@@ -1,7 +1,0 @@
-{
-  "_source": "openjev README shape",
-  "status": 400,
-  "body": {
-    "detail": "at most 255 options per choice question"
-  }
-}

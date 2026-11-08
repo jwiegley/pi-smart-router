@@ -1,105 +1,45 @@
 {
   "name": "pi-smart-router",
-  "version": "1.4.0",
-  "description": "Auto-model router middleware for the pi.dev coding agent",
-  "type": "module",
+  "version": "1.3.0-jw.1",
+  "description": "Pi virtual models smart-router/auto and smart-router/local, routed by a per-host roster",
+  "private": true,
   "license": "MIT",
-  "keywords": [
-    "pi-package",
-    "pi-extension",
-    "pi",
-    "smart-router",
-    "routing",
-    "ai",
-    "agent"
-  ],
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/beettlle/pi-smart-router.git"
-  },
-  "homepage": "https://github.com/beettlle/pi-smart-router#readme",
-  "bugs": {
-    "url": "https://github.com/beettlle/pi-smart-router/issues"
-  },
+  "type": "module",
   "engines": {
     "node": ">=22.19.0"
   },
-  "bin": {
-    "pi-smart-router": "./bin/pi-smart-router.mjs"
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi-coding-agent",
+    "routing",
+    "virtual-model"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jwiegley/pi-smart-router.git"
   },
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
-  },
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
   "files": [
-    "dist",
-    "src",
-    "bin",
-    ".pi/extensions/smart-router",
-    "!.pi/extensions/smart-router/node_modules",
-    "!.pi/extensions/smart-router/node_modules/**",
-    "!.pi/extensions/smart-router/package-lock.json",
-    "config",
-    "skills",
-    "specs/001-build-smart-router/contracts/telemetry-contrib.schema.json",
-    "data/contrib/example.json"
+    "index.ts",
+    "src/**/*.ts",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
-    "build": "tsc --project tsconfig.build.json",
-    "prepublishOnly": "npm run release:check",
-    "release:check": "bash -c 'export VITEST_MAX_WORKERS=\"${VITEST_MAX_WORKERS:-2}\"; npm run verify:script-artifacts && npm run release:refresh-benchmarks && npm run verify:ci && npm run release:consumer-pack && npm run release:functional-smoke'",
-    "release:assert-content": "bash scripts/assert-release-has-content.sh",
-    "release:refresh-benchmarks": "tsx scripts/release-refresh-benchmark-profiles.ts",
-    "release:consumer-pack": "bash scripts/verify-consumer-pack.sh",
-    "release:functional-smoke": "npm run routing:verify-calibration -- --skip-embed && npm run routing:verify-benchmark-profiles && tsx scripts/eval/assert-release-gates.ts --fixtures tests/eval/fixtures --baseline-version 0.6.0",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "test:release": "vitest run --testNamePattern '@release'",
-    "coverage:check": "vitest run --coverage",
-    "lint": "eslint . --ext .ts && node --input-type=module -e \"import { readFileSync } from 'node:fs'; import { parse } from 'yaml'; const doc = parse(readFileSync('config/models.yaml.example', 'utf8')); if (!Array.isArray(doc.models) || doc.models.length < 3) throw new Error('models.yaml.example must list at least one model per tier'); const tiers = new Set(doc.models.map((m) => m.tier)); for (const tier of ['zero-tier', 'economical-cloud', 'frontier-cloud']) { if (!tiers.has(tier)) throw new Error('missing tier: ' + tier); } console.log('models.yaml.example: valid');\"",
-    "routing:bootstrap-centroids": "tsx scripts/bootstrap-routing-centroids.ts",
-    "routing:calibration-aggregate": "tsx scripts/calibration-aggregate.ts",
-    "routing:train-calibration": "tsx scripts/train-routing-calibration.ts",
-    "routing:train-p-success": "tsx scripts/train-p-success-weights.ts",
-    "routing:ingest-benchmarks": "tsx scripts/ingest-benchmark-profiles.ts",
-    "routing:verify-benchmark-profiles": "vitest run tests/unit/ingest-benchmark-profiles.test.ts -t \"checked-in artifact matches fixture ingest\"",
-    "routing:verify-calibration": "bash -c 'if [[ \" $* \" == *\" --skip-embed \"* ]]; then vitest run tests/unit/train-routing-calibration.test.ts -t \"verifyRoutingCalibration passes|evaluates benchmark triage gates\"; else npm run build && tsx scripts/verify-routing-calibration.ts \"$@\"; fi' --",
-    "routing:calibration-dry-run": "tsx scripts/verify-routing-calibration.ts --dry-run-packs",
-    "routing:eval-replay": "tsx scripts/eval/counterfactual-replay.ts",
-    "routing:eval-k4-ab": "tsx scripts/eval/counterfactual-replay.ts --k4-ab --corpus tests/eval/corpus/twinrouterbench/ci-subset.json",
-    "routing:eval-harness": "tsx scripts/eval/run-harness.ts",
-    "routing:eval-harness:smoke": "tsx scripts/eval/run-harness.ts --summary-only",
-    "routing:eval-harness:corpus-smoke": "tsx scripts/eval/run-harness.ts --fixtures tests/eval/corpus/twinrouterbench --summary-only",
-    "routing:assert-release-gates:corpus-report": "tsx scripts/eval/assert-release-gates.ts --fixtures tests/eval/corpus/twinrouterbench --report-only",
-    "routing:analyze-overrouting": "tsx scripts/eval/analyze-twinrouterbench-overrouting.ts",
-    "routing:twinrouterbench:full-ingest": "bash -c 'set -euo pipefail; CACHE=\"${TRB_CACHE_DIR:-.pi-smart-router/eval-cache/twinrouterbench}\"; mkdir -p \"$CACHE\"; npm run routing:ingest-twinrouterbench -- --input \"$CACHE/question_bank.jsonl\" --output \"$CACHE/full-static-track.json\"'",
-    "routing:twinrouterbench:full-report": "bash -c 'set -euo pipefail; CACHE=\"${TRB_CACHE_DIR:-.pi-smart-router/eval-cache/twinrouterbench}\"; DIR=\"$CACHE/full-track\"; mkdir -p \"$DIR\"; cp \"$CACHE/full-static-track.json\" \"$DIR/full-static-track.json\"; npm run routing:eval-harness -- --fixtures \"$DIR\" --summary-only; npx tsx scripts/eval/assert-release-gates.ts --fixtures \"$DIR\" --report-only'",
-    "routing:twinrouterbench:full-track": "bash scripts/eval/twinrouterbench-full-track.sh",
-    "routing:community-bench": "tsx scripts/eval/community-bench.ts",
-    "routing:ingest-twinrouterbench": "tsx scripts/eval/ingest-twinrouterbench-corpus.ts",
-    "routing:ingest-llmrouterbench": "tsx scripts/eval/ingest-llmrouterbench-subset.ts",
-    "routing:llmrouterbench-regret": "tsx scripts/eval/llmrouterbench-regret-report.ts",
-    "routing:ingest-swe-gym": "tsx scripts/ingest-swe-gym-labels.ts",
-    "routing:ingest-fc-rewardbench": "tsx scripts/ingest-fc-rewardbench-labels.ts",
-    "routing:ingest-twinrouterbench-weak": "tsx scripts/ingest-twinrouterbench-weak-labels.ts",
-    "routing:capture-baseline": "tsx scripts/eval/capture-baseline.ts",
-    "routing:test-projection": "npm run build && node --experimental-strip-types scripts/test-hydra-projection.ts",
-    "benchmark:encoder": "tsx scripts/benchmark-encoder-latency.ts",
-    "qa:shadow-dogfood": "bash scripts/qa/shadow-dogfood-session.sh",
-    "qa:dogfood-soft-feed": "tsx scripts/qa/dogfood-soft-feed.ts",
-    "qa:count-labeled-econ": "tsx scripts/qa/count-labeled-econ.ts",
-    "qa:export-dogfood-snapshot": "tsx scripts/qa/export-dogfood-snapshot.ts",
-    "qa:dogfood-gather": "bash scripts/qa/dogfood-gather.sh",
-    "verify:ci": "npm run build && npm run typecheck && npm run lint && npm run coverage:check",
-    "verify:script-artifacts": "bash scripts/assert-no-script-artifacts.sh"
+    "test": "node test/run.mjs",
+    "pack:check": "npm pack --dry-run --json --ignore-scripts | node test/pack-check.mjs",
+    "check": "tsc --noEmit && node test/run.mjs && npm run pack:check",
+    "check:sandbox": "tsc --noEmit && node test/sandbox.mjs && npm run pack:check"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-ai": ">=1.5.0",
+    "@earendil-works/pi-coding-agent": ">=1.5.0"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-ai": {
@@ -110,36 +50,9 @@
     }
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^1.5.2",
-    "@earendil-works/pi-coding-agent": "^1.5.2",
-    "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "^22.15.21",
-    "@typescript-eslint/eslint-plugin": "^8.62.1",
-    "@typescript-eslint/parser": "^8.62.1",
-    "@vitest/coverage-v8": "^3.2.3",
-    "ajv": "^8.20.0",
-    "ajv-formats": "^3.0.1",
-    "eslint": "^8.57.1",
-    "tsx": "^4.23.0",
-    "typescript": "^5.8.3",
-    "vitest": "^3.2.3"
-  },
-  "dependencies": {
-    "@huggingface/transformers": "^4.2.0",
-    "better-sqlite3": "^12.11.1",
-    "yaml": "^2.9.0",
-    "zod": "^4.4.3"
-  },
-  "allowScripts": {
-    "better-sqlite3@12.11.1": true
-  },
-  "pi": {
-    "extensions": [
-      ".pi/extensions/smart-router/index.ts"
-    ],
-    "skills": [
-      "./skills"
-    ],
-    "minPiVersion": "0.85.1"
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@types/node": "22.19.19",
+    "typescript": "5.9.3"
   }
 }

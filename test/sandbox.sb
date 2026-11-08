@@ -1,0 +1,46 @@
+;; The sandbox-exec profile `npm run check:sandbox` runs the test suites under, behaviour suite
+;; included (test/sandbox.mjs). Test-only; never shipped.
+;;
+;; The behaviour suite runs Pi 1.5 and its npm dependency closure, so it runs with no network but
+;; loopback, writes nothing outside the run's temporary root, and reads nothing under the home
+;; directory but the checkout and the root. Scrubbing HOME in the environment is not a sandbox:
+;; absolute paths stay readable, so the kernel enforces this.
+;;
+;; Parameters, set by test/sandbox.mjs:
+;;   ROOT  the run's temporary root
+;;   HOME  the home directory, from the user database rather than the environment
+;;   REPO  the checkout
+;;
+;; When rules overlap, the later rule wins.
+(version 1)
+(allow default)
+
+;; Network: loopback only. Unix-domain sockets are denied too, which also refuses DNS through
+;; mDNSResponder.
+(deny network*)
+(allow network* (remote ip "localhost:*"))
+(allow network-inbound (local ip "localhost:*"))
+
+;; Writes: only under the temporary root, and to the null and terminal devices.
+(deny file-write*)
+(allow file-write* (subpath (param "ROOT")))
+(allow file-write-data
+  (literal "/dev/null")
+  (literal "/dev/zero")
+  (literal "/dev/tty")
+  (literal "/dev/dtracehelper"))
+
+;; Reads: no file content under the home directory except the checkout and the root. File
+;; metadata stays readable, because resolving the checkout's path stats its ancestors.
+(deny file-read-data (subpath (param "HOME")))
+(allow file-read-data (subpath (param "REPO")) (subpath (param "ROOT")))
+
+;; The credential stores stay denied, contents and metadata, even if the checkout or the root lies
+;; above one of them.
+(deny file-read*
+  (subpath (string-append (param "HOME") "/.config/pi"))
+  (subpath (string-append (param "HOME") "/.pi"))
+  (subpath (string-append (param "HOME") "/.ssh"))
+  (subpath (string-append (param "HOME") "/.gnupg"))
+  (subpath (string-append (param "HOME") "/.password-store"))
+  (literal (string-append (param "HOME") "/.npmrc")))

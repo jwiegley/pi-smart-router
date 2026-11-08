@@ -4,19 +4,17 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "lib": ["ES2022"],
+    "types": ["node"],
     "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
+    "useUnknownInCatchVariables": true,
     "forceConsistentCasingInFileNames": true,
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
-    "outDir": "dist",
-    "rootDir": ".",
-    "noEmit": true
+    "skipLibCheck": true
   },
-  "include": ["src/**/*", "tests/**/*", ".pi/extensions/smart-router/**/*", "vitest.config.ts"],
-  "exclude": ["node_modules", "dist"]
+  "include": ["index.ts", "src/**/*.ts", "test/**/*.ts"]
 }

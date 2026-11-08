@@ -1,0 +1,186 @@
+// The process slot: what every instance of the router in this process shares, kept under
+// globalThis[Symbol.for("jwiegley.pi-smart-router.v1")], and the dispatch that uses it.
+//
+// Pi registers a virtual model's route per ModelRuntime, and the last registration wins. A nested
+// session that shares its parent's runtime and loads the router (goal-x's auditor or oracle with
+// project resources, pi-subagents' detached children) therefore replaces the route for every
+// session on that runtime, and once it is disposed, the context Pi passes that route throws on
+// every read. So each session that starts the router joins the slot as an owner, with the context
+// its session_start handler received, and whichever instance's route Pi calls:
+//
+//   1. a request of an owner's own agent loop, recognised by its run signal, goes to that owner;
+//   2. any other request routes with the context Pi passed, while that context is live;
+//   3. with a stale context, every live owner checks whether it was displaced; when exactly one
+//      was, and re-registered, the request routes with that owner's context;
+//   4. otherwise the router refuses with its own non-retryable error.
+//
+// The slot holds only process-wide state: the owners, the catalog objects their registrations
+// produced, the environment latch, pin handoffs and the pi-cache-optimizer adapter's registration.
+// Per-session records live in each router instance. Every load of this module, /reload included,
+// shares the slot, so it holds plain data and is checked by shape, never by class identity.
+import { createHash } from "node:crypto";
+
+import type { ExtensionContext, ModelRoute, ModelRouteRequest } from "@earendil-works/pi-coding-agent";
+
+import type { ActiveRoute } from "./cache-optimizer.ts";
+import { SLOT_KEY } from "./constants.ts";
+import type { VirtualId } from "./constants.ts";
+import { isRecord } from "./files.ts";
+import type { LocalPolicy } from "./local.ts";
+
+/** What the slot asks of a router instance. Instances of every load of this module answer it. */
+export interface OwnerRouter {
+  /** Route a request of this owner's own agent loop. */
+  routeOwned(id: VirtualId, request: ModelRouteRequest, ctx: ExtensionContext): ModelRoute;
+  /** Route a `direct` request, or a loop request of a session without its own instance. */
+  routeOther(id: VirtualId, request: ModelRouteRequest, ctx: ExtensionContext): ModelRoute;
+  /** Re-register both models when a registration no live owner made displaced this one's. */
+  heal(ctx: ExtensionContext): boolean;
+  /** What route() will pick next for this owner's session, for pi-cache-optimizer; never throws. */
+  activeRoute(id: VirtualId): ActiveRoute | undefined;
+}
+
+export interface Owner {
+  readonly router: OwnerRouter;
+  /** The context the session's session_start handler received. */
+  readonly ctx: ExtensionContext;
+  readonly sessionId: string;
+  /** The first 16 hex characters of sha256(sessionId): pi-cache-optimizer's session key. */
+  readonly hash: string;
+}
+
+export interface EnvLatch {
+  /** On for the life of the process once any instance saw PI_SMART_ROUTER_LOCAL_ONLY on. */
+  on: boolean;
+  /** The local policy the switch pins to when a session has no pin entry of its own. */
+  policy: LocalPolicy | undefined;
+}
+
+export interface Slot {
+  readonly version: 1;
+  readonly owners: Set<Owner>;
+  /** Each catalog object an owner's registration produced, mapped to that owner. */
+  readonly registered: WeakMap<object, Owner>;
+  readonly env: EnvLatch;
+  /** Pins handed to the session a fork or /new creates, keyed by its session file. */
+  readonly handoffs: Map<string, unknown>;
+  /** The pi-cache-optimizer adapter and its registration, while any owner is live. */
+  adapter: { readonly adapter: object; readonly unregister: () => void } | undefined;
+}
+
+const KEY = Symbol.for(SLOT_KEY);
+
+function isSlot(value: unknown): value is Slot {
+  if (!isRecord(value)) return false;
+  const { env } = value;
+  return (
+    value.version === 1 &&
+    value.owners instanceof Set &&
+    value.registered instanceof WeakMap &&
+    value.handoffs instanceof Map &&
+    isRecord(env) &&
+    typeof env.on === "boolean"
+  );
+}
+
+/** The process slot, created on first use. Throws when the key holds anything else. */
+export function processSlot(host: object = globalThis): Slot {
+  const existing = (host as Record<symbol, unknown>)[KEY];
+  if (existing === undefined) {
+    const slot: Slot = {
+      version: 1,
+      owners: new Set(),
+      registered: new WeakMap(),
+      env: { on: false, policy: undefined },
+      handoffs: new Map(),
+      adapter: undefined,
+    };
+    Object.defineProperty(host, KEY, { value: slot, configurable: true, enumerable: false, writable: false });
+    return slot;
+  }
+  if (!isSlot(existing)) {
+    throw new Error(`globalThis[Symbol.for("${SLOT_KEY}")] holds an unknown shape; another version of pi-smart-router may be loaded`);
+  }
+  return existing;
+}
+
+/** Whether a PI_SMART_ROUTER_LOCAL_ONLY value turns the switch on: any non-blank value but 0, false or off. */
+export function envSwitchOn(value: string | undefined): boolean {
+  const text = (value ?? "").trim().toLowerCase();
+  return text !== "" && text !== "0" && text !== "false" && text !== "off";
+}
+
+/** Latch the environment switch. Once on, it stays on for the life of the process. */
+export function latchEnvPin(slot: Slot, value: string | undefined): boolean {
+  if (envSwitchOn(value)) slot.env.on = true;
+  return slot.env.on;
+}
+
+export function sessionHash(sessionId: string): string {
+  return createHash("sha256").update(sessionId).digest("hex").slice(0, 16);
+}
+
+/** Whether a context is still usable: Pi makes every getter of a stale one throw. */
+export function isLive(ctx: ExtensionContext): boolean {
+  try {
+    return ctx.sessionManager !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+/** Drop the owners whose context went stale without a session_shutdown. */
+function prune(slot: Slot): void {
+  for (const owner of [...slot.owners]) if (!isLive(owner.ctx)) slot.owners.delete(owner);
+}
+
+/** Add an owner. True when it is the only live one. */
+export function join(slot: Slot, owner: Owner): boolean {
+  prune(slot);
+  slot.owners.add(owner);
+  return slot.owners.size === 1;
+}
+
+/** Remove an owner. True when it was the last live one. */
+export function leave(slot: Slot, owner: Owner): boolean {
+  const removed = slot.owners.delete(owner);
+  prune(slot);
+  return removed && slot.owners.size === 0;
+}
+
+/** Whether an owner is still in the slot with a live context; a stale one is dropped. */
+export function isLiveOwner(slot: Slot, owner: Owner): boolean {
+  if (!slot.owners.has(owner)) return false;
+  if (isLive(owner.ctx)) return true;
+  slot.owners.delete(owner);
+  return false;
+}
+
+/** The owner whose agent loop carries this run signal. Owners with a stale context are dropped. */
+export function ownerBySignal(slot: Slot, signal: AbortSignal): Owner | undefined {
+  for (const owner of [...slot.owners]) {
+    let current: AbortSignal | undefined;
+    try {
+      current = owner.ctx.signal;
+    } catch {
+      slot.owners.delete(owner);
+      continue;
+    }
+    if (current === signal) return owner;
+  }
+  return undefined;
+}
+
+/** Every live owner checks for displacement; the one owner that re-registered, if exactly one did. */
+export function healDisplaced(slot: Slot): Owner | undefined {
+  const healed: Owner[] = [];
+  for (const owner of [...slot.owners]) {
+    if (!isLiveOwner(slot, owner)) continue;
+    try {
+      if (owner.router.heal(owner.ctx)) healed.push(owner);
+    } catch {
+      // An owner that cannot check its registration is not counted as displaced.
+    }
+  }
+  return healed.length === 1 ? healed[0] : undefined;
+}
