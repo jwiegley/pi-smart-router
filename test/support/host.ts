@@ -111,7 +111,7 @@ const boundedReaders: Record<(typeof BOUNDED_READERS)[number], unknown> = {
 const prototype = SessionManager.prototype as unknown as Record<string, unknown>;
 
 /** Give npm's SessionManager the fork's bounded reads. */
-export function installBoundedReaders(): void {
+function installBoundedReaders(): void {
   for (const name of BOUNDED_READERS) prototype[name] = boundedReaders[name];
 }
 
@@ -161,7 +161,7 @@ export interface FauxCall {
 /** A scripted reply: a message, or a function of the call that returns one. */
 export type FauxStep = AssistantMessage | ((call: FauxCall) => AssistantMessage | Promise<AssistantMessage>);
 
-export const NOT_SENT = Symbol("not sent yet");
+const NOT_SENT = Symbol("not sent yet");
 
 function textOf(content: unknown): string {
   if (typeof content === "string") return content;
@@ -301,7 +301,7 @@ export type TraceEntry =
  * registry at load when there is none, and resolves the active route with its session hint at
  * before_agent_start, before_provider_headers and before_provider_request.
  */
-export function coProbe(trace: TraceEntry[]): InlineExtension {
+function coProbe(trace: TraceEntry[]): InlineExtension {
   return {
     name: "co-probe",
     factory: (pi) => {
@@ -321,19 +321,17 @@ export function coProbe(trace: TraceEntry[]): InlineExtension {
 
 // ─── The UI ──────────────────────────────────────────────────────────────────
 
-/** A UI context that records notices and status items, and answers dialogs from a script. */
+/** A UI context that records notices and status items, and cancels every dialog, as Escape does. */
 export class FakeUI {
   readonly notices: Array<{ readonly message: string; readonly type: string }> = [];
   readonly statuses = new Map<string, string | undefined>();
-  /** Answers for the next select dialogs; without one, a dialog is cancelled. */
-  readonly answers: string[] = [];
   readonly context: ExtensionUIContext;
 
   constructor() {
     const ui = this;
     const none = (): void => undefined;
     this.context = {
-      select: async () => ui.answers.shift(),
+      select: async () => undefined,
       confirm: async () => false,
       input: async () => undefined,
       notify: (message: string, type?: string) => {
@@ -389,7 +387,7 @@ export const BASE_SETTINGS: Settings = {
 };
 
 /** The fleet of the design's scenarios (§8.2). */
-export const FLEET: readonly FauxSpec[] = [
+const FLEET: readonly FauxSpec[] = [
   { provider: "local-a", baseUrl: "http://localhost:0" },
   { provider: "cloud-a" },
   { provider: "cloud-b" },
@@ -399,8 +397,20 @@ export const FLEET: readonly FauxSpec[] = [
   { provider: "openai-codex-2", id: "gpt-6.1-sol", api: "openai-codex-responses" },
 ];
 
+/** A roster as JSON, loose enough for a scenario to vary any field; the router validates it. */
+export interface RosterJson {
+  version: number;
+  exclude?: string[];
+  roles: Array<{ name: string; models: string[]; thinking?: string }>;
+  routing: { default: string; trivial?: string; complex?: string; planning?: string; fallback?: Record<string, string> };
+  accounts?: Record<string, { multiPassLabel?: string; native?: string }>;
+  local?: { role: string; providers: string[]; hosts: string[] };
+  stickyIdleMinutes?: number;
+  cooldownMinutes?: number;
+}
+
 /** The roster of the behaviour tests, shaped like John's: the local role is reached only by smart-router/local, coder only as engineer's fallback. */
-export const ROSTER = {
+export const ROSTER: RosterJson = {
   version: 1,
   roles: [
     { name: "local", models: ["local-a/m"] },
@@ -450,7 +460,7 @@ export interface PiOptions {
 }
 
 /** Forget the process slot, the routing registry and the environment switch: a fresh process. */
-export function resetProcess(): void {
+function resetProcess(): void {
   const store = globalThis as Record<symbol, unknown>;
   delete store[Symbol.for(SLOT_KEY)];
   delete store[Symbol.for(ROUTING_REGISTRY_KEY)];
@@ -723,7 +733,7 @@ export async function auditorSession(world: World, parent: Pi, ref: string): Pro
   return session;
 }
 
-export function findModel(runtime: Pick<ModelRuntime, "getModel">, ref: string): Model<Api> {
+function findModel(runtime: Pick<ModelRuntime, "getModel">, ref: string): Model<Api> {
   const slash = ref.indexOf("/");
   const model = slash <= 0 ? undefined : runtime.getModel(ref.slice(0, slash), ref.slice(slash + 1));
   if (model === undefined) throw new Error(`model not found: ${ref}`);
@@ -733,7 +743,7 @@ export function findModel(runtime: Pick<ModelRuntime, "getModel">, ref: string):
 // ─── Session history ─────────────────────────────────────────────────────────
 
 /** A user message, as Pi records one. */
-export function userMessage(text: string, timestamp = Date.now()): { role: "user"; content: Array<{ type: "text"; text: string }>; timestamp: number } {
+function userMessage(text: string, timestamp = Date.now()): { role: "user"; content: Array<{ type: "text"; text: string }>; timestamp: number } {
   return { role: "user", content: [{ type: "text", text }], timestamp };
 }
 
@@ -755,9 +765,9 @@ export function response(
   };
 }
 
-/** A session that already holds a conversation: a selection, then user and assistant turns. */
-export function history(world: World, selection: string, turns: ReadonlyArray<readonly [string, AssistantMessage]>, persisted = false): SessionManager {
-  const manager = persisted ? world.persistedSession() : SessionManager.inMemory(world.cwd);
+/** An in-memory session that already holds a conversation: a selection, then user and assistant turns. */
+export function history(world: World, selection: string, turns: ReadonlyArray<readonly [string, AssistantMessage]>): SessionManager {
+  const manager = SessionManager.inMemory(world.cwd);
   const slash = selection.indexOf("/");
   manager.appendModelChange(selection.slice(0, slash), selection.slice(slash + 1));
   manager.appendThinkingLevelChange("medium");

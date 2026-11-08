@@ -573,7 +573,7 @@ test("21. max thinking is clamped per routed model, and a role's fixed level win
   pi.session.setThinkingLevel("max");
   assert.equal(pi.session.thinkingLevel, "max", "smart-router/local offers max");
   await pi.prompt(PROMPTS.plain);
-  const levels = pi.assistants().map((message) => `${message.provider}:${(message as { thinkingLevel?: string }).thinkingLevel}`);
+  const levels = pi.assistants().map((message) => `${message.provider}:${message.thinkingLevel}`);
   assert.deepEqual(levels, ["cloud-b:high", "cloud-a:max", "codex-like:low", "local-a:off"]);
 });
 
@@ -641,7 +641,7 @@ test("23. /reload and /new leave one registered adapter, one owner per live sess
 });
 
 test("24a. a roster that names openai-codex-3 is invalid, and both models refuse", TIMEOUT, async (t) => {
-  const roster = structuredClone(ROSTER) as { roles: Array<{ name: string; models: string[] }> };
+  const roster = structuredClone(ROSTER);
   roster.roles.push({ name: "work", models: ["openai-codex-3/gpt-6.1-sol"] });
   const world = new World(t, { roster });
   const pi = await world.start({ select: "smart-router/auto" });
@@ -652,7 +652,7 @@ test("24a. a roster that names openai-codex-3 is invalid, and both models refuse
 });
 
 test("24b. after a direct turn on openai-codex-3, neither runs nor compaction go back to it, and openai-codex-2 takes its model id", TIMEOUT, async (t) => {
-  const roster = structuredClone(ROSTER) as typeof ROSTER & { accounts?: unknown };
+  const roster = structuredClone(ROSTER);
   roster.roles = roster.roles.map((role) => (role.name === "engineer" ? { ...role, models: ["openai-codex-2/gpt-6.1-sol"] } : role));
   roster.accounts = { "openai-codex-2": { multiPassLabel: "personal" } };
   const world = new World(t, {
@@ -672,9 +672,9 @@ test("24b. after a direct turn on openai-codex-3, neither runs nor compaction go
 });
 
 test("24c. with Multi-Pass labelling alias #2 Positron, a roster that binds openai-codex-2 refuses", TIMEOUT, async (t) => {
-  const roster = structuredClone(ROSTER) as typeof ROSTER & { accounts?: unknown };
+  const roster = structuredClone(ROSTER);
   roster.roles = roster.roles.map((role) => (role.name === "engineer" ? { ...role, models: ["openai-codex-2/gpt-6.1-sol"] } : role));
-  roster.routing = { ...roster.routing, fallback: {} as typeof ROSTER.routing.fallback };
+  roster.routing = { ...roster.routing, fallback: {} };
   roster.accounts = { "openai-codex-2": { multiPassLabel: "personal" } };
   const world = new World(t, { roster, multiPass: { subscriptions: [{ provider: "openai-codex", index: 2, label: "positron" }] } });
   const pi = await world.start({ select: "smart-router/auto" });
@@ -799,8 +799,7 @@ test("Q6. /new and a fork carry the pin; resuming an unpinned session after a pi
   const pinEntries = (): unknown[] =>
     pi.session.sessionManager
       .getEntries()
-      .filter((entry) => entry.type === "custom" && entry.customType === "smart-router.pin")
-      .map((entry) => (entry as { data?: unknown }).data);
+      .flatMap((entry) => (entry.type === "custom" && entry.customType === "smart-router.pin" ? [entry.data] : []));
 
   await pi.runtime.newSession();
   await pi.prompt("first");
