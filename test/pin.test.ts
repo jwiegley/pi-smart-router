@@ -16,7 +16,7 @@ import { createRouter } from "../src/router.ts";
 import { FakeCatalog, GLM, heraModels, KIMI, model, NOW, rosterFixture } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
 import { agentDir, assistant, FakeRuntime, load, request, resetSlot, routed, start } from "./support/pi.ts";
-import type { Loaded, LoadOptions } from "./support/pi.ts";
+import type { DialogKey, Loaded, LoadOptions } from "./support/pi.ts";
 
 const HERA = rosterFixture("roster-hera.json");
 const POLICY = policyFromRoster(HERA);
@@ -380,15 +380,47 @@ describe("session_start keeps the pin when another of its steps fails", () => {
 });
 
 describe("/smart-router local off", () => {
-  test("asks first, defaulting to No, then unpins, clears the lock and keeps the selection", async (t) => {
+  const STAYS = "pi-smart-router: the session stays pinned to local models.";
+
+  test("asks with the answer that keeps the pin first, so Enter keeps it", async (t) => {
     const loaded = await start({ dir: agentDir(t), select: "local", setup: (session) => session.pin(POLICY), now: () => NOW });
     await loaded.host.command("smart-router", "local off");
-    assert.deepEqual(loaded.session.dialogs, ["Unpin this session from local models?"]);
-    assert.equal(pinOf(loaded).on, true, "the dialog's default answer is No");
+    assert.deepEqual(loaded.session.dialogs, [
+      {
+        title: "Unpin this session from local models?\nThe next requests may go to cloud models. Earlier turns stay where they are.",
+        options: ["No, keep the pin", "Yes, unpin"],
+      },
+    ]);
+    assert.deepEqual([pinOf(loaded).on, loaded.session.pinEntries().length], [true, 1], "Enter picked the first answer, which keeps the pin");
+    assert.equal(loaded.session.notices.at(-1)?.message, STAYS);
+    // Pi's own confirm dialog, a selector over Yes and No, would have unpinned on the same Enter.
+    assert.equal(await loaded.session.ctx.ui.confirm("Unpin this session from local models?", "The next requests may go to cloud models."), true);
+  });
+
+  test("Escape, an unanswered dialog, and any answer but the one that unpins keep the pin", async (t) => {
+    const loaded = await start({ dir: agentDir(t), select: "local", setup: (session) => session.pin(POLICY) });
+    const keys: DialogKey[][] = [["escape"], [], ["down"], ["down", "escape"], ["down", "up", "enter"], ["up", "enter"]];
+    for (const sequence of keys) {
+      loaded.session.dialogKeys = sequence;
+      await loaded.host.command("smart-router", "local off");
+      assert.deepEqual([pinOf(loaded).on, loaded.session.notices.at(-1)?.message], [true, STAYS], sequence.join(" "));
+    }
+    // An RPC client answers with whatever it likes.
+    const ui = loaded.session.ctx.ui as unknown as Record<string, unknown>;
+    for (const answer of ["Yes", "yes, unpin", " Yes, unpin", "Yes, unpin.", "No, keep the pin", "", undefined]) {
+      ui.select = async () => answer;
+      await loaded.host.command("smart-router", "local off");
+      assert.deepEqual([pinOf(loaded).on, loaded.session.notices.at(-1)?.message], [true, STAYS], String(answer));
+    }
+    assert.equal(loaded.session.pinEntries().length, 1, "nothing was written");
+  });
+
+  test("the answer that unpins unpins, clears the lock and keeps the selection", async (t) => {
+    const loaded = await start({ dir: agentDir(t), select: "local", setup: (session) => session.pin(POLICY), now: () => NOW });
     const record = loaded.router?.record("session-1");
     assert.ok(record !== undefined);
     record.guard.lock = { since: NOW, model: KIMI, cause: "conflict" };
-    loaded.session.confirmAnswer = true;
+    loaded.session.dialogKeys = ["down", "enter"];
     await loaded.host.command("smart-router", "local off");
     assert.deepEqual(loaded.session.pinEntries().at(-1), { v: 1, on: false, at: AT });
     assert.deepEqual([pinOf(loaded).on, pinOf(loaded).entry], [false, "off"]);
@@ -400,22 +432,23 @@ describe("/smart-router local off", () => {
 
   test("refuses without dialogs, under the environment switch, and where pins cannot be read", async (t) => {
     const dir = agentDir(t);
+    const UNPINS: DialogKey[] = ["down", "enter"];
     const headless = await start({ dir, id: "headless", select: "local", setup: (session) => session.pin(POLICY) });
     headless.session.hasUI = false;
-    headless.session.confirmAnswer = true;
+    headless.session.dialogKeys = UNPINS;
     await headless.host.command("smart-router", "local off");
     assert.deepEqual([headless.session.dialogs, headless.session.pinEntries().length, pinOf(headless).on], [[], 1, true]);
     assert.match(headless.session.notices.at(-1)?.message ?? "", /asks for confirmation, and this mode has no dialogs/);
     await withEnv("yes", async () => {
       const env = await start({ dir, id: "env", runtime: new FakeRuntime(), select: "local", setup: (session) => session.pin(POLICY) });
-      env.session.confirmAnswer = true;
+      env.session.dialogKeys = UNPINS;
       await env.host.command("smart-router", "local off");
       assert.deepEqual([env.session.dialogs, env.session.pinEntries().length], [[], 1]);
       assert.match(env.session.notices.at(-1)?.message ?? "", /PI_SMART_ROUTER_LOCAL_ONLY pins every session in this process/);
     });
     resetSlot();
     const unbounded = await start({ dir, id: "unbounded", runtime: new FakeRuntime(), bounded: false, select: "local" });
-    unbounded.session.confirmAnswer = true;
+    unbounded.session.dialogKeys = UNPINS;
     await unbounded.host.command("smart-router", "local off");
     assert.deepEqual(unbounded.session.dialogs, []);
     assert.match(unbounded.session.notices.at(-1)?.message ?? "", /cannot read pin entries/);

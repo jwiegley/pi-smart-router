@@ -8,13 +8,15 @@
 // extension runtime: the API a factory receives, which stages registrations until the session
 // binds, as Pi's loader does, and the handlers events are emitted to, in registration order. Its
 // setModel follows AgentSession.setModel: it assigns the selection, records a model_change and
-// then awaits every model_select handler, so a handler can switch again from inside it.
+// then awaits every model_select handler, so a handler can switch again from inside it. The
+// session's dialogs are Pi's own selector component, answered with scripted keys.
 import assert from "node:assert/strict";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { TestContext } from "node:test";
 
 import type { Api, AssistantMessage, Model, Usage } from "@earendil-works/pi-ai";
+import { ExtensionSelectorComponent, initTheme } from "@earendil-works/pi-coding-agent";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -66,6 +68,50 @@ export function assistant(ref: string, init: Partial<AssistantMessage> = {}): As
     timestamp: NOW,
     ...init,
   };
+}
+
+/** A key pressed in one of Pi's selector dialogs. */
+export type DialogKey = "up" | "down" | "enter" | "escape";
+
+/** What a terminal sends for each key. */
+const KEY_CODES: Readonly<Record<DialogKey, string>> = { up: "\x1b[A", down: "\x1b[B", enter: "\r", escape: "\x1b" };
+
+let themed = false;
+
+/**
+ * Answer a selector dialog as Pi's interactive mode does: with Pi's own ExtensionSelectorComponent
+ * and these keys. It starts on the first option, so Enter alone picks that one. Escape cancels, and
+ * keys that run out before an answer leave the dialog unanswered, as a timeout would; both give
+ * undefined.
+ */
+function answerSelector(title: string, options: string[], keys: readonly DialogKey[]): string | undefined {
+  if (!themed) {
+    // The component draws with Pi's theme. The built-in one reads only Pi's own package files.
+    initTheme("dark");
+    themed = true;
+  }
+  let answered = false;
+  let answer: string | undefined;
+  const selector = new ExtensionSelectorComponent(
+    title,
+    options,
+    (option) => {
+      answered = true;
+      answer = option;
+    },
+    () => {
+      answered = true;
+    },
+  );
+  try {
+    for (const key of keys) {
+      if (answered) break;
+      selector.handleInput(KEY_CODES[key]);
+    }
+  } finally {
+    selector.dispose();
+  }
+  return answer;
 }
 
 function latest<T>(items: readonly T[], match: (item: T) => boolean): T | undefined {
@@ -159,9 +205,9 @@ export class FakeSession {
   wholeHistoryReads = 0;
   /** The status items, as setStatus left them. */
   readonly statuses = new Map<string, string | undefined>();
-  /** What the confirmation dialog answers, and the dialogs shown. */
-  confirmAnswer = false;
-  readonly dialogs: string[] = [];
+  /** The keys each dialog gets (see answerSelector), and the dialogs shown. */
+  dialogKeys: DialogKey[] = ["enter"];
+  readonly dialogs: Array<{ readonly title: string; readonly options: readonly string[] }> = [];
   /** How many times an extension aborted, whether or not a run was active. */
   aborts = 0;
   readonly ctx: ExtensionContext;
@@ -204,13 +250,16 @@ export class FakeSession {
       manager.getLatestMessage = (role?: string) =>
         latest(session.entries, (entry) => entry.type === "message" && (role === undefined || (entry.message as { role?: string }).role === role));
     }
+    const select = async (title: string, options: string[]): Promise<string | undefined> => {
+      session.dialogs.push({ title, options: [...options] });
+      return answerSelector(title, options, session.dialogKeys);
+    };
     const ui = {
       notify: (message: string, type = "info") => session.notices.push({ type, message }),
       setStatus: (key: string, text: string | undefined) => session.statuses.set(key, text),
-      confirm: async (title: string) => {
-        session.dialogs.push(title);
-        return session.confirmAnswer;
-      },
+      select,
+      // Pi's interactive confirm (InteractiveMode.showExtensionConfirm) is this selector over Yes and No.
+      confirm: async (title: string, message: string): Promise<boolean> => (await select(`${title}\n${message}`, ["Yes", "No"])) === "Yes",
     };
     this.ctx = {
       get ui() {

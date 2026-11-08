@@ -61,6 +61,15 @@ const UNPINNED: Pin = Object.freeze({ on: false, policy: EMPTY_POLICY });
 const HISTORY_DEFAULT = 10;
 const CODEX_API = "openai-codex-responses";
 
+/**
+ * What /smart-router local off asks, and its two answers. Pi's selector starts on the first answer,
+ * so Enter keeps the pin. Pi's own confirm dialog is a selector over Yes and No that starts on Yes,
+ * so it is not used here.
+ */
+const UNPIN_QUESTION = "Unpin this session from local models?\nThe next requests may go to cloud models. Earlier turns stay where they are.";
+const KEEP_PIN = "No, keep the pin";
+const UNPIN = "Yes, unpin";
+
 /** Extension commands that can send data off the machine, found by name. */
 const EGRESS_COMMANDS: ReadonlyArray<readonly [string, string]> = [
   ["warden", "pi-warden's judge sends redacted context to its backend while it is enabled"],
@@ -293,8 +302,9 @@ async function localOff(host: CommandHost, ctx: ExtensionContext): Promise<Answe
     return info("pi-smart-router: this session is not pinned.");
   }
   if (!ctx.hasUI) return warning("pi-smart-router: /smart-router local off asks for confirmation, and this mode has no dialogs, so the session stays pinned.");
-  const confirmed = await ctx.ui.confirm("Unpin this session from local models?", "The next requests may go to cloud models. Earlier turns stay where they are.");
-  if (!confirmed) return info("pi-smart-router: the session stays pinned to local models.");
+  // Only the one answer unpins: Escape, a timeout, a cancelled dialog and anything else keep the pin.
+  const answer = await ctx.ui.select(UNPIN_QUESTION, [KEEP_PIN, UNPIN]);
+  if (answer !== UNPIN) return info("pi-smart-router: the session stays pinned to local models.");
   host.pi.appendEntry(PIN_ENTRY, pinOff(host.now()));
   host.guards.unlock(ctx);
   host.guards.showStatus(ctx);
