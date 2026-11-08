@@ -5,17 +5,18 @@ import test, { afterEach, beforeEach, describe } from "node:test";
 
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 
-import { ENV_PIN, PIN_ENTRY } from "../src/constants.ts";
-import { PIN_POLICY_CHANGED, resumeNotice } from "../src/errors.ts";
+import { ENV_PIN, PIN_ENTRY, ROUTING_REGISTRY_KEY } from "../src/constants.ts";
+import { carriedNotice, PIN_POLICY_CHANGED, resumeNotice } from "../src/errors.ts";
 import { EMPTY_POLICY, policyFromRoster } from "../src/local.ts";
 import type { LocalPolicy } from "../src/local.ts";
 import { processSlot } from "../src/owners.ts";
 import { describePin, leaveHandoff, pinOff, pinOn, readPin, takeHandoff } from "../src/pin.ts";
 import type { PinReading } from "../src/pin.ts";
+import { createRouter } from "../src/router.ts";
 import { FakeCatalog, GLM, heraModels, KIMI, model, NOW, rosterFixture } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
 import { agentDir, assistant, FakeRuntime, load, request, resetSlot, routed, start } from "./support/pi.ts";
-import type { Loaded } from "./support/pi.ts";
+import type { Loaded, LoadOptions } from "./support/pi.ts";
 
 const HERA = rosterFixture("roster-hera.json");
 const POLICY = policyFromRoster(HERA);
@@ -271,6 +272,110 @@ describe("handoffs", () => {
     assert.deepEqual(takeHandoff(slot, "/sessions/m.jsonl"), { kind: "pin", policy: EMPTY_POLICY }, "a malformed pin carries over as a pin");
     for (const target of [undefined, "", 7]) leaveHandoff(slot, "fork", target, pinned);
     assert.equal(slot.handoffs.size, 0);
+  });
+});
+
+describe("session_start keeps the pin when another of its steps fails", () => {
+  const LOCAL = "smart-router/local";
+  const selection = (loaded: Loaded): string => `${loaded.session.model?.provider}/${loaded.session.model?.id}`;
+  const reported = (loaded: Loaded, reason: string): boolean =>
+    loaded.session.notices.some((notice) => notice.message === `pi-smart-router: the session_start handler failed: ${reason}`);
+
+  const throwing = (message: string) => () => {
+    throw new Error(message);
+  };
+  /** A seed read that fails, as a locked or damaged session index does. */
+  const failSeed = (loaded: Loaded, message: string): void => {
+    (loaded.session.ctx.sessionManager as unknown as Record<string, unknown>).getRecentActiveEntries = throwing(message);
+  };
+  /** Another extension's pi.routing.registry.v1: it passes pi-cache-optimizer's shape check, but its registerRouter throws. */
+  const breakRegistry = (): void => {
+    (globalThis as Record<symbol, unknown>)[Symbol.for(ROUTING_REGISTRY_KEY)] = { version: 1, registerRouter: throwing("broken registry"), getRouter: () => undefined };
+  };
+
+  /** A pinned session leaves by /new or a fork, and the new session starts on a cloud model after `breaks` broke one of its steps. */
+  async function inherit(
+    t: Parameters<typeof agentDir>[0],
+    reason: "new" | "fork",
+    breaks: (child: Loaded) => void,
+    { roster, ...options }: Partial<LoadOptions> & { readonly roster?: string | null } = {},
+  ): Promise<Loaded> {
+    const dir = agentDir(t, roster === undefined ? {} : { roster });
+    const parent = await start({ dir, id: "parent", file: "/sessions/p.jsonl", select: "local", setup: (session) => session.pin(POLICY) });
+    await parent.host.emit("session_shutdown", { reason, targetSessionFile: "/sessions/child.jsonl" });
+    assert.equal(processSlot().handoffs.size, 1);
+    const child = load({ dir, id: "child", file: "/sessions/child.jsonl", runtime: new FakeRuntime(), now: () => NOW, ...options });
+    breaks(child);
+    child.session.select(KIMI);
+    await child.host.emit("session_start", { reason });
+    return child;
+  }
+
+  /** The new session recorded the pin it carried, took its handoff, and switched to smart-router/local. */
+  function assertCarried(child: Loaded): void {
+    assert.deepEqual(pinOf(child), { on: true, policy: POLICY, entry: "on", at: AT, env: false }, "the pin was recorded in the new session");
+    assert.equal(processSlot().handoffs.size, 0, "the handoff was taken");
+    assert.equal(selection(child), LOCAL, "the cloud selection was switched to smart-router/local");
+    assert.equal(child.session.statuses.get("smart-router"), "local models");
+  }
+
+  function assertPinned(child: Loaded, failure: string): void {
+    assertCarried(child);
+    assert.ok(child.session.notices.some((notice) => notice.message === carriedNotice()));
+    assert.ok(reported(child, failure), JSON.stringify(child.session.notices));
+  }
+
+  test("/new, when the seed read of the new session throws", async (t) => {
+    assertPinned(await inherit(t, "new", (child) => failSeed(child, "database is locked")), "database is locked");
+  });
+
+  test("a fork, when another extension's routing registry throws", async (t) => {
+    assertPinned(await inherit(t, "fork", breakRegistry), "broken registry");
+  });
+
+  test("/new, when registering the models again throws", async (t) => {
+    const conflict = "Virtual model smart-router/auto conflicts with a registered model";
+    assertPinned(
+      await inherit(t, "new", (child) => {
+        child.host.api.registerVirtualModel = throwing(conflict);
+      }),
+      conflict,
+    );
+  });
+
+  test("/new, when Pi's agent directory cannot be found", async (t) => {
+    const build: NonNullable<LoadOptions["build"]> = (pi, options) => createRouter(pi, { ...options, agentDir: throwing("HOME is not set") });
+    assertPinned(await inherit(t, "new", () => {}, { build }), "HOME is not set");
+  });
+
+  test("a resume, when the seed read throws: the restored cloud selection is switched at once", async (t) => {
+    const loaded = load({ dir: agentDir(t), id: "resumed", file: "/sessions/r.jsonl", setup: (session) => session.pin(POLICY) });
+    failSeed(loaded, "Cycle in session ancestry at e3");
+    loaded.session.select(KIMI);
+    await loaded.host.emit("session_start", { reason: "resume" });
+    assert.equal(selection(loaded), LOCAL);
+    assert.equal(loaded.session.statuses.get("smart-router"), "local models");
+    assert.ok(reported(loaded, "Cycle in session ancestry at e3"));
+  });
+
+  test("/new, when no notice can be shown and the roster is missing", async (t) => {
+    // Every notice fails, the carried pin's and the missing roster's alike.
+    const breakNotices = (child: Loaded): void => {
+      (child.session.ctx.ui as unknown as Record<string, unknown>).notify = throwing("the terminal is gone");
+    };
+    assertCarried(await inherit(t, "new", breakNotices, { roster: null }));
+  });
+
+  test("a step that fails leaves the others to run", async (t) => {
+    breakRegistry();
+    const loaded = load({ dir: agentDir(t), runtime: new FakeRuntime() });
+    loaded.session.appendAssistant(assistant(KIMI, { timestamp: NOW - 60_000 }));
+    loaded.session.select("auto");
+    await loaded.host.emit("session_start", { reason: "resume" });
+    assert.ok(reported(loaded, "broken registry"));
+    assert.deepEqual(loaded.router?.limits(), { auto: { contextWindow: 128_000, maxTokens: 32_000 }, local: { contextWindow: 262_144, maxTokens: 81_920 } }, "the roster was read");
+    assert.equal(loaded.runtime.find("smart-router", "local")?.contextWindow, 262_144, "both models were registered again with its limits");
+    assert.equal(loaded.router?.record(loaded.session.id)?.last?.ref, KIMI, "the last responder was seeded");
   });
 });
 

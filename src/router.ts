@@ -269,35 +269,53 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     if (ctx.hasUI) ctx.ui.notify(text, type);
   };
 
-  const start = async (ctx: ExtensionContext): Promise<void> => {
-    const { sessionManager } = ctx;
-    const sessionId = sessionManager.getSessionId();
-    if (self !== undefined) leave(slot, self);
-    self = { router: api, ctx, sessionId, hash: sessionHash(sessionId) };
-    join(slot, self);
-    registerAdapter(slot);
-    const state = refreshFiles();
-    limits = state.kind === "ok" ? computeLimits(ctx, state.value) : BOTH_DEFAULT;
-    registerModels(ctx);
-    const view = boundedHistory(sessionManager);
-    const last = view === undefined ? undefined : seed(view);
-    if (last !== undefined) recordOf(sessionId).last = last;
-    const notice = state.kind !== "ok" ? rosterNotice(state) : view === undefined ? historyNotice() : undefined;
-    if (notice !== undefined) notify(ctx, notice, "warning");
-    // A fork or /new carries the pin; a resume only says that the session it left was pinned.
-    const handoff = takeHandoff(slot, sessionManager.getSessionFile());
+  /** A fork or /new records the pin it carries; a resume only says that the session it left was pinned. */
+  const carry = (ctx: ExtensionContext): void => {
+    const handoff = takeHandoff(slot, ctx.sessionManager.getSessionFile());
     if (handoff?.kind === "pin") {
+      let failure: string | undefined;
       try {
         pi.appendEntry(PIN_ENTRY, pinOn(handoff.policy, now()));
-        notify(ctx, carriedNotice(), "info");
       } catch (error) {
-        notify(ctx, carryFailedNotice(firstLine(error)), "error");
+        failure = firstLine(error);
       }
+      if (failure === undefined) notify(ctx, carriedNotice(), "info");
+      else notify(ctx, carryFailedNotice(failure), "error");
     } else if (handoff?.kind === "notice" && !pinOf(ctx).on) {
       notify(ctx, resumeNotice(), "warning");
     }
-    await guards.enforce(ctx);
-    guards.showStatus(ctx);
+  };
+
+  // The pin's steps come first and last, and nothing between them can skip them: a fork or /new
+  // records the pin it carries before any other step runs, and the pin is enforced on the restored
+  // selection, with its status item, whatever failed in between. Each of the other steps reports
+  // its own failure and lets the rest run.
+  const start = async (ctx: ExtensionContext): Promise<void> => {
+    try {
+      const { sessionManager } = ctx;
+      const sessionId = sessionManager.getSessionId();
+      if (self !== undefined) leave(slot, self);
+      self = { router: api, ctx, sessionId, hash: sessionHash(sessionId) };
+      join(slot, self);
+      carry(ctx);
+      const step = <T>(run: () => T): T | undefined => guarded("session_start", ctx, run);
+      step(() => registerAdapter(slot));
+      const state = step(refreshFiles);
+      if (state !== undefined) {
+        step(() => {
+          limits = state.kind === "ok" ? computeLimits(ctx, state.value) : BOTH_DEFAULT;
+        });
+      }
+      step(() => registerModels(ctx));
+      const view = boundedHistory(sessionManager);
+      const last = view === undefined ? undefined : step(() => seed(view));
+      if (last !== undefined) recordOf(sessionId).last = last;
+      const notice = state !== undefined && state.kind !== "ok" ? rosterNotice(state) : view === undefined ? historyNotice() : undefined;
+      if (notice !== undefined) notify(ctx, notice, "warning");
+    } finally {
+      await guards.enforce(ctx);
+      guards.showStatus(ctx);
+    }
   };
 
   // The decision point: a prompt typed while the session is idle plans its run. Input that
@@ -349,11 +367,12 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     }
   };
 
-  const guarded = (name: string, ctx: ExtensionContext, run: () => void): void => {
+  const guarded = <T>(name: string, ctx: ExtensionContext, run: () => T): T | undefined => {
     try {
-      run();
+      return run();
     } catch (error) {
       report(name, ctx, error);
+      return undefined;
     }
   };
 
