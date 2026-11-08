@@ -9,6 +9,12 @@ export const NAMES: Readonly<Record<VirtualId, string>> = {
   local: "Smart Router (local models)",
 };
 
+/**
+ * The API id Pi gives virtual catalog entries (VIRTUAL_MODEL_API, which the package index does not
+ * export). A model with it never reaches a provider, and the router never routes to one.
+ */
+export const VIRTUAL_API = "pi-virtual";
+
 /** Pi's thinking levels, lowest first. Both virtual models offer every one of them. */
 export const ALL_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type Level = (typeof ALL_LEVELS)[number];
