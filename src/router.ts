@@ -1,6 +1,7 @@
 // One instance of the router: the session whose extension runtime loaded it, the two files it
 // reads, its per-session records and cooldowns, the limits both models declare, the pin's guards
-// and handoffs, the /smart-router command, and the handlers wire() registers.
+// and handoffs, the /smart-router command, what it tells pi-cache-optimizer, and the handlers
+// wire() registers.
 //
 // createRouter only builds closures. It makes no pi.on, registration or command call, so a throw
 // while it is built leaves only the two refusing models index.ts registered, and wire() makes
@@ -19,6 +20,8 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 import { labelsFile, needsLabels } from "./accounts.ts";
+import { registerAdapter, unregisterAdapter } from "./cache-optimizer.ts";
+import type { ActiveRoute } from "./cache-optimizer.ts";
 import { smartRouterCommand } from "./commands.ts";
 import type { CommandHost, Files } from "./commands.ts";
 import { COMMAND, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, PIN_ENTRY, PROVIDER, VIRTUAL_API, VIRTUAL_IDS } from "./constants.ts";
@@ -37,9 +40,9 @@ import { latchEnvPolicy, leaveHandoff, pinOn, readPin, takeHandoff } from "./pin
 import type { PinReading } from "./pin.ts";
 import { coolFrom, Cooldowns, resolveContext } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
-import { boundedHistory, newRecord, requireBoundedHistory, routeOther, routeOwned } from "./route.ts";
+import { boundedHistory, newRecord, predict, requireBoundedHistory, routeOther, routeOwned } from "./route.ts";
 import type { BoundedHistory, Pin, RouteInput, SessionRecord } from "./route.ts";
-import { autoRoles, rosterFile } from "./roster.ts";
+import { autoRoles, parseRef, rosterFile } from "./roster.ts";
 import type { Roster } from "./roster.ts";
 
 export interface Limits {
@@ -232,6 +235,36 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     return undefined;
   };
 
+  // What pi-cache-optimizer reads through the adapter, for the owner's session: the run's plan,
+  // else the run's pick, else what a continuation would pick now. Only the owner's own loop and
+  // its message_end change it.
+  const activeRoute = (id: VirtualId): ActiveRoute | undefined => {
+    try {
+      const owner = self;
+      if (owner === undefined) return undefined;
+      const { ctx } = owner;
+      const state = loaded(roster.current());
+      if (state.kind !== "ok" || boundedHistory(ctx.sessionManager) === undefined) return undefined;
+      const rc = contextFor(ctx, state.value, id, pinOf(ctx));
+      const record = records.get(owner.sessionId) ?? newRecord();
+      const at = now();
+      const answer = (model: Model<Api>, status: ActiveRoute["status"]): ActiveRoute => ({ provider: model.provider, modelId: model.id, api: model.api, status, at });
+      const { plan, runPick } = record;
+      if (plan !== undefined && plan.virtualId === id && plan.localOnly === rc.localOnly) {
+        // The run's first request takes the planned model, or refuses when the plan found none.
+        return plan.decision.ok ? answer(plan.decision.choice.model, "planned") : undefined;
+      }
+      if (runPick?.id === id) {
+        const ref = parseRef(runPick.ref);
+        return ref === undefined ? undefined : { provider: ref.provider, modelId: ref.id, api: rc.catalog.find(ref.provider, ref.id)?.api, status: "selected", at };
+      }
+      const predicted = predict(rc, record);
+      return predicted.ok ? answer(predicted.choice.model, "selected") : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
   const notify = (ctx: ExtensionContext, text: string, type: "info" | "warning" | "error"): void => {
     if (ctx.hasUI) ctx.ui.notify(text, type);
   };
@@ -242,6 +275,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     if (self !== undefined) leave(slot, self);
     self = { router: api, ctx, sessionId, hash: sessionHash(sessionId) };
     join(slot, self);
+    registerAdapter(slot);
     const state = refreshFiles();
     limits = state.kind === "ok" ? computeLimits(ctx, state.value) : BOTH_DEFAULT;
     registerModels(ctx);
@@ -297,7 +331,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       leaveHandoff(slot, event.reason, event.targetSessionFile, pinOf(ctx));
     } finally {
       records.clear();
-      if (self !== undefined) leave(slot, self);
+      // pi-cache-optimizer's adapter serves every owner in the process; the last one to leave removes it.
+      if (self !== undefined && leave(slot, self)) unregisterAdapter(slot);
       self = undefined;
     }
   };
@@ -363,6 +398,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     routeOwned: (id, request, ctx) => routeOwned(prepare(id, request, ctx)),
     routeOther: (id, request, ctx) => routeOther(prepare(id, request, ctx)),
     heal,
+    activeRoute,
 
     dispatch(id, request, passed) {
       const owner = request.reason !== "direct" && request.signal !== undefined ? ownerBySignal(slot, request.signal) : undefined;

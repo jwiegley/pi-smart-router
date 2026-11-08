@@ -29,7 +29,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 import { install } from "../../index.ts";
-import { PIN_ENTRY, PROVIDER, SLOT_KEY } from "../../src/constants.ts";
+import { PIN_ENTRY, PROVIDER, ROUTING_REGISTRY_KEY, SLOT_KEY } from "../../src/constants.ts";
 import type { VirtualId } from "../../src/constants.ts";
 import type { LocalPolicy } from "../../src/local.ts";
 import { pinOff, pinOn } from "../../src/pin.ts";
@@ -42,9 +42,10 @@ import { fixture, scratch, write } from "./fixtures.ts";
 type Route = (request: ModelRouteRequest) => ModelRoute | Promise<ModelRoute>;
 type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
 
-/** Forget the process slot, so each test starts with a fresh process. */
+/** Forget the process slot and the routing registry, so each test starts with a fresh process. */
 export function resetSlot(): void {
   delete (globalThis as Record<symbol, unknown>)[Symbol.for(SLOT_KEY)];
+  delete (globalThis as Record<symbol, unknown>)[Symbol.for(ROUTING_REGISTRY_KEY)];
 }
 
 export function usage(totalTokens: number): Usage {

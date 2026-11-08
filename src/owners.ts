@@ -22,6 +22,7 @@ import { createHash } from "node:crypto";
 
 import type { ExtensionContext, ModelRoute, ModelRouteRequest } from "@earendil-works/pi-coding-agent";
 
+import type { ActiveRoute } from "./cache-optimizer.ts";
 import { SLOT_KEY } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { isRecord } from "./files.ts";
@@ -35,6 +36,8 @@ export interface OwnerRouter {
   routeOther(id: VirtualId, request: ModelRouteRequest, ctx: ExtensionContext): ModelRoute;
   /** Re-register both models when a registration no live owner made displaced this one's. */
   heal(ctx: ExtensionContext): boolean;
+  /** What route() will pick next for this owner's session, for pi-cache-optimizer; never throws. */
+  activeRoute(id: VirtualId): ActiveRoute | undefined;
 }
 
 export interface Owner {
@@ -61,8 +64,8 @@ export interface Slot {
   readonly env: EnvLatch;
   /** Pins handed to the session a fork or /new creates, keyed by its session file. */
   readonly handoffs: Map<string, unknown>;
-  /** The pi-cache-optimizer adapter's registration, while any owner is live. */
-  adapter: { readonly unregister: () => void } | undefined;
+  /** The pi-cache-optimizer adapter and its registration, while any owner is live. */
+  adapter: { readonly adapter: object; readonly unregister: () => void } | undefined;
 }
 
 const KEY = Symbol.for(SLOT_KEY);

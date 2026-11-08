@@ -114,11 +114,11 @@ function byDefault(rc: ResolveContext, code: string): Decision {
   return pickInRole(rc, role, { fallback: !rc.localOnly, code });
 }
 
-/** A base model that holds the conversation: itself, else its role, else that role's fallback. */
-function stick(rc: ResolveContext, request: ModelRouteRequest, record: SessionRecord): Decision {
+/** A base model that holds the conversation: itself, else its role, else that role's fallback. Pure. */
+function stick(rc: ResolveContext, previous: string | undefined, record: SessionRecord): Decision {
   const run = record.runPick?.id === rc.virtualId ? record.runPick.ref : undefined;
   const bases: ReadonlyArray<readonly [string, string | undefined]> = [
-    ["previous", previousRef(request)],
+    ["previous", previous],
     ["run", run],
     ["last", record.last?.ref],
   ];
@@ -133,9 +133,18 @@ function stick(rc: ResolveContext, request: ModelRouteRequest, record: SessionRe
   return byDefault(rc, "stick:default");
 }
 
+/**
+ * What an owner continuation without a previous model would pick now: the run's pick, else the
+ * last responder, its role or that role's fallback, else the default role. No side effects; the
+ * pi-cache-optimizer adapter reports it.
+ */
+export function predict(rc: ResolveContext, record: SessionRecord): Decision {
+  return stick(rc, undefined, record);
+}
+
 function retry(rc: ResolveContext, request: ModelRouteRequest, record: SessionRecord): Decision {
   const { failed } = request;
-  if (failed === undefined) return stick(rc, request, record);
+  if (failed === undefined) return stick(rc, previousRef(request), record);
   coolFrom(failed.message, rc.roster, rc.cooldowns, rc.now);
   const ref = refOf(failed.model);
   const role = eligibleRole(rc, ref);
@@ -149,7 +158,7 @@ function retry(rc: ResolveContext, request: ModelRouteRequest, record: SessionRe
   if (kind === "content-filter") {
     return { ok: false, attempts: [], problem: `${ref} refused this content and can no longer take the retry, and refused content is never sent to another model` };
   }
-  return stick(rc, request, record);
+  return stick(rc, previousRef(request), record);
 }
 
 /** The run's plan, consumed: it is never used twice, and never for another selection. */
@@ -215,11 +224,11 @@ export function routeOwned(input: RouteInput): ModelRoute {
   let plan: Plan | undefined;
   if (request.reason === "user") {
     plan = takePlan(record, id, rc.localOnly);
-    decision = plan === undefined ? stick(rc, request, record) : fromPlan(rc, plan);
+    decision = plan === undefined ? stick(rc, previousRef(request), record) : fromPlan(rc, plan);
   } else if (request.reason === "retry") {
     decision = retry(rc, request, record);
   } else {
-    decision = stick(rc, request, record);
+    decision = stick(rc, previousRef(request), record);
   }
   const choice = settle(input, decision);
   record.runPick = { id, ref: choice.ref, role: choice.role };
