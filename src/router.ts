@@ -1,11 +1,12 @@
 // One instance of the router: the session whose extension runtime loaded it, the two files it
-// reads, its per-session records and cooldowns, the limits both models declare, and the handlers
-// wire() registers.
+// reads, its per-session records and cooldowns, the limits both models declare, the pin's guards
+// and handoffs, the /smart-router command, and the handlers wire() registers.
 //
-// createRouter only builds closures. It makes no pi.on or registration call, so a throw while it
-// is built leaves only the two refusing models index.ts registered, and wire() makes every pi.on
-// call in one place, after the router exists. No timer, watcher, socket or other handle is ever
-// opened; the files are read at session_start, at idle prompts when they changed, and on demand.
+// createRouter only builds closures. It makes no pi.on, registration or command call, so a throw
+// while it is built leaves only the two refusing models index.ts registered, and wire() makes
+// every pi.on and registerCommand call in one place, after the router exists. No timer, watcher,
+// socket or other handle is ever opened; the files are read at session_start, at idle prompts when
+// they changed, and on demand.
 import type { Api, Model, Usage } from "@earendil-works/pi-ai";
 import type {
   ExtensionAPI,
@@ -14,19 +15,26 @@ import type {
   MessageEndEvent,
   ModelRoute,
   ModelRouteRequest,
+  SessionShutdownEvent,
 } from "@earendil-works/pi-coding-agent";
 
 import { labelsFile, needsLabels } from "./accounts.ts";
-import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, PROVIDER, VIRTUAL_API, VIRTUAL_IDS } from "./constants.ts";
+import { smartRouterCommand } from "./commands.ts";
+import type { CommandHost, Files } from "./commands.ts";
+import { COMMAND, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, PIN_ENTRY, PROVIDER, VIRTUAL_API, VIRTUAL_IDS } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { pickInRole, planUserTurn, reserveFor } from "./decide.ts";
 import type { Decision, LastResponder } from "./decide.ts";
-import { firstLine, historyNotice, rosterNotice, rosterRefusal, stale } from "./errors.ts";
+import { carriedNotice, carryFailedNotice, firstLine, historyNotice, resumeNotice, rosterNotice, rosterRefusal, stale } from "./errors.ts";
 import { isRecord } from "./files.ts";
-import type { FileSystem } from "./files.ts";
+import type { FileSystem, Loaded } from "./files.ts";
+import { createGuards, newGuardState } from "./guards.ts";
+import type { GuardState } from "./guards.ts";
 import { EMPTY_POLICY, policyFromRoster } from "./local.ts";
 import { healDisplaced, isLive, isLiveOwner, join, leave, ownerBySignal, sessionHash } from "./owners.ts";
 import type { Owner, OwnerRouter, Slot } from "./owners.ts";
+import { latchEnvPolicy, leaveHandoff, pinOn, readPin, takeHandoff } from "./pin.ts";
+import type { PinReading } from "./pin.ts";
 import { coolFrom, Cooldowns, resolveContext } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
 import { boundedHistory, newRecord, requireBoundedHistory, routeOther, routeOwned } from "./route.ts";
@@ -41,15 +49,6 @@ export interface Limits {
 
 export const DEFAULT_LIMITS: Limits = Object.freeze({ contextWindow: DEFAULT_CONTEXT_WINDOW, maxTokens: DEFAULT_MAX_TOKENS });
 
-/** Where routing reads a session's pin. */
-export type PinSource = (ctx: ExtensionContext, roster: Roster, slot: Slot) => Pin;
-
-/**
- * The pin as routing reads it until pin entries are read: only the latched environment switch
- * pins, with the policy latched for it, and with nothing latched no model qualifies.
- */
-export const envPin: PinSource = (_ctx, _roster, slot) => ({ on: slot.env.on, policy: slot.env.policy ?? EMPTY_POLICY });
-
 export interface RouterOptions {
   readonly slot: Slot;
   /** Register one virtual model, with the factory's route and these limits. */
@@ -57,19 +56,23 @@ export interface RouterOptions {
   /** Pi's agent directory, asked afresh on every load. */
   readonly agentDir: () => string;
   readonly now: () => number;
-  readonly pin?: PinSource | undefined;
   /** Test seams for the file reader. */
   readonly uid?: number | undefined;
   readonly fs?: FileSystem | undefined;
 }
 
+/** What a router instance keeps per session: the route records and the pin's guard state. */
+export interface Session extends SessionRecord {
+  readonly guard: GuardState;
+}
+
 export interface Router extends OwnerRouter {
   /** Every route call of both models lands here, whichever instance registered the route. */
   dispatch(id: VirtualId, request: ModelRouteRequest, ctx: ExtensionContext): ModelRoute;
-  /** Register every handler, once. */
+  /** Register every handler and the command, once. */
   wire(pi: ExtensionAPI): void;
   /** A session's records, for status and history. */
-  record(sessionId: string): Readonly<SessionRecord> | undefined;
+  record(sessionId: string): Readonly<Session> | undefined;
   /** The limits both models were last registered with. */
   limits(): Readonly<Record<VirtualId, Limits>>;
 }
@@ -102,26 +105,41 @@ function smallest(decisions: readonly Decision[]): Limits {
   };
 }
 
+const sameLimits = (a: Readonly<Record<VirtualId, Limits>>, b: Readonly<Record<VirtualId, Limits>>): boolean =>
+  VIRTUAL_IDS.every((id) => a[id].contextWindow === b[id].contextWindow && a[id].maxTokens === b[id].maxTokens);
+
 export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   const { slot, now } = options;
   const files = { agentDir: options.agentDir, uid: options.uid, fs: options.fs, now };
   const roster = rosterFile(files);
   const labels = labelsFile(files);
-  const pinOf = options.pin ?? envPin;
   const cooldowns = new Cooldowns();
-  const records = new Map<string, SessionRecord>();
+  const records = new Map<string, Session>();
   const reported = new Set<string>();
   let limits = BOTH_DEFAULT;
   let self: Owner | undefined;
 
-  const recordOf = (sessionId: string): SessionRecord => {
+  const recordOf = (sessionId: string): Session => {
     let record = records.get(sessionId);
     if (record === undefined) {
-      record = newRecord();
+      record = { ...newRecord(), guard: newGuardState() };
       records.set(sessionId, record);
     }
     return record;
   };
+
+  /** A session's pin, read fail closed. A context whose session cannot be read counts as pinned. */
+  const pinOf = (ctx: ExtensionContext): PinReading => {
+    let manager: unknown;
+    try {
+      manager = ctx.sessionManager;
+    } catch {
+      manager = undefined;
+    }
+    return readPin(manager, slot.env);
+  };
+
+  const guards = createGuards({ pi, now, pinOf, stateOf: (ctx) => recordOf(ctx.sessionManager.getSessionId()).guard });
 
   const contextFor = (ctx: ExtensionContext, value: Roster, id: VirtualId, pin: Pin): ResolveContext =>
     resolveContext({
@@ -133,11 +151,18 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       virtualId: id,
       localOnly: id === "local" || pin.on,
       policy: pin.on ? pin.policy : policyFromRoster(value),
+      pinned: pin.on,
     });
 
+  /** Every roster load passes here, so the environment switch latches the first valid one's local policy. */
+  const loaded = (state: Loaded<Roster>): Loaded<Roster> => {
+    if (state.kind === "ok") latchEnvPolicy(slot.env, state.value);
+    return state;
+  };
+
   /** Re-read both files when they changed. */
-  const refreshFiles = () => {
-    const state = roster.refresh();
+  const refreshFiles = (): Loaded<Roster> => {
+    const state = loaded(roster.refresh());
     if (state.kind === "ok" && needsLabels(state.value)) labels.refresh();
     return state;
   };
@@ -145,9 +170,9 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   const prepare = (id: VirtualId, request: ModelRouteRequest, ctx: ExtensionContext): RouteInput => {
     const { sessionManager } = ctx;
     requireBoundedHistory(id, sessionManager);
-    const state = roster.current();
+    const state = loaded(roster.current());
     if (state.kind !== "ok") throw rosterRefusal(id, state);
-    const pin = pinOf(ctx, state.value, slot);
+    const pin = pinOf(ctx);
     return { id, request, rc: contextFor(ctx, state.value, id, pin), pin, record: recordOf(sessionManager.getSessionId()) };
   };
 
@@ -207,7 +232,11 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     return undefined;
   };
 
-  const start = (ctx: ExtensionContext): void => {
+  const notify = (ctx: ExtensionContext, text: string, type: "info" | "warning" | "error"): void => {
+    if (ctx.hasUI) ctx.ui.notify(text, type);
+  };
+
+  const start = async (ctx: ExtensionContext): Promise<void> => {
     const { sessionManager } = ctx;
     const sessionId = sessionManager.getSessionId();
     if (self !== undefined) leave(slot, self);
@@ -220,21 +249,33 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     const last = view === undefined ? undefined : seed(view);
     if (last !== undefined) recordOf(sessionId).last = last;
     const notice = state.kind !== "ok" ? rosterNotice(state) : view === undefined ? historyNotice() : undefined;
-    if (notice !== undefined && ctx.hasUI) ctx.ui.notify(notice, "warning");
+    if (notice !== undefined) notify(ctx, notice, "warning");
+    // A fork or /new carries the pin; a resume only says that the session it left was pinned.
+    const handoff = takeHandoff(slot, sessionManager.getSessionFile());
+    if (handoff?.kind === "pin") {
+      try {
+        pi.appendEntry(PIN_ENTRY, pinOn(handoff.policy, now()));
+        notify(ctx, carriedNotice(), "info");
+      } catch (error) {
+        notify(ctx, carryFailedNotice(firstLine(error)), "error");
+      }
+    } else if (handoff?.kind === "notice" && !pinOf(ctx).on) {
+      notify(ctx, resumeNotice(), "warning");
+    }
+    await guards.enforce(ctx);
+    guards.showStatus(ctx);
   };
 
   // The decision point: a prompt typed while the session is idle plans its run. Input that
   // arrives while a run starts or streams (steering, follow-ups) neither plans nor drops.
-  const input = (event: InputEvent, ctx: ExtensionContext): void => {
+  const plan = (event: InputEvent, ctx: ExtensionContext): void => {
     if (!ctx.isIdle()) return;
-    heal(ctx);
     const { sessionManager } = ctx;
     const record = recordOf(sessionManager.getSessionId());
-    record.plan = undefined;
     const state = refreshFiles();
     const id = virtualIdOf(ctx.model);
     if (id === undefined || state.kind !== "ok" || boundedHistory(sessionManager) === undefined) return;
-    const rc = contextFor(ctx, state.value, id, pinOf(ctx, state.value, slot));
+    const rc = contextFor(ctx, state.value, id, pinOf(ctx));
     record.plan = planUserTurn({ rc, text: event.text, last: record.last, now: now(), reserve: reserveFor(pi.getSettings(), id) });
   };
 
@@ -250,26 +291,72 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     recordOf(ctx.sessionManager.getSessionId()).last = { ref: `${message.provider}/${message.model}`, at: now(), usage: message.usage };
   };
 
-  const shutdown = (): void => {
-    records.clear();
-    if (self !== undefined) leave(slot, self);
-    self = undefined;
+  const shutdown = (event: SessionShutdownEvent, ctx: ExtensionContext): void => {
+    try {
+      // The pin goes with a fork or /new into the session it creates, keyed by that session's file.
+      leaveHandoff(slot, event.reason, event.targetSessionFile, pinOf(ctx));
+    } finally {
+      records.clear();
+      if (self !== undefined) leave(slot, self);
+      self = undefined;
+    }
   };
 
-  /** Run a handler; report its failure once, and never let it reach Pi. */
+  /** Report a handler's failure once; never let it reach Pi. */
+  const report = (name: string, ctx: ExtensionContext, error: unknown): void => {
+    const text = `pi-smart-router: the ${name} handler failed: ${firstLine(error)}`;
+    if (reported.has(text)) return;
+    reported.add(text);
+    try {
+      if (ctx.hasUI) ctx.ui.notify(text, "warning");
+    } catch {
+      // A stale context has nowhere to report to.
+    }
+  };
+
   const guarded = (name: string, ctx: ExtensionContext, run: () => void): void => {
     try {
       run();
     } catch (error) {
-      const text = `pi-smart-router: the ${name} handler failed: ${firstLine(error)}`;
-      if (reported.has(text)) return;
-      reported.add(text);
-      try {
-        if (ctx.hasUI) ctx.ui.notify(text, "warning");
-      } catch {
-        // A stale context has nowhere to report to.
-      }
+      report(name, ctx, error);
     }
+  };
+
+  const guardedAsync = async (name: string, ctx: ExtensionContext, run: () => Promise<void>): Promise<void> => {
+    try {
+      await run();
+    } catch (error) {
+      report(name, ctx, error);
+    }
+  };
+
+  const filesNow = (state: Loaded<Roster>): Files => ({
+    roster: state,
+    labels: state.kind === "ok" && needsLabels(state.value) ? labels.current() : undefined,
+  });
+
+  const commandHost: CommandHost = {
+    pi,
+    guards,
+    now,
+    refresh: () => filesNow(refreshFiles()),
+    reload: (ctx) => {
+      const state = loaded(roster.reload());
+      if (state.kind === "ok" && needsLabels(state.value)) labels.reload();
+      let limitsChanged = false;
+      if (state.kind === "ok") {
+        const next = computeLimits(ctx, state.value);
+        limitsChanged = !sameLimits(next, limits);
+        if (limitsChanged) {
+          limits = next;
+          registerModels(ctx);
+        }
+      }
+      return { ...filesNow(state), limitsChanged };
+    },
+    pinOf,
+    session: (ctx) => records.get(ctx.sessionManager.getSessionId()),
+    resolver: contextFor,
   };
 
   const api: Router = {
@@ -287,14 +374,26 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     },
 
     wire(target) {
-      target.on("session_start", (_event, ctx) => guarded("session_start", ctx, () => start(ctx)));
-      target.on("input", (event, ctx) => guarded("input", ctx, () => input(event, ctx)));
+      target.on("session_start", (_event, ctx) => guardedAsync("session_start", ctx, () => start(ctx)));
+      target.on("input", (event, ctx) => {
+        guarded("input", ctx, () => {
+          if (!ctx.isIdle()) return;
+          heal(ctx);
+          recordOf(ctx.sessionManager.getSessionId()).plan = undefined;
+        });
+        const veto = guards.input(ctx);
+        if (veto === undefined) guarded("input", ctx, () => plan(event, ctx));
+        return veto;
+      });
       target.on("before_agent_start", (event, ctx) =>
         guarded("before_agent_start", ctx, () => {
           if (event.messageType === "custom") recordOf(ctx.sessionManager.getSessionId()).plan = undefined;
         }),
       );
-      target.on("turn_start", (_event, ctx) => guarded("turn_start", ctx, () => void heal(ctx)));
+      target.on("turn_start", async (_event, ctx) => {
+        guarded("turn_start", ctx, () => void heal(ctx));
+        await guards.turnStart(ctx);
+      });
       target.on("message_end", (event, ctx) => guarded("message_end", ctx, () => messageEnd(event, ctx)));
       target.on("agent_settled", (_event, ctx) =>
         guarded("agent_settled", ctx, () => {
@@ -303,9 +402,19 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
           record.runPick = undefined;
         }),
       );
-      target.on("session_before_compact", (_event, ctx) => guarded("session_before_compact", ctx, () => void heal(ctx)));
-      target.on("session_before_tree", (_event, ctx) => guarded("session_before_tree", ctx, () => void heal(ctx)));
-      target.on("session_shutdown", (_event, ctx) => guarded("session_shutdown", ctx, shutdown));
+      target.on("model_select", (event, ctx) => guards.modelSelect(event, ctx));
+      target.on("session_before_compact", (_event, ctx) => {
+        guarded("session_before_compact", ctx, () => void heal(ctx));
+        return guards.beforeCompact(ctx);
+      });
+      target.on("session_before_tree", (event, ctx) => {
+        guarded("session_before_tree", ctx, () => void heal(ctx));
+        return guards.beforeTree(event, ctx);
+      });
+      target.on("before_provider_request", (_event, ctx) => guards.beforeProviderRequest(ctx));
+      target.on("cache_warming_decision", (_event, ctx) => guards.cacheWarming(ctx));
+      target.on("session_shutdown", (event, ctx) => guarded("session_shutdown", ctx, () => shutdown(event, ctx)));
+      target.registerCommand(COMMAND, smartRouterCommand(commandHost));
     },
 
     record: (sessionId) => records.get(sessionId),

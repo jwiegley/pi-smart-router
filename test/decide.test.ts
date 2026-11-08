@@ -346,7 +346,6 @@ function randomCase(seed: number): Case {
         role: one(names),
         providers: some(["omlx-hera", "lan-box", "openrouter", "hermes", "router"], 0.6),
         hosts: some(["hera.lan", "localhost", "127.0.0.1", "openrouter.ai", "api.openai.com", "hera.tail1234.ts.net"], 0.6),
-        blockTools: [],
       }
     : undefined;
   const roster: Roster = {

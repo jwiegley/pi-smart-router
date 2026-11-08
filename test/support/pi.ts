@@ -6,7 +6,9 @@
 // its context; every getter of the context throws once the session is disposed, as a stale Pi
 // context does, and its session manager refuses whole-history reads. FakeHost is one session's
 // extension runtime: the API a factory receives, which stages registrations until the session
-// binds, as Pi's loader does, and the handlers events are emitted to.
+// binds, as Pi's loader does, and the handlers events are emitted to, in registration order. Its
+// setModel follows AgentSession.setModel: it assigns the selection, records a model_change and
+// then awaits every model_select handler, so a handler can switch again from inside it.
 import assert from "node:assert/strict";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -15,19 +17,25 @@ import type { TestContext } from "node:test";
 import type { Api, AssistantMessage, Model, Usage } from "@earendil-works/pi-ai";
 import type {
   ExtensionAPI,
+  ExtensionCommandContext,
   ExtensionContext,
   ExtensionVirtualModel,
   ModelRoute,
   ModelRouteReason,
   ModelRouteRequest,
+  RegisteredCommand,
+  SlashCommandInfo,
+  ToolInfo,
 } from "@earendil-works/pi-coding-agent";
 
 import { install } from "../../index.ts";
-import { PROVIDER, SLOT_KEY } from "../../src/constants.ts";
+import { PIN_ENTRY, PROVIDER, SLOT_KEY } from "../../src/constants.ts";
 import type { VirtualId } from "../../src/constants.ts";
+import type { LocalPolicy } from "../../src/local.ts";
+import { pinOff, pinOn } from "../../src/pin.ts";
 import { refOf } from "../../src/resolve.ts";
 import { createRouter } from "../../src/router.ts";
-import type { PinSource, Router, RouterOptions } from "../../src/router.ts";
+import type { Router, RouterOptions } from "../../src/router.ts";
 import { FakeCatalog, heraModels, NOW } from "./catalog.ts";
 import { fixture, scratch, write } from "./fixtures.ts";
 
@@ -148,6 +156,13 @@ export class FakeSession {
   readonly entries: Array<Record<string, unknown>> = [];
   readonly boundedReads: unknown[] = [];
   wholeHistoryReads = 0;
+  /** The status items, as setStatus left them. */
+  readonly statuses = new Map<string, string | undefined>();
+  /** What the confirmation dialog answers, and the dialogs shown. */
+  confirmAnswer = false;
+  readonly dialogs: string[] = [];
+  /** How many times an extension aborted, whether or not a run was active. */
+  aborts = 0;
   readonly ctx: ExtensionContext;
 
   constructor(runtime: FakeRuntime, options: SessionOptions = {}) {
@@ -181,8 +196,8 @@ export class FakeSession {
         });
         return matching.slice(-(filter.limit ?? 256));
       };
-      manager.getLatestCustomEntry = (customType: string) => {
-        session.boundedReads.push({ customType });
+      manager.getLatestCustomEntry = (customType: string, options?: { scope?: "all" | "active" }) => {
+        session.boundedReads.push({ customType, ...options });
         return latest(session.entries, (entry) => (entry.type === "custom" || entry.type === "custom_message") && entry.customType === customType);
       };
       manager.getLatestMessage = (role?: string) =>
@@ -190,7 +205,11 @@ export class FakeSession {
     }
     const ui = {
       notify: (message: string, type = "info") => session.notices.push({ type, message }),
-      setStatus: () => {},
+      setStatus: (key: string, text: string | undefined) => session.statuses.set(key, text),
+      confirm: async (title: string) => {
+        session.dialogs.push(title);
+        return session.confirmAnswer;
+      },
     };
     this.ctx = {
       get ui() {
@@ -239,6 +258,7 @@ export class FakeSession {
       },
       abort: () => {
         live();
+        session.aborts += 1;
         session.controller?.abort();
       },
       hasPendingMessages: () => false,
@@ -273,6 +293,31 @@ export class FakeSession {
   appendAssistant(message: AssistantMessage, timestamp = new Date(message.timestamp).toISOString()): void {
     this.entries.push({ type: "message", id: `e${this.entries.length}`, parentId: null, timestamp, message });
   }
+
+  /** Append a custom entry, as Pi's appendEntry does. */
+  appendCustom(customType: string, data: unknown, type: "custom" | "custom_message" = "custom"): void {
+    this.entries.push({ type, customType, data, id: `e${this.entries.length}`, parentId: null, timestamp: new Date(NOW).toISOString() });
+  }
+
+  /** Pin the session to a policy, as /smart-router local on records it. */
+  pin(policy: LocalPolicy): void {
+    this.appendCustom(PIN_ENTRY, pinOn(policy, NOW));
+  }
+
+  /** Record the one entry that unpins. */
+  unpin(): void {
+    this.appendCustom(PIN_ENTRY, pinOff(NOW));
+  }
+
+  /** The pin entries recorded so far, oldest first. */
+  pinEntries(): unknown[] {
+    return this.entries.filter((entry) => entry.customType === PIN_ENTRY).map((entry) => entry.data);
+  }
+
+  /** Force the selection without a model_select, as writing session.agent.state.model does. */
+  force(ref: string): void {
+    this.select(ref);
+  }
 }
 
 export class FakeHost {
@@ -280,7 +325,13 @@ export class FakeHost {
   readonly handlers = new Map<string, Handler[]>();
   readonly calls: string[] = [];
   readonly definitions: ExtensionVirtualModel[] = [];
+  readonly commands = new Map<string, Omit<RegisteredCommand, "name" | "sourceInfo">>();
   settings: Record<string, unknown> = {};
+  /** What pi.getCommands() and pi.getAllTools() list. */
+  commandList: SlashCommandInfo[] = [];
+  tools: ToolInfo[] = [];
+  /** The model_select events emitted, in order. */
+  readonly selections: Array<{ readonly model: string; readonly previous: string | undefined; readonly source: string }> = [];
   bound = false;
   readonly staged: Array<() => void> = [];
   readonly api: ExtensionAPI;
@@ -301,11 +352,46 @@ export class FakeHost {
         if (host.bound) apply();
         else host.staged.push(apply);
       },
-      registerCommand(name: string) {
+      registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "sourceInfo">) {
         host.calls.push(`registerCommand:${name}`);
+        host.commands.set(name, options);
       },
       getSettings: () => structuredClone(host.settings),
+      appendEntry(customType: string, data?: unknown) {
+        session.appendCustom(customType, data);
+      },
+      getCommands: () => host.commandList,
+      getAllTools: () => host.tools,
+      getThinkingLevel: () => "high",
+      setModel: (model: Model<Api>) => host.setModel(model, "set"),
     } as unknown as ExtensionAPI;
+  }
+
+  /** Select a model as AgentSession.setModel (source set) or cycleModel (source cycle) does. */
+  async setModel(model: Model<Api>, source: "set" | "cycle" = "set"): Promise<boolean> {
+    if (!this.session.runtime.hasConfiguredAuth(model)) return false;
+    const previousModel = this.session.model;
+    this.session.model = model;
+    this.session.entries.push({ type: "model_change", provider: model.provider, modelId: model.id, id: `e${this.session.entries.length}`, parentId: null, timestamp: new Date(NOW).toISOString() });
+    if (previousModel !== undefined && refOf(previousModel) === refOf(model)) return true;
+    this.selections.push({ model: refOf(model), previous: previousModel === undefined ? undefined : refOf(previousModel), source });
+    await this.emit("model_select", { model, previousModel, source });
+    return true;
+  }
+
+  /** Select a model by ref, as /model or a competing extension does. */
+  choose(ref: string, source: "set" | "cycle" = "set"): Promise<boolean> {
+    const slash = ref.indexOf("/");
+    const model = this.session.runtime.find(ref.slice(0, slash), ref.slice(slash + 1));
+    assert.ok(model !== undefined, ref);
+    return this.setModel(model, source);
+  }
+
+  /** Run a registered command with its arguments; resolves when the handler has finished. */
+  async command(name: string, args = ""): Promise<void> {
+    const command = this.commands.get(name);
+    assert.ok(command !== undefined, `the command ${name} is registered`);
+    await command.handler(args, this.session.ctx as ExtensionCommandContext);
   }
 
   /** Flush the staged registrations into the runtime, as Pi does when the session binds. */
@@ -350,10 +436,13 @@ export interface Loaded {
 export interface LoadOptions extends SessionOptions {
   readonly dir: string;
   readonly runtime?: FakeRuntime;
-  readonly pin?: PinSource;
   readonly now?: () => number;
   /** Replace the router builder, as the lifecycle tests do. */
   readonly build?: (pi: ExtensionAPI, options: RouterOptions) => Router;
+  /** Runs before the router loads: an extension that loads earlier registers its handlers here. */
+  readonly before?: (host: FakeHost) => void;
+  /** Entries the session holds before it starts, such as a pin. */
+  readonly setup?: (session: FakeSession) => void;
 }
 
 /** Load the extension into a new session on a runtime and bind it, without starting it. */
@@ -362,9 +451,11 @@ export function load(options: LoadOptions): Loaded {
   const session = new FakeSession(runtime, options);
   const host = new FakeHost(session);
   const loaded: Loaded = { runtime, session, host, router: undefined };
+  options.setup?.(session);
+  options.before?.(host);
   install(host.api, (pi, given) => {
     const build = options.build ?? createRouter;
-    loaded.router = build(pi, { ...given, agentDir: () => options.dir, pin: options.pin, ...(options.now === undefined ? {} : { now: options.now }) });
+    loaded.router = build(pi, { ...given, agentDir: () => options.dir, ...(options.now === undefined ? {} : { now: options.now }) });
     return loaded.router;
   });
   host.bind();

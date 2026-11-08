@@ -54,8 +54,9 @@ export const MULTI_PASS_MAX_BYTES = 256 * 1024;
 export const STICKY_IDLE_MINUTES = { default: 5, min: 0, max: 1440 } as const;
 export const COOLDOWN_MINUTES = { default: 30, min: 1, max: 1440 } as const;
 
-/** The pin's session entry, the environment switch, the status item and the process slots. */
+/** The pin's session entry, the environment switch, the status item, the command and the process slots. */
 export const PIN_ENTRY = "smart-router.pin";
+export const COMMAND = "smart-router";
 export const ENV_PIN = "PI_SMART_ROUTER_LOCAL_ONLY";
 export const STATUS_KEY = "smart-router";
 export const SLOT_KEY = "jwiegley.pi-smart-router.v1";

@@ -14,8 +14,9 @@ import { checkAccount } from "./accounts.ts";
 import type { Labels } from "./accounts.ts";
 import { BUILTIN_EXCLUDES, PROVIDER, VIRTUAL_API } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
+import { PIN_POLICY_CHANGED } from "./errors.ts";
 import type { Loaded } from "./files.ts";
-import { checkLocal } from "./local.ts";
+import { checkLocal, policyFromRoster } from "./local.ts";
 import type { LocalPolicy } from "./local.ts";
 import { autoRoles, excludedBy, parseRef, roleOf } from "./roster.ts";
 import type { Roster } from "./roster.ts";
@@ -53,6 +54,8 @@ export interface ResolveContext {
   readonly localOnly: boolean;
   /** The local policy local-only requests obey: the pin's recorded one, or the roster's. */
   readonly policy: LocalPolicy;
+  /** Whether `policy` is a pin's, recorded when John pinned, rather than the roster's own. */
+  readonly pinned?: boolean | undefined;
 }
 
 export const refOf = (model: { readonly provider: string; readonly id: string }): string => `${model.provider}/${model.id}`;
@@ -99,7 +102,11 @@ export function resolveCandidate(ref: string, rc: ResolveContext): Resolution {
   }
   if (rc.localOnly) {
     const local = checkLocal(model, rc.policy, true);
-    if (!local.ok) return refuse("not-local", local.reason);
+    if (!local.ok) {
+      // A pinned session keeps the policy it was pinned under: a roster edit cannot widen it.
+      const widened = rc.pinned === true && checkLocal(model, policyFromRoster(rc.roster), true).ok;
+      return refuse("not-local", widened ? PIN_POLICY_CHANGED : local.reason);
+    }
   }
   return { ok: true, ref, model };
 }

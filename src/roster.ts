@@ -40,12 +40,15 @@ export type AccountBinding =
   | { readonly kind: "multi-pass"; readonly label: string }
   | { readonly kind: "native"; readonly label: string };
 
+/**
+ * The local role and what counts as local. There is no field for tools: the pin pins the model
+ * only (John's decision Q7), so a roster cannot ask for a tool block the router would not apply.
+ */
 export interface LocalSection {
   readonly role: string;
   readonly providers: readonly string[];
   /** Base-URL host names, canonical, each passing the built-in local-host rule. */
   readonly hosts: readonly string[];
-  readonly blockTools: readonly string[];
 }
 
 export interface Roster {
@@ -104,7 +107,7 @@ const TOP_KEYS = ["version", "exclude", "roles", "routing", "accounts", "local",
 const ROLE_KEYS = ["name", "models", "thinking"];
 const ROUTING_KEYS = ["default", "trivial", "complex", "planning", "fallback"];
 const BINDING_KEYS = ["multiPassLabel", "native"];
-const LOCAL_KEYS = ["role", "providers", "hosts", "blockTools"];
+const LOCAL_KEYS = ["role", "providers", "hosts"];
 const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 const ROLE_NAME = /^[a-z][a-z0-9-]{0,31}$/;
 const PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -298,8 +301,7 @@ function validate(value: unknown): Roster {
         fail(where, `"${host}" is not a local host: use localhost, a loopback, private, link-local or unique-local address, or a .lan, .local or .home.arpa name`);
       }
     });
-    const blockTools = own(section, "blockTools") === undefined ? [] : uniqueTexts(own(section, "blockTools"), "local.blockTools", false);
-    local = { role, providers, hosts, blockTools };
+    local = { role, providers, hosts };
   }
 
   return {

@@ -95,7 +95,25 @@ export function noBoundedHistory(id: VirtualId): RouterError {
 }
 
 export function historyNotice(): string {
-  return `pi-smart-router: ${NO_HISTORY}, so smart-router/auto and smart-router/local refuse every request. Run jwiegley/pi 1.5.0 or later.`;
+  return `pi-smart-router: ${NO_HISTORY}, so smart-router/auto and smart-router/local refuse every request, and every session counts as pinned to local models because its pin cannot be read. Run jwiegley/pi 1.5.0 or later.`;
+}
+
+/** Why a local candidate the roster allows is refused while pinned: the recorded policy does not hold it. */
+export const PIN_POLICY_CHANGED = "the roster's local role changed after this session was pinned; run /smart-router local on to accept it";
+
+/** Shown when a resumed session is not pinned, but the session it replaced was. */
+export function resumeNotice(): string {
+  return "pi-smart-router: the session you left was pinned to local models, and this one is not. Run /smart-router local on to pin it.";
+}
+
+/** Shown when a fork or /new carried the pin over. */
+export function carriedNotice(): string {
+  return "pi-smart-router: this session is pinned to local models, as the session it came from was.";
+}
+
+/** Shown when the pin of the session a fork or /new came from could not be recorded in the new one. */
+export function carryFailedNotice(reason: string): string {
+  return `pi-smart-router: the session this one came from was pinned to local models, but its pin could not be recorded here (${reason}). Run /smart-router local on before you send anything.`;
 }
 
 /** What one role's candidates said, as a refusal lists it. */
@@ -125,9 +143,12 @@ export function unroutable(
   const pinned = context.pinned ? " while this session is pinned to local models" : "";
   const detail = failure.attempts.map(describeAttempt).join("; ");
   const cause = `${subject} can take this request${pinned}${detail === "" ? "" : ` (${detail})`}`;
-  const way = context.localOnly
-    ? `Start the local model server and send the prompt again, or ${unpin}.`
-    : "See /smart-router status, or choose a model with /model.";
+  const changed = context.pinned && failure.attempts.some((attempt) => attempt.candidates.some((candidate) => candidate.detail === PIN_POLICY_CHANGED));
+  const way = changed
+    ? "Run /smart-router local on to accept the roster's local role, or run /smart-router local off."
+    : context.localOnly
+      ? `Start the local model server and send the prompt again, or ${unpin}.`
+      : "See /smart-router status, or choose a model with /model.";
   return refusal(id, cause, way);
 }
 

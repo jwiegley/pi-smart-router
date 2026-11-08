@@ -7,7 +7,6 @@ import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 
 import { policyFromRoster } from "../src/local.ts";
 import { assertSafe } from "../src/route.ts";
-import type { PinSource } from "../src/router.ts";
 import {
   ASTRA,
   DEEPSEEK,
@@ -254,8 +253,7 @@ describe("direct and foreign requests", () => {
   });
 
   test("under the pin, direct goes local, and auto never leaves the policy", async (t) => {
-    const pinned: PinSource = (_ctx, roster) => ({ on: true, policy: policyFromRoster(roster) });
-    const loaded = await start({ dir: agentDir(t), pin: pinned, select: "local" });
+    const loaded = await start({ dir: agentDir(t), select: "local", setup: (session) => session.pin(policyFromRoster(HERA)) });
     await loaded.host.emit("message_end", { message: assistant(KIMI) });
     assert.equal(routed(loaded.runtime.route("local", request("direct", { previous: previous(loaded.runtime, KIMI) }))), GLM);
     assert.equal(lastHistory(loaded)?.code, "direct:default");
@@ -363,7 +361,10 @@ describe("session state", () => {
     await loaded.host.emit("session_start", { reason: "resume" });
     assert.equal(record(loaded)?.last?.ref, KIMI);
     assert.equal(record(loaded)?.last?.at, NOW - 60_000);
-    assert.deepEqual(loaded.session.boundedReads, [{ type: "message", messageRole: "assistant", limit: 16 }]);
+    const [seedRead, ...pinReads] = loaded.session.boundedReads;
+    assert.deepEqual(seedRead, { type: "message", messageRole: "assistant", limit: 16 });
+    assert.ok(pinReads.length > 0, "session_start reads the pin");
+    for (const read of pinReads) assert.deepEqual(read, { customType: "smart-router.pin", scope: "all" }, "every other read is the pin's, over the whole session");
     assert.equal(loaded.session.wholeHistoryReads, 0);
   });
 

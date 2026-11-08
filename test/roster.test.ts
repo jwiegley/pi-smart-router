@@ -72,7 +72,7 @@ describe("John's rosters", () => {
       },
     );
     assert.deepEqual([...roster.accounts], [["openai-codex-2", { kind: "multi-pass", label: "personal" }]]);
-    assert.deepEqual(roster.local, { role: "local", providers: ["omlx-hera"], hosts: ["hera.lan"], blockTools: [] });
+    assert.deepEqual(roster.local, { role: "local", providers: ["omlx-hera"], hosts: ["hera.lan"] });
     assert.deepEqual(roster.exclude, [...BUILTIN_EXCLUDES, "openai-codex/*"]);
     assert.deepEqual([roster.stickyIdleMinutes, roster.cooldownMinutes], [5, 30]);
   });
@@ -573,25 +573,15 @@ describe("the local section", () => {
     }
   });
 
-  test("blockTools is optional and lists unique tool names", () => {
-    const roster = valid(
-      edited((r) => {
-        r.local.blockTools = ["web_fetch", "subagent"];
-      }),
-    );
-    assert.deepEqual(roster.local?.blockTools, ["web_fetch", "subagent"]);
-    invalid(
-      edited((r) => {
-        r.local.blockTools = ["web_fetch", "web_fetch"];
-      }),
-      'local.blockTools[1]: "web_fetch" is listed twice',
-    );
-    invalid(
-      edited((r) => {
-        r.local.blockTools = [3];
-      }),
-      "local.blockTools[0]: must be a non-empty string",
-    );
+  test("blockTools is not a field: the pin pins the model only (Q7), so a roster cannot ask for a tool block", () => {
+    for (const value of [[], ["web_fetch", "subagent"]]) {
+      invalid(
+        edited((r) => {
+          r.local.blockTools = value;
+        }),
+        "local.blockTools: unknown key",
+      );
+    }
   });
 
   test("without a local section the roster has no local role", () => {

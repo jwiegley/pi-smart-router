@@ -2,12 +2,16 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test, { afterEach, beforeEach, describe } from "node:test";
 
+import { writeFileSync } from "node:fs";
+import { join as joinPath } from "node:path";
+
 import { ENV_PIN, SLOT_KEY } from "../src/constants.ts";
 import { stale } from "../src/errors.ts";
-import { EMPTY_POLICY } from "../src/local.ts";
+import { EMPTY_POLICY, policyFromRoster } from "../src/local.ts";
 import { envSwitchOn, isLive, join, latchEnvPin, ownerBySignal, processSlot, sessionHash } from "../src/owners.ts";
-import { envPin } from "../src/router.ts";
-import { ASTRA, DEEPSEEK, KIMI, NOW, rosterFixture, SOL } from "./support/catalog.ts";
+import { readPin } from "../src/pin.ts";
+import { ASTRA, DEEPSEEK, GLM, KIMI, NOW, rosterFixture, SOL } from "./support/catalog.ts";
+import { fixture } from "./support/fixtures.ts";
 import { agentDir, assistant, FakeRuntime, load, previous, request, resetSlot, routed, start } from "./support/pi.ts";
 import type { Loaded } from "./support/pi.ts";
 
@@ -84,12 +88,39 @@ describe("the environment switch", () => {
       delete process.env[ENV_PIN];
       const second = await start({ dir: agentDir(t), id: "second", runtime: new FakeRuntime() });
       assert.equal(processSlot().env.on, true);
-      assert.deepEqual(envPin(second.session.ctx, rosterFixture("roster-hera.json"), processSlot()), { on: true, policy: EMPTY_POLICY });
-      // With no policy latched for the switch, no model qualifies: the router refuses rather than guess.
+      const policy = policyFromRoster(rosterFixture("roster-hera.json"));
+      assert.deepEqual(processSlot().env.policy, policy, "the first valid roster's local section is latched as the switch's policy");
+      assert.deepEqual(readPin(second.session.ctx.sessionManager, processSlot().env), { on: true, policy, entry: "none", at: undefined, env: true });
       for (const loaded of [first, second]) {
-        assert.throws(() => loaded.runtime.route("local", request("direct")), { message: /^smart-router\/local: no local model can take this request while this session is pinned/ });
+        assert.equal(loaded.session.model?.id, "local", "session_start switched the selection to smart-router/local");
+        assert.equal(routed(loaded.runtime.route("local", request("direct"))), GLM);
+        // smart-router/auto never reaches the local role in John's roster, so pinned, it refuses.
         assert.throws(() => loaded.runtime.route("auto", request("direct", { previous: previous(loaded.runtime, KIMI) })), { message: /^smart-router\/auto: .*pinned to local models/ });
       }
+    } finally {
+      if (saved === undefined) delete process.env[ENV_PIN];
+      else process.env[ENV_PIN] = saved;
+    }
+  });
+
+  test("the switch's policy is the first valid roster's: none before it, and a later edit does not change it", async (t) => {
+    const saved = process.env[ENV_PIN];
+    try {
+      process.env[ENV_PIN] = "on";
+      const dir = agentDir(t, { roster: null });
+      const loaded = await start({ dir, id: "first" });
+      assert.equal(processSlot().env.policy, undefined);
+      assert.deepEqual(readPin(loaded.session.ctx.sessionManager, processSlot().env).policy, EMPTY_POLICY, "with nothing latched, no model qualifies");
+      writeFileSync(joinPath(dir, "smart-router.json"), fixture("roster-hera.json"), { mode: 0o600 });
+      await loaded.host.emit("input", { text: "hello", source: "interactive" });
+      const latched = policyFromRoster(rosterFixture("roster-hera.json"));
+      assert.deepEqual(processSlot().env.policy, latched);
+      const widened = JSON.parse(fixture("roster-hera.json"));
+      widened.local.providers.push("openrouter");
+      widened.local.hosts.push("10.0.0.9");
+      writeFileSync(joinPath(dir, "smart-router.json"), JSON.stringify(widened), { mode: 0o600 });
+      await loaded.host.command("smart-router", "reload");
+      assert.deepEqual(processSlot().env.policy, latched, "a roster edit cannot widen the switch's policy");
     } finally {
       if (saved === undefined) delete process.env[ENV_PIN];
       else process.env[ENV_PIN] = saved;

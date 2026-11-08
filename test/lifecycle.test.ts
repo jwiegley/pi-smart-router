@@ -17,8 +17,11 @@ const HANDLERS = [
   "turn_start",
   "message_end",
   "agent_settled",
+  "model_select",
   "session_before_compact",
   "session_before_tree",
+  "before_provider_request",
+  "cache_warming_decision",
   "session_shutdown",
 ];
 
@@ -56,8 +59,9 @@ test("both models are registered first, and every handler is wired once, after t
   });
   assert.ok(built, "the router was built");
   assert.deepEqual(order, ["registerVirtualModel:auto", "registerVirtualModel:local", "build"]);
-  assert.deepEqual(host.calls.slice(2), HANDLERS.map((event) => `on:${event}`));
+  assert.deepEqual(host.calls.slice(2), [...HANDLERS.map((event) => `on:${event}`), "registerCommand:smart-router"]);
   for (const event of HANDLERS) assert.equal(host.count(event), 1, event);
+  assert.equal(host.count("tool_call"), 0, "the pin blocks no tools (Q7)");
 });
 
 test("the factory does no I/O: the files are first read at session_start", async (t) => {
@@ -88,7 +92,7 @@ test("a builder that throws leaves both models refusing with the load error, and
     },
   });
   assert.equal(loaded.router, undefined);
-  assert.deepEqual(loaded.host.calls, ["registerVirtualModel:auto", "registerVirtualModel:local", "on:session_start"]);
+  assert.deepEqual(loaded.host.calls, ["registerVirtualModel:auto", "registerVirtualModel:local", "on:session_start"], "no guard, handler or command of a router that failed to build");
   loaded.session.select("auto");
   for (const id of ["auto", "local"] as const) {
     let message = "";
@@ -152,7 +156,7 @@ test("the factory works through nix-config's staging proxy, which returns nothin
   }) as ExtensionAPI;
   install(api, (pi, options) => createRouter(pi, { ...options, agentDir: () => dir }));
   assert.deepEqual(host.calls, [], "everything was staged");
-  assert.equal(staged.length, 2 + HANDLERS.length);
+  assert.equal(staged.length, 2 + HANDLERS.length + 1, "both models, every handler and the command");
   live = true;
   for (const register of staged) register();
   host.bind();
