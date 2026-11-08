@@ -65,6 +65,7 @@ test("package.json declares no runtime surface beyond the source extension", () 
 test("the gate stays whole", () => {
   const scripts = record(manifest.scripts, "scripts");
   assert.equal(scripts.check, "tsc --noEmit && node test/run.mjs && npm run pack:check");
+  assert.equal(scripts["check:sandbox"], "tsc --noEmit && node test/sandbox.mjs && npm run pack:check");
   assert.equal(scripts.test, "node test/run.mjs");
   assert.equal(scripts.typecheck, "tsc --noEmit");
   assert.equal(scripts["pack:check"], "npm pack --dry-run --json --ignore-scripts | node test/pack-check.mjs");

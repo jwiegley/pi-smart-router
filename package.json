@@ -29,7 +29,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node test/run.mjs",
     "pack:check": "npm pack --dry-run --json --ignore-scripts | node test/pack-check.mjs",
-    "check": "tsc --noEmit && node test/run.mjs && npm run pack:check"
+    "check": "tsc --noEmit && node test/run.mjs && npm run pack:check",
+    "check:sandbox": "tsc --noEmit && node test/sandbox.mjs && npm run pack:check"
   },
   "pi": {
     "extensions": [
