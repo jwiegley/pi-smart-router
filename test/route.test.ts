@@ -172,6 +172,26 @@ describe("owner-loop requests", () => {
     assert.equal(routed(loaded.runtime.route("auto", request("continuation", { signal, previous: previous(loaded.runtime, SOL) }))), SOL);
   });
 
+  test("a content-filter refusal whose model can no longer take the retry is refused, never moved", async (t) => {
+    // Pi retries this failure ("Provider returned error"), so the retry reaches the router.
+    const text = "Provider returned error: the response was flagged by the content_filter";
+    for (const withPrevious of [false, true]) {
+      resetSlot();
+      const catalog = new FakeCatalog(heraModels());
+      const loaded = await start({ dir: agentDir(t), runtime: new FakeRuntime(catalog) });
+      const signal = await prompt(loaded, "Debug the deadlock in concurrent writes");
+      assert.equal(routed(loaded.runtime.route("auto", request("user", { signal }))), SOL);
+      const failed = failure(loaded.runtime, SOL, text);
+      assert.equal(isRetryableAssistantError(failed.message), true, "Pi retries this failure");
+      // sol stops resolving before the retry. Sticking would send the refused content through the
+      // engineer's declared fallback to openrouter/z-ai/glm-5.3, or to previous on kimi.
+      catalog.unavailable.add(SOL);
+      const retry = withPrevious ? request("retry", { signal, failed, previous: previous(loaded.runtime, KIMI) }) : request("retry", { signal, failed });
+      refuses(() => loaded.runtime.route("auto", retry), /^smart-router\/auto: openai-codex-2\/gpt-6\.1-sol refused this content and can no longer take the retry/, `previous: ${withPrevious}`);
+      assert.deepEqual([record(loaded)?.history.length, record(loaded)?.runPick?.ref], [1, SOL], "the refused retry recorded no pick");
+    }
+  });
+
   test("a retry with no failed request routes as a continuation", async (t) => {
     const loaded = await start({ dir: agentDir(t) });
     const signal = loaded.session.startRun();
