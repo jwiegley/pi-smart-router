@@ -240,6 +240,19 @@ describe("direct and foreign requests", () => {
     assert.equal(routed(loaded.runtime.route("auto", request("user", { signal }))), ASTRA, "the owner's run still gets its plan");
   });
 
+  test("a direct request that carries the run's signal routes as direct and leaves the run's pick", async (t) => {
+    const loaded = await start({ dir: agentDir(t) });
+    const signal = await prompt(loaded, PLANNING);
+    assert.equal(routed(loaded.runtime.route("auto", request("user", { signal }))), ASTRA);
+    const pick = { id: "auto", ref: ASTRA, role: "architect" };
+    assert.deepEqual(record(loaded)?.runPick, pick, "the run's signal routes the owner's loop");
+    // An extension's side call made during the run with { signal: ctx.signal }: Pi's
+    // ModelRuntime.streamSimple routes it as direct, with the caller's signal.
+    assert.equal(routed(loaded.runtime.route("auto", request("direct", { signal, previous: previous(loaded.runtime, KIMI) }))), KIMI);
+    assert.equal(lastHistory(loaded)?.code, "direct:previous");
+    assert.deepEqual(record(loaded)?.runPick, pick, "the run's pick, which the adapter reports, is unchanged");
+  });
+
   test("under the pin, direct goes local, and auto never leaves the policy", async (t) => {
     const pinned: PinSource = (_ctx, roster) => ({ on: true, policy: policyFromRoster(roster) });
     const loaded = await start({ dir: agentDir(t), pin: pinned, select: "local" });
