@@ -33,12 +33,16 @@ answered, and Pi's footer shows it.
 What it does not do: it opens no network connection, starts no process, writes no file of its own
 and sets no timer; the pin's session entries are written by Pi, into the session. It reads two
 files, both under Pi's agent directory: the roster, and Multi-Pass's subscription labels when the
-roster binds a Multi-Pass account. It never reads anything relative to the working
-directory or a project. It has no runtime dependency and no native code; Pi supplies
+roster binds a Multi-Pass account. It reads no file relative to the working directory or a
+project. The one project-influenced value it uses is the compaction reserve in Pi's settings, which
+Pi merges with a project's `.pi/settings.json`; it only affects whether stickiness may move a run
+down to a smaller role. It has no runtime dependency and no native code; Pi supplies
 `@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai`.
 
 It needs jwiegley/pi 1.5.0 or later, whose bounded session reads let it look at a session without
-loading its whole history. On upstream Pi 1.5.0 both models refuse and say so.
+loading its whole history. Upstream Pi 1.5.0 lacks those reads, so there the router fails closed: it
+cannot read a session's pin and treats every session as pinned, switching each selection to
+`smart-router/local` and refusing prompts for as long as it is loaded. Do not load it on upstream Pi.
 
 ## Installing
 
@@ -153,7 +157,9 @@ is no `exclude` line, and the native login is bound with `"native": "personal"`.
   sol cannot take a request, thinker when astra cannot, as when the ChatGPT subscription is
   unavailable or cooling down after a usage limit. sol and astra share one ChatGPT account, so the
   fallbacks move to a different quota. A fallback sends the conversation to another vendor; delete
-  the `fallback` object to be refused instead.
+  the `fallback` object to be refused instead. After a fallback, stickiness can keep the session on
+  coder or thinker for default and trivial runs until it has been idle for `stickyIdleMinutes`,
+  because both rank above worker; the next complex or planning run tries sol or astra again.
 
 The order of `roles` is the ladder stickiness uses, cheapest or weakest first. A session that
 reached astra on a planning run stays there for complex follow-ups until it has been idle for 5
@@ -204,8 +210,8 @@ and their Multi-Pass aliases such as `openai-codex-2`.
   account is logged in; the router cannot check it, and `status` shows it as unverified, with the
   provider's auth source. Run `/smart-router status` after any `/login`, `/logout`, `/subs add` or
   `/subs remove` on hosts that route to native `openai-codex`.
-- **A label containing `work` or `positron`** is refused wherever it appears, in the roster or in
-  Multi-Pass's file.
+- **A label with the word `work` or `positron`** (a whole word, in any case) is refused wherever it
+  appears, in the roster or in Multi-Pass's file.
 
 `status` reports each binding, the label Multi-Pass stores and the auth source (configured, stored or
 environment), never a credential.
@@ -280,8 +286,8 @@ the pin and what can still leave the machine.
 - **Selecting `smart-router/local` does not pin.** It routes locally; pinning is explicit.
 - **`PI_SMART_ROUTER_LOCAL_ONLY`**, set to any non-blank value other than `0`, `false` or `off`,
   pins every session in the process, with the local section of the first valid roster. It is read
-  once when the router loads and stays on even if the variable is removed later. Set it in a
-  launcher or an alias; Nix never sets it.
+  each time the router loads; once seen, it stays on for the life of the process, even if the
+  variable is removed later. Set it in a launcher or an alias; Nix never sets it.
 - **It fails closed.** Only a well-formed unpinning entry unpins. A `smart-router.pin` entry of any
   other shape, a custom message of that type or another version pins with an empty policy, under
   which nothing qualifies, until you pin again. On a Pi without the fork's bounded session reads,

@@ -16,7 +16,7 @@ beettlle/pi-smart-router to the virtual models of Pi 1.5. `CLAUDE.md` is a link 
 - Never read or write `~/.pi`, `~/.config/pi`, any `auth.json`, `~/.ssh`, `~/.gnupg` or
   `~/.password-store`.
 - Runtime code never reads a session's whole history: no `getEntries()` or `getBranch()`. It uses
-  the bounded readers `getLatestCustomEntry`, `getLatestMessage` and `getRecentActiveEntries`.
+  the bounded readers `getLatestCustomEntry` and `getRecentActiveEntries`.
 - Runtime code does no I/O relative to the working directory or HOME, and it writes no files. It
   reads only the roster and Multi-Pass's subscription labels under Pi's agent directory, through
   `src/files.ts`.

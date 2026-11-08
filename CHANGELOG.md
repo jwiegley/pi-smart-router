@@ -26,7 +26,8 @@ directories, its ONNX models and its SQLite database are not read, and can be de
   one-hop fallbacks, account bindings and a local section. Validation is strict and fails closed.
 - Account bindings for subscription providers: a Multi-Pass alias must carry the label Multi-Pass
   stores for it, read from Multi-Pass's own file; a native login carries an acknowledgement, shown
-  as unverified. Labels containing `work` or `positron` are refused everywhere.
+  as unverified. Labels with the word `work` or `positron` (a whole word, in any case) are refused
+  everywhere.
 - The local policy: the local role, its providers and its hosts, which must pass a built-in
   local-host rule (loopback, private, link-local and unique-local addresses, `.lan`, `.local` and
   `.home.arpa` names).
@@ -119,8 +120,9 @@ directories, its ONNX models and its SQLite database are not read, and can be de
   load order; cancelling compaction needs the router to load before an extension that compacts
   remotely, such as pi-openai-codex-compat.
 - No whole-history session reads: only the fork's bounded readers.
-- No install scripts: the repository's `.npmrc` sets `ignore-scripts`, and the lock is reviewed for
-  install scripts.
+- No install script runs: the repository's `.npmrc` sets `ignore-scripts`. The reviewed dev lock has
+  two packages that declare one (`@google/genai` and `protobufjs`), and a package test pins that
+  list.
 - Tests run offline in an isolated root with a network and process tripwire, and the behaviour
   suite runs only in a sandbox.
 
