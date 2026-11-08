@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "$comment": "Hera. openai-codex-2 is John's personal ChatGPT account, labelled 'personal' in Multi-Pass. The router itself excludes openai-codex-3 and refuses work or Positron labels; plain openai-codex is excluded here because Hera reserves it for the work account.",
+  "exclude": ["openai-codex/*"],
+  "roles": [
+    { "name": "local", "$comment": "private or extreme economy; free; only smart-router/local and the pin", "models": ["omlx-hera/GLM-5.3-Flash-oQ4e-mtp"], "thinking": "max" },
+    { "name": "worker", "$comment": "economical", "models": ["openrouter/deepseek/deepseek-v4.1-flash-1017"] },
+    { "name": "thinker", "$comment": "strong; the architect's fallback", "models": ["openrouter/moonshotai/kimi-k3.1-pro"] },
+    { "name": "coder", "$comment": "the engineer's fallback, reached only through routing.fallback; ranked just below the engineer so that sessions return to sol as soon as it is available", "models": ["openrouter/z-ai/glm-5.3"] },
+    { "name": "engineer", "$comment": "frontier", "models": ["openai-codex-2/gpt-6.1-sol"] },
+    { "name": "architect", "$comment": "frontier architect/thinker", "models": ["openai-codex-2/gpt-6-astra"] }
+  ],
+  "routing": {
+    "default": "worker",
+    "trivial": "worker",
+    "complex": "engineer",
+    "planning": "architect",
+    "fallback": { "engineer": "coder", "architect": "thinker" }
+  },
+  "accounts": { "openai-codex-2": { "multiPassLabel": "personal" } },
+  "local": { "role": "local", "providers": ["omlx-hera"], "hosts": ["hera.lan"] }
+}

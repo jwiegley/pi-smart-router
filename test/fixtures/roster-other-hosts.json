@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "$comment": "Clio, Vulcan, athena and pallas. Native openai-codex is John's personal ChatGPT login on these hosts; the binding below is his acknowledgement, which the router cannot verify. Run /smart-router status after any /login, /logout, /subs add or /subs remove.",
+  "roles": [
+    { "name": "local", "$comment": "private or extreme economy; free; only smart-router/local and the pin", "models": ["omlx-hera/GLM-5.3-Flash-oQ4e-mtp"], "thinking": "max" },
+    { "name": "worker", "$comment": "economical", "models": ["openrouter/deepseek/deepseek-v4.1-flash-1017"] },
+    { "name": "thinker", "$comment": "strong; the architect's fallback", "models": ["openrouter/moonshotai/kimi-k3.1-pro"] },
+    { "name": "coder", "$comment": "the engineer's fallback, reached only through routing.fallback", "models": ["openrouter/z-ai/glm-5.3"] },
+    { "name": "engineer", "$comment": "frontier", "models": ["openai-codex/gpt-6.1-sol"] },
+    { "name": "architect", "$comment": "frontier architect/thinker", "models": ["openai-codex/gpt-6-astra"] }
+  ],
+  "routing": {
+    "default": "worker",
+    "trivial": "worker",
+    "complex": "engineer",
+    "planning": "architect",
+    "fallback": { "engineer": "coder", "architect": "thinker" }
+  },
+  "accounts": { "openai-codex": { "native": "personal" } },
+  "local": { "role": "local", "providers": ["omlx-hera"], "hosts": ["hera.lan"] }
+}

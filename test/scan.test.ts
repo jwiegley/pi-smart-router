@@ -23,7 +23,9 @@ const WHOLE_HISTORY = /\.get(?:Entries|Branch)(?:[^A-Za-z0-9_$]|$)/m;
 
 const ALLOWED_SPECIFIERS = new Set(["node:path", "node:crypto", "@earendil-works/pi-coding-agent", "@earendil-works/pi-ai"]);
 const FS_MODULE = "src/files.ts";
-const FS_NAMES = new Set(["openSync", "fstatSync", "readSync", "closeSync"]);
+// `constants` supplies O_RDONLY | O_NONBLOCK, so that a FIFO at the roster's path cannot block Pi
+// at open(); fstat then refuses it as not a regular file.
+const FS_NAMES = new Set(["openSync", "fstatSync", "readSync", "closeSync", "constants"]);
 
 const FORBIDDEN: ReadonlyArray<readonly [string, RegExp]> = [
   ["require(", /\brequire\s*\(/],
