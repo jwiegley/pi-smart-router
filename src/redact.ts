@@ -5,8 +5,8 @@ export const REDACTED = "[redacted]";
 
 const PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   // Header, in plain or JSON form: the whole value, whatever its scheme.
-  [/\bAuthorization["']?[ \t]*:[ \t]*["']?(?:[A-Za-z]+[ \t]+)?["']?[^\s"';]+/gi, REDACTED],
-  [/\beyJ[\w-]+\.[\w-]+\.[\w-]*/g, REDACTED],
+  [/\bAuthorization\\?["']?[ \t]*:[ \t]*\\?["']?(?:[A-Za-z]+[ \t]+)?\\?["']?[^\s"';\\]+/gi, REDACTED],
+  [/(?<![\w-])eyJ[\w-]+\.[\w-]+\.[\w-]*/g, REDACTED],
   [/-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|$)/g, REDACTED],
   [/\b[rs]k[_-](?:live|test|proj)[_-][A-Za-z0-9_-]{8,}/g, REDACTED],
   [/\bsk-[A-Za-z0-9_-]{20,}/g, REDACTED],
@@ -23,33 +23,35 @@ const PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
 ];
 
 // A name and its separator, never the value, so the value of a harmless key is scanned for more
-// names like any other text. Only a secret name takes the value after it (VALUE, sticky), and the
+// names like any other text. Only a secret name takes the value after it (a sticky regex), and the
 // scan resumes behind it. The lookbehind starts one attempt per run of name characters, so the
-// scan stays linear.
-const NAME_SEPARATOR = /(?<![\w-])([\w-]+)["'\]]*[ \t]*(?::=|=>|=|:)[ \t]*/g;
-const VALUE = /"[^"\n]*"?|'[^'\n]*'?|[^\s"',;]+/y;
+// scan stays linear. Quotes may be escaped (\"), and a quote with no closing quote on its line
+// ends at the next whitespace, as an unquoted value does.
+const NAME_SEPARATOR = /(?<![\w-])([\w-]+)(?:\\?["'\]])*[ \t]*(?::=|=>|=|:)[ \t]*/g;
+const VALUE = /\\?"[^"\n]*"|\\?'[^'\n]*'|\\?["'][^\s]*|[^\s"',;]+/y;
 // A flag that names a secret and takes its value after a space: --password hunter2.
-const FLAG = /(?<![\w-])(--[\w-]+[ \t]+)("[^"\n]*"?|'[^'\n]*'?|[^\s"'-][^\s"',;]*)/g;
+const FLAG_SPACE = /(?<![\w-])(--[\w-]+)[ \t]+/g;
+const FLAG_VALUE = /\\?"[^"\n]*"|\\?'[^'\n]*'|\\?["'][^\s]*|[^\s"'-][^\s"',;]*/y;
+// Any name ending in key is secret, monkey and hotkey included; keyboard is not.
 const SECRET_NAME =
-  /secret|password|passwd|passphrase|credential|token(?!s)|api[_-]?key|access[_-]?key|private[_-]?key|(?:^|[_-])(?:pass|pwd)(?:$|[_-])/i;
-// Names ending in key, by case: ENCRYPTION_KEY, encryptionKey, key; never monkey or hotkey.
-const KEY_NAME = /(?:^|[_-])(?:key|KEY)$|[a-z]Key$|[A-Z]KEY$/;
+  /secret|password|passwd|passphrase|credential|authorization|token(?!s)|api[_-]?key|access[_-]?key|private[_-]?key|key$|(?:^|[_-])(?:pass|pwd)(?:$|[_-])/i;
 
 function isSecretName(name: string): boolean {
-  return SECRET_NAME.test(name) || KEY_NAME.test(name);
+  return SECRET_NAME.test(name);
 }
 
-function redactAssignments(text: string): string {
+/** Replaces the value after each secret name that `names` finds with REDACTED. */
+function redactValues(text: string, names: RegExp, value: RegExp, nameGroup: (match: RegExpExecArray) => string): string {
   let out = "";
   let last = 0;
-  NAME_SEPARATOR.lastIndex = 0;
-  for (let m = NAME_SEPARATOR.exec(text); m !== null; m = NAME_SEPARATOR.exec(text)) {
-    if (!isSecretName(m[1]!)) continue;
-    VALUE.lastIndex = NAME_SEPARATOR.lastIndex;
-    if (VALUE.exec(text) === null) continue;
-    out += text.slice(last, NAME_SEPARATOR.lastIndex) + REDACTED;
-    last = VALUE.lastIndex;
-    NAME_SEPARATOR.lastIndex = last;
+  names.lastIndex = 0;
+  for (let m = names.exec(text); m !== null; m = names.exec(text)) {
+    if (!isSecretName(nameGroup(m))) continue;
+    value.lastIndex = names.lastIndex;
+    if (value.exec(text) === null) continue;
+    out += text.slice(last, names.lastIndex) + REDACTED;
+    last = value.lastIndex;
+    names.lastIndex = last;
   }
   return out + text.slice(last);
 }
@@ -67,8 +69,8 @@ function mixedCase(run: string): boolean {
 export function redact(text: string): string {
   let out = text;
   for (const [pattern, replacement] of PATTERNS) out = out.replace(pattern, replacement);
-  out = redactAssignments(out);
-  out = out.replace(FLAG, (match, flag: string) => (isSecretName(flag.trim().slice(2)) ? `${flag}${REDACTED}` : match));
+  out = redactValues(out, NAME_SEPARATOR, VALUE, (m) => m[1]!);
+  out = redactValues(out, FLAG_SPACE, FLAG_VALUE, (m) => m[1]!.slice(2));
   out = out.replace(LONG_BASE64, (run) => (mixedCase(run) && /\d/.test(run) && /[+/]/.test(run) ? REDACTED : run));
   return out.replace(LONG_ALNUM, (run) => (mixedCase(run) ? REDACTED : run));
 }

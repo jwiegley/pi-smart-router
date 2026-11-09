@@ -120,8 +120,45 @@ describe("redact", () => {
       const out = redact(input);
       assert.ok(out.includes(REDACTED) && !out.includes(secret), out);
     }
-    for (const spared of ["monkey: 3", "--verbose true", "--timeout 30", "keyboard = us"]) {
+    for (const spared of ["--verbose true", "--timeout 30", "keyboard = us"]) {
       assert.equal(redact(spared), spared);
+    }
+  });
+
+  test("hides names ending in key, whatever their case", () => {
+    for (const input of ["masterkey: q8Zt1rLm9XaQ", "passkey=q8Zt1rLm9XaQ", "encryptionkey=q8Zt1rLm9XaQ", "Encryption_Key=q8Zt1rLm9XaQ", "Key=q8Zt1rLm9XaQ", "MONKEY: q8Zt1rLm9XaQ"]) {
+      const out = redact(input);
+      assert.ok(out.includes(REDACTED) && !out.includes("q8Zt1rLm9XaQ"), out);
+    }
+    assert.equal(redact("keyboard = us"), "keyboard = us");
+  });
+
+  test("scans a flag's quoted value for secret flags", () => {
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      ['ssh host --command "mysql --password hunter2"', "hunter2"],
+      ["run --args '--token t0k3n'", "t0k3n"],
+      ['docker run --entrypoint "app --api-key q8Zt1rLm9XaQ"', "q8Zt1rLm9XaQ"],
+    ];
+    for (const [input, secret] of cases) {
+      const out = redact(input);
+      assert.ok(out.includes(REDACTED) && !out.includes(secret), out);
+    }
+  });
+
+  test("ends an unclosed quote at the next whitespace", () => {
+    const text = "Fix the bug: the token: 'it never refreshes and I want to investigate the retry loop";
+    assert.equal(redact(text), `Fix the bug: the token: ${REDACTED} never refreshes and I want to investigate the retry loop`);
+  });
+
+  test("hides escaped quotes and an Authorization name", () => {
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      ['{\\"password\\": \\"hunter2\\"}', "hunter2"],
+      ['{"Authorization": "Bearer \\"q8Zt1rLm9XaQ\\""}', "q8Zt1rLm9XaQ"],
+      ['headers=dict(Authorization="Bearer q8Zt1rLm9XaQ")', "q8Zt1rLm9XaQ"],
+    ];
+    for (const [input, secret] of cases) {
+      const out = redact(input);
+      assert.ok(out.includes(REDACTED) && !out.includes(secret), out);
     }
   });
 
@@ -168,6 +205,18 @@ describe("redact", () => {
       `Authorization: Bearer "${"a".repeat(100000)}`,
       `key${" ".repeat(100000)}=`,
       "Authorization: Bearer ,".repeat(10000),
+      "-eyJ".repeat(50000),
+      "eyJ-".repeat(50000),
+      "-eyJa".repeat(40000),
+      "eyJa.-eyJ".repeat(25000),
+      '--a "'.repeat(30000),
+      "--password '".repeat(20000),
+      '\\"password\\": \\"'.repeat(10000),
+      "token: '".repeat(30000),
+      `token: '${"a".repeat(100000)}`,
+      "key=".repeat(50000),
+      "a\\".repeat(50000),
+      `Authorization: \\"${"a".repeat(100000)}`,
     ];
     for (const input of inputs) {
       const start = performance.now();
