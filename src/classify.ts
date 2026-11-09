@@ -33,6 +33,17 @@ const PLANNING: ReadonlyArray<readonly [string, RegExp]> = [
   ["destructive-git", /\b(?:unstage|git\s+rm|rm\s+-rf|force\s+push|git\s+reset\s+--hard|destructive)\b/i],
 ];
 
+export type RiskyTrigger = "destructive-git" | "repo-cleanup" | "added-by-mistake";
+
+// The risky-operations floor. These are John's list, narrower than the planning patterns above
+// (no bare "destructive", "clean up" or "cleanup"), and they scan on their own because
+// classify() reports only its first reason: "please plan the force push" is a planning run.
+const RISKY: ReadonlyArray<readonly [RiskyTrigger, RegExp]> = [
+  ["destructive-git", /\b(?:unstage|git\s+rm|rm\s+-rf|force\s+push|git\s+reset\s+--hard)\b/i],
+  ["repo-cleanup", /\b(?:clean\s*up(?:\s+the)?\s+repo|repo\s+cleanup|cleanup\s+the\s+repo)\b/i],
+  ["added-by-mistake", /\b(?:mistakenly\s+added|accidentally\s+added|accidental\s+add)\b/i],
+];
+
 // A token names a path when it holds a slash or a backslash, and a file when it ends in an
 // extension that starts with a letter (PLAN.org, plan.md, .plan), so "v1.2" and "step 1.2" stay.
 const EDGES = /^[`'"([{<]+|[`'")\]}>,;:!?.]+$/g;
@@ -67,4 +78,13 @@ export function classify(text: string, judge: Judge = triage): Classification {
   if (result.verdict === "complex") return { signal: "complex", reason };
   if (result.verdict === "trivial") return { signal: "trivial", reason };
   return { signal: "default", reason };
+}
+
+/** The first risky operation the text names, if any. File names and paths are blanked first. */
+export function riskyTrigger(text: string): RiskyTrigger | undefined {
+  const words = withoutFileNames(capText(text));
+  for (const [name, pattern] of RISKY) {
+    if (pattern.test(words)) return name;
+  }
+  return undefined;
 }
