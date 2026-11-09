@@ -215,6 +215,10 @@ git commit -S -m "Add the four-level Jev design and its implementation plan"
 - [ ] **Step 5: Commit.**
   `git add src/tiers.ts src/tags.ts src/classify.ts test/tiers.test.ts test/tags.test.ts test/classify.test.ts && git commit -S -m "Add tiers, trailing tags and the risky-operations floor triggers"`
 
+**Controller rulings (pre-flight, binding; they amend this task):**
+- `closeCallTier` counts a gap within `1e-9` of `closeCall` as a close call. In floating point,
+  `0.5 - 0.35` is `0.15000000000000002`, so the boundary test fails with a bare `<=`.
+
 ### Task 2: Redaction and the Jev request
 
 **Files:**
@@ -303,6 +307,12 @@ git commit -S -m "Add the four-level Jev design and its implementation plan"
   `npm run typecheck`.
 - [ ] **Step 5: Commit.**
   `git add src/redact.ts src/jev.ts test/redact.test.ts test/jev.test.ts && git commit -S -m "Add redaction and the Jev request and answer"`
+
+**Controller rulings (pre-flight, binding; they amend this task):**
+- When the capped message is still longer than `totalChars`, keep its first
+  `totalChars - Math.floor(totalChars / 5)` characters and its last `Math.floor(totalChars / 5) - 1`,
+  joined by `"\n"` as `capText` does, so that it is exactly `totalChars` long. Recent messages
+  then get only the budget that is left. Test it.
 
 ### Task 3: Roster schema version 2
 
@@ -442,6 +452,27 @@ git commit -S -m "Add the four-level Jev design and its implementation plan"
 - [ ] **Step 5: Commit.**
   `git add src/roster.ts src/accounts.ts test/roster-v2.test.ts test/roster.test.ts test/route.test.ts test/support/catalog.ts test/fixtures/roster-hera-v2.json test/fixtures/roster-work.json && git commit -S -m "Accept roster version 2: scoped levels, scoped bindings and a classifier"`
 
+**Controller rulings (pre-flight, binding; they amend this task):**
+- `Roster` becomes a union in this task, so Step 4's typecheck passes only if this task also
+  narrows every consumer of the version 1 `routing` field on `version === 1`. Until later tasks
+  replace them, the version 2 branches do this:
+  - `autoRoles` (`src/roster.ts:99`): every level role of every scope present. Task 4 adds the
+    scope.
+  - The fallback at `src/decide.ts:88`: none. This is final, because version 2 has no
+    cross-level fallback.
+  - `planUserTurn` at `src/decide.ts:151`: refuses with code `v2-unplanned` and the decision
+    `{ ok: false, attempts: [], problem: "version 2 planning is not built yet" }`. Task 6 replaces it.
+  - `byDefault` at `src/route.ts:112`: the personal scope's `medium` role. Task 4 makes it the
+    session scope's.
+  - Status (`src/commands.ts:195-213`): no routing line and no fallback warnings. Task 9 adds the
+    version 2 lines.
+
+  Version 1 behaviour and text stay byte-identical. Add `src/decide.ts`, `src/route.ts` and
+  `src/commands.ts` to the commit.
+- Write the lifting of `openai-codex-3/*` as one exported helper in `src/roster.ts`. The pattern
+  is lifted only for a work-bound provider in a work level role. Validation uses the helper here,
+  and Task 4's `excludesFor` calls it.
+
 ### Task 4: Scope-aware resolution
 
 **Files:**
@@ -498,6 +529,13 @@ git commit -S -m "Add the four-level Jev design and its implementation plan"
   All existing suites must pass.
 - [ ] **Step 5: Commit.**
   `git add src/resolve.ts src/accounts.ts src/roster.ts src/route.ts src/decide.ts src/commands.ts src/router.ts test/resolve.test.ts test/accounts.test.ts test/route.test.ts && git commit -S -m "Resolve candidates, accounts and exclusions within a scope"`
+
+**Controller rulings (pre-flight, binding; they amend this task):**
+- `excludesFor` calls Task 3's helper for lifting `openai-codex-3/*`. Do not write the rule twice.
+- `autoRoles(roster, scope)` replaces Task 3's interim all-scopes set. `byDefault` uses the
+  `medium` role of `rc.scope`.
+- `heraContext()` in `test/support/catalog.ts` defaults `scope` to `personal`. Add that file to
+  the commit.
 
 ### Task 5: Scope state: latch, entry, directories and carry
 
@@ -597,6 +635,10 @@ git commit -S -m "Add the four-level Jev design and its implementation plan"
 - [ ] **Step 5: Commit.**
   `git add src/scope.ts src/constants.ts src/owners.ts index.ts src/router.ts src/errors.ts test/support/pi.ts test/scope.test.ts test/owners.test.ts && git commit -S -m "Give each session a scope: latch, entry, work directories, carried into forks and /new"`
 
+**Controller rulings (pre-flight, binding; they amend this task):**
+- When the scope is unreadable, `contextFor` resolves in `work` scope, the narrower one, while
+  `prepare()` refuses `smart-router/auto` as above.
+
 ### Task 6: The version 2 planner
 
 **Files:**
@@ -679,6 +721,11 @@ git commit -S -m "Add the four-level Jev design and its implementation plan"
 - [ ] **Step 5: Commit.**
   `git add src/decide.ts src/route.ts test/decide.test.ts test/route.test.ts && git commit -S -m "Plan version 2 runs by tier: tags, Jev, keywords, the floor and first-available candidates"`
 
+**Controller rulings (pre-flight, binding; they amend this task):**
+- The version 2 branch replaces Task 3's interim `v2-unplanned` refusal.
+- The 200-case property loop uses a fixed-seed generator, and its failure message names the seed
+  and the case.
+
 ### Task 7: The router input: tags, Jev and the pending record
 
 **Files:**
@@ -756,6 +803,13 @@ git commit -S -m "Add the four-level Jev design and its implementation plan"
 - [ ] **Step 5: Commit.**
   `git add src/router.ts src/route.ts src/errors.ts test/support/pi.ts test/router-levels.test.ts && git commit -S -m "Strip tags and ask Jev at input; plan with the chosen tier"`
 
+**Controller rulings (pre-flight, binding; they amend this task):**
+- The `/new` row becomes two tests:
+  - (a) A tagged input whose `classify` never settles returns its transform at once. When that
+    `classify` settles after `/new`, the new session's `pendingLevel` is untouched.
+  - (b) An untagged input whose `classify` is still pending when `/new` arrives resolves without
+    throwing and plans nothing, and the new session's `pendingLevel` stays undefined.
+
 ### Task 8: The work selection guard
 
 **Files:**
@@ -800,6 +854,10 @@ git commit -S -m "Add the four-level Jev design and its implementation plan"
 - [ ] **Step 4: Run the tests and confirm they pass.** Run the same command, then `npm run check`.
 - [ ] **Step 5: Commit.**
   `git add src/guards.ts src/router.ts src/errors.ts test/guards.test.ts && git commit -S -m "Guard the selection in work scope, below the pin"`
+
+**Controller rulings (pre-flight, binding; they amend this task):**
+- `isCodexProvider` comes from Task 3 (`src/accounts.ts`), not Task 4.
+- John ruled that the guard applies in work scope only. There is no personal-scope guard.
 
 ### Task 9: Records, corrections, history, the footer and commands
 
@@ -892,6 +950,10 @@ git commit -S -m "Add the four-level Jev design and its implementation plan"
   The lifecycle test still sees one `registerCommand` and the same handlers.
 - [ ] **Step 5: Commit.**
   `git add src/records.ts src/router.ts src/commands.ts src/errors.ts test/commands.test.ts test/router-levels.test.ts test/scope.test.ts && git commit -S -m "Record each routed run, add scope and was commands, show the tier in the footer"`
+
+**Controller rulings (pre-flight, binding; they amend this task):**
+- When the latest level record is itself a correction, `/smart-router was` refers to the run that
+  correction named (its `refers`), not to the correction.
 
 ### Task 10: Declared limits and the behaviour suite
 
