@@ -94,6 +94,17 @@ describe("buildContext", () => {
     assert.ok(!JSON.stringify(context.state).includes("hunter2"));
   });
 
+  test("redacts a recent text before the messageChars cut, so a secret across the cut leaves no fragment", () => {
+    const secret = `sk-proj-${"aB3dE5gH7j".repeat(4)}`;
+    const text = "q ".repeat(150) + secret + "q ".repeat(86);
+    const recent = stateOf(buildContext("m", [{ role: "user", text }], descriptions, { ...caps, messageChars: 200 })).recent;
+    const out = recent[0]!.text;
+    assert.ok(out.includes(REDACTED), out);
+    for (let i = 0; i + 8 <= secret.length; i++) {
+      assert.ok(!out.includes(secret.slice(i, i + 8)), secret.slice(i, i + 8));
+    }
+  });
+
   test("cuts each recent text to its last messageChars characters", () => {
     const text = `${"a".repeat(300)}${"b".repeat(200)}`;
     const recent = stateOf(buildContext("m", [{ role: "assistant", text }], descriptions, { ...caps, messageChars: 200 })).recent;
