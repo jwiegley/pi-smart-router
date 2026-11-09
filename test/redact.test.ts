@@ -75,6 +75,68 @@ describe("redact", () => {
     assert.equal(redact(lower), lower);
   });
 
+  test("hides a secret inside a non-secret key's value", () => {
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      ["curl https://api.example.com/v1/items?api_key=q8Zt1rLm9XaQ", "q8Zt1rLm9XaQ"],
+      ["http://localhost:8888/lab?token=4f1c9e2ab7d3", "4f1c9e2ab7d3"],
+      ["body: user=bob&password=hunter2", "hunter2"],
+      ["jdbc:postgresql://db:5432/app?user=fred&password=s3cretpw", "s3cretpw"],
+      ['{"command": "mysql --password=hunter2 -u root app"}', "hunter2"],
+      ['level=error msg="login failed: password=hunter2 rejected"', "hunter2"],
+    ];
+    for (const [input, secret] of cases) {
+      const out = redact(input);
+      assert.ok(out.includes(REDACTED) && !out.includes(secret), out);
+    }
+    assert.equal(redact("body: user=bob&password=hunter2"), `body: user=bob&password=${REDACTED}`);
+  });
+
+  test("hides quoted and comma-joined bearer credentials", () => {
+    for (const input of ['Authorization: Bearer "q8Zt1rLm9XaQ"', "Authorization: Bearer q8Zt1rLm9XaQ,zz9Yy8Xx7"]) {
+      const out = redact(input);
+      assert.ok(!/q8Zt|zz9Yy/.test(out), out);
+    }
+  });
+
+  test("hides a whole JWT", () => {
+    const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    assert.equal(redact(`token was ${jwt} ok`), `token was ${REDACTED} ok`);
+    assert.equal(redact(`see ${jwt}`), `see ${REDACTED}`);
+  });
+
+  test("hides other assignment shapes and key-like names", () => {
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      ['os.environ["DB_PASSWORD"] = "hunter2"', "hunter2"],
+      ["'password' => 'hunter2'", "hunter2"],
+      ['password := "hunter2"', "hunter2"],
+      ["mysql --password hunter2 -u root", "hunter2"],
+      ['mysql --password "hunter 2" -u root', "hunter 2"],
+      ["credentials: q8Zt1rLm9XaQ", "q8Zt1rLm9XaQ"],
+      ["ENCRYPTION_KEY=q8Zt1rLm9XaQ", "q8Zt1rLm9XaQ"],
+      ["encryptionKey: q8Zt1rLm9XaQ", "q8Zt1rLm9XaQ"],
+      ['password="unterminated secret', "unterminated secret"],
+    ];
+    for (const [input, secret] of cases) {
+      const out = redact(input);
+      assert.ok(out.includes(REDACTED) && !out.includes(secret), out);
+    }
+    for (const spared of ["monkey: 3", "--verbose true", "--timeout 30", "keyboard = us"]) {
+      assert.equal(redact(spared), spared);
+    }
+  });
+
+  test("redacts every part of a private key block and a vendor token that the backstops would miss", () => {
+    const block = `-----BEGIN PGP PRIVATE KEY BLOCK-----\n\n${pgpBody}\nshort/Tail+9\n-----END PGP PRIVATE KEY BLOCK-----`;
+    assert.equal(redact(`${block}`), REDACTED);
+    const pat = "github_pat_11ABCDEFG0aBcDeFgHiJkLmN_aB3dE5gH7jK9mN1pQ3sT5vW7y";
+    assert.equal(redact(pat), REDACTED);
+  });
+
+  test("the long-run backstop holds across an underscore", () => {
+    assert.equal(redact(`pad_${mixed40}`), `pad_${REDACTED}`);
+    assert.equal(redact(`${mixed40}_pad`), `${REDACTED}_pad`);
+  });
+
   test("runs in linear time on long hostile input", () => {
     const inputs = [
       "-----BEGIN PRIVATE KEY-----".repeat(5000),
@@ -93,9 +155,25 @@ describe("redact", () => {
       `a://:${"b".repeat(100000)}`,
       `-----BEGIN ${"A".repeat(100000)}`,
       `"${"a".repeat(100000)}`,
+      'password="'.repeat(20000),
+      "x=".repeat(50000),
+      "a=b&".repeat(30000),
+      'a["'.repeat(30000),
+      "--a ".repeat(30000),
+      "--password ".repeat(20000),
+      `--${"a".repeat(100000)} `,
+      "eyJ".repeat(30000),
+      "eyJa.".repeat(20000),
+      `eyJ${"a".repeat(100000)}.${"b".repeat(100000)}`,
+      `Authorization: Bearer "${"a".repeat(100000)}`,
+      `key${" ".repeat(100000)}=`,
+      "Authorization: Bearer ,".repeat(10000),
     ];
-    const start = performance.now();
-    for (const input of inputs) redact(input);
-    assert.ok(performance.now() - start < 5000, `took ${performance.now() - start} ms`);
+    for (const input of inputs) {
+      const start = performance.now();
+      redact(input);
+      const took = performance.now() - start;
+      assert.ok(took < 1000, `${input.slice(0, 24)}... took ${took} ms`);
+    }
   });
 });
