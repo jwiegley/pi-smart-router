@@ -21,8 +21,10 @@ const TAGS: Readonly<Record<string, Tier>> = {
 
 export function parseTag(text: string): Tagged | undefined {
   const body = text.trimEnd();
-  const start = body.search(/\S+$/);
-  if (start < 0) return undefined;
+  // Scan back from the end: a regex like /\S+$/ is quadratic on a long pasted token.
+  let start = body.length;
+  while (start > 0 && !/\s/.test(body[start - 1] as string)) start--;
+  if (start === body.length) return undefined;
   const tier = TAGS[body.slice(start).toLowerCase()];
   return tier === undefined ? undefined : { tier, text: body.slice(0, start).trimEnd() };
 }

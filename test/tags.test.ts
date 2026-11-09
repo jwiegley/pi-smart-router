@@ -18,4 +18,14 @@ describe("parseTag", () => {
       assert.equal(parseTag(text), undefined, text);
     }
   });
+
+  test("stays linear on a huge token, and reads the tag after it", () => {
+    const blob = "a".repeat(300_000);
+    const started = Date.now();
+    assert.equal(parseTag(`${blob} fix`), undefined);
+    assert.equal(parseTag(blob), undefined);
+    assert.equal(parseTag(`${blob}#h`), undefined);
+    assert.deepEqual(parseTag(`${blob} #h`), { tier: "high", text: blob });
+    assert.ok(Date.now() - started < 3000, "a huge token must not stall the parser");
+  });
 });
