@@ -629,6 +629,33 @@ describe("the classifier", () => {
     }
   });
 
+  test("its model, written or the default, is refused when an exclusion matches it, with nothing lifted", () => {
+    const cases: Array<[string, string]> = [
+      ["openai-codex-3/gpt-6-luna", "openai-codex-3/*"],
+      ["openai-codex/gpt-6-luna", "openai-codex/*"],
+      ["hermes/hermes-4", "hermes/*"],
+      ["openrouter/openrouter/auto", "openrouter/openrouter/auto"],
+      ["smart-router/auto", "smart-router/*"],
+    ];
+    for (const [model, pattern] of cases) {
+      invalid(
+        edited((r) => {
+          r.classifier.model = model;
+        }),
+        `classifier.model: "${model}" is excluded by ${pattern}`,
+      );
+    }
+    const workWithout = (classifier: object): Json =>
+      edited((r) => {
+        r.exclude = ["openrouter/*"];
+        r.classifier = classifier;
+      }, WORK);
+    for (const classifier of [{}, { model: "openrouter/typesafe/jev-1.14" }]) {
+      invalid(workWithout(classifier), 'classifier.model: "openrouter/typesafe/jev-1.14" is excluded by openrouter/*');
+    }
+    assert.equal(valid(workWithout({ model: "typesafe/jev-1.14" })).classifier?.model, "typesafe/jev-1.14");
+  });
+
   test("timeoutMs is a whole number of milliseconds from 100 to 1000", () => {
     for (const timeoutMs of [1001, 99, 0, 500.5, "1000", null]) {
       invalid(

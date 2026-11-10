@@ -459,10 +459,16 @@ function fraction(value: unknown, path: string, range: Range): number {
   return value;
 }
 
-/** The classifier section, with every field it leaves out given its default. */
-function classifierSettings(value: unknown): JevSettings {
+/**
+ * The classifier section, with every field it leaves out given its default. Jev reads text from
+ * both scopes, so its model, written or the default, must match none of the roster's exclusions,
+ * and none is lifted for it.
+ */
+function classifierSettings(value: unknown, exclude: readonly string[]): JevSettings {
   const section = object(value, "classifier", CLASSIFIER_KEYS);
   const model = own(section, "model") === undefined ? CLASSIFIER_MODEL : exactRef(own(section, "model"), "classifier.model").ref;
+  const pattern = excludedBy(exclude, model);
+  if (pattern !== undefined) fail("classifier.model", `"${model}" is excluded by ${pattern}`);
   const timeoutMs = count(own(section, "timeoutMs"), "classifier.timeoutMs", CLASSIFIER_TIMEOUT_MS, "milliseconds");
   const closeCall = fraction(own(section, "closeCall"), "classifier.closeCall", CLASSIFIER_CLOSE_CALL);
   const caps: Record<string, unknown> = own(section, "context") === undefined ? {} : object(own(section, "context"), "classifier.context", CONTEXT_KEYS);
@@ -640,7 +646,7 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
     local = { role, providers, hosts };
   }
 
-  const classifier = own(root, "classifier") === undefined ? undefined : classifierSettings(own(root, "classifier"));
+  const classifier = own(root, "classifier") === undefined ? undefined : classifierSettings(own(root, "classifier"), exclude);
 
   return {
     version: 2,
