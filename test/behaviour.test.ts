@@ -915,6 +915,9 @@ const WORK: Readonly<Record<Tier, string>> = {
   super: "openai-codex-3/gpt-6-astra",
 };
 
+/** The personal SUPER level's second candidate. */
+const KIMI_REF = "openrouter/moonshotai/kimi-k3.1-pro";
+
 /** The descriptions Jev reads in each scope. Work's are worded apart, so a test can tell which scope's descriptions Jev read. */
 const DESCRIBE: Readonly<Record<Tier, string>> = {
   low: "Mechanical or trivial work that follows a clear specification",
@@ -1442,7 +1445,8 @@ test("L6 the work guard switches a hand-picked OpenRouter model back, and work r
 
 test("L7 one smart-router.level record per run; /smart-router was appends a correction", TIMEOUT, async (t) => {
   const world = levelsWorld(t);
-  const pi = await world.start({ select: "smart-router/auto" });
+  writeFileSync(join(world.cwd, "zebra.txt"), "the zebra notes\n");
+  const pi = await world.start({ select: "smart-router/auto", tools: ["read"] });
   // Run A: one record, which holds neither the prompt's text nor a digest of it.
   world.jev.answer(JEV.medium);
   await pi.prompt("Tidy the zebra notes");
@@ -1513,6 +1517,27 @@ test("L7 one smart-router.level record per run; /smart-router was appends a corr
   await pi.command("was super");
   const branch = { source: "correction", tier: "super", refers: b?.at };
   assert.deepEqual(fields(entriesOf(pi, LEVEL_ENTRY).at(-1), branch), branch);
+
+  // Run D has a tool turn. Its continuation hits a usage limit that Pi retries, and the retry goes
+  // to the level's next model, which answers: still one record, naming that model. Jev says SUPER,
+  // the level of run C, the latest response, so no hold moves it.
+  world.jev.answer(JEV.super);
+  const codex = world.faux("openai-codex-2");
+  codex.respond(
+    fauxAssistantMessage([fauxToolCall("read", { path: "zebra.txt" }, { id: "read-1" })], { stopReason: "toolUse" }),
+    failure("429 Too Many Requests: usage limit reached"),
+  );
+  const beforeD = world.refCounts();
+  await pi.prompt("Read the zebra file and say what it holds");
+  assert.equal(pi.eventsOf("auto_retry_start").length, 1, "Pi retried the continuation");
+  const d = runRecords(pi).at(-1);
+  assert.equal(runRecords(pi).length, 4, "one record for the run, not one per turn or response");
+  const answeredBy = { source: "jev", tier: "super", ref: KIMI_REF };
+  assert.deepEqual(fields(d, answeredBy), answeredBy);
+  assert.equal(answered(pi), KIMI_REF);
+  const afterD = world.refCounts();
+  const runD = (ref: string): number => (afterD[ref] ?? 0) - (beforeD[ref] ?? 0);
+  assert.deepEqual([runD(PERSONAL.super), runD(KIMI_REF)], [2, 1], "astra took the tool turn and the failed continuation, Kimi the retry");
 
   // No record holds the prompts' text, or a digest of it.
   const recorded = JSON.stringify(entriesOf(pi, LEVEL_ENTRY));
