@@ -64,9 +64,11 @@ sends nothing unless pinned.
 - A trailing level tag is removed from every message before any model sees it, whatever the roster
   or the selection; where it cannot set its run's level, as under a version 1 roster, a notice says
   it has no effect. A message that is only a tag is not sent.
-- A run's plan is bound to the message that made it, under version 1 too: the router compares a
-  keyed digest of the message's text with the prompt the run starts with, so a run never takes
-  another message's plan, and one it cannot match goes unplanned. The README states the limits.
+- A run's plan is bound to the message that made it, under version 1 too: a run takes only its own
+  message's plan. The router matches a keyed digest of the message's text with the prompt the run
+  starts with, or, for a prompt that Pi expanded or an extension rewrote, gives the run the plan of
+  the one idle message since the latest prompt's run started; with two such messages, the run goes
+  unplanned. The README lists where a plan can still bind wrongly.
 - The guards serve two policies: the pin's first, then work scope's. Each lock records the policy
   that set it.
 - `smart-router/auto` refuses a session in a scope the roster does not serve, as a work session is
@@ -90,8 +92,10 @@ sends nothing unless pinned.
 - The router keeps no prompt text: it binds plans by HMAC-SHA-256 digests under a key each instance
   draws at random, and records hold neither text nor digest.
 - No OpenRouter model answers a work session, routed or picked by hand; Jev's request is the one
-  OpenRouter use in work scope. `smart-router/auto` never routes a personal session to a work-bound
-  account. In personal scope, a model picked by hand is sent as it is.
+  OpenRouter use in work scope. Subagent children, goal-x auditors and forks made from the command
+  line do not inherit a scope that only an entry set (see "Limits and rollout" in the README).
+  `smart-router/auto` never routes a personal session to a work-bound account. In personal scope,
+  outside the pin, a model picked by hand is sent as it is.
 - Scope reads fail closed: an unreadable or malformed scope entry makes `smart-router/auto` refuse,
   and the work guard holds the session as work scope. A work session under a version 1 roster is
   refused twice, when its request is prepared and by the check every pick passes.

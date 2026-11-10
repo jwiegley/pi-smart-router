@@ -548,8 +548,9 @@ account bindings. The first rule that applies decides it:
      work scope. It is refused under the latch, and in modes without dialogs.
 3. **The roster's work directories**, on every read. A session without an entry whose working
    directory lies under one is in work scope, whether it is new, resumed or running, so a roster
-   edit that lists a running session's directory moves it at once. The first time this rule decides
-   a session's scope, at its start, at its next idle prompt or when its next run starts, the router
+   edit that lists a running session's directory moves it at the next roster load (the next idle
+   prompt, or `/smart-router status`, `scope` or `reload`). The first time this rule decides a
+   session's scope, at its start, at its next idle prompt or when its next run starts, the router
    records a work entry, with a notice, so that the session stays in work scope whatever the roster
    says later. The working directory is Pi's `ctx.cwd`, compared as text on whole path segments:
    `/x/work` holds `/x/work` and `/x/work/a`, but not `/x/workshop`. Nothing is resolved, so a
@@ -570,9 +571,10 @@ session to a work-bound account, and sends a work session only to a work-bound C
 the pin, both scopes route only to the local role's models. A version 1 roster
 serves no work scope: `smart-router/auto` refuses a work session, and the check every pick passes
 refuses it again. A latched process whose roster has no work scope refuses every request on
-`smart-router/auto`, and `/smart-router status` says why. `smart-router/local` carries no account,
-so it serves both scopes. In personal scope, a model picked by hand is sent as it is, a work-account
-model included: only work scope has a guard.
+`smart-router/auto`, and `/smart-router status` says why. Under the pin, `smart-router/local` serves
+both scopes, since it carries no account; outside the pin, the work guard switches it back to
+`smart-router/auto` in work scope. In personal scope, outside the pin, a model picked by hand is
+sent as it is, a work-account model included: only work scope has a guard.
 
 ### The work guard
 
@@ -659,9 +661,9 @@ inherited it before the pin for instance, is refused. While the selection is out
 - the payload of any provider request is emptied, and later extensions cannot restore it;
 - cache warming stops.
 
-The router asks no classifier while a session is pinned, so Jev reads nothing typed while it is
-pinned; a tag is removed with a notice that it has no effect. In work scope, the pin replaces the
-work guard while it holds.
+While a session is pinned, the router asks no classifier, and a tag is removed with a notice that it
+has no effect. Once the session is unpinned, Jev reads the recent conversation as it does for any
+message, pinned turns included. In work scope, the pin replaces the work guard while it holds.
 
 If another extension keeps switching the selection away, the router locks the session instead of
 fighting: prompts are refused, runs stopped, compaction cancelled and payloads emptied until a local
@@ -736,7 +738,7 @@ router itself never reads other sessions and never writes the roster.
 
 | Command | Does |
 |---|---|
-| `/smart-router` or `/smart-router status` | The roster's path and state; the selection and level; the pin and any lock; the session's scope and what set it, under a version 2 roster or whenever `smart-router/auto` refuses the scope; every role's models on this host with `ok` or the reason they cannot route, and catalog prices; account bindings, checked in the session's scope, and auth sources; a version 1 roster's routing table and fallbacks, or a version 2 roster's levels in each scope and its classifier; the last decision; what can still leave the machine, the classifier first when `smart-router/auto` may ask it; and a warning for any fallback that would move a run onto Codex's API from another one. |
+| `/smart-router` or `/smart-router status` | The roster's path and state; the selection and its thinking level; the pin and any lock; the session's scope and what set it, under a version 2 roster or whenever `smart-router/auto` refuses the scope; every role's models on this host with `ok` or the reason they cannot route, and catalog prices; account bindings, checked in the session's scope, and auth sources; a version 1 roster's routing table and fallbacks, or a version 2 roster's levels in each scope and its classifier; the last decision; what can still leave the machine, the classifier first when `smart-router/auto` may ask it; and a warning for any fallback that would move a run onto Codex's API from another one. |
 | `/smart-router history [n]` | The last `n` routing decisions (10 by default, at most 50), with reason codes, and on a version 2 run's first request its scope, level and what decided the level. Model ids and codes only, never prompt text. |
 | `/smart-router local on`, `off`, `status` | The pin. |
 | `/smart-router scope [work\|personal\|status]` | The session's scope and what set it: `latch`, `entry`, `directory` or `default`. `work` records work scope at once; `personal` asks first in work scope, and is refused under `PI_SMART_ROUTER_SCOPE=work`. |
@@ -755,7 +757,7 @@ router itself never reads other sessions and never writes the roster.
   fallbacks. The default auditor routes through the session and obeys its pin; a configured auditor
   bypasses the router and the pin, so leave it unset in private work. Leave `auditorProjectResources`
   and `projectResources` off: each loads a second router into every audit. An auditor does not
-  inherit a scope that an entry set ([Scope](#limits-and-rollout)).
+  inherit a scope that an entry set ([Limits and rollout](#limits-and-rollout)).
 - **pi-subagents**: foreground children inherit the selection but load the router only when it is
   registered for children, as nix-config's integration is meant to do; otherwise a child on
   `smart-router/*` fails with "model not found". Give children explicit models where that
