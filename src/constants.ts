@@ -46,7 +46,8 @@ export const SUBSCRIPTION_ALIAS = /^(openai-codex|anthropic|github-copilot)-[0-9
 
 /**
  * Account labels that name work. The router refuses them wherever they appear, in the roster or in
- * Multi-Pass's file, except on a version 2 work binding, which must carry one.
+ * Multi-Pass's file, except on a version 2 work binding, which must carry one, and which only a
+ * work-scope session's check accepts (checkAccount).
  */
 export const REFUSED_LABEL = /\b(positron|work)\b/i;
 

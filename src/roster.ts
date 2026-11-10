@@ -150,6 +150,11 @@ export function scopeSection(roster: Roster, scope: Scope): ScopeSection | undef
   return roster.version === 2 ? roster.scopes[scope] : undefined;
 }
 
+/** Whether smart-router/auto serves a scope under a roster: version 1 serves only personal scope, version 2 each scope it has a section for. */
+export function servesScope(roster: Roster, scope: Scope): boolean {
+  return roster.version === 1 ? scope === "personal" : scopeSection(roster, scope) !== undefined;
+}
+
 function boundToWork(accounts: ReadonlyMap<string, ScopedBinding>, provider: string): boolean {
   return accounts.get(provider)?.scope === "work";
 }

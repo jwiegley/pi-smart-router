@@ -180,6 +180,11 @@ export interface Guards {
   switchToAuto(ctx: ExtensionContext): Promise<boolean>;
   /** Clear the lock, as unpinning does. */
   unlock(ctx: ExtensionContext): void;
+  /**
+   * The lock the guards honour now: the lock of the policy that guards the session, else none. A
+   * lock the other policy set, which the next guard clears, is not one. Never throws.
+   */
+  lockOf(ctx: ExtensionContext): Lock | undefined;
   showStatus(ctx: ExtensionContext): void;
 }
 
@@ -578,6 +583,18 @@ export function createGuards(options: GuardOptions): Guards {
     },
 
     unlock: (ctx) => unlockState(ctx, stateOf(ctx), undefined),
+
+    lockOf: (ctx) => {
+      try {
+        const policy = policyOf(ctx);
+        if (policy === undefined) return undefined;
+        const { lock } = stateOf(ctx);
+        return lock?.policy === policy.kind ? lock : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+
     showStatus,
   };
 }

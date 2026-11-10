@@ -13,7 +13,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { Api, ClassifierResult, Model } from "@earendil-works/pi-ai";
 import type { InputEventResult } from "@earendil-works/pi-coding-agent";
 
-import { ENV_PIN, ENV_SCOPE, SCOPE_ENTRY } from "../src/constants.ts";
+import { ENV_PIN, ENV_SCOPE, LEVEL_ENTRY, LEVEL_KEY, SCOPE_ENTRY, STATUS_KEY } from "../src/constants.ts";
 import { JEV_INSTRUCTIONS } from "../src/jev.ts";
 import { policyFromRoster } from "../src/local.ts";
 import { createRouter } from "../src/router.ts";
@@ -22,7 +22,7 @@ import { TIERS } from "../src/tiers.ts";
 import type { Tier } from "../src/tiers.ts";
 import { ASTRA, CHATGPT, DEEPSEEK, FakeCatalog, GLM, GLM_CLOUD, HERA_LAN, heraModels, KIMI, model, NOW, rosterFixtureV2, SOL } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
-import { agentDir, assistant, FakeRuntime, load, request, resetSlot, routed, start } from "./support/pi.ts";
+import { agentDir, assistant, failure as failedRequest, FakeRuntime, load, request, resetSlot, routed, start } from "./support/pi.ts";
 import type { Loaded, LoadOptions } from "./support/pi.ts";
 
 const HERA_V2 = fixture("roster-hera-v2.json");
@@ -1227,5 +1227,295 @@ describe("what pi-cache-optimizer is told", () => {
       assert.equal(brief(loaded), undefined);
       assert.equal(brief(loaded, "local"), `${GLM} selected`);
     });
+  });
+});
+
+describe("a run's record", () => {
+  /** The data of the session's level entries, oldest first. */
+  const levelEntries = (loaded: Loaded): Array<Record<string, unknown>> =>
+    loaded.session.entries.filter((entry) => entry.customType === LEVEL_ENTRY).map((entry) => entry.data as Record<string, unknown>);
+
+  test("is one smart-router.level entry, appended when the run settles: its level, the keywords, Jev's answer and the model that answered", async (t) => {
+    const loaded = await hera(t);
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    await say(loaded, "rename foo to bar");
+    assert.equal(firstRequest(loaded), LUNA);
+    await loaded.host.emit("message_end", { message: assistant(LUNA) });
+    assert.deepEqual(levelEntries(loaded), [], "nothing before the run settles");
+    await loaded.host.emit("agent_settled", { aborted: false });
+    loaded.session.endRun();
+    assert.deepEqual(levelEntries(loaded), [
+      {
+        v: 1,
+        at: NOW,
+        scope: "personal",
+        source: "jev",
+        tier: "low",
+        asked: "low",
+        keyword: { signal: "trivial", reason: "triage:keyword_economical" },
+        jev: { model: JEV, choice: "low", probabilities: LOW, confidence: 0.8, ms: 0 },
+        ref: LUNA,
+      },
+    ]);
+    assert.ok(
+      loaded.session.entries.filter((entry) => entry.customType === LEVEL_ENTRY).every((entry) => entry.type === "custom"),
+      "a custom entry, which no model sees",
+    );
+    assert.equal(recordOf(loaded)?.pendingLevel, undefined, "the pending level is dropped");
+    await loaded.host.emit("agent_settled", { aborted: false });
+    assert.equal(levelEntries(loaded).length, 1, "a settle without a pending level records nothing");
+  });
+
+  test("names the model the run's last request went to, after a retry moved the run", async (t) => {
+    const loaded = await hera(t);
+    await say(loaded, "x #high");
+    const signal = loaded.session.startRun();
+    assert.equal(routed(loaded.runtime.route("auto", request("user", { signal }))), SOL);
+    const limit = "You've hit your usage limit.";
+    await loaded.host.emit("message_end", { message: assistant(SOL, { stopReason: "error", errorMessage: limit }) });
+    assert.equal(routed(loaded.runtime.route("auto", request("retry", { signal, failed: failedRequest(loaded.runtime, SOL, limit) }))), GLM_CLOUD);
+    await finish(loaded, GLM_CLOUD);
+    assert.deepEqual(
+      levelEntries(loaded).map((record) => [record.source, record.tier, record.ref]),
+      [["tag", "high", GLM_CLOUD]],
+    );
+  });
+
+  test("an aborted run's record says so", async (t) => {
+    const loaded = await hera(t);
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    await say(loaded, "rename foo to bar");
+    assert.equal(firstRequest(loaded), LUNA);
+    await loaded.host.emit("message_end", { message: assistant(LUNA, { stopReason: "aborted" }) });
+    await loaded.host.emit("agent_settled", { aborted: true });
+    loaded.session.endRun();
+    assert.deepEqual(
+      levelEntries(loaded).map((record) => [record.ref, record.aborted]),
+      [[LUNA, true]],
+    );
+  });
+
+  test("a tagged run records its tag and Jev's opinion, or that the opinion had not come when the run settled", { timeout: 10_000 }, async (t) => {
+    const loaded = await hera(t);
+    const late = deferred<ClassifierResult>();
+    loaded.runtime.answer = () => late.promise;
+    await say(loaded, "x #high");
+    assert.equal(firstRequest(loaded), SOL);
+    await finish(loaded, SOL);
+    // The opinion that comes after the run settled changes nothing recorded.
+    late.resolve(jevAnswer(MEDIUM));
+    await settled();
+    loaded.runtime.answer = async () => jevAnswer(MEDIUM);
+    await say(loaded, "y #high");
+    await settled();
+    assert.equal(firstRequest(loaded), SOL);
+    await finish(loaded, SOL);
+    const tagged = {
+      v: 1,
+      at: NOW,
+      scope: "personal",
+      source: "tag",
+      tier: "high",
+      asked: "high",
+      tag: "high",
+      keyword: { signal: "default", reason: "triage:no_fast_path" },
+      ref: SOL,
+    };
+    assert.deepEqual(levelEntries(loaded), [
+      { ...tagged, jev: { late: true } },
+      { ...tagged, jev: { model: JEV, choice: "medium", probabilities: MEDIUM, confidence: 0.8, ms: 0 } },
+    ]);
+  });
+
+  test("a resend that reused a tagged message's level records the tag, and no opinion of Jev's", async (t) => {
+    const loaded = await hera(t);
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    await say(loaded, "go ahead #high");
+    await settled();
+    assert.equal(firstRequest(loaded), SOL);
+    await finish(loaded, SOL, { stopReason: "error", errorMessage: "terminated" });
+    // pi-idle-check sends the text again, and Jev is not asked again.
+    await say(loaded, "go ahead", { source: "extension" });
+    assert.equal(firstRequest(loaded), SOL);
+    await finish(loaded, SOL);
+    const records = levelEntries(loaded);
+    assert.deepEqual(
+      records.map((record) => [record.source, record.tag, record.ref]),
+      [
+        ["tag", "high", SOL],
+        ["tag", "high", SOL],
+      ],
+    );
+    assert.deepEqual(records[0]?.jev, { model: JEV, choice: "low", probabilities: LOW, confidence: 0.8, ms: 0 });
+    assert.equal(records[1] !== undefined && "jev" in records[1], false, "the resend asked Jev nothing");
+  });
+
+  test("a run without a level records nothing: a physical selection, smart-router/local, a pinned session and a version 1 roster", async (t) => {
+    const policy = policyFromRoster(rosterFixtureV2("roster-hera-v2.json"));
+    const physical = await hera(t, { id: "physical", select: KIMI });
+    const local = await hera(t, { id: "local", select: "local" });
+    const pinned = await hera(t, { id: "pinned", select: "local", setup: (session) => session.pin(policy) });
+    const v1 = await hera(t, { id: "v1", roster: fixture("roster-hera.json") });
+    for (const loaded of [physical, local, pinned, v1]) {
+      loaded.runtime.answer = async () => jevAnswer(LOW);
+      for (const text of ["rename foo to bar", "go ahead #high"]) {
+        await say(loaded, text);
+        const signal = loaded.session.startRun();
+        const selected = loaded.session.model;
+        const ref = selected?.provider === "smart-router" ? routed(loaded.runtime.route(selected.id === "local" ? "local" : "auto", request("user", { signal }))) : KIMI;
+        await finish(loaded, ref);
+      }
+      assert.deepEqual(levelEntries(loaded), [], loaded.session.id);
+      assert.equal(loaded.session.statuses.has(LEVEL_KEY), false, `${loaded.session.id}: the footer's level item is never set`);
+    }
+  });
+
+  test("that cannot be appended is reported, and the run's plan, pick and level are dropped all the same", async (t) => {
+    const loaded = await hera(t);
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    await say(loaded, "rename foo to bar");
+    assert.equal(firstRequest(loaded), LUNA);
+    loaded.host.api.appendEntry = () => {
+      throw new Error("the session file is read-only");
+    };
+    await finish(loaded, LUNA);
+    assert.deepEqual(lastNotice(loaded), { type: "warning", message: "pi-smart-router: the agent_settled handler failed: the session file is read-only" });
+    assert.deepEqual([recordOf(loaded)?.plan, recordOf(loaded)?.runPick, recordOf(loaded)?.pendingLevel], [undefined, undefined, undefined]);
+  });
+
+  test("holds no prompt text, and no digest of it", async (t) => {
+    const MARK = "quixotic-zebra";
+    const loaded = await hera(t);
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    const digests: string[] = [];
+    for (const [typed, prompt] of [
+      [`${MARK} rename foo to bar #high`, `${MARK} rename foo to bar`],
+      [`${MARK} and the tests`, `${MARK} and the tests`],
+    ] as const) {
+      await say(loaded, typed);
+      const digest = recordOf(loaded)?.pendingLevel?.digest;
+      assert.ok(digest !== undefined, typed);
+      digests.push(digest);
+      await finish(loaded, await runPrompt(loaded, prompt));
+    }
+    const records = levelEntries(loaded);
+    assert.equal(records.length, 2);
+    const text = JSON.stringify(records);
+    assert.ok(!text.includes(MARK), text);
+    for (const digest of digests) assert.ok(!text.includes(digest), text);
+  });
+});
+
+describe("the footer", () => {
+  const footer = (loaded: Loaded): string | undefined => loaded.session.statuses.get(LEVEL_KEY);
+
+  test("shows a planned run's scope, tier, model and what decided it, under its own key, never the pin's", async (t) => {
+    const loaded = await hera(t);
+    loaded.runtime.answer = () => new Promise(() => {});
+    await say(loaded, "x #high");
+    assert.equal(footer(loaded), "personal HIGH → gpt-6.1-sol (tag)");
+    assert.equal(loaded.session.statuses.get(STATUS_KEY), undefined, "the pin's item is untouched");
+  });
+
+  test("after a Jev timeout, names the keywords and the timeout", async (t) => {
+    const loaded = await hera(t);
+    loaded.runtime.answer = async () => jevFailure("Request timed out after 1000ms");
+    await say(loaded, "go ahead");
+    assert.equal(footer(loaded), "personal MEDIUM → gpt-6.1-terra (keywords; jev timeout)");
+  });
+
+  test("names the probability Jev gave the tier taken from its answer, rounded, a close call's too", async (t) => {
+    const loaded = await hera(t);
+    loaded.runtime.answer = async () => jevAnswer({ low: 0.05, medium: 0.1, high: 0.824, super: 0.026 });
+    await say(loaded, "go ahead");
+    assert.equal(footer(loaded), "personal HIGH → gpt-6.1-sol (jev 82%)");
+    // Medium leads high by less than the close call, so the run takes high, and the footer its probability.
+    loaded.runtime.answer = async () => jevAnswer({ low: 0.05, medium: 0.45, high: 0.4, super: 0.1 });
+    await say(loaded, "go ahead again");
+    assert.equal(footer(loaded), "personal HIGH → gpt-6.1-sol (jev 40%)");
+  });
+
+  test("names the keywords alone without a classifier, the floor that raised a run, and work scope in a work session", async (t) => {
+    const roster = JSON.parse(HERA_V2);
+    delete roster.classifier;
+    const none = await hera(t, { id: "none", roster: JSON.stringify(roster) });
+    await say(none, "go ahead");
+    assert.equal(footer(none), "personal MEDIUM → gpt-6.1-terra (keywords)");
+    const floor = await hera(t, { id: "floor" });
+    floor.runtime.answer = async () => jevAnswer(LOW);
+    await say(floor, "force push the branch");
+    assert.equal(footer(floor), "personal HIGH → gpt-6.1-sol (floor)");
+    const work = await hera(t, { id: "work", setup: (session) => session.appendCustom(SCOPE_ENTRY, scopeEntry("work", "command", NOW)) });
+    work.runtime.answer = async () => jevAnswer(LOW);
+    await say(work, "go ahead");
+    assert.equal(footer(work), "work LOW → gpt-6-luna (jev 80%)");
+  });
+
+  test("at message_end, names the model that answered for the run's route; a model the route did not pick changes nothing", async (t) => {
+    const loaded = await hera(t);
+    await say(loaded, "x #high");
+    const signal = loaded.session.startRun();
+    await loaded.host.emit("before_agent_start", { messageType: "user", prompt: "x" });
+    assert.equal(routed(loaded.runtime.route("auto", request("user", { signal }))), SOL);
+    const limit = "You've hit your usage limit.";
+    await loaded.host.emit("message_end", { message: assistant(SOL, { stopReason: "error", errorMessage: limit }) });
+    assert.equal(footer(loaded), "personal HIGH → gpt-6.1-sol (tag)", "an error is no answer");
+    assert.equal(routed(loaded.runtime.route("auto", request("retry", { signal, failed: failedRequest(loaded.runtime, SOL, limit) }))), GLM_CLOUD);
+    await loaded.host.emit("message_end", { message: assistant(KIMI) });
+    assert.equal(footer(loaded), "personal HIGH → gpt-6.1-sol (tag)", "the route did not pick KIMI");
+    await loaded.host.emit("message_end", { message: assistant(GLM_CLOUD) });
+    assert.equal(footer(loaded), "personal HIGH → z-ai/glm-5.3 (tag)");
+    await loaded.host.emit("agent_settled", { aborted: false });
+    loaded.session.endRun();
+    assert.equal(footer(loaded), "personal HIGH → z-ai/glm-5.3 (tag)", "it stays once the run settled");
+  });
+
+  test("is cleared by a run without a level of its own, and by a plan that found no model", async (t) => {
+    const runtime = heraRuntime();
+    const loaded = await hera(t, { runtime });
+    await say(loaded, "x #high");
+    await finish(loaded, await runPrompt(loaded, "x"));
+    assert.equal(footer(loaded), "personal HIGH → gpt-6.1-sol (tag)");
+    // A goal-x continuation has no level.
+    await loaded.host.emit("before_agent_start", { messageType: "custom", message: GOAL_X });
+    assert.deepEqual([loaded.session.statuses.has(LEVEL_KEY), footer(loaded)], [true, undefined]);
+    loaded.session.endRun();
+    await say(loaded, "x #high");
+    assert.equal(footer(loaded), "personal HIGH → gpt-6.1-sol (tag)");
+    for (const ref of [TERRA, DEEPSEEK, SOL, GLM_CLOUD, ASTRA, KIMI]) runtime.catalog.unavailable.add(ref);
+    await say(loaded, "x #medium");
+    assert.equal(footer(loaded), undefined);
+  });
+});
+
+describe("/smart-router scope work", () => {
+  const scopeEntries = (loaded: Loaded): unknown[] => loaded.session.entries.filter((entry) => entry.customType === SCOPE_ENTRY).map((entry) => entry.data);
+  const selection = (loaded: Loaded): string | undefined => (loaded.session.model === undefined ? undefined : `${loaded.session.model.provider}/${loaded.session.model.id}`);
+
+  test("records work scope, and switches a selection outside it to smart-router/auto", async (t) => {
+    const loaded = await hera(t, { select: KIMI });
+    await loaded.host.command("smart-router", "scope work");
+    assert.equal(selection(loaded), "smart-router/auto");
+    assert.deepEqual(scopeEntries(loaded), [{ v: 1, scope: "work", by: "command", at: NOW }]);
+    assert.deepEqual(lastNotice(loaded), { type: "info", message: "pi-smart-router: scope work (entry).\nThe selection is smart-router/auto now." });
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    await say(loaded, "go ahead");
+    assert.equal(firstRequest(loaded), WORK_LUNA);
+  });
+
+  test("keeps a selection work scope allows, and says when the switch fails", async (t) => {
+    const kept = await hera(t, { id: "kept", select: WORK_LUNA });
+    await kept.host.command("smart-router", "scope work");
+    assert.deepEqual([selection(kept), lastNotice(kept)], [WORK_LUNA, { type: "info", message: "pi-smart-router: scope work (entry)." }]);
+    const stuck = await hera(t, { id: "stuck", select: KIMI });
+    stuck.host.setModel = async () => false;
+    await stuck.host.command("smart-router", "scope work");
+    assert.deepEqual([selection(stuck), lastNotice(stuck)], [
+      KIMI,
+      {
+        type: "warning",
+        message: `pi-smart-router: scope work (entry).\nThe selection ${KIMI} is outside work scope and could not be switched to smart-router/auto, so prompts are refused until you choose smart-router/auto or a work Codex model.`,
+      },
+    ]);
   });
 });

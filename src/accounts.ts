@@ -1,8 +1,10 @@
 // Account bindings. Provider ids do not identify accounts, so every subscription provider in the
 // roster carries a binding. A Multi-Pass alias must carry the label Multi-Pass stores for it; a
 // native login carries John's acknowledgement, which the router cannot verify. A work or Positron
-// label is refused wherever it appears, except on a version 2 work binding: that binding serves
-// only work-scope sessions, and must carry such a label.
+// label is refused wherever it appears, except on a version 2 work binding, which must carry one.
+// Even that binding passes only a check made in work scope: routing and status check each binding
+// in the session's scope and the work guard in work scope, so a personal session refuses it for its
+// scope, and a check made without a scope refuses its label.
 //
 // Multi-Pass's labels come from its own global file, <agentDir>/multi-pass.json, read with the
 // same safe reader. Only subscriptions[].{provider, index, label} is used, and the file holds no

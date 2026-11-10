@@ -637,3 +637,36 @@ test("a session started before the latch was set is in work scope once any insta
   assert.deepEqual(scopeOf(before), OK_WORK_LATCH);
   assert.equal(routed(before.runtime.route("auto", request("direct"))), WORK_TERRA);
 });
+
+describe("/smart-router status", () => {
+  /** The lines of the session's status, and the lines that name its scope. */
+  const scopeLines = async (loaded: Loaded): Promise<string[]> => {
+    await loaded.host.command("smart-router", "status");
+    return (loaded.session.notices.at(-1)?.message ?? "").split("\n").filter((line) => line.startsWith("Scope:"));
+  };
+
+  test("says when smart-router/auto refuses the session's scope: a scope that cannot be read, and a latched process whose roster has no work scope", async (t) => {
+    const malformed = await begin({ dir: agentDir(t, { roster: HERA_V2 }), id: "malformed", setup: (session) => session.appendCustom(SCOPE_ENTRY, { v: 9 }) });
+    assert.deepEqual(await scopeLines(malformed), [
+      "Scope: unreadable (the latest smart-router.scope entry is not one the router wrote), so smart-router/auto refuses every request until /smart-router scope work or /smart-router scope personal records it again.",
+    ]);
+    const v1Malformed = await begin({ dir: agentDir(t), id: "v1-malformed", setup: (session) => session.appendCustom(SCOPE_ENTRY, { v: 9 }) });
+    assert.equal((await scopeLines(v1Malformed)).length, 1, "a version 1 roster refuses it too");
+    // A version 1 roster serves personal scope, and its status stays as it was.
+    const plain = await begin({ dir: agentDir(t), id: "plain" });
+    assert.deepEqual(await scopeLines(plain), []);
+    // The latch holds for the rest of the process.
+    await withScope("work", async () => {
+      const v1 = await begin({ dir: agentDir(t), id: "v1" });
+      assert.deepEqual(await scopeLines(v1), ["Scope: work (latch), which a version 1 roster does not serve, so smart-router/auto refuses every request."]);
+      const v2 = JSON.parse(HERA_V2);
+      delete v2.scopes.work;
+      v2.roles = v2.roles.filter((role: { name: string }) => !role.name.startsWith("work-"));
+      delete v2.accounts["openai-codex-3"];
+      const personalOnly = await begin({ dir: agentDir(t, { roster: JSON.stringify(v2) }), id: "personal-only" });
+      assert.deepEqual(await scopeLines(personalOnly), ["Scope: work (latch), which the roster does not serve, so smart-router/auto refuses every request."]);
+      const served = await begin({ dir: agentDir(t, { roster: HERA_V2 }), id: "served", runtime: new FakeRuntime(workCatalog()) });
+      assert.deepEqual(await scopeLines(served), ["Scope: work (latch)"]);
+    });
+  });
+});
