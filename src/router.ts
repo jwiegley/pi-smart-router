@@ -48,6 +48,7 @@ import {
   stepUpNotice,
   tagIgnoredNotice,
   tagOnlyNotice,
+  unmatchedTagNotice,
 } from "./errors.ts";
 import type { RouterError, TagIgnored } from "./errors.ts";
 import { isRecord } from "./files.ts";
@@ -104,8 +105,10 @@ export interface Session extends SessionRecord {
   plannedToken: number;
   /** The text, without its tag, of the message whose plan `plan` holds; meaningful only while `plan` is set. */
   planText: string | undefined;
-  /** How many idle messages the router passed since the latest run started. */
+  /** How many idle messages the router passed since the latest prompt's run started. */
   inputsSinceRun: number;
+  /** The texts, without tags, of every message the router passed since the latest prompt's run started, busy or idle. */
+  readonly textsSinceRun: Set<string>;
 }
 
 export interface Router extends OwnerRouter {
@@ -167,7 +170,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   const recordOf = (sessionId: string): Session => {
     let record = records.get(sessionId);
     if (record === undefined) {
-      record = { ...newRecord(), guard: newGuardState(), directoryTried: false, plannedToken: 0, planText: undefined, inputsSinceRun: 0 };
+      record = { ...newRecord(), guard: newGuardState(), directoryTried: false, plannedToken: 0, planText: undefined, inputsSinceRun: 0, textsSinceRun: new Set() };
       records.set(sessionId, record);
     }
     return record;
@@ -512,15 +515,26 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
 
   /**
    * Whether a plan or a pending level made for a message's text belongs to the run a prompt starts.
-   * Pi starts a prompt's run once that prompt's input handlers return, so two messages that overlap
-   * a Jev wait can start their runs in either order, and a run belongs to the message whose text is
-   * its prompt. Pi expands a template or skill after the input handlers, and a later extension can
-   * change the text, so a prompt can match no message's text: it is still the plan's message's when
-   * that is the only idle message since the latest run started. With two, it cannot be told whose,
-   * and it is neither's.
+   * Pi starts a message's run once the message's input handlers return, whenever that is: two
+   * messages that overlap a Jev wait start their runs in either order, and a message a later
+   * extension's async input handler holds, even one typed while a run streamed, can start its run
+   * after another message has planned. So a prompt that is the plan's message's text is that
+   * message's run, and a prompt that is the text of another message the router passed since the
+   * latest prompt's run started, busy or idle, is that other message's run and takes no plan.
+   *
+   * Pi expands a template or skill after the input handlers, and a later extension can change the
+   * text, so a prompt can match no message's text. Such a run is the plan's message's only when that
+   * is the one idle message since the latest prompt's run started; with two, it cannot be told whose
+   * and is neither's. A custom message's run is no message's run, so it starts neither the count nor
+   * the texts again. What remains:
+   * - a stray message whose own prompt a later handler also expands or changes matches no text, so it
+   *   can still take the plan of the one idle message counted;
+   * - after a message a later extension handles, which never runs, the next expanded or changed run
+   *   goes unplanned. A run that drops a tagged plan says so (unmatchedTagNotice); under version 1,
+   *   which has no tags, it goes unplanned without a notice.
    */
   const ownsRun = (record: Session, text: string | undefined, prompt: string): boolean =>
-    text !== undefined && (text === prompt || record.inputsSinceRun === 1);
+    text !== undefined && (text === prompt || (!record.textsSinceRun.has(prompt) && record.inputsSinceRun === 1));
 
   // The decision point: a prompt typed while the session is idle plans its run. Input that
   // arrives while a run starts or streams (steering, follow-ups) neither plans nor drops; its tag
@@ -533,14 +547,17 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   // them to the run the message's prompt starts.
   const planInput = async (event: InputEvent, ctx: ExtensionContext, tagged: Tagged | undefined, previous: LastInput | undefined): Promise<void> => {
     const tier = tagged?.tier;
-    if (!ctx.isIdle()) {
-      if (tier !== undefined) notify(ctx, tagIgnoredNotice(tier, "busy"), "warning");
-      return;
-    }
     const text = tagged === undefined ? event.text : tagged.text;
     const { sessionManager } = ctx;
     const sessionId = sessionManager.getSessionId();
     const record = recordOf(sessionId);
+    // A message typed while a run streams can still start a run of its own, when a later handler
+    // holds it until that run ends: its text tells its run from the message that plans next.
+    record.textsSinceRun.add(text);
+    if (!ctx.isIdle()) {
+      if (tier !== undefined) notify(ctx, tagIgnoredNotice(tier, "busy"), "warning");
+      return;
+    }
     const token = ++inputs;
     record.inputsSinceRun += 1;
     const state = refreshFiles();
@@ -738,12 +755,15 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
           } else {
             // A prompt's run takes only its own message's plan and pending level, never another's.
             if (record.plan !== undefined && !ownsRun(record, record.planText, event.prompt)) {
+              const tagged = record.plan.level?.source === "tag";
               record.plan = undefined;
               record.planText = undefined;
+              if (tagged) notify(ctx, unmatchedTagNotice(), "warning");
             }
             if (record.pendingLevel !== undefined && !ownsRun(record, record.pendingLevel.text, event.prompt)) record.pendingLevel = undefined;
+            record.inputsSinceRun = 0;
+            record.textsSinceRun.clear();
           }
-          record.inputsSinceRun = 0;
         });
         // Every run starts here, so a run without an input (a custom message's, a goal-x
         // continuation's) records the work directories' scope too.

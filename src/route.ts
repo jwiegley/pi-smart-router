@@ -87,7 +87,8 @@ export interface PendingLevel {
   /**
    * Jev's outcome for the level: the one an untagged run waited for, or the original message's when
    * an extension's resend reused that message's level and Jev was not asked again; for a tagged run,
-   * Jev's opinion, "pending" until it arrives. Undefined when Jev was not asked for the level.
+   * Jev's opinion, "pending" until it arrives. A resend of a tagged original carries undefined, not
+   * the original's opinion. Undefined when Jev was not asked for the level.
    */
   jev: JevOutcome | "pending" | undefined;
 }

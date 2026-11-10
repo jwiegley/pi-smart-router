@@ -10,6 +10,7 @@ import type { TestContext } from "node:test";
 import { isDeepStrictEqual } from "node:util";
 
 import type { Api, ClassifierResult, Model } from "@earendil-works/pi-ai";
+import type { InputEventResult } from "@earendil-works/pi-coding-agent";
 
 import { ENV_PIN, ENV_SCOPE, SCOPE_ENTRY } from "../src/constants.ts";
 import { JEV_INSTRUCTIONS } from "../src/jev.ts";
@@ -142,6 +143,37 @@ async function runPrompt(loaded: Loaded, prompt: string): Promise<string> {
   await loaded.host.emit("before_agent_start", { messageType: "user", prompt });
   return routed(loaded.runtime.route("auto", request("user", { signal })));
 }
+
+/** An extension loaded after the router, whose async input handler can hold a message, handle it or transform it. */
+function laterExtension(loaded: Loaded) {
+  const holds = new Map<string, Promise<void>>();
+  const handled = new Set<string>();
+  const transforms = new Map<string, string>();
+  loaded.host.api.on("input", async (event): Promise<InputEventResult | undefined> => {
+    const gate = holds.get(event.text);
+    if (gate !== undefined) await gate;
+    if (handled.has(event.text)) return { action: "handled" };
+    const to = transforms.get(event.text);
+    return to === undefined ? undefined : { action: "transform", text: to };
+  });
+  return { holds, handled, transforms };
+}
+
+/** Pi's examples/extensions/input-transform.ts, loaded after the router. */
+function inputTransform(loaded: Loaded): void {
+  loaded.host.api.on("input", async (event, ctx): Promise<InputEventResult> => {
+    if (event.source === "extension") return { action: "continue" };
+    if (event.text.startsWith("?quick ")) return { action: "transform", text: `Respond briefly in 1-2 sentences: ${event.text.slice(7).trim()}` };
+    if (event.text.toLowerCase() === "ping") {
+      ctx.ui.notify("pong", "info");
+      return { action: "handled" };
+    }
+    return { action: "continue" };
+  });
+}
+
+const UNMATCHED = "pi-smart-router: this run could not be matched to its tagged message, so it runs without a planned level.";
+const GOAL_X = { role: "custom", customType: "goal-x", content: "continue", display: false, timestamp: NOW };
 
 /** Two messages that overlap a Jev wait, and the two answers, settled when the test says. */
 async function overlap(loaded: Loaded, first: string, second: string) {
@@ -651,6 +683,7 @@ describe("a session replaced, or a newer input, during the wait", () => {
     assert.equal(recordOf(loaded)?.plan?.level?.tier, "high");
     assert.equal(await runPrompt(loaded, expanded.replace("a.ts", "c.ts")), ASTRA, "it sticks to the last responder");
     assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel], ["stick:last", undefined, undefined]);
+    assert.deepEqual(lastNotice(loaded), { type: "warning", message: UNMATCHED }, "the dropped plan carried a tag");
     waiting.resolve(jevAnswer(LOW));
     assert.deepEqual(await one, [undefined]);
   });
@@ -667,6 +700,164 @@ describe("a session replaced, or a newer input, during the wait", () => {
     late.resolve(jevAnswer(LOW));
     assert.deepEqual(await waiting, [undefined]);
     assert.deepEqual([recordOf(loaded)?.plan, recordOf(loaded)?.pendingLevel, recordOf(loaded)?.lastInput], [undefined, undefined, undefined]);
+  });
+});
+
+describe("a message a later extension's input handler holds, handles or changes", () => {
+  test("typed while a run streamed and held until it ended, its own run takes no plan of a message that planned meanwhile (B8)", async (t) => {
+    const loaded = await hera(t);
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    const later = laterExtension(loaded);
+    await say(loaded, "go ahead");
+    assert.equal(await runPrompt(loaded, "go ahead"), LUNA);
+    const [holdM, holdX] = [deferred<void>(), deferred<void>()];
+    later.holds.set("fix the failing test", holdM.promise);
+    later.holds.set("design the new storage layer", holdX.promise);
+    // M is typed while the run streams, so Pi passes streamingBehavior "steer", and the later handler holds it.
+    const m = say(loaded, "fix the failing test", { streamingBehavior: "steer" });
+    await settled();
+    await finish(loaded, LUNA);
+    // X is typed once the run has ended: idle and tagged, it plans at the router, then the later handler holds it.
+    const x = say(loaded, "design the new storage layer #super");
+    await settled();
+    assert.deepEqual([recordOf(loaded)?.plan?.level?.tier, recordOf(loaded)?.pendingLevel?.text], ["super", "design the new storage layer"]);
+    // M's handlers return first. Pi is no longer streaming, so M starts a run of its own, with its own prompt.
+    holdM.resolve();
+    await m;
+    assert.equal(await runPrompt(loaded, "fix the failing test"), LUNA, "the last responder, not X's SUPER");
+    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel], ["stick:last", undefined, undefined]);
+    assert.deepEqual(lastNotice(loaded), { type: "warning", message: UNMATCHED }, "X's dropped plan carried a tag");
+    holdX.resolve();
+    await x;
+  });
+
+  test("a tagged message typed while a run streamed is told its tag has no effect, and its own run, held until that run ended, takes no plan", async (t) => {
+    const loaded = await hera(t);
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    const later = laterExtension(loaded);
+    await say(loaded, "go ahead");
+    assert.equal(await runPrompt(loaded, "go ahead"), LUNA);
+    const [holdM, holdX] = [deferred<void>(), deferred<void>()];
+    later.holds.set("fix the failing test", holdM.promise);
+    later.holds.set("design the new storage layer", holdX.promise);
+    const m = say(loaded, "fix the failing test #low", { streamingBehavior: "steer" });
+    await settled();
+    assert.match(lastNotice(loaded)?.message ?? "", /the LOW tag was removed and has no effect, because a run is under way/);
+    await finish(loaded, LUNA);
+    const x = say(loaded, "design the new storage layer #super");
+    await settled();
+    holdM.resolve();
+    assert.deepEqual(await m, [{ action: "transform", text: "fix the failing test" }, undefined]);
+    assert.equal(await runPrompt(loaded, "fix the failing test"), LUNA, "its own run's prompt is its text without the tag");
+    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel], [undefined, undefined]);
+    holdX.resolve();
+    await x;
+  });
+
+  test("a message a later extension rewrites into an earlier message's text keeps its plan: the texts and the count start again with each prompt's run, and steers are not counted", async (t) => {
+    const loaded = await hera(t);
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    const later = laterExtension(loaded);
+    later.transforms.set("!!", "go ahead");
+    await say(loaded, "go ahead");
+    assert.equal(await runPrompt(loaded, "go ahead"), LUNA);
+    assert.deepEqual(await say(loaded, "and the docs", { streamingBehavior: "steer" }), [undefined, undefined]);
+    await finish(loaded, LUNA);
+    // "!!" repeats the last message: the later extension turns it into "go ahead", an earlier message's text.
+    assert.deepEqual(await say(loaded, "!! #high"), [
+      { action: "transform", text: "!!" },
+      { action: "transform", text: "go ahead" },
+    ]);
+    assert.equal(await runPrompt(loaded, "go ahead"), SOL, "the tag's tier");
+    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.level?.source, loaded.session.notices], ["tag", []]);
+  });
+
+  test("the same with an untagged message that planned by Jev, or by version 1's keywords (B9)", async (t) => {
+    for (const version of [2, 1] as const) {
+      resetSlot();
+      const loaded = await hera(t, { id: `v${version}`, roster: version === 2 ? HERA_V2 : fixture("roster-hera.json") });
+      loaded.runtime.answer = async () => jevAnswer(SUPER);
+      const later = laterExtension(loaded);
+      await say(loaded, "hello");
+      const first = await runPrompt(loaded, "hello");
+      const [holdM, holdX] = [deferred<void>(), deferred<void>()];
+      later.holds.set("fix the failing test", holdM.promise);
+      later.holds.set("plan the migration to the new store", holdX.promise);
+      const m = say(loaded, "fix the failing test", { streamingBehavior: "steer" });
+      await settled();
+      await finish(loaded, first);
+      const x = say(loaded, "plan the migration to the new store");
+      await settled();
+      const planned = recordOf(loaded)?.plan;
+      assert.deepEqual([planned?.signal, planned?.decision.ok && planned.decision.choice.ref], ["planning", ASTRA], `version ${version}: X planned`);
+      holdM.resolve();
+      await m;
+      assert.equal(await runPrompt(loaded, "fix the failing test"), first, `version ${version}: the last responder`);
+      assert.deepEqual(
+        [recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel, loaded.session.notices],
+        ["stick:last", undefined, undefined, []],
+        `version ${version}: neither X's plan nor its level, and no tag to tell of`,
+      );
+      holdX.resolve();
+      await x;
+    }
+  });
+
+  test("held across a custom message's run, its own run takes no plan of a message that planned after that run (B14)", async (t) => {
+    const loaded = await hera(t);
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    const later = laterExtension(loaded);
+    const [holdA, holdX] = [deferred<void>(), deferred<void>()];
+    later.holds.set("fix the failing test", holdA.promise);
+    later.holds.set("design the new storage layer", holdX.promise);
+    const a = say(loaded, "fix the failing test");
+    await settled();
+    assert.equal(recordOf(loaded)?.plan?.level?.tier, "low", "A planned");
+    // A goal-x continuation starts and ends a run while A is held; that run drops A's plan.
+    await loaded.host.emit("before_agent_start", { messageType: "custom", message: GOAL_X });
+    loaded.session.startRun();
+    await finish(loaded, KIMI);
+    const x = say(loaded, "design the new storage layer #super");
+    await settled();
+    holdA.resolve();
+    await a;
+    assert.equal(await runPrompt(loaded, "fix the failing test"), KIMI, "the last responder, not X's SUPER");
+    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel], ["stick:last", undefined, undefined]);
+    assert.deepEqual(lastNotice(loaded), { type: "warning", message: UNMATCHED });
+    holdX.resolve();
+    await x;
+  });
+
+  test("after a message Pi's input-transform example handled, a tagged message it changes runs without its level, and says so (B13)", async (t) => {
+    const plain = await hera(t, { id: "plain" });
+    plain.runtime.answer = async () => jevAnswer(LOW);
+    inputTransform(plain);
+    await say(plain, "hello");
+    await runPrompt(plain, "hello");
+    await finish(plain, KIMI);
+    // With no other message since the last run, the changed prompt still keeps its tag's level.
+    assert.deepEqual(await say(plain, "?quick sketch the parser #low"), [
+      { action: "transform", text: "?quick sketch the parser" },
+      { action: "transform", text: "Respond briefly in 1-2 sentences: sketch the parser" },
+    ]);
+    assert.equal(await runPrompt(plain, "Respond briefly in 1-2 sentences: sketch the parser"), LUNA);
+    assert.deepEqual(plain.session.notices, []);
+    for (const version of [2, 1] as const) {
+      const loaded = await hera(t, { id: `ping-v${version}`, roster: version === 2 ? HERA_V2 : fixture("roster-hera.json") });
+      loaded.runtime.answer = async () => jevAnswer(LOW);
+      inputTransform(loaded);
+      await say(loaded, "hello");
+      await runPrompt(loaded, "hello");
+      await finish(loaded, KIMI);
+      // "ping" is handled after the router, so it never runs, and the next changed prompt matches neither message.
+      assert.deepEqual(await say(loaded, "ping"), [undefined, { action: "handled" }]);
+      await say(loaded, version === 2 ? "?quick sketch the design of the parser #low" : "?quick sketch the design of the parser");
+      assert.ok(recordOf(loaded)?.plan !== undefined, `version ${version}: the message planned`);
+      assert.equal(await runPrompt(loaded, "Respond briefly in 1-2 sentences: sketch the design of the parser"), KIMI, `version ${version}: unplanned`);
+      assert.equal(recordOf(loaded)?.history.at(-1)?.code, "stick:last", `version ${version}`);
+      // Version 1 has no tags, so its unplanned run says nothing.
+      assert.deepEqual(lastNotice(loaded), version === 2 ? { type: "warning", message: UNMATCHED } : { type: "info", message: "pong" }, `version ${version}`);
+    }
   });
 });
 
