@@ -717,6 +717,23 @@ describe("in work scope, a refusal offers only what the work guard keeps", () =>
     assert.match(refusalOf(() => loaded.runtime.route("auto", request("direct"))), /, or choose a model with \/model\.$/);
   });
 
+  test("a roster that serves no work scope: outside the latch, /smart-router scope personal is a way out too", async (t) => {
+    const v1 = await begin({ dir: agentDir(t), id: "v1", setup: recorded("work") });
+    assert.equal(
+      refusalOf(() => v1.runtime.route("auto", request("direct"))),
+      "smart-router/auto: this session is in work scope, which a version 1 roster does not serve. Nothing was sent. Give the roster a work scope (version 2), or run /smart-router scope personal.",
+    );
+    const roster = JSON.parse(HERA_V2);
+    delete roster.scopes.work;
+    roster.roles = roster.roles.filter((role: { name: string }) => !role.name.startsWith("work-"));
+    delete roster.accounts["openai-codex-3"];
+    const v2 = await begin({ dir: agentDir(t, { roster: JSON.stringify(roster) }), id: "v2", setup: recorded("work") });
+    assert.equal(
+      refusalOf(() => v2.runtime.route("auto", request("direct"))),
+      "smart-router/auto: this session is in work scope, which the roster does not serve. Nothing was sent. Give the roster a work scope, run /smart-router scope personal, or choose a work Codex model with /model.",
+    );
+  });
+
   test("no work model available: the refusal lists the tier and offers a work Codex model", async (t) => {
     const loaded = await begin({ dir: agentDir(t, { roster: HERA_V2 }), runtime: new FakeRuntime(), setup: recorded("work") });
     assert.equal(

@@ -1510,6 +1510,26 @@ describe("the footer", () => {
     assert.equal(footer(loaded), "personal HIGH → gpt-6.1-sol (jev 40%)");
   });
 
+  test("after a step-up or a hold, names the tier Jev chose with its probability, in history too", async (t) => {
+    const runtime = heraRuntime();
+    for (const ref of [LUNA, NYX_QWEN, HERA_QWEN]) runtime.catalog.unavailable.add(ref);
+    const stepped = await hera(t, { id: "stepped", runtime });
+    stepped.runtime.answer = async () => jevAnswer(LOW);
+    await say(stepped, "rename foo to bar");
+    assert.equal(footer(stepped), "personal MEDIUM → gpt-6.1-terra (jev LOW 80%)", "no LOW model is available, so the run steps up");
+    await finish(stepped, firstRequest(stepped));
+    await stepped.host.command("smart-router", "history");
+    assert.match(lastNotice(stepped)?.message ?? "", / \[personal MEDIUM \(jev LOW 80%\)\]$/);
+    const held = await hera(t, { id: "held" });
+    held.runtime.answer = async () => jevAnswer(HIGH);
+    await say(held, "go ahead");
+    await finish(held, firstRequest(held));
+    // The latest response, from HIGH a moment ago, holds the session at HIGH.
+    held.runtime.answer = async () => jevAnswer(LOW);
+    await say(held, "and the docs");
+    assert.equal(footer(held), "personal HIGH → gpt-6.1-sol (jev LOW 80%)");
+  });
+
   test("names the keywords alone without a classifier, the floor that raised a run, and work scope in a work session", async (t) => {
     const roster = JSON.parse(HERA_V2);
     delete roster.classifier;

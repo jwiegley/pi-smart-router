@@ -59,6 +59,7 @@ function templates(id: VirtualId, ref: string, reason: string): Array<readonly [
     ["roster invalid in work scope", rosterRefusal(id, { kind: "invalid", path: "/agent/smart-router.json", error: `roles[0].models[0]: "${ref}" ${reason}` }, true)],
     ["scope unreadable in work scope", scopeUnreadable(id, reason, true)],
     ["scope unserved in work scope", scopeUnserved(id, "work", 1, true)],
+    ["scope unserved in work scope, outside the latch", scopeUnserved(id, "work", 2, true, true)],
     ["unroutable in work scope", unroutable(id, { attempts: attempts(ref, reason) }, { localOnly: false, pinned: false, work: true })],
     ["unroutable local in work scope", unroutable(id, { attempts: attempts(ref, reason) }, { localOnly: true, pinned: false, work: true })],
     ["unroutable problem in work scope", unroutable(id, { attempts: [], problem: `${ref} ${reason}` }, { localOnly: false, pinned: false, work: true })],
@@ -161,7 +162,7 @@ describe("in work scope, outside the pin", () => {
     );
   });
 
-  test("a scope the roster does not serve: a version 1 roster binds no work account, so the roster is the only way out; a version 2 roster may bind one", () => {
+  test("a scope the roster does not serve: a version 1 roster binds no work account, so the roster is the only way out under the latch; a version 2 roster may bind one", () => {
     assert.equal(
       scopeUnserved("auto", "work", 1, true).message,
       "smart-router/auto: this session is in work scope, which a version 1 roster does not serve. Nothing was sent. Give the roster a work scope (version 2).",
@@ -169,6 +170,22 @@ describe("in work scope, outside the pin", () => {
     assert.equal(
       scopeUnserved("auto", "work", 2, true).message,
       "smart-router/auto: this session is in work scope, which the roster does not serve. Nothing was sent. Give the roster a work scope, or choose a work Codex model with /model.",
+    );
+  });
+
+  test("outside the latch, /smart-router scope personal is a way out of a scope the roster does not serve", () => {
+    assert.equal(
+      scopeUnserved("auto", "work", 1, true, true).message,
+      "smart-router/auto: this session is in work scope, which a version 1 roster does not serve. Nothing was sent. Give the roster a work scope (version 2), or run /smart-router scope personal.",
+    );
+    assert.equal(
+      scopeUnserved("auto", "work", 2, true, true).message,
+      "smart-router/auto: this session is in work scope, which the roster does not serve. Nothing was sent. Give the roster a work scope, run /smart-router scope personal, or choose a work Codex model with /model.",
+    );
+    // Under the pin, the pin's rules apply, and the words are as they were.
+    assert.equal(
+      scopeUnserved("auto", "work", 1, false, true).message,
+      "smart-router/auto: this session is in work scope, which a version 1 roster does not serve. Nothing was sent. Give the roster a work scope (version 2), or choose a model with /model.",
     );
   });
 

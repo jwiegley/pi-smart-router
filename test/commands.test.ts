@@ -508,6 +508,24 @@ describe("scope", () => {
     assert.deepEqual(entriesOf(loaded, SCOPE_ENTRY), [{ v: 1, scope: "work", by: "command", at: NOW }]);
   });
 
+  test("work with a roster that serves no work scope says smart-router/auto refuses, and the way out, which the latch narrows", async (t) => {
+    const loaded = await hera(t);
+    assert.deepEqual(await answer(loaded, "scope work"), {
+      type: "warning",
+      message:
+        "pi-smart-router: scope work (entry).\nIt is in work scope, which a version 1 roster does not serve, so smart-router/auto refuses its requests: give the roster a work scope (version 2), or run /smart-router scope personal.",
+    });
+    resetSlot();
+    await withScope("work", async () => {
+      const latched = await hera(t);
+      assert.deepEqual(await answer(latched, "scope work"), {
+        type: "warning",
+        message:
+          "pi-smart-router: scope work (latch).\nIt is in work scope, which a version 1 roster does not serve, so smart-router/auto refuses its requests: give the roster a work scope (version 2).",
+      });
+    });
+  });
+
   test("work in a pinned session records the entry and leaves the selection to the pin's rules", async (t) => {
     const loaded = await heraV2(t, { select: "local", setup: (session) => session.pin(POLICY_V2) });
     assert.deepEqual(await answer(loaded, "scope work"), { type: "info", message: "pi-smart-router: scope work (entry)." });
@@ -789,6 +807,82 @@ describe("local off in work scope", () => {
       message:
         "pi-smart-router: this session is no longer pinned, and the selection is smart-router/auto now. Its scope cannot be read (the latest smart-router.scope entry is not one the router wrote), so smart-router/auto refuses its requests until /smart-router scope work or /smart-router scope personal records it again.",
     });
+  });
+
+  test("in work scope, asks with the work account as where the next requests can go", async (t) => {
+    const loaded = await pinnedWork(t, "work");
+    await answer(loaded, "local off");
+    assert.deepEqual(loaded.session.dialogs, [
+      {
+        title: "Unpin this session from local models?\nThe next requests can go only to the work account. Earlier turns stay where they are.",
+        options: ["No, keep the pin", "Yes, unpin"],
+      },
+    ]);
+  });
+
+  test("with a roster that serves no work scope, or did not load, says smart-router/auto refuses, and the way out: the roster, and outside the latch /smart-router scope personal", async (t) => {
+    const UNSERVED_V1 = "It is in work scope, which a version 1 roster does not serve, so smart-router/auto refuses its requests: give the roster a work scope (version 2)";
+    const unpinned = (loaded: Loaded) => {
+      loaded.session.dialogKeys = [...UNPINS];
+      return answer(loaded, "local off");
+    };
+    const now = "pi-smart-router: this session is no longer pinned, and the selection is smart-router/auto now.";
+    await withScope("work", async () => {
+      const latched = await start({ dir: agentDir(t), id: "latched", select: "local", now: () => NOW, setup: (session) => session.pin(POLICY) });
+      assert.deepEqual(await unpinned(latched), { type: "warning", message: `${now} ${UNSERVED_V1}.` });
+      assert.equal(selection(latched), "smart-router/auto");
+    });
+    resetSlot();
+    const entry = await start({ dir: agentDir(t), id: "entry", select: "local", now: () => NOW, setup: (session) => {
+      workEntry(session);
+      session.pin(POLICY);
+    } });
+    assert.deepEqual(await unpinned(entry), { type: "warning", message: `${now} ${UNSERVED_V1}, or run /smart-router scope personal.` });
+    const roster = JSON.parse(HERA_V2);
+    delete roster.scopes.work;
+    roster.roles = roster.roles.filter((role: { name: string }) => !role.name.startsWith("work-"));
+    delete roster.accounts["openai-codex-3"];
+    const personalOnly = await start({ dir: agentDir(t, { roster: JSON.stringify(roster) }), id: "personal-only", select: "local", now: () => NOW, setup: (session) => {
+      workEntry(session);
+      session.pin(POLICY_V2);
+    } });
+    assert.deepEqual(await unpinned(personalOnly), {
+      type: "warning",
+      message: `${now} It is in work scope, which the roster does not serve, so smart-router/auto refuses its requests: give the roster a work scope, or run /smart-router scope personal.`,
+    });
+    const dir = agentDir(t, { roster: HERA_V2 });
+    const broken = await start({ dir, id: "broken", select: "local", runtime: priced(), now: () => NOW, setup: (session) => {
+      workEntry(session);
+      session.pin(POLICY_V2);
+    } });
+    const path = join(dir, "smart-router.json");
+    writeFileSync(path, "{ nope");
+    utimesSync(path, new Date(), new Date(Date.now() + 5_000));
+    assert.deepEqual(await unpinned(broken), {
+      type: "warning",
+      message: `${now} It is in work scope, but the roster did not load, so smart-router/auto refuses its requests until it is fixed; see /smart-router status.`,
+    });
+  });
+
+  test("clears only a lock the pin set, whether it unpins or the session was not pinned", async (t) => {
+    const work = { since: NOW, model: KIMI, cause: "conflict", policy: "work" } as const;
+    const pin = { since: NOW, model: KIMI, cause: "conflict", policy: "pin" } as const;
+    const unpinnedWork = await heraV2(t, { id: "unpinned", setup: workEntry });
+    const own = unpinnedWork.router?.record(unpinnedWork.session.id);
+    assert.ok(own !== undefined);
+    own.guard.lock = work;
+    assert.deepEqual(await answer(unpinnedWork, "local off"), { type: "info", message: "pi-smart-router: this session is not pinned." });
+    assert.equal(own.guard.lock, work, "work scope's lock is not the pin's to clear");
+    own.guard.lock = pin;
+    await answer(unpinnedWork, "local off");
+    assert.equal(own.guard.lock, undefined, "a lock the pin set is");
+    const unpins = await pinnedWork(t, "unpins");
+    const record = unpins.router?.record(unpins.session.id);
+    assert.ok(record !== undefined);
+    record.guard.lock = work;
+    unpins.session.dialogKeys = [...UNPINS];
+    await answer(unpins, "local off");
+    assert.equal(record.guard.lock, work);
   });
 
   test("in personal scope, keeps the selection and says the next requests may go to cloud models, as before", async (t) => {

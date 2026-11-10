@@ -359,7 +359,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     const scope = scopeOf(ctx);
     if (scope.kind === "unreadable") return scopeUnreadable("auto", scope.reason, !pinOf(ctx).on);
     if (servesScope(value, scope.scope)) return undefined;
-    return scopeUnserved("auto", scope.scope, value.version, scope.scope === "work" && !pinOf(ctx).on);
+    // Outside the latch, /smart-router scope personal can move the session.
+    return scopeUnserved("auto", scope.scope, value.version, scope.scope === "work" && !pinOf(ctx).on, scope.source !== "latch");
   };
 
   const prepare = (id: VirtualId, request: ModelRouteRequest, ctx: ExtensionContext): RouteInput => {

@@ -142,15 +142,30 @@ export function scopeUnreadable(id: VirtualId, reason: string, work = false): Ro
   );
 }
 
+/** A roster that does not serve a scope, as the texts name it: by its version, when that is 1. */
+export function rosterNamed(version: 1 | 2): string {
+  return version === 1 ? "a version 1 roster" : "the roster";
+}
+
+/** Ways out, as a refusal lists them: "a", "a, or b", "a, b, or c". */
+function either(ways: readonly string[]): string {
+  return ways.length < 2 ? (ways[0] ?? "") : `${ways.slice(0, -1).join(", ")}, or ${ways.at(-1) ?? ""}`;
+}
+
 /**
  * smart-router/auto refuses a session whose scope the roster does not serve: work under a version 1
  * roster, or a scope a version 2 roster has no section for. `work`: whether the work guard holds the
- * session (chooseModel); a version 1 roster binds no work account, so then only the roster is offered.
+ * session (chooseModel); a version 1 roster binds no work account, so then no model is offered.
+ * `movable`: whether /smart-router scope personal can move the session, which the latch refuses; it
+ * is offered only then, and only to a session the work guard holds.
  */
-export function scopeUnserved(id: VirtualId, scope: Scope, version: 1 | 2, work = false): RouterError {
-  const roster = version === 1 ? "a version 1 roster" : "the roster";
-  const give = `Give the roster a ${scope} scope${version === 1 ? " (version 2)" : ""}`;
-  return refusal(id, `this session is in ${scope} scope, which ${roster} does not serve`, work && version === 1 ? `${give}.` : `${give}, or ${chooseModel(id, work)}.`);
+export function scopeUnserved(id: VirtualId, scope: Scope, version: 1 | 2, work = false, movable = false): RouterError {
+  const ways = [
+    `Give the roster a ${scope} scope${version === 1 ? " (version 2)" : ""}`,
+    ...(work && movable ? ["run /smart-router scope personal"] : []),
+    ...(work && version === 1 ? [] : [chooseModel(id, work)]),
+  ];
+  return refusal(id, `this session is in ${scope} scope, which ${rosterNamed(version)} does not serve`, `${either(ways)}.`);
 }
 
 /** Shown when the roster's work directories put a session in work scope. */

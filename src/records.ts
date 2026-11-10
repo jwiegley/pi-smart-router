@@ -122,7 +122,11 @@ export function readLevelRecord(entry: unknown): LevelRecord | undefined {
   return isTime(refers) ? { v: 1, at, scope, source, tier, refers } : undefined;
 }
 
-/** What decided a run's tier, in a few words: Jev with the probability it gave that tier, a tag, the floor, or the keywords and why Jev did not decide. */
+/**
+ * What decided a run's tier, in a few words: Jev with the probability it gave its tier, a tag, the
+ * floor, or the keywords and why Jev did not decide. A hold or a step-up can take the run to another
+ * tier than Jev's, and the note then names Jev's, so its probability is never read as the run's.
+ */
 export function levelNote(level: PlanLevel): string {
   const { jev } = level;
   switch (level.source) {
@@ -130,8 +134,11 @@ export function levelNote(level: PlanLevel): string {
       return "tag";
     case "floor":
       return "floor";
-    case "jev":
-      return jev?.kind === "answer" ? `jev ${Math.round(jev.probabilities[jev.tier] * 100)}%` : "jev";
+    case "jev": {
+      if (jev?.kind !== "answer") return "jev";
+      const share = `${Math.round(jev.probabilities[jev.tier] * 100)}%`;
+      return jev.tier === level.tier ? `jev ${share}` : `jev ${tierLabel(jev.tier)} ${share}`;
+    }
     case "keyword":
       return jev?.kind === "failure" ? `keywords; jev ${jev.failure}` : "keywords";
   }
