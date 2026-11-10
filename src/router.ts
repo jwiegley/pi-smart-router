@@ -538,8 +538,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
    *   can still take the plan of the one idle message counted;
    * - a counted message that never starts its own run (one a later extension handles, an idle RPC
    *   steer or follow_up, a prompt() that throws) leaves the next expanded or changed run unplanned.
-   *   A run that drops a tagged plan says so (unmatchedTagNotice); under version 1, which has no
-   *   tags, it goes unplanned without a notice;
+   *   A run that drops a tagged plan, a prompt's or a custom message's, says so (unmatchedTagNotice);
+   *   under version 1, which has no tags, it goes unplanned without a notice;
    * - a message a later extension rewrites into the text of a steer the router still remembers goes
    *   unplanned, which is the safe direction.
    */
@@ -769,10 +769,14 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
           const record = recordOf(ctx.sessionManager.getSessionId());
           if (event.messageType === "custom") {
             // A custom message's run has no input: what an earlier input planned or kept is not its.
+            // Each run's end drops the plan, so one still set is a level no run took, or whose run
+            // failed to start; a tagged one is lost, and this run says so as a prompt's run does.
+            const tagged = record.plan?.level?.source === "tag";
             record.plan = undefined;
             record.planText = undefined;
             record.pendingLevel = undefined;
             record.lastInput = undefined;
+            if (tagged) notify(ctx, unmatchedTagNotice(), "warning");
           } else {
             // A prompt's run takes only its own message's plan and pending level, never another's.
             if (record.plan !== undefined && !ownsRun(record, record.planText, event.prompt)) {

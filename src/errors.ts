@@ -175,9 +175,9 @@ export function tagIgnoredNotice(tier: Tier, why: TagIgnored): string {
   return `pi-smart-router: the ${tierLabel(tier)} tag was removed and has no effect, because ${cause}.`;
 }
 
-/** Shown when a run's start drops a tagged message's plan: the run could not be matched to that message. */
+/** Shown when a prompt's or a custom message's run starts and drops a tagged message's plan: the run is not that message's. */
 export function unmatchedTagNotice(): string {
-  return "pi-smart-router: this run could not be matched to its tagged message, so it runs without a planned level.";
+  return "pi-smart-router: a tagged message's level could not be matched to the run that started, so it was dropped.";
 }
 
 /** Shown when a version 2 run went to a higher tier than the one its pick started at. */

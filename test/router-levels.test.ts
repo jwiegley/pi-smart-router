@@ -172,7 +172,7 @@ function inputTransform(loaded: Loaded): void {
   });
 }
 
-const UNMATCHED = "pi-smart-router: this run could not be matched to its tagged message, so it runs without a planned level.";
+const UNMATCHED = "pi-smart-router: a tagged message's level could not be matched to the run that started, so it was dropped.";
 const GOAL_X = { role: "custom", customType: "goal-x", content: "continue", display: false, timestamp: NOW };
 
 /** Two messages that overlap a Jev wait, and the two answers, settled when the test says. */
@@ -826,6 +826,52 @@ describe("a message a later extension's input handler holds, handles or changes"
     assert.deepEqual(lastNotice(loaded), { type: "warning", message: UNMATCHED });
     holdX.resolve();
     await x;
+  });
+
+  test("a tagged message held across a custom message's run: that run drops the tagged plan and says so, and the message's own run goes unplanned without a second notice (E11)", async (t) => {
+    const loaded = await hera(t);
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    const later = laterExtension(loaded);
+    const hold = deferred<void>();
+    later.holds.set("design the new storage layer", hold.promise);
+    const a = say(loaded, "design the new storage layer #super");
+    await settled();
+    assert.deepEqual([recordOf(loaded)?.plan?.level?.tier, recordOf(loaded)?.plan?.level?.source, loaded.session.notices], ["super", "tag", []]);
+    // A goal-x continuation starts a run while A is held: the run is not A's, so A's level is lost.
+    await loaded.host.emit("before_agent_start", { messageType: "custom", message: GOAL_X });
+    assert.deepEqual([recordOf(loaded)?.plan, recordOf(loaded)?.pendingLevel, loaded.session.notices], [undefined, undefined, [{ type: "warning", message: UNMATCHED }]]);
+    loaded.session.startRun();
+    await finish(loaded, KIMI);
+    hold.resolve();
+    await a;
+    assert.equal(await runPrompt(loaded, "design the new storage layer"), KIMI, "the last responder, not A's SUPER");
+    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level], ["stick:last", undefined]);
+    assert.deepEqual(loaded.session.notices, [{ type: "warning", message: UNMATCHED }], "said once, at the custom message's run");
+  });
+
+  test("a custom message's run drops an untagged plan, or a tagged plan whose run has ended, without a notice", async (t) => {
+    const loaded = await hera(t);
+    loaded.runtime.answer = async () => jevAnswer(SUPER);
+    const later = laterExtension(loaded);
+    const hold = deferred<void>();
+    later.holds.set("design the new storage layer", hold.promise);
+    const a = say(loaded, "design the new storage layer");
+    await settled();
+    assert.deepEqual([recordOf(loaded)?.plan?.level?.tier, recordOf(loaded)?.plan?.level?.source], ["super", "jev"]);
+    await loaded.host.emit("before_agent_start", { messageType: "custom", message: GOAL_X });
+    loaded.session.startRun();
+    await finish(loaded, KIMI);
+    hold.resolve();
+    await a;
+    assert.equal(await runPrompt(loaded, "design the new storage layer"), KIMI);
+    await finish(loaded, KIMI);
+    // A tagged message's own run takes its level, and the run's end drops the plan: a goal-x
+    // continuation after it has nothing to say.
+    await say(loaded, "rename foo to bar #low");
+    assert.equal(await runPrompt(loaded, "rename foo to bar"), LUNA);
+    await finish(loaded, LUNA);
+    await loaded.host.emit("before_agent_start", { messageType: "custom", message: GOAL_X });
+    assert.deepEqual(loaded.session.notices, []);
   });
 
   test("after a message Pi's input-transform example handled, a tagged message it changes runs without its level, and says so (B13)", async (t) => {
