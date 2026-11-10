@@ -257,7 +257,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
    * Whether a provider is the work account, by routing's own verdict: a work-bound Codex provider
    * whose binding passes checkAccount in work scope, so a Multi-Pass alias needs the label its binding
    * names. It reads the bindings rosterFacts gives, so while the roster fails to load, the last valid
-   * roster's, against Multi-Pass's labels as last read. Before any roster has loaded there is no work
+   * roster's, against Multi-Pass's labels as refreshFiles or /smart-router reload last read them, so
+   * a label change shows at the next idle input. Before any roster has loaded there is no work
    * account. Never throws: a check that cannot be made says no.
    */
   const workAccount = (provider: string): boolean => {
@@ -308,10 +309,20 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     return state;
   };
 
-  /** Re-read both files when they changed. */
+  /**
+   * Whether Multi-Pass's labels matter with the roster as it loaded: it binds a Multi-Pass alias,
+   * or, while it fails to load, the bindings remembered from the last valid roster do, which the work
+   * guard still checks against the labels (workAccount).
+   */
+  const labelsNeeded = (state: Loaded<Roster>): boolean => {
+    const bindings = state.kind === "ok" ? state.value : rememberedRoster(slot);
+    return bindings !== undefined && needsLabels(bindings);
+  };
+
+  /** Re-read both files when they changed. Only here and on /smart-router reload, never in a guard. */
   const refreshFiles = (): Loaded<Roster> => {
     const state = loaded(roster.refresh());
-    if (state.kind === "ok" && needsLabels(state.value)) labels.refresh();
+    if (labelsNeeded(state)) labels.refresh();
     return state;
   };
 
@@ -782,7 +793,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     refresh: () => filesNow(refreshFiles()),
     reload: (ctx) => {
       const state = loaded(roster.reload());
-      if (state.kind === "ok" && needsLabels(state.value)) labels.reload();
+      if (labelsNeeded(state)) labels.reload();
       let limitsChanged = false;
       if (state.kind === "ok") {
         const next = computeLimits(ctx, state.value);

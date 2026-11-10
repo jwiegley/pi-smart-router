@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { chmodSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test, { afterEach, beforeEach, describe } from "node:test";
 
@@ -1010,6 +1010,75 @@ describe("work guard", () => {
       await loaded.host.choose(WORK_SOL);
       assert.deepEqual([selection(loaded), lastNotice(loaded)?.message], [AUTO, reverted(WORK_SOL)], "the remembered binding names Positron work, and Multi-Pass labels the alias personal");
     });
+
+    /** What happens to Multi-Pass's labels together with the roster breaking: each leaves openai-codex-3 without its label. */
+    const LABEL_CHANGES: ReadonlyArray<readonly [string, (path: string) => void]> = [
+      ["deleted", (path) => rmSync(path)],
+      ["made unsafe", (path) => chmodSync(path, 0o666)],
+      ["made unreadable", (path) => chmodSync(path, 0o000)],
+      ["made malformed", (path) => writeFileSync(path, "{ nope")],
+      ["swapped", (path) => writeFileSync(path, SWAPPED)],
+    ];
+
+    /** A session in work scope whose labels read fine, and the work alias picked by hand, kept. */
+    async function labelledSession(t: Parameters<typeof agentDir>[0]): Promise<{ readonly loaded: Clocked; readonly dir: string }> {
+      let clock = NOW;
+      const dir = agentDir(t, { roster: HERA_V2 });
+      const loaded = Object.assign(await start({ dir, setup: workEntry, now: () => clock }), {
+        advance(ms: number) {
+          clock += ms;
+        },
+      });
+      await loaded.host.choose(WORK_SOL);
+      assert.equal(selection(loaded), WORK_SOL);
+      return { loaded, dir };
+    }
+
+    /** Pick the work alias by hand once the revert window has passed, and say what the selection is. */
+    async function pickWorkSol(loaded: Clocked): Promise<string | undefined> {
+      loaded.advance(2_000);
+      loaded.session.force(AUTO);
+      await loaded.host.choose(WORK_SOL);
+      return selection(loaded);
+    }
+
+    for (const [name, change] of LABEL_CHANGES) {
+      test(`Multi-Pass's labels ${name} while the roster fails to load are read again at the next idle input, as with a valid roster, and the work alias is refused`, async (t) => {
+        const { loaded, dir } = await labelledSession(t);
+        const labels = join(dir, "multi-pass.json");
+        change(labels);
+        writeFileSync(join(dir, "smart-router.json"), "{ nope");
+        // Nothing reads the files between idle inputs, so the labels read at start still name the alias.
+        assert.equal(await pickWorkSol(loaded), WORK_SOL, "before the next idle input");
+        loaded.session.force(AUTO);
+        await loaded.host.emit("input", { text: "fix the build", source: "interactive" });
+        assert.equal(await pickWorkSol(loaded), AUTO, "after it");
+        assert.equal(lastNotice(loaded)?.message, reverted(WORK_SOL));
+        loaded.session.force(WORK_SOL);
+        const signal = loaded.session.startRun();
+        assert.deepEqual(await loaded.host.emit("before_provider_request", { payload: { input: "work text" } }), [null]);
+        assert.equal(signal.aborted, true);
+        assert.deepEqual(await loaded.host.emit("cache_warming_decision", { action: "warm" }), [{ action: "stop" }]);
+        loaded.session.endRun();
+        if (name !== "deleted") chmodSync(labels, 0o600);
+      });
+
+      test(`Multi-Pass's labels ${name} while the roster fails to load are read again at once by /smart-router reload`, async (t) => {
+        const { loaded, dir } = await labelledSession(t);
+        const labels = join(dir, "multi-pass.json");
+        change(labels);
+        writeFileSync(join(dir, "smart-router.json"), "{ nope");
+        await loaded.host.command("smart-router", "reload");
+        assert.match(lastNotice(loaded)?.message ?? "", /smart-router\.json: invalid \(JSON syntax error/);
+        assert.equal(await pickWorkSol(loaded), AUTO);
+        loaded.session.force(WORK_SOL);
+        const signal = loaded.session.startRun();
+        await loaded.host.emit("turn_start", { turnIndex: 0, timestamp: NOW });
+        assert.deepEqual([selection(loaded), signal.aborted], [AUTO, false], "turn_start switches it");
+        loaded.session.endRun();
+        if (name !== "deleted") chmodSync(labels, 0o600);
+      });
+    }
 
     test("before any roster has loaded in the process, a work-scope session allows only smart-router/auto, which refuses", async (t) => {
       const loaded = await working(t, { roster: "{ nope" });

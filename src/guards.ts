@@ -34,10 +34,12 @@
 //
 // The lock holds until an allowed selection holds through a model_select or a turn_start, or until
 // John unpins. A lock belongs to the policy that set it: the other policy's guards treat it as absent
-// and clear it without a word, which is safe both ways, since the pin is narrower than work scope
-// and unpinning clears every lock anyway. A lock acts only while a policy guards the session, so it
-// does nothing in a session moved to personal scope. The guards block no tools: they guard the
-// model only (John's decision Q7). Each policy's texts are in its own words.
+// and clear it without a word. That is safe both ways. The two policies allow disjoint selections,
+// but where data can go is narrower under the pin: only to LAN models, which hold no account, so a
+// work lock the pin drops lets nothing reach an account; and unpinning clears every lock anyway. A
+// lock acts only while a policy guards the session, so it does nothing in a session moved to
+// personal scope. The guards block no tools: they guard the model only (John's decision Q7). Each
+// policy's texts are in its own words.
 //
 // Pi catches handler errors and carries on, so each guard catches its own and denies. A session
 // known to be unguarded runs no guard.
