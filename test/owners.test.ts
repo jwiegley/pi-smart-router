@@ -171,7 +171,7 @@ describe("the scope switch", () => {
       assert.equal(scopeLatched(processSlot()), true);
       assert.deepEqual(readScope(second.session.ctx.sessionManager, scopeLatched(processSlot()), undefined), { kind: "ok", scope: "work", source: "latch" });
       // Hera's roster is version 1, which serves no work scope: auto refuses, and local still routes.
-      assert.throws(() => second.runtime.route("auto", request("direct", { previous: previous(second.runtime, KIMI) })), { message: scopeUnserved("auto", "work", 1).message });
+      assert.throws(() => second.runtime.route("auto", request("direct", { previous: previous(second.runtime, KIMI) })), { message: scopeUnserved("auto", "work", 1, true).message });
       assert.equal(routed(second.runtime.route("local", request("direct"))), GLM);
       assert.equal(processSlot().env.on, false, "the scope switch does not pin");
     } finally {

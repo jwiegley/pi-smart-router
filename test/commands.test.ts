@@ -6,7 +6,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import type { SlashCommandInfo, ToolInfo } from "@earendil-works/pi-coding-agent";
 
-import { ENV_SCOPE, LEVEL_ENTRY, SCOPE_ENTRY } from "../src/constants.ts";
+import { ENV_SCOPE, LEVEL_ENTRY, PIN_ENTRY, SCOPE_ENTRY } from "../src/constants.ts";
 import { policyFromRoster } from "../src/local.ts";
 import { clock } from "../src/resolve.ts";
 import { createRouter } from "../src/router.ts";
@@ -676,5 +676,69 @@ describe("was", () => {
       });
       assert.equal(loaded.session.entries.length, before, JSON.stringify(data));
     }
+  });
+});
+
+describe("local off in work scope", () => {
+  const UNPINS = ["down", "enter"] as const;
+  const selection = (loaded: Loaded): string => `${loaded.session.model?.provider}/${loaded.session.model?.id}`;
+  /** A pinned session in work scope, or with a scope entry the router did not write, on smart-router/local. */
+  const pinnedWork = (t: Parameters<typeof agentDir>[0], id: string, scope: unknown = scopeEntry("work", "command", NOW - 60_000)) =>
+    heraV2(t, {
+      id,
+      select: "local",
+      setup: (session) => {
+        session.appendCustom(SCOPE_ENTRY, scope);
+        session.pin(POLICY_V2);
+      },
+    });
+
+  test("switches the selection to smart-router/auto, and says the next requests go to the work account", async (t) => {
+    const loaded = await pinnedWork(t, "work");
+    loaded.session.dialogKeys = [...UNPINS];
+    assert.deepEqual(await answer(loaded, "local off"), {
+      type: "warning",
+      message: "pi-smart-router: this session is no longer pinned, and the selection is smart-router/auto now. It is in work scope, so the next requests go to the work account.",
+    });
+    assert.equal(selection(loaded), "smart-router/auto");
+    assert.deepEqual(entriesOf(loaded, PIN_ENTRY).at(-1), { v: 1, on: false, at: AT });
+  });
+
+  test("keeps a selection work scope allows, and says when the selection cannot be switched", async (t) => {
+    const kept = await pinnedWork(t, "kept");
+    kept.session.force(WORK_SOL);
+    kept.session.dialogKeys = [...UNPINS];
+    assert.deepEqual(await answer(kept, "local off"), {
+      type: "warning",
+      message: `pi-smart-router: this session is no longer pinned, and the selection stays ${WORK_SOL}. It is in work scope, so the next requests go to the work account.`,
+    });
+    const stuck = await pinnedWork(t, "stuck");
+    stuck.host.setModel = async () => false;
+    stuck.session.dialogKeys = [...UNPINS];
+    assert.deepEqual(await answer(stuck, "local off"), {
+      type: "warning",
+      message:
+        "pi-smart-router: this session is no longer pinned, and it is in work scope, but its selection smart-router/local could not be switched to smart-router/auto, so prompts are refused until you choose smart-router/auto or a work Codex model.",
+    });
+    assert.equal(selection(stuck), "smart-router/local");
+  });
+
+  test("with a scope that cannot be read, switches as work scope does, and says that smart-router/auto refuses until a scope is recorded", async (t) => {
+    const loaded = await pinnedWork(t, "unreadable", { v: 9 });
+    loaded.session.dialogKeys = [...UNPINS];
+    assert.deepEqual(await answer(loaded, "local off"), {
+      type: "warning",
+      message:
+        "pi-smart-router: this session is no longer pinned, and the selection is smart-router/auto now. Its scope cannot be read (the latest smart-router.scope entry is not one the router wrote), so smart-router/auto refuses its requests until /smart-router scope work or /smart-router scope personal records it again.",
+    });
+  });
+
+  test("in personal scope, keeps the selection and says the next requests may go to cloud models, as before", async (t) => {
+    const loaded = await heraV2(t, { select: "local", setup: (session) => session.pin(POLICY_V2) });
+    loaded.session.dialogKeys = [...UNPINS];
+    assert.deepEqual(await answer(loaded, "local off"), {
+      type: "warning",
+      message: "pi-smart-router: this session is no longer pinned, and the selection stays smart-router/local. The next requests may go to cloud models.",
+    });
   });
 });

@@ -251,6 +251,12 @@ function outsideScope(rc: ResolveContext, provider: string): string | undefined 
   return "is not on a work-bound Codex account, and this session is in work scope";
 }
 
+/**
+ * Whether the work guard holds the request's session: work scope, or a scope that cannot be read,
+ * outside the pin. A refusal then offers only what that guard keeps (src/errors.ts).
+ */
+const workGuarded = (rc: ResolveContext): boolean => rc.pinned !== true && rc.scope === "work";
+
 /** The router's own invariants, checked on every pick before it is returned. */
 export function assertSafe(id: VirtualId, rc: ResolveContext, choice: Choice): void {
   const { roster } = rc;
@@ -273,7 +279,7 @@ export function assertSafe(id: VirtualId, rc: ResolveContext, choice: Choice): v
                   : rc.localOnly && !checkLocal(choice.model, rc.policy, true).ok
                     ? "is outside the local policy"
                     : undefined;
-  if (problem !== undefined) throw invariant(id, choice.ref, problem);
+  if (problem !== undefined) throw invariant(id, choice.ref, problem, workGuarded(rc));
 }
 
 /** The level a role sends: the selected one, or the role's fixed level. Pi clamps it to the model. */
@@ -284,7 +290,9 @@ export function levelFor(rc: ResolveContext, roleName: string, selected: ModelTh
 
 function settle(input: RouteInput, decision: Decision): Choice {
   // A version 2 decision tries more than one role only when its run steps up a tier.
-  if (!decision.ok) throw unroutable(input.id, decision, { localOnly: input.rc.localOnly, pinned: input.pin.on, stepUps: input.rc.roster.version === 2 });
+  if (!decision.ok) {
+    throw unroutable(input.id, decision, { localOnly: input.rc.localOnly, pinned: input.pin.on, stepUps: input.rc.roster.version === 2, work: workGuarded(input.rc) });
+  }
   assertSafe(input.id, input.rc, decision.choice);
   return decision.choice;
 }

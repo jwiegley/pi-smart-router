@@ -1,6 +1,7 @@
 // The texts the router throws and shows. Every refusal names the virtual model, says that nothing
 // was sent, gives the cause in the router's own words (never a provider's error text) and the way
-// out.
+// out. In work scope, outside the pin, the work guard reverts any selection but smart-router/auto
+// and the work account's models, so a way out offers only those (chooseModel).
 //
 // Pi decides whether to retry a failed request from its error text alone, and a router refusal is
 // deterministic: retrying it with backoff only delays the error. An interpolated ref or reason can
@@ -54,8 +55,20 @@ export function firstLine(error: unknown): string {
   return (text.split("\n", 1)[0] ?? "").slice(0, 300);
 }
 
-const CHOOSE = "Choose a model with /model.";
+/**
+ * How a refusal offers a model to choose by hand: any model, or, while the work guard holds the
+ * session (work scope, or a scope that cannot be read, outside the pin), only what it keeps: a work
+ * Codex model when smart-router/auto refused, and smart-router/auto too when smart-router/local did.
+ */
+function chooseModel(id: VirtualId, work: boolean): string {
+  if (!work) return "choose a model with /model";
+  return id === "auto" ? "choose a work Codex model with /model" : "choose smart-router/auto or a work Codex model with /model";
+}
 
+/** The way out as a sentence of its own. */
+const sentence = (text: string): string => `${text.charAt(0).toUpperCase()}${text.slice(1)}.`;
+
+// No router runs while it failed to load, so no guard holds the session.
 export function loadFailed(id: VirtualId, reason: string): RouterError {
   return refusal(id, `pi-smart-router failed to load (${reason})`, "Choose a model with /model, or fix the cause and run /reload.");
 }
@@ -82,9 +95,10 @@ function rosterCause(problem: RosterProblem): string {
   }
 }
 
-export function rosterRefusal(id: VirtualId, problem: RosterProblem): RouterError {
-  const way = problem.kind === "missing" ? "Create it as the README describes, or choose a model with /model." : "Fix it and send the prompt again, or choose a model with /model.";
-  return refusal(id, rosterCause(problem), way);
+/** `work`: whether the work guard holds the session (chooseModel). */
+export function rosterRefusal(id: VirtualId, problem: RosterProblem, work = false): RouterError {
+  const fix = problem.kind === "missing" ? "Create it as the README describes" : "Fix it and send the prompt again";
+  return refusal(id, rosterCause(problem), `${fix}, or ${chooseModel(id, work)}.`);
 }
 
 export function rosterNotice(problem: RosterProblem): string {
@@ -119,19 +133,24 @@ export function carryFailedNotice(reason: string): string {
   return `pi-smart-router: the session this one came from was pinned to local models, but its pin could not be recorded here (${reason}). Run /smart-router local on before you send anything.`;
 }
 
-/** smart-router/auto refuses a session whose scope cannot be read. */
-export function scopeUnreadable(id: VirtualId, reason: string): RouterError {
+/** smart-router/auto refuses a session whose scope cannot be read. `work`: whether the work guard holds the session (chooseModel). */
+export function scopeUnreadable(id: VirtualId, reason: string, work = false): RouterError {
   return refusal(
     id,
     `this session's scope cannot be read (${reason})`,
-    "Record it again with /smart-router scope work or /smart-router scope personal, or choose a model with /model.",
+    `Record it again with /smart-router scope work or /smart-router scope personal, or ${chooseModel(id, work)}.`,
   );
 }
 
-/** smart-router/auto refuses a session whose scope the roster does not serve: work under a version 1 roster, or a scope a version 2 roster has no section for. */
-export function scopeUnserved(id: VirtualId, scope: Scope, version: 1 | 2): RouterError {
+/**
+ * smart-router/auto refuses a session whose scope the roster does not serve: work under a version 1
+ * roster, or a scope a version 2 roster has no section for. `work`: whether the work guard holds the
+ * session (chooseModel); a version 1 roster binds no work account, so then only the roster is offered.
+ */
+export function scopeUnserved(id: VirtualId, scope: Scope, version: 1 | 2, work = false): RouterError {
   const roster = version === 1 ? "a version 1 roster" : "the roster";
-  return refusal(id, `this session is in ${scope} scope, which ${roster} does not serve`, `Give the roster a ${scope} scope${version === 1 ? " (version 2)" : ""}, or choose a model with /model.`);
+  const give = `Give the roster a ${scope} scope${version === 1 ? " (version 2)" : ""}`;
+  return refusal(id, `this session is in ${scope} scope, which ${roster} does not serve`, work && version === 1 ? `${give}.` : `${give}, or ${chooseModel(id, work)}.`);
 }
 
 /** Shown when the roster's work directories put a session in work scope. */
@@ -198,6 +217,8 @@ export interface UnroutableContext {
   readonly pinned: boolean;
   /** Whether the roles after the first are a version 2 run's step-ups to higher tiers, not version 1's declared fallback. */
   readonly stepUps?: boolean;
+  /** Whether the work guard holds the session (chooseModel). */
+  readonly work?: boolean;
 }
 
 /** No candidate could take the request: every role tried and why, or the problem found first. */
@@ -206,7 +227,8 @@ export function unroutable(
   failure: { readonly attempts: readonly Attempt[]; readonly problem?: string | undefined },
   context: UnroutableContext,
 ): RouterError {
-  const unpin = context.pinned ? "run /smart-router local off" : "choose another model with /model";
+  const work = context.work === true;
+  const unpin = context.pinned ? "run /smart-router local off" : work ? chooseModel(id, true) : "choose another model with /model";
   if (failure.problem !== undefined) {
     return refusal(id, failure.problem, `Fix the roster and send the prompt again, or ${unpin}.`);
   }
@@ -220,7 +242,7 @@ export function unroutable(
     ? "Run /smart-router local on to accept the roster's local role, or run /smart-router local off."
     : context.localOnly
       ? `Start the local model server and send the prompt again, or ${unpin}.`
-      : "See /smart-router status, or choose a model with /model.";
+      : `See /smart-router status, or ${chooseModel(id, work)}.`;
   return refusal(id, cause, way);
 }
 
@@ -228,7 +250,7 @@ export function stale(id: VirtualId): RouterError {
   return refusal(id, "this request came through a route left by a session that has ended", "Run /reload.");
 }
 
-/** A pick that broke one of the router's own invariants: a bug, refused rather than sent. */
-export function invariant(id: VirtualId, ref: string, problem: string): RouterError {
-  return refusal(id, `the router picked ${ref}, which ${problem}; this is a bug in pi-smart-router`, CHOOSE);
+/** A pick that broke one of the router's own invariants: a bug, refused rather than sent. `work`: whether the work guard holds the session (chooseModel). */
+export function invariant(id: VirtualId, ref: string, problem: string, work = false): RouterError {
+  return refusal(id, `the router picked ${ref}, which ${problem}; this is a bug in pi-smart-router`, sentence(chooseModel(id, work)));
 }

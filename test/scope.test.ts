@@ -515,10 +515,11 @@ describe("smart-router/auto refuses a scope it cannot serve", () => {
   test("a version 1 roster with PI_SMART_ROUTER_SCOPE=work, on every path, sending nothing; smart-router/local still routes to the LAN model", async (t) => {
     await withScope("work", async () => {
       const loaded = await begin({ dir: agentDir(t) });
-      const refusal = scopeUnserved("auto", "work", 1);
+      // The work guard keeps only smart-router/auto and the work account, which a version 1 roster cannot bind.
+      const refusal = scopeUnserved("auto", "work", 1, true);
       assert.equal(
         refusal.message,
-        "smart-router/auto: this session is in work scope, which a version 1 roster does not serve. Nothing was sent. Give the roster a work scope (version 2), or choose a model with /model.",
+        "smart-router/auto: this session is in work scope, which a version 1 roster does not serve. Nothing was sent. Give the roster a work scope (version 2).",
       );
       // The owned run: the prompt plans nothing for a scope auto refuses, and the run's first request refuses.
       await loaded.host.emit("input", { text: PLANNING, source: "interactive" });
@@ -563,10 +564,11 @@ describe("smart-router/auto refuses a scope it cannot serve", () => {
   test("an unreadable scope, which routing resolves in work scope, the narrower one", async (t) => {
     const dir = agentDir(t, { roster: HERA_V2 });
     const malformed = await begin({ dir, id: "malformed", runtime: new FakeRuntime(workCatalog()), setup: (session) => session.appendCustom(SCOPE_ENTRY, { v: 1, scope: "work" }) });
-    const unreadable = scopeUnreadable("auto", "the latest smart-router.scope entry is not one the router wrote");
+    // The work guard holds a session whose scope cannot be read, so only a work Codex model is offered.
+    const unreadable = scopeUnreadable("auto", "the latest smart-router.scope entry is not one the router wrote", true);
     assert.equal(
       unreadable.message,
-      "smart-router/auto: this session's scope cannot be read (the latest smart-router.scope entry is not one the router wrote). Nothing was sent. Record it again with /smart-router scope work or /smart-router scope personal, or choose a model with /model.",
+      "smart-router/auto: this session's scope cannot be read (the latest smart-router.scope entry is not one the router wrote). Nothing was sent. Record it again with /smart-router scope work or /smart-router scope personal, or choose a work Codex model with /model.",
     );
     refuses(() => malformed.runtime.route("auto", request("direct")), unreadable, "a malformed entry");
     const signal = malformed.session.startRun();
@@ -587,7 +589,7 @@ describe("smart-router/auto refuses a scope it cannot serve", () => {
       if (customType === SCOPE_ENTRY) throw new Error("database is locked");
       return latest(customType, options);
     };
-    refuses(() => locked.runtime.route("auto", request("direct")), scopeUnreadable("auto", "reading its smart-router.scope entries failed: database is locked"), "a reader that throws");
+    refuses(() => locked.runtime.route("auto", request("direct")), scopeUnreadable("auto", "reading its smart-router.scope entries failed: database is locked", true), "a reader that throws");
     assert.equal(routed(locked.runtime.route("local", request("direct"))), GLM);
   });
 
@@ -607,7 +609,7 @@ describe("smart-router/auto refuses a scope it cannot serve", () => {
     await withScope("work", async () => {
       const latched = await begin({ dir: personalOnly, id: "latched", runtime: new FakeRuntime(workCatalog()) });
       assert.equal(latched.session.notices.length, 0, "the roster is valid");
-      refuses(() => latched.runtime.route("auto", request("direct")), scopeUnserved("auto", "work", 2), "a personal-only roster in work scope");
+      refuses(() => latched.runtime.route("auto", request("direct")), scopeUnserved("auto", "work", 2, true), "a personal-only roster in work scope");
       assert.equal(routed(latched.runtime.route("local", request("direct"))), GLM);
     });
   });
@@ -668,5 +670,45 @@ describe("/smart-router status", () => {
       const served = await begin({ dir: agentDir(t, { roster: HERA_V2 }), id: "served", runtime: new FakeRuntime(workCatalog()) });
       assert.deepEqual(await scopeLines(served), ["Scope: work (latch)"]);
     });
+  });
+});
+
+describe("in work scope, a refusal offers only what the work guard keeps", () => {
+  /** The text a request's refusal carries. */
+  const refusalOf = (run: () => unknown): string => {
+    try {
+      run();
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+    return assert.fail("the request was routed");
+  };
+
+  test("a roster that fails to load: a work Codex model on smart-router/auto, and smart-router/auto too on smart-router/local; under the pin and in personal scope, any model", async (t) => {
+    const dir = agentDir(t, { roster: HERA_V2 });
+    const work = await begin({ dir, id: "work", runtime: new FakeRuntime(workCatalog()), setup: recorded("work") });
+    const personal = await begin({ dir, id: "personal", runtime: new FakeRuntime(workCatalog()) });
+    const pinned = await begin({ dir, id: "pinned", runtime: new FakeRuntime(workCatalog()), setup: (session) => {
+      recorded("work")(session);
+      session.pin(policyFromRoster(rosterFixture("roster-hera.json")));
+    } });
+    const path = join(dir, "smart-router.json");
+    writeFileSync(path, "{ nope");
+    for (const loaded of [work, personal, pinned]) await loaded.host.command("smart-router", "reload");
+    const auto = refusalOf(() => work.runtime.route("auto", request("direct")));
+    assert.match(auto, /^smart-router\/auto: the roster .*smart-router\.json is invalid \(JSON syntax error/);
+    assert.ok(auto.endsWith("Nothing was sent. Fix it and send the prompt again, or choose a work Codex model with /model."), auto);
+    assert.ok(refusalOf(() => work.runtime.route("local", request("direct"))).endsWith("Fix it and send the prompt again, or choose smart-router/auto or a work Codex model with /model."));
+    for (const loaded of [personal, pinned]) {
+      assert.ok(refusalOf(() => loaded.runtime.route("auto", request("direct"))).endsWith("Fix it and send the prompt again, or choose a model with /model."), loaded.session.id);
+    }
+  });
+
+  test("no work model available: the refusal lists the tier and offers a work Codex model", async (t) => {
+    const loaded = await begin({ dir: agentDir(t, { roster: HERA_V2 }), runtime: new FakeRuntime(), setup: recorded("work") });
+    assert.equal(
+      refusalOf(() => loaded.runtime.route("auto", request("direct"))),
+      `smart-router/auto: no model can take this request (work-medium: ${WORK_TERRA}: not in the catalog). Nothing was sent. See /smart-router status, or choose a work Codex model with /model.`,
+    );
   });
 });

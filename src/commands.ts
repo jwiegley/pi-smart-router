@@ -385,8 +385,27 @@ async function localOff(host: CommandHost, ctx: ExtensionContext): Promise<Answe
   if (answer !== UNPIN) return info("pi-smart-router: the session stays pinned to local models.");
   host.pi.appendEntry(PIN_ENTRY, pinOff(host.now()));
   host.guards.unlock(ctx);
+  const scope = host.scopeOf(ctx);
+  if (scope.kind === "ok" && scope.scope === "personal") {
+    host.guards.showStatus(ctx);
+    return warning(`pi-smart-router: this session is no longer pinned, and the selection stays ${describeModel(ctx.model)}. The next requests may go to cloud models.`);
+  }
+  // Unpinned, the session is the work guard's, which keeps only smart-router/auto and the work
+  // account (a scope that cannot be read included), so the selection goes where its next turn would.
+  const before = describeModel(ctx.model);
+  const allowed = await host.guards.switchToAuto(ctx);
   host.guards.showStatus(ctx);
-  return warning(`pi-smart-router: this session is no longer pinned, and the selection stays ${describeModel(ctx.model)}. The next requests may go to cloud models.`);
+  const selection = describeModel(ctx.model);
+  if (!allowed) {
+    return warning(
+      `pi-smart-router: this session is no longer pinned, and it is in work scope, but its selection ${selection} could not be switched to smart-router/auto, so prompts are refused until you choose smart-router/auto or a work Codex model.`,
+    );
+  }
+  const next =
+    scope.kind === "ok"
+      ? "It is in work scope, so the next requests go to the work account."
+      : `Its scope cannot be read (${scope.reason}), so smart-router/auto refuses its requests until /smart-router scope work or /smart-router scope personal records it again.`;
+  return warning(`pi-smart-router: this session is no longer pinned, and the selection ${selection === before ? `stays ${selection}` : `is ${selection} now`}. ${next}`);
 }
 
 function localStatus(host: CommandHost, ctx: ExtensionContext): Answer {

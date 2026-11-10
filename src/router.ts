@@ -349,22 +349,25 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
    * Why smart-router/auto refuses this session's scope, if it does: a scope that cannot be read, a
    * work-scope session under a version 1 roster, and a scope a version 2 roster has no section for.
    * Local-only requests carry no account, so smart-router/local is never refused for its scope.
-   * prepare() throws the refusal; what pi-cache-optimizer is told and an input's plan follow it.
+   * prepare() throws the refusal; what pi-cache-optimizer is told and an input's plan follow it. Its
+   * way out is worded for the work guard, which holds a work or unreadable scope outside the pin.
    */
   const scopeRefusal = (value: Roster, ctx: ExtensionContext): RouterError | undefined => {
     const scope = scopeOf(ctx);
-    if (scope.kind === "unreadable") return scopeUnreadable("auto", scope.reason);
-    return servesScope(value, scope.scope) ? undefined : scopeUnserved("auto", scope.scope, value.version);
+    if (scope.kind === "unreadable") return scopeUnreadable("auto", scope.reason, !pinOf(ctx).on);
+    if (servesScope(value, scope.scope)) return undefined;
+    return scopeUnserved("auto", scope.scope, value.version, scope.scope === "work" && !pinOf(ctx).on);
   };
 
   const prepare = (id: VirtualId, request: ModelRouteRequest, ctx: ExtensionContext): RouteInput => {
     const { sessionManager } = ctx;
     requireBoundedHistory(id, sessionManager);
     const state = loaded(roster.current());
-    if (state.kind !== "ok") throw rosterRefusal(id, state);
+    const pin = pinOf(ctx);
+    // The work guard holds a session in work scope, or with a scope that cannot be read, outside the pin.
+    if (state.kind !== "ok") throw rosterRefusal(id, state, !pin.on && resolvedScope(ctx) === "work");
     const refused = id === "auto" ? scopeRefusal(state.value, ctx) : undefined;
     if (refused !== undefined) throw refused;
-    const pin = pinOf(ctx);
     return { id, request, rc: contextFor(ctx, state.value, id, pin), pin, record: recordOf(sessionManager.getSessionId()) };
   };
 
