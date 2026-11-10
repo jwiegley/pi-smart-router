@@ -32,9 +32,11 @@ const APP = `${WORK_DIRECTORY}/app`;
 /** A directory Hera's roster does not list until a test adds it, and a directory under it. */
 const ACME = "/Users/johnw/src/acme";
 const ACME_APP = `${ACME}/app`;
-/** The work guard's way out of a lock, as its lock notices end. */
+/** The work guard's way out of a lock, as its lock notices end; under the latch, which refuses /smart-router scope personal, without it. */
 const WORK_WAY_OUT =
   "To get out: /new (the work scope carries over), a branch before any native Codex compaction checkpoint, smart-router/auto or a work Codex model chosen with /model, or /smart-router scope personal.";
+const LATCHED_WAY_OUT =
+  "To get out: /new (the work scope carries over), a branch before any native Codex compaction checkpoint, or smart-router/auto or a work Codex model chosen with /model.";
 /** Hera's catalog with the work account's medium model, so that routing in work scope reaches the account check. */
 const workCatalog = (): FakeCatalog =>
   new FakeCatalog([...heraModels(), model("openai-codex-3/gpt-6.1-terra", { api: "openai-codex-responses", baseUrl: CHATGPT, contextWindow: 272_000, maxTokens: 128_000 })]);
@@ -118,11 +120,19 @@ function readOnly(host: FakeHost): void {
   };
 }
 
-/** Multi-Pass allowedSubs, roughly: whenever a smart-router model is selected, it selects `to` instead. */
-function allowedSubs(host: FakeHost, to: string, active = true): { active: boolean } {
-  const state = { active };
+/** How many times a competitor switches the selection at most, so that a router that keeps reverting fails a test instead of looping forever. */
+const COMPETITOR_SWITCHES = 5;
+
+/**
+ * Multi-Pass allowedSubs, roughly: whenever a smart-router model is selected, it selects `to`
+ * instead, at most COMPETITOR_SWITCHES times, and counts its switches.
+ */
+function allowedSubs(host: FakeHost, to: string, active = true): { active: boolean; switches: number } {
+  const state = { active, switches: 0 };
   host.api.on("model_select", async (event) => {
-    if (state.active && event.model.provider === "smart-router") await host.choose(to);
+    if (!state.active || state.switches >= COMPETITOR_SWITCHES || event.model.provider !== "smart-router") return;
+    state.switches += 1;
+    await host.choose(to);
   });
   return state;
 }
@@ -186,7 +196,7 @@ describe("model_select", () => {
     const signal = fast.session.startRun();
     await fast.host.choose(SOL);
     assert.equal(selection(fast), SOL, "the router stops reverting");
-    assert.deepEqual(guardOf(fast).lock, { since: NOW + 500, model: SOL, cause: "conflict" });
+    assert.deepEqual(guardOf(fast).lock, { since: NOW + 500, model: SOL, cause: "conflict", policy: "pin" });
     assert.equal(signal.aborted, true, "a run in progress is aborted");
     assert.equal(fast.session.statuses.get("smart-router"), "local models: locked");
     const notice = lastNotice(fast);
@@ -255,7 +265,7 @@ describe("while locked", () => {
     const signal = loaded.session.startRun();
     await loaded.host.choose(KIMI);
     assert.equal(signal.aborted, true);
-    assert.deepEqual(guardOf(loaded).lock, { since: NOW, model: KIMI, cause: "conflict" }, "the lock keeps when it began and names the latest model");
+    assert.deepEqual(guardOf(loaded).lock, { since: NOW, model: KIMI, cause: "conflict", policy: "pin" }, "the lock keeps when it began and names the latest model");
     assert.equal(selection(loaded), KIMI, "the router does not revert while locked");
   });
 
@@ -583,7 +593,7 @@ describe("work guard", () => {
     const signal = fast.session.startRun();
     await fast.host.choose(SOL);
     assert.equal(selection(fast), SOL, "the router stops reverting");
-    assert.deepEqual(guardOf(fast).lock, { since: NOW + 500, model: SOL, cause: "conflict" });
+    assert.deepEqual(guardOf(fast).lock, { since: NOW + 500, model: SOL, cause: "conflict", policy: "work" });
     assert.equal(signal.aborted, true, "a run in progress is aborted");
     assert.equal(fast.session.statuses.get("smart-router"), undefined, "a work lock has no status item");
     assert.deepEqual(lastNotice(fast), {
@@ -597,6 +607,7 @@ describe("work guard", () => {
     const competitor = allowedSubs(loaded.host, SOL);
     await loaded.host.choose(KIMI);
     competitor.active = false;
+    assert.equal(competitor.switches, 1, "the competitor switched once, and the router locked instead of reverting again");
     assert.equal(guardOf(loaded).lock?.model, SOL, "the competitor won the revert, so the session is locked");
     assert.deepEqual(await loaded.host.emit("input", { text: "hello", source: "interactive" }), [{ action: "handled" }]);
     assert.deepEqual(lastNotice(loaded), { type: "warning", message: `pi-smart-router: this session is in work scope and locked, so the prompt was not sent. ${WORK_WAY_OUT}` });
@@ -628,7 +639,7 @@ describe("work guard", () => {
     const competitor = allowedSubs(chosen.host, SOL);
     await chosen.host.choose(KIMI);
     competitor.active = false;
-    assert.ok(guardOf(chosen).lock !== undefined);
+    assert.deepEqual([competitor.switches, guardOf(chosen).lock?.policy], [1, "work"]);
     await chosen.host.choose(WORK_SOL);
     assert.deepEqual([selection(chosen), guardOf(chosen).lock], [WORK_SOL, undefined]);
     assert.deepEqual(lastNotice(chosen), { type: "info", message: "pi-smart-router: the selection stayed within work scope, so the session is no longer locked." });
@@ -636,11 +647,62 @@ describe("work guard", () => {
     const other = allowedSubs(held.host, SOL);
     await held.host.choose(KIMI);
     other.active = false;
-    assert.ok(guardOf(held).lock !== undefined);
+    assert.deepEqual([other.switches, guardOf(held).lock?.policy], [1, "work"]);
     held.session.force(AUTO);
     const signal = held.session.startRun();
     await held.host.emit("turn_start", { turnIndex: 0, timestamp: NOW });
     assert.deepEqual([signal.aborted, guardOf(held).lock], [false, undefined]);
+  });
+
+  test("a lock belongs to the policy that set it: the other policy clears it without a word, a work lock once the session is pinned, a pin lock once it is not", async (t) => {
+    const workLocked = await working(t, { id: "work-lock" });
+    const competitor = allowedSubs(workLocked.host, SOL);
+    await workLocked.host.choose(KIMI);
+    competitor.active = false;
+    assert.deepEqual([guardOf(workLocked).lock?.policy, selection(workLocked)], ["work", SOL]);
+    await workLocked.host.command("smart-router", "local on");
+    assert.deepEqual([selection(workLocked), guardOf(workLocked).lock], [LOCAL, undefined], "/smart-router local on switched to smart-router/local, and the pin's guard cleared work scope's lock");
+    assert.equal(workLocked.session.statuses.get("smart-router"), "local models");
+    const said = workLocked.session.notices.length;
+    assert.deepEqual(await workLocked.host.emit("input", { text: "hello", source: "interactive" }), [undefined]);
+    assert.deepEqual(await workLocked.host.emit("session_before_compact", { reason: "manual" }), [undefined]);
+    assert.deepEqual(messages(workLocked).slice(said), [], "nothing is refused, and nothing is said");
+    assert.ok(!messages(workLocked).some((message) => message.includes("no longer locked")), "the lock was cleared without a word");
+
+    // Pinned while its selection is already smart-router/local, nothing is switched, so no guard has
+    // met the work lock yet: the pin's status item still shows no lock of its own.
+    const alreadyLocal = await working(t, { id: "already-local", runtime: new FakeRuntime() });
+    const third = allowedSubs(alreadyLocal.host, SOL);
+    await alreadyLocal.host.choose(KIMI);
+    third.active = false;
+    alreadyLocal.session.force(LOCAL);
+    await alreadyLocal.host.command("smart-router", "local on");
+    assert.deepEqual([guardOf(alreadyLocal).lock?.policy, alreadyLocal.session.statuses.get("smart-router")], ["work", "local models"]);
+    assert.deepEqual(await alreadyLocal.host.emit("input", { text: "hello", source: "interactive" }), [undefined]);
+    assert.equal(guardOf(alreadyLocal).lock, undefined, "the first guard to meet it cleared it");
+
+    const pinLocked = await working(t, {
+      id: "pin-lock",
+      runtime: new FakeRuntime(),
+      select: "local",
+      setup: (session) => {
+        workEntry(session);
+        session.pin(POLICY_V2);
+      },
+    });
+    const other = allowedSubs(pinLocked.host, SOL);
+    await pinLocked.host.choose(KIMI);
+    other.active = false;
+    assert.deepEqual([guardOf(pinLocked).lock?.policy, selection(pinLocked)], ["pin", SOL]);
+    // The pin's entry is turned off without /smart-router local off, which would clear the lock itself.
+    pinLocked.session.unpin();
+    assert.deepEqual(await pinLocked.host.emit("input", { text: "hello", source: "interactive" }), [{ action: "handled" }]);
+    assert.equal(
+      lastNotice(pinLocked)?.message,
+      "pi-smart-router: this session is in work scope, and openai-codex-2/gpt-6.1-sol is outside it, so the prompt was not sent. Choose smart-router/auto or a work Codex model with /model, or run /smart-router scope personal.",
+      "refused for its selection, not as locked",
+    );
+    assert.equal(guardOf(pinLocked).lock, undefined);
   });
 
   test("a competitor's selection restored after the revert is caught at turn_start and at the payload barrier", async (t) => {
@@ -661,6 +723,14 @@ describe("work guard", () => {
       type: "error",
       message: "pi-smart-router: this session is in work scope, and a request to openrouter/moonshotai/kimi-k3.1-pro would go outside it, so the request was emptied and the run stopped.",
     });
+    assert.deepEqual(await loaded.host.emit("cache_warming_decision", { action: "warm" }), [{ action: "stop" }]);
+    // smart-router/local written after turn_start would answer from a LAN model, so it meets the barrier too.
+    loaded.session.endRun();
+    loaded.session.force(LOCAL);
+    const local = loaded.session.startRun();
+    assert.deepEqual(await loaded.host.emit("before_provider_request", { payload: { input: "secret" } }), [null]);
+    assert.equal(local.aborted, true);
+    assert.equal(lastNotice(loaded)?.message, "pi-smart-router: this session is in work scope, and a request to smart-router/local would go outside it, so the request was emptied and the run stopped.");
     assert.deepEqual(await loaded.host.emit("cache_warming_decision", { action: "warm" }), [{ action: "stop" }]);
   });
 
@@ -705,12 +775,11 @@ describe("work guard", () => {
   test("the payload barrier and the warming guard: a physical model outside work scope or another router's model is emptied and stopped", async (t) => {
     const runtime = new FakeRuntime(new FakeCatalog([...heraModels(), model(OTHER_ROUTER, { api: "pi-virtual", baseUrl: "" })]));
     const loaded = await working(t, { runtime });
-    // The router's own two models route only within work scope's rules (smart-router/local to the
-    // LAN, which no account holds), so their requests pass; the turn_start guard still switches
-    // smart-router/local as a selection.
+    // Work scope trusts exactly the selections it allows: smart-router/local, written after
+    // turn_start, would answer from a LAN model, so its request is emptied too.
     const cases: Array<[string, unknown, unknown]> = [
       [AUTO, undefined, undefined],
-      [LOCAL, undefined, undefined],
+      [LOCAL, null, { action: "stop" }],
       [WORK_SOL, undefined, undefined],
       [SOL, null, { action: "stop" }],
       [NATIVE_SOL, null, { action: "stop" }],
@@ -805,6 +874,29 @@ describe("work guard", () => {
     assert.deepEqual(lastNotice(loaded), {
       type: "error",
       message: `pi-smart-router: this session is in work scope, and its restored selection openai-codex-2/gpt-6.1-sol is outside work scope, and smart-router/auto could not be selected, ${LOCKED_EFFECTS} ${WORK_WAY_OUT}`,
+    });
+  });
+
+  test("under the latch, which refuses /smart-router scope personal, the ways out leave it out", async (t) => {
+    await withScope("work", async () => {
+      const loaded = await start({ dir: agentDir(t, { roster: HERA_V2 }), now: () => NOW });
+      loaded.session.force(KIMI);
+      assert.deepEqual(await loaded.host.emit("input", { text: "fix the build", source: "interactive" }), [{ action: "handled" }]);
+      assert.equal(
+        lastNotice(loaded)?.message,
+        "pi-smart-router: this session is in work scope, and openrouter/moonshotai/kimi-k3.1-pro is outside it, so the prompt was not sent. Choose smart-router/auto or a work Codex model with /model.",
+      );
+      loaded.session.force(AUTO);
+      const competitor = allowedSubs(loaded.host, SOL);
+      await loaded.host.choose(KIMI);
+      competitor.active = false;
+      assert.equal(lastNotice(loaded)?.message, `pi-smart-router: this session is in work scope, and something keeps switching it to openai-codex-2/gpt-6.1-sol, ${LOCKED_EFFECTS} ${CAUSES} ${LATCHED_WAY_OUT}`);
+      assert.deepEqual(await loaded.host.emit("input", { text: "fix the build", source: "interactive" }), [{ action: "handled" }]);
+      assert.equal(lastNotice(loaded)?.message, `pi-smart-router: this session is in work scope and locked, so the prompt was not sent. ${LATCHED_WAY_OUT}`);
+      const signal = loaded.session.startRun();
+      await loaded.host.emit("turn_start", { turnIndex: 0, timestamp: NOW });
+      assert.deepEqual([signal.aborted, lastNotice(loaded)?.message], [true, `pi-smart-router: this session is in work scope and locked, so the run was stopped before anything was sent. ${LATCHED_WAY_OUT}`]);
+      assert.ok(!messages(loaded).some((message) => message.includes("scope personal")));
     });
   });
 

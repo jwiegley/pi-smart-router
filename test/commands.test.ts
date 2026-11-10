@@ -96,7 +96,7 @@ describe("status", () => {
     await loaded.host.command("smart-router", "local on");
     const record = loaded.router?.record("session-1");
     assert.ok(record !== undefined);
-    record.guard.lock = { since: NOW, model: KIMI, cause: "conflict" };
+    record.guard.lock = { since: NOW, model: KIMI, cause: "conflict", policy: "pin" };
     const { message } = await answer(loaded, "status");
     const lines = message.split("\n");
     assert.ok(lines.includes(`Pin: on since ${AT}, with models ${GLM}; providers omlx-hera; hosts hera.lan`), message);

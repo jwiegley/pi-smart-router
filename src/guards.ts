@@ -26,15 +26,18 @@
 //                           switch the model, which model_select and turn_start then meet)
 //   session_before_compact  compaction is cancelled; summaries pass no payload hook, so this is
 //   session_before_tree     their only barrier (tree navigation only when it summarizes)
-//   before_provider_request the payload becomes null and the run is aborted, for a physical model
-//                           outside the policy or another router's model, or while locked; later
-//                           handlers see only the null
+//   before_provider_request the payload becomes null and the run is aborted, for a selection whose
+//                           requests the policy does not trust, or while locked; later handlers see
+//                           only the null. The pin trusts both of the router's own models; work scope
+//                           trusts exactly what it allows, so not smart-router/local
 //   cache_warming_decision  warming stops, under the same condition
 //
 // The lock holds until an allowed selection holds through a model_select or a turn_start, or until
-// John unpins. A lock acts only while a policy guards the session, so it does nothing in a session
-// moved to personal scope. The guards block no tools: they guard the model only (John's decision
-// Q7). Each policy's texts are in its own words.
+// John unpins. A lock belongs to the policy that set it: the other policy's guards treat it as absent
+// and clear it without a word, which is safe both ways, since the pin is narrower than work scope
+// and unpinning clears every lock anyway. A lock acts only while a policy guards the session, so it
+// does nothing in a session moved to personal scope. The guards block no tools: they guard the
+// model only (John's decision Q7). Each policy's texts are in its own words.
 //
 // Pi catches handler errors and carries on, so each guard catches its own and denies. A session
 // known to be unguarded runs no guard.
@@ -65,6 +68,8 @@ export interface Lock {
   readonly model: string;
   /** `conflict`: something keeps switching away; `restore`: a restored selection could not be switched. */
   readonly cause: "conflict" | "restore";
+  /** The policy that set the lock; the other policy's guards treat it as absent. */
+  readonly policy: "pin" | "work";
 }
 
 /** A session's guard state, kept with its other records in the owning router instance. */
@@ -114,8 +119,14 @@ export function requestAllowed(model: Selection | undefined, pin: Pin): boolean 
   return model.api !== VIRTUAL_API && checkLocal(model, pin.policy, false).ok;
 }
 
-/** The policy that guards a session: the pin's while pinned, else work scope's, which asks the router whether a provider is the work account. */
-type Policy = { readonly kind: "pin"; readonly pin: Pin } | { readonly kind: "work"; readonly workAccount: (provider: string) => boolean };
+/**
+ * The policy that guards a session: the pin's while pinned, else work scope's, which asks the router
+ * whether a provider is the work account, and knows whether the latch set the scope, under which
+ * /smart-router scope personal is refused.
+ */
+type Policy =
+  | { readonly kind: "pin"; readonly pin: Pin }
+  | { readonly kind: "work"; readonly workAccount: (provider: string) => boolean; readonly latched: boolean };
 
 /** Whether a selection may stay under a policy: the pin's rule, or work scope's: smart-router/auto, or a physical model of the work account. */
 function allows(policy: Policy, model: Selection | undefined): boolean {
@@ -127,15 +138,12 @@ function allows(policy: Policy, model: Selection | undefined): boolean {
 
 /**
  * Whether a provider request made under this selection may carry the conversation, under a policy.
- * In work scope too, both of the router's own models route only inside the policy (assertSafe in
- * src/route.ts; smart-router/local only to LAN models, which hold no account), so their requests
- * are trusted; another router's model is not.
+ * The pin trusts both of the router's own models, which route only inside its policy
+ * (requestAllowed). Work scope trusts exactly the selections it allows: smart-router/local, which it
+ * does not allow, would answer from a LAN model, and another router's model is not trusted either.
  */
 function trusts(policy: Policy, model: Selection | undefined): boolean {
-  if (policy.kind === "pin") return requestAllowed(model, policy.pin);
-  if (model === undefined) return false;
-  if (isRouterModel(model)) return true;
-  return model.api !== VIRTUAL_API && policy.workAccount(model.provider);
+  return policy.kind === "pin" ? requestAllowed(model, policy.pin) : allows(policy, model);
 }
 
 export interface GuardOptions {
@@ -180,35 +188,44 @@ const STOP: CacheWarmingDecisionEventResult = Object.freeze({ action: "stop" });
 const WAY_OUT =
   "To get out: /new (the pin carries over), a branch before any native Codex compaction checkpoint, smart-router/local chosen with /model, or /smart-router local off.";
 
+/** What a lock does, as both policies' lock notices say it. */
+const LOCKED = "so it is locked: prompts are refused, runs are stopped before anything is sent, compaction is cancelled, and provider requests are emptied.";
+
+/** The usual causes of a conflict lock, under either policy. */
+const CONFLICT_CAUSES =
+  "The usual causes are Multi-Pass allowedSubs in this project (list smart-router there), or a branch that holds a native Codex compaction checkpoint, which codex-compat keeps on openai-codex.";
+
+/** A lock notice: the session's policy and why the lock was set, what the lock does, a conflict's usual causes, and the way out. */
+function lockText(session: string, why: string, lock: Lock, wayOut: string): string {
+  const causes = lock.cause === "conflict" ? ` ${CONFLICT_CAUSES}` : "";
+  return `${session}, and ${why}, ${LOCKED}${causes} ${wayOut}`;
+}
+
 function lockNotice(lock: Lock): string {
   const why =
     lock.cause === "restore"
       ? `its restored selection ${lock.model} is not local, and smart-router/local could not be selected`
       : `something keeps switching it to ${lock.model}`;
-  const causes =
-    lock.cause === "conflict"
-      ? " The usual causes are Multi-Pass allowedSubs in this project (list smart-router there), or a branch that holds a native Codex compaction checkpoint, which codex-compat keeps on openai-codex."
-      : "";
-  return `pi-smart-router: this session is pinned to local models, and ${why}, so it is locked: prompts are refused, runs are stopped before anything is sent, compaction is cancelled, and provider requests are emptied.${causes} ${WAY_OUT}`;
+  return lockText("pi-smart-router: this session is pinned to local models", why, lock, WAY_OUT);
 }
 
 /** How each of work scope's texts begins. */
 const IN_WORK = "pi-smart-router: this session is in work scope";
 
-const WORK_WAY_OUT =
-  "To get out: /new (the work scope carries over), a branch before any native Codex compaction checkpoint, smart-router/auto or a work Codex model chosen with /model, or /smart-router scope personal.";
+/** Work scope's way out of a lock. Under the latch, /smart-router scope personal is refused, so it is not offered. */
+function workWayOut(latched: boolean): string {
+  return latched
+    ? "To get out: /new (the work scope carries over), a branch before any native Codex compaction checkpoint, or smart-router/auto or a work Codex model chosen with /model."
+    : "To get out: /new (the work scope carries over), a branch before any native Codex compaction checkpoint, smart-router/auto or a work Codex model chosen with /model, or /smart-router scope personal.";
+}
 
 /** lockNotice in work scope's words. */
-function workLockNotice(lock: Lock): string {
+function workLockNotice(lock: Lock, latched: boolean): string {
   const why =
     lock.cause === "restore"
       ? `its restored selection ${lock.model} is outside work scope, and smart-router/auto could not be selected`
       : `something keeps switching it to ${lock.model}`;
-  const causes =
-    lock.cause === "conflict"
-      ? " The usual causes are Multi-Pass allowedSubs in this project (list smart-router there), or a branch that holds a native Codex compaction checkpoint, which codex-compat keeps on openai-codex."
-      : "";
-  return `${IN_WORK}, and ${why}, so it is locked: prompts are refused, runs are stopped before anything is sent, compaction is cancelled, and provider requests are emptied.${causes} ${WORK_WAY_OUT}`;
+  return lockText(IN_WORK, why, lock, workWayOut(latched));
 }
 
 export function createGuards(options: GuardOptions): Guards {
@@ -232,7 +249,8 @@ export function createGuards(options: GuardOptions): Guards {
 
   const showStatus = (ctx: ExtensionContext): void => {
     try {
-      const text = !pinOf(ctx).on ? undefined : stateOf(ctx).lock !== undefined ? STATUS_LOCKED : STATUS_PINNED;
+      // Only a lock the pin set is the pin's; a lock work scope set does not show here.
+      const text = !pinOf(ctx).on ? undefined : stateOf(ctx).lock?.policy === "pin" ? STATUS_LOCKED : STATUS_PINNED;
       ctx.ui.setStatus(STATUS_KEY, text);
     } catch {
       // The status item is a courtesy.
@@ -244,7 +262,18 @@ export function createGuards(options: GuardOptions): Guards {
     const pin = pinOf(ctx);
     if (pin.on) return { kind: "pin", pin };
     const scope = scopeOf(ctx);
-    return scope.kind === "ok" && scope.scope === "personal" ? undefined : { kind: "work", workAccount };
+    if (scope.kind === "ok" && scope.scope === "personal") return undefined;
+    return { kind: "work", workAccount, latched: scope.kind === "ok" && scope.source === "latch" };
+  };
+
+  /** The session's guard state under a policy: a lock the other policy set is no lock of this one's, so it is cleared, without a word. */
+  const stateUnder = (ctx: ExtensionContext, policy: Policy): GuardState => {
+    const state = stateOf(ctx);
+    if (state.lock !== undefined && state.lock.policy !== policy.kind) {
+      state.lock = undefined;
+      showStatus(ctx);
+    }
+    return state;
   };
 
   /** Run a guard under the session's policy. Unguarded, it allows; on an internal error it denies. */
@@ -252,7 +281,7 @@ export function createGuards(options: GuardOptions): Guards {
     let policy: Policy | undefined;
     try {
       policy = policyOf(ctx);
-      return policy === undefined ? undefined : run(policy, stateOf(ctx));
+      return policy === undefined ? undefined : run(policy, stateUnder(ctx, policy));
     } catch (error) {
       notify(ctx, `pi-smart-router: the ${name} guard failed (${firstLine(error)}), so it denied.`, "error");
       return deny(policy);
@@ -263,7 +292,7 @@ export function createGuards(options: GuardOptions): Guards {
     let policy: Policy | undefined;
     try {
       policy = policyOf(ctx);
-      if (policy !== undefined) await run(policy, stateOf(ctx));
+      if (policy !== undefined) await run(policy, stateUnder(ctx, policy));
     } catch (error) {
       notify(ctx, `pi-smart-router: the ${name} guard failed (${firstLine(error)}), so it denied.`, "error");
       deny(policy);
@@ -292,10 +321,15 @@ export function createGuards(options: GuardOptions): Guards {
     }
   };
 
-  /** Lock the session, and say so in the words of the policy that locked it (the pin's when it could not be read). */
+  /** Lock the session for the policy that guards it, and say so in that policy's words; the pin's when the policy could not be read. */
   const lock = (ctx: ExtensionContext, state: GuardState, policy: Policy | undefined, model: Selection | undefined, cause: Lock["cause"]): void => {
     const fresh = state.lock === undefined;
-    state.lock = { since: state.lock?.since ?? now(), model: describeModel(model), cause: state.lock?.cause ?? cause };
+    state.lock = {
+      since: state.lock?.since ?? now(),
+      model: describeModel(model),
+      cause: state.lock?.cause ?? cause,
+      policy: state.lock?.policy ?? policy?.kind ?? "pin",
+    };
     try {
       if (!ctx.isIdle()) ctx.abort();
     } catch {
@@ -303,7 +337,7 @@ export function createGuards(options: GuardOptions): Guards {
     }
     if (fresh) {
       showStatus(ctx);
-      notify(ctx, policy?.kind === "work" ? workLockNotice(state.lock) : lockNotice(state.lock), "error");
+      notify(ctx, policy?.kind === "work" ? workLockNotice(state.lock, policy.latched) : lockNotice(state.lock), "error");
     }
   };
 
@@ -346,8 +380,8 @@ export function createGuards(options: GuardOptions): Guards {
             notify(
               ctx,
               state.lock !== undefined
-                ? `${IN_WORK} and locked, so the prompt was not sent. ${WORK_WAY_OUT}`
-                : `${IN_WORK}, and ${describeModel(ctx.model)} is outside it, so the prompt was not sent. Choose smart-router/auto or a work Codex model with /model, or run /smart-router scope personal.`,
+                ? `${IN_WORK} and locked, so the prompt was not sent. ${workWayOut(policy.latched)}`
+                : `${IN_WORK}, and ${describeModel(ctx.model)} is outside it, so the prompt was not sent. Choose smart-router/auto or a work Codex model with /model${policy.latched ? "" : ", or run /smart-router scope personal"}.`,
               "warning",
             );
           } else {
@@ -392,7 +426,7 @@ export function createGuards(options: GuardOptions): Guards {
             notify(
               ctx,
               policy.kind === "work"
-                ? `${IN_WORK} and locked, so the run was stopped before anything was sent. ${WORK_WAY_OUT}`
+                ? `${IN_WORK} and locked, so the run was stopped before anything was sent. ${workWayOut(policy.latched)}`
                 : `pi-smart-router: this session is pinned to local models and locked, so the run was stopped before anything was sent. ${WAY_OUT}`,
               "error",
             );
