@@ -649,6 +649,14 @@ git commit -S -m "Add the four-level Jev design and its implementation plan"
 **Controller rulings (pre-flight, binding; they amend this task):**
 - When the scope is unreadable, `contextFor` resolves in `work` scope, the narrower one, while
   `prepare()` refuses `smart-router/auto` as above.
+- (Ruling after Task 4) Back `prepare()`'s refusal for a version 1 roster in work scope with a
+  second guard. In `src/route.ts`, the scope check that `assertSafe` uses treats every choice that is
+  not local-only as outside the scope when the roster is version 1 and the scope is work.
+  - Test that with a version 1 roster in work scope, `smart-router/auto` refuses, sending nothing, on
+    every path that can reach a model: the owned run, a direct request without a plan, and a foreign
+    request.
+  - Test that `smart-router/local` still routes to the LAN model, because local-only requests carry no
+    account and stay on the LAN.
 
 ### Task 6: The version 2 planner
 
