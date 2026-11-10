@@ -793,7 +793,7 @@ git commit -S -m "Add the four-level Jev design and its implementation plan"
      reuses `lastInput.level` and makes no Jev call.
   7. **Plan.** After any wait, rebuild `rc`. Plan only if this input's token is still the latest.
      Set `pendingLevel` and `lastInput`. When `plan.level.steppedUp`, notify
-     `pi-smart-router: no ${ASKED} model can take this run, so it goes to ${TIER} (${modelId}).`
+     `pi-smart-router: no ${START} model can take this run, so it goes to ${TIER} (${modelId}).`, where START is `plan.level.start` (Task 6's ruling)
   8. **Return** the transform for a tagged input, otherwise `undefined`. Everything after step 1
      sits in `try`/`catch`, so the transform is always returned.
 
@@ -828,6 +828,22 @@ git commit -S -m "Add the four-level Jev design and its implementation plan"
     `classify` settles after `/new`, the new session's `pendingLevel` is untouched.
   - (b) An untagged input whose `classify` is still pending when `/new` arrives resolves without
     throwing and plans nothing, and the new session's `pendingLevel` stays undefined.
+- (Rulings after Tasks 2, 5 and 6, all binding)
+  - Pass `ctx.modelRegistry` to `askJev` as the `ClassifierRegistry`, and confirm that it type-checks
+    with no cast. Build the context from entries that do not include the current message, using the
+    text with the tag removed and the validated caps of the roster's classifier.
+  - Keep `redact()` inside the handler's `try`/`catch`. It can throw a RangeError on single runs of
+    millions of characters, and the handler must still return the transform.
+  - Keep Task 5's directory-recording call right after the roster refresh in the input handler.
+    Also call it from an own-session hook, `before_agent_start` or `turn_start` and never
+    `prepare()`, so that runs without an `input` event record it too: custom-message runs and goal-x
+    continuations.
+  - Word the step-ups of version 2 as step-ups, not as fallbacks, in `describeAttempt`
+    (`src/errors.ts`) and in refusal texts.
+  - Give `activeRoute` (`src/router.ts`) and `takePlan` (`src/route.ts`) one shared predicate for
+    whether a plan applies to the session as it is now: the scope, the roster version and the
+    local-only exception. `activeRoute` also reports no pick when `prepare()` would refuse
+    `smart-router/auto` for the scope.
 
 ### Task 8: The work selection guard
 
