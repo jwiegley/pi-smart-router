@@ -13,7 +13,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { Api, ClassifierResult, Model } from "@earendil-works/pi-ai";
 import type { InputEventResult } from "@earendil-works/pi-coding-agent";
 
-import { ENV_PIN, ENV_SCOPE, LEVEL_ENTRY, LEVEL_KEY, SCOPE_ENTRY, STATUS_KEY } from "../src/constants.ts";
+import { ENV_PIN, ENV_SCOPE, LEVEL_ENTRY, LEVEL_KEY, PIN_ENTRY, SCOPE_ENTRY, STATUS_KEY } from "../src/constants.ts";
 import { JEV_INSTRUCTIONS } from "../src/jev.ts";
 import { policyFromRoster } from "../src/local.ts";
 import { createRouter } from "../src/router.ts";
@@ -441,6 +441,29 @@ describe("an untagged message", () => {
     }
     assert.equal(recordOf(none)?.plan?.level?.source, "keyword");
     assert.equal(recordOf(none)?.plan?.level?.jev, undefined, "a roster without a classifier asks nothing, so nothing failed");
+  });
+
+  test("asks nothing in a pinned session even when the pin's guard missed the pin: the input reads it again", async (t) => {
+    // The pin's input guard refuses a pinned session's prompt on smart-router/auto first. To show
+    // the router checks the pin again before Jev, its first pin read, the guard's, misses the entry.
+    const loaded = await hera(t);
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    loaded.session.pin(policyFromRoster(rosterFixtureV2("roster-hera-v2.json")));
+    const manager = loaded.session.ctx.sessionManager as unknown as { getLatestCustomEntry: (type: string, options?: unknown) => unknown };
+    const read = manager.getLatestCustomEntry;
+    let missed = false;
+    manager.getLatestCustomEntry = (type, options) => {
+      if (type !== PIN_ENTRY || missed) return read(type, options);
+      missed = true;
+      return undefined;
+    };
+    for (const text of ["go ahead", "go ahead #high"]) {
+      missed = false;
+      assert.notDeepEqual(await say(loaded, text), [{ action: "handled" }], `${text}: the guard missed the pin and let the prompt through`);
+      assert.ok(missed, text);
+      assert.equal(calls(loaded), 0, `${text}: Jev was asked`);
+      assert.equal(recordOf(loaded)?.plan?.localOnly, true, `${text}: the run is planned under the pin`);
+    }
   });
 });
 
