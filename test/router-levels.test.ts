@@ -754,7 +754,7 @@ describe("a message a later extension's input handler holds, handles or changes"
     await x;
   });
 
-  test("a message a later extension rewrites into an earlier message's text keeps its plan: the texts and the count start again with each prompt's run, and steers are not counted", async (t) => {
+  test("a message a later extension rewrites into an earlier message's text keeps its plan: a prompt's run forgets its own text, the count starts again with it, and steers are not counted", async (t) => {
     const loaded = await hera(t);
     loaded.runtime.answer = async () => jevAnswer(LOW);
     const later = laterExtension(loaded);
@@ -858,6 +858,153 @@ describe("a message a later extension's input handler holds, handles or changes"
       // Version 1 has no tags, so its unplanned run says nothing.
       assert.deepEqual(lastNotice(loaded), version === 2 ? { type: "warning", message: UNMATCHED } : { type: "info", message: "pong" }, `version ${version}`);
     }
+  });
+});
+
+describe("a message held through another message's whole run", () => {
+  /** A steer held by a later handler through the run it was typed in and the whole next run (E1-E4). */
+  async function heldSteer(loaded: Loaded, later: ReturnType<typeof laterExtension>) {
+    await say(loaded, "go ahead");
+    const first = await runPrompt(loaded, "go ahead");
+    const holdS = deferred<void>();
+    later.holds.set("fix the failing test", holdS.promise);
+    const s = say(loaded, "fix the failing test", { streamingBehavior: "steer" });
+    await settled();
+    await finish(loaded, first);
+    // X1: the next message, typed idle and not held, runs to its end while S is still held.
+    await say(loaded, "rename foo to bar");
+    const second = await runPrompt(loaded, "rename foo to bar");
+    await finish(loaded, second);
+    return { s, release: () => holdS.resolve(), second };
+  }
+
+  test("a steer's own run takes no plan of a tagged message that planned after the next message's whole run (E1)", async (t) => {
+    const loaded = await hera(t);
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    const later = laterExtension(loaded);
+    const { s, release, second } = await heldSteer(loaded, later);
+    const holdX = deferred<void>();
+    later.holds.set("design the new storage layer", holdX.promise);
+    const x = say(loaded, "design the new storage layer #super");
+    await settled();
+    assert.equal(recordOf(loaded)?.plan?.level?.tier, "super", "X2 planned");
+    release();
+    await s;
+    assert.equal(await runPrompt(loaded, "fix the failing test"), second, "the last responder, not X2's SUPER");
+    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel], ["stick:last", undefined, undefined]);
+    assert.deepEqual(lastNotice(loaded), { type: "warning", message: UNMATCHED });
+    holdX.resolve();
+    await x;
+  });
+
+  test("the same when a later extension handles the tagged message, which never runs (E2)", async (t) => {
+    const loaded = await hera(t);
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    const later = laterExtension(loaded);
+    const { s, release, second } = await heldSteer(loaded, later);
+    later.handled.add("design the new storage layer");
+    assert.deepEqual(await say(loaded, "design the new storage layer #super"), [{ action: "transform", text: "design the new storage layer" }, { action: "handled" }]);
+    release();
+    await s;
+    assert.equal(await runPrompt(loaded, "fix the failing test"), second);
+    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel], ["stick:last", undefined, undefined]);
+  });
+
+  test("the same with an untagged message whose Jev answer is SUPER: the steer's run takes neither its plan nor its answer (E3)", async (t) => {
+    const loaded = await hera(t);
+    // "go ahead" and "rename foo to bar" are answered LOW, the held X2 SUPER.
+    const answers = [LOW, LOW, SUPER];
+    loaded.runtime.answer = async () => jevAnswer(answers.shift() ?? MEDIUM);
+    const later = laterExtension(loaded);
+    const { s, release, second } = await heldSteer(loaded, later);
+    const holdX = deferred<void>();
+    later.holds.set("plan the migration to the new store", holdX.promise);
+    const x = say(loaded, "plan the migration to the new store");
+    await settled();
+    assert.equal(recordOf(loaded)?.plan?.level?.jev?.kind, "answer", "X2 planned by Jev");
+    release();
+    await s;
+    assert.equal(await runPrompt(loaded, "fix the failing test"), second);
+    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel], ["stick:last", undefined, undefined]);
+    holdX.resolve();
+    await x;
+  });
+
+  test("the same under version 1: the steer's run takes no planning plan (E4)", async (t) => {
+    const loaded = await hera(t, { roster: fixture("roster-hera.json") });
+    const later = laterExtension(loaded);
+    const { s, release, second } = await heldSteer(loaded, later);
+    const holdX = deferred<void>();
+    later.holds.set("plan the migration to the new store", holdX.promise);
+    const x = say(loaded, "plan the migration to the new store");
+    await settled();
+    assert.equal(recordOf(loaded)?.plan?.code, "signal:planning", "X2 planned");
+    release();
+    await s;
+    assert.equal(await runPrompt(loaded, "fix the failing test"), second);
+    assert.equal(recordOf(loaded)?.history.at(-1)?.code, "stick:last");
+    holdX.resolve();
+    await x;
+  });
+
+  test("an RPC message held through another message's whole run takes no plan of a tagged message Pi's input-transform example then handles (E5c)", async (t) => {
+    const loaded = await hera(t);
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    const later = laterExtension(loaded);
+    inputTransform(loaded);
+    const holdA = deferred<void>();
+    later.holds.set("rename foo to bar", holdA.promise);
+    const a = say(loaded, "rename foo to bar", { source: "rpc" });
+    await settled();
+    // B arrives while A is held (RPC prompts are not awaited one by one), plans, runs and ends.
+    await say(loaded, "go ahead", { source: "rpc" });
+    assert.equal(await runPrompt(loaded, "go ahead"), LUNA);
+    await finish(loaded, KIMI);
+    assert.deepEqual(await say(loaded, "ping #high", { source: "rpc" }), [{ action: "transform", text: "ping" }, undefined, { action: "handled" }]);
+    assert.equal(recordOf(loaded)?.plan?.level?.tier, "high", "ping planned before the example handled it");
+    holdA.resolve();
+    await a;
+    assert.equal(await runPrompt(loaded, "rename foo to bar"), KIMI, "the last responder, not ping's HIGH");
+    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel], ["stick:last", undefined, undefined]);
+    assert.deepEqual(lastNotice(loaded), { type: "warning", message: UNMATCHED });
+  });
+
+  test("remembers the 64 most recent messages whose runs have not started, forgetting the oldest first", async (t) => {
+    const loaded = await hera(t);
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    const later = laterExtension(loaded);
+    /** A held steer's own run, after a tagged message planned: unplanned while the steer is remembered. */
+    const strayRun = async (text: string, release: () => void, held: Promise<unknown[]>, name: string): Promise<void> => {
+      await say(loaded, `${name} #super`);
+      release();
+      await held;
+      assert.equal(await runPrompt(loaded, text), LUNA, `${text} is remembered, so its run takes no plan`);
+      assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level], ["stick:last", undefined], text);
+    };
+    await say(loaded, "go ahead");
+    assert.equal(await runPrompt(loaded, "go ahead"), LUNA);
+    // Seventy steers while the run streams; a later handler holds the last.
+    const hold69 = deferred<void>();
+    later.holds.set("steer 69", hold69.promise);
+    const steers: Array<Promise<unknown[]>> = [];
+    for (let index = 0; index < 70; index += 1) steers.push(say(loaded, `steer ${index}`, { streamingBehavior: "steer" }));
+    await settled();
+    assert.equal(recordOf(loaded)?.remembered.size, 64, "steers 6 to 69: the six oldest are forgotten");
+    await finish(loaded, LUNA);
+    // The newest is kept, not refused for want of room.
+    await strayRun("steer 69", () => hold69.resolve(), Promise.all(steers).then(() => []), "design the new storage layer");
+    // The tagged message forgot "steer 6", and that run forgot "steer 69". During the run, "steer 7",
+    // now the oldest, is typed again and held: it becomes the most recent instead of the next to go,
+    // so "steer 71" forgets "steer 8", and the tagged message after the run forgets "steer 9".
+    const hold7 = deferred<void>();
+    later.holds.set("steer 7", hold7.promise);
+    const again = say(loaded, "steer 7", { streamingBehavior: "steer" });
+    await settled();
+    await say(loaded, "steer 70", { streamingBehavior: "steer" });
+    await say(loaded, "steer 71", { streamingBehavior: "steer" });
+    assert.equal(recordOf(loaded)?.remembered.size, 64);
+    await finish(loaded, LUNA);
+    await strayRun("steer 7", () => hold7.resolve(), again, "design the new cache layer");
   });
 });
 

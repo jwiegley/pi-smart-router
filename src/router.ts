@@ -107,8 +107,11 @@ export interface Session extends SessionRecord {
   planText: string | undefined;
   /** How many idle messages the router passed since the latest prompt's run started. */
   inputsSinceRun: number;
-  /** The texts, without tags, of every message the router passed since the latest prompt's run started, busy or idle. */
-  readonly textsSinceRun: Set<string>;
+  /**
+   * The texts, without tags, of the messages the router passed, busy or idle, whose own runs have not
+   * started: the REMEMBERED most recent, oldest first. A prompt's run forgets only its own text.
+   */
+  readonly remembered: Set<string>;
 }
 
 export interface Router extends OwnerRouter {
@@ -125,6 +128,8 @@ export interface Router extends OwnerRouter {
 const BOTH_DEFAULT: Readonly<Record<VirtualId, Limits>> = Object.freeze({ auto: DEFAULT_LIMITS, local: DEFAULT_LIMITS });
 const UNPINNED: Pin = Object.freeze({ on: false, policy: EMPTY_POLICY });
 const HANDLED: InputEventResult = Object.freeze({ action: "handled" });
+/** How many messages whose runs have not started a session remembers (Session.remembered). */
+const REMEMBERED = 64;
 /** How far back session_start looks for the latest successful response. */
 const SEED_ENTRIES = 16;
 
@@ -170,7 +175,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   const recordOf = (sessionId: string): Session => {
     let record = records.get(sessionId);
     if (record === undefined) {
-      record = { ...newRecord(), guard: newGuardState(), directoryTried: false, plannedToken: 0, planText: undefined, inputsSinceRun: 0, textsSinceRun: new Set() };
+      record = { ...newRecord(), guard: newGuardState(), directoryTried: false, plannedToken: 0, planText: undefined, inputsSinceRun: 0, remembered: new Set() };
       records.set(sessionId, record);
     }
     return record;
@@ -518,23 +523,39 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
    * Pi starts a message's run once the message's input handlers return, whenever that is: two
    * messages that overlap a Jev wait start their runs in either order, and a message a later
    * extension's async input handler holds, even one typed while a run streamed, can start its run
-   * after another message has planned. So a prompt that is the plan's message's text is that
-   * message's run, and a prompt that is the text of another message the router passed since the
-   * latest prompt's run started, busy or idle, is that other message's run and takes no plan.
+   * after other messages have planned and run. So a prompt that is the plan's message's text is that
+   * message's run, and a prompt that is the text of another message the router remembers (passed,
+   * busy or idle, and not yet started) is that other message's run and takes no plan.
    *
    * Pi expands a template or skill after the input handlers, and a later extension can change the
    * text, so a prompt can match no message's text. Such a run is the plan's message's only when that
    * is the one idle message since the latest prompt's run started; with two, it cannot be told whose
-   * and is neither's. A custom message's run is no message's run, so it starts neither the count nor
-   * the texts again. What remains:
+   * and is neither's. A custom message's run is no message's run, so it restarts neither the count
+   * nor what is remembered. What remains:
+   * - identical texts cannot be told apart, so a message's run can take the plan of another message
+   *   with the same text;
    * - a stray message whose own prompt a later handler also expands or changes matches no text, so it
    *   can still take the plan of the one idle message counted;
-   * - after a message a later extension handles, which never runs, the next expanded or changed run
-   *   goes unplanned. A run that drops a tagged plan says so (unmatchedTagNotice); under version 1,
-   *   which has no tags, it goes unplanned without a notice.
+   * - a counted message that never starts its own run (one a later extension handles, an idle RPC
+   *   steer or follow_up, a prompt() that throws) leaves the next expanded or changed run unplanned.
+   *   A run that drops a tagged plan says so (unmatchedTagNotice); under version 1, which has no
+   *   tags, it goes unplanned without a notice;
+   * - a message a later extension rewrites into the text of a steer the router still remembers goes
+   *   unplanned, which is the safe direction.
    */
   const ownsRun = (record: Session, text: string | undefined, prompt: string): boolean =>
-    text !== undefined && (text === prompt || (!record.textsSinceRun.has(prompt) && record.inputsSinceRun === 1));
+    text !== undefined && (text === prompt || (!record.remembered.has(prompt) && record.inputsSinceRun === 1));
+
+  /** Remember a message until its own run starts: the REMEMBERED most recent, the oldest forgotten first. */
+  const remember = (record: Session, text: string): void => {
+    const { remembered } = record;
+    remembered.delete(text);
+    remembered.add(text);
+    for (const oldest of remembered) {
+      if (remembered.size <= REMEMBERED) break;
+      remembered.delete(oldest);
+    }
+  };
 
   // The decision point: a prompt typed while the session is idle plans its run. Input that
   // arrives while a run starts or streams (steering, follow-ups) neither plans nor drops; its tag
@@ -552,8 +573,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     const sessionId = sessionManager.getSessionId();
     const record = recordOf(sessionId);
     // A message typed while a run streams can still start a run of its own, when a later handler
-    // holds it until that run ends: its text tells its run from the message that plans next.
-    record.textsSinceRun.add(text);
+    // holds it until that run ends: its text tells its run from the messages that plan meanwhile.
+    remember(record, text);
     if (!ctx.isIdle()) {
       if (tier !== undefined) notify(ctx, tagIgnoredNotice(tier, "busy"), "warning");
       return;
@@ -761,8 +782,9 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
               if (tagged) notify(ctx, unmatchedTagNotice(), "warning");
             }
             if (record.pendingLevel !== undefined && !ownsRun(record, record.pendingLevel.text, event.prompt)) record.pendingLevel = undefined;
+            // This prompt's message has started its run; the others it remembers have not.
             record.inputsSinceRun = 0;
-            record.textsSinceRun.clear();
+            record.remembered.delete(event.prompt);
           }
         });
         // Every run starts here, so a run without an input (a custom message's, a goal-x
