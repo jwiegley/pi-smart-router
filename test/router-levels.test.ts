@@ -1046,6 +1046,25 @@ describe("a message held through another message's whole run", () => {
     assert.deepEqual(lastNotice(loaded), { type: "warning", message: UNMATCHED });
   });
 
+  test("a run whose prompt is not text takes no plan, and its handler does not fail (F5)", async (t) => {
+    for (const prompt of [undefined, null, 42, { text: "design the new storage layer" }]) {
+      resetSlot();
+      const loaded = await hera(t, { id: `prompt-${typeof prompt}-${String(prompt)}` });
+      loaded.runtime.answer = async () => jevAnswer(LOW);
+      await say(loaded, "design the new storage layer #super");
+      assert.equal(recordOf(loaded)?.plan?.level?.tier, "super", "the tagged message planned");
+      const signal = loaded.session.startRun();
+      await loaded.host.emit("before_agent_start", { messageType: "user", prompt });
+      assert.equal(routed(loaded.runtime.route("auto", request("user", { signal }))), TERRA, `${String(prompt)}: the default level, not the plan's SUPER`);
+      assert.deepEqual(
+        [recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel],
+        ["stick:default", undefined, undefined],
+        String(prompt),
+      );
+      assert.deepEqual(loaded.session.notices, [{ type: "warning", message: UNMATCHED }], `${String(prompt)}: the dropped tag is told, and no handler failed`);
+    }
+  });
+
   test("a held steer typed again keeps its memory: the retyped message's run forgets one of the two, and the steer's own run takes no other plan (F1)", async (t) => {
     const loaded = await hera(t);
     loaded.runtime.answer = async () => jevAnswer(LOW);

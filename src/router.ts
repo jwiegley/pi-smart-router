@@ -942,10 +942,12 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
           const record = recordOf(ctx.sessionManager.getSessionId());
           // A run starts with no answer of its own.
           record.answered = undefined;
-          if (event.messageType === "custom") {
-            // A custom message's run has no input: what an earlier input planned or kept is not its.
-            // Each run's end drops the plan, so one still set is a level no run took, or whose run
-            // failed to start; a tagged one is lost, and this run says so as a prompt's run does.
+          if (event.messageType === "custom" || typeof event.prompt !== "string") {
+            // A custom message's run has no input, and a prompt that is not text matches none: what
+            // an earlier input planned or kept is not its, and neither the count nor what is
+            // remembered starts again. Each run's end drops the plan, so one still set is a level no
+            // run took, or whose run failed to start; a tagged one is lost, and this run says so as a
+            // prompt's run does.
             const tagged = record.plan?.level?.source === "tag";
             record.plan = undefined;
             record.planDigest = undefined;
