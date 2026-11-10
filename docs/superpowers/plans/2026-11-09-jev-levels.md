@@ -1081,6 +1081,23 @@ git commit -S -m "Add the four-level Jev design and its implementation plan"
 - [ ] **Step 5: Commit.**
   `git add src/router.ts test/support/host.ts test/behaviour.test.ts && git commit -S -m "Declare limits across scopes; add behaviour scenarios for tiers, scope and records"`
 
+**Controller rulings (after Tasks 5, 7 and 9, binding; they amend this task):**
+- The scenarios use version 2 rosters wherever a scenario exercises levels, scope, records or the
+  footer. The existing scenarios use version 1 rosters, so records, corrections and the footer have
+  never run on Pi's real runtime.
+- L5 adds a running session whose roster reload adds its work directory. The session moves to work
+  scope, and the `directory` entry is recorded once, at the next idle input, on the real host.
+- L7 checks on the real host:
+  - exactly one `smart-router.level` record per routed run, with no prompt text and no digest in it;
+  - a `/smart-router was` correction after the run settles, and one sent while a run streams, which
+    corrects the run in flight;
+  - that `was` reads the active branch;
+  - that the footer item uses only `smart-router-level`.
+- `computeLimits` for version 2 replaces Task 5's interim, in which the limits followed the last
+  session to start. The limits are the smallest window among the available candidates of every
+  level role in both scopes, plus the local role, and they stay per process.
+
+
 ### Task 11: Docs, scan hardening and release
 
 **Files:**
