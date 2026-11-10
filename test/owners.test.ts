@@ -167,7 +167,7 @@ describe("the scope switch", () => {
       const personal = (session: Loaded["session"]): void => session.appendCustom(SCOPE_ENTRY, scopeEntry("personal", "command", NOW));
       const second = await start({ dir: agentDir(t), id: "second", runtime: new FakeRuntime(), setup: personal });
       assert.equal(scopeLatched(processSlot()), true);
-      assert.deepEqual(readScope(second.session.ctx.sessionManager, scopeLatched(processSlot())), { kind: "ok", scope: "work", source: "latch" });
+      assert.deepEqual(readScope(second.session.ctx.sessionManager, scopeLatched(processSlot()), undefined), { kind: "ok", scope: "work", source: "latch" });
       // Hera's roster is version 1, which serves no work scope: auto refuses, and local still routes.
       assert.throws(() => second.runtime.route("auto", request("direct", { previous: previous(second.runtime, KIMI) })), { message: scopeUnserved("auto", "work", 1).message });
       assert.equal(routed(second.runtime.route("local", request("direct"))), GLM);

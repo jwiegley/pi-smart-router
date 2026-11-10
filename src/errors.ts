@@ -137,9 +137,9 @@ export function directoryNotice(cwd: string, directory: string): string {
   return `pi-smart-router: this session is in work scope because ${cwd} is under ${directory}.`;
 }
 
-/** Shown when the work scope the work directories call for could not be recorded. */
+/** Shown when the work scope the work directories give a session could not be recorded in it. */
 export function directoryFailedNotice(cwd: string, directory: string, reason: string): string {
-  return `pi-smart-router: this session belongs in work scope because ${cwd} is under ${directory}, but its scope could not be recorded (${reason}). Run /smart-router scope work before you send anything.`;
+  return `pi-smart-router: this session is in work scope because ${cwd} is under ${directory}, but its scope could not be recorded (${reason}), so it stays in work scope only while the roster lists that directory.`;
 }
 
 /** Shown when a fork or /new carried the scope over. */

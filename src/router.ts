@@ -59,8 +59,8 @@ import { boundedHistory, newRecord, predict, requireBoundedHistory, routeOther, 
 import type { BoundedHistory, Pin, RouteInput, SessionRecord } from "./route.ts";
 import { autoRoles, parseRef, rosterFile, scopeSection } from "./roster.ts";
 import type { Roster } from "./roster.ts";
-import { readScope, scopeEntry, underDirectory } from "./scope.ts";
-import type { ScopeEntryData, ScopeState } from "./scope.ts";
+import { readScope, scopeEntry, workDirectoryOf } from "./scope.ts";
+import type { ScopeEntryData, ScopeState, WorkDirectories } from "./scope.ts";
 
 export interface Limits {
   readonly contextWindow: number;
@@ -81,9 +81,11 @@ export interface RouterOptions {
   readonly fs?: FileSystem | undefined;
 }
 
-/** What a router instance keeps per session: the route records and the pin's guard state. */
+/** What a router instance keeps per session: the route records, the pin's guard state, and whether it tried to record the work directories' scope. */
 export interface Session extends SessionRecord {
   readonly guard: GuardState;
+  /** Whether this instance has tried to record the scope the work directories gave the session. It tries once. */
+  directoryTried: boolean;
 }
 
 export interface Router extends OwnerRouter {
@@ -142,7 +144,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   const recordOf = (sessionId: string): Session => {
     let record = records.get(sessionId);
     if (record === undefined) {
-      record = { ...newRecord(), guard: newGuardState() };
+      record = { ...newRecord(), guard: newGuardState(), directoryTried: false };
       records.set(sessionId, record);
     }
     return record;
@@ -160,8 +162,27 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   /** A session's pin, read fail closed. A context whose session cannot be read counts as pinned. */
   const pinOf = (ctx: ExtensionContext): PinReading => readPin(managerOf(ctx), slot.env);
 
-  /** A session's scope, read fail closed. A context whose session cannot be read has an unreadable scope. */
-  const scopeOf = (ctx: ExtensionContext): ScopeState => readScope(managerOf(ctx), scopeLatched(slot));
+  /**
+   * The session's working directory and the work directories of the roster as it is now; undefined
+   * without any. Never throws: a roster that cannot be read, or a stale context, has none.
+   */
+  const workOf = (ctx: ExtensionContext): WorkDirectories | undefined => {
+    try {
+      const state = loaded(roster.current());
+      const directories = state.kind === "ok" ? (scopeSection(state.value, "work")?.directories ?? []) : [];
+      if (directories.length === 0) return undefined;
+      const { cwd } = ctx;
+      return typeof cwd === "string" ? { cwd, directories } : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  /**
+   * A session's scope, read fail closed: the latch, the session's entry, then the roster's work
+   * directories as they are now. A context whose session cannot be read has an unreadable scope.
+   */
+  const scopeOf = (ctx: ExtensionContext): ScopeState => readScope(managerOf(ctx), scopeLatched(slot), workOf(ctx));
 
   const guards = createGuards({ pi, now, pinOf, stateOf: (ctx) => recordOf(ctx.sessionManager.getSessionId()).guard });
 
@@ -345,28 +366,28 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   };
 
   /**
-   * At every session start, resumed sessions included: a session in the default scope whose working
-   * directory lies under one of a version 2 roster's work directories moves to work scope and
-   * records it. Otherwise a session begun before its directory was listed would keep sending work
-   * to personal accounts.
+   * The work directories decide a session's scope on every read (scopeOf), so a roster load that
+   * lists a running session's directory moves it at once. The first time they do, at session start
+   * or at the next idle input, the router records the scope as a work entry, so that it no longer
+   * depends on the roster, and says so. It tries once per session: a session whose entry cannot be
+   * written is told once, and stays in work scope while the roster lists its directory.
    */
-  const applyDirectories = (ctx: ExtensionContext, value: Roster): void => {
-    const directories = scopeSection(value, "work")?.directories ?? [];
-    if (directories.length === 0) return;
+  const recordDirectory = (ctx: ExtensionContext): void => {
     const scope = scopeOf(ctx);
-    if (scope.kind !== "ok" || scope.source !== "default") return;
-    const { cwd } = ctx;
-    const directory = directories.find((entry) => underDirectory(cwd, [entry]));
-    if (directory === undefined) return;
-    recordScope(ctx, scopeEntry("work", "directory", now()), directoryNotice(cwd, directory), (reason) => directoryFailedNotice(cwd, directory, reason));
+    const work = workOf(ctx);
+    const directory = work === undefined ? undefined : workDirectoryOf(work.cwd, work.directories);
+    if (scope.kind !== "ok" || scope.source !== "directory" || work === undefined || directory === undefined) return;
+    const record = recordOf(ctx.sessionManager.getSessionId());
+    if (record.directoryTried) return;
+    record.directoryTried = true;
+    recordScope(ctx, scopeEntry("work", "directory", now()), directoryNotice(work.cwd, directory), (reason) => directoryFailedNotice(work.cwd, directory, reason));
   };
 
   // The pin's steps come first and last, and nothing between them can skip them: a fork or /new
   // records the pin it carries before any other step runs, and the pin is enforced on the restored
   // selection, with its status item, whatever failed in between. The scope a fork or /new carries
-  // is recorded next, and the work directories apply as soon as the roster is read, before the
-  // limits are computed in the session's scope. Each of the other steps reports its own failure
-  // and lets the rest run.
+  // is recorded next, and the scope the work directories give is recorded as soon as the roster is
+  // read. Each of the other steps reports its own failure and lets the rest run.
   const start = async (ctx: ExtensionContext): Promise<void> => {
     try {
       const { sessionManager } = ctx;
@@ -379,7 +400,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       step(() => carryScope(ctx));
       step(() => registerAdapter(slot));
       const state = step(refreshFiles);
-      if (state?.kind === "ok") step(() => applyDirectories(ctx, state.value));
+      step(() => recordDirectory(ctx));
       if (state !== undefined) {
         step(() => {
           limits = state.kind === "ok" ? computeLimits(ctx, state.value) : BOTH_DEFAULT;
@@ -398,12 +419,14 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   };
 
   // The decision point: a prompt typed while the session is idle plans its run. Input that
-  // arrives while a run starts or streams (steering, follow-ups) neither plans nor drops.
+  // arrives while a run starts or streams (steering, follow-ups) neither plans nor drops. A roster
+  // edit read here that lists the session's directory is recorded before the run is planned.
   const plan = (event: InputEvent, ctx: ExtensionContext): void => {
     if (!ctx.isIdle()) return;
     const { sessionManager } = ctx;
     const record = recordOf(sessionManager.getSessionId());
     const state = refreshFiles();
+    guarded("input", ctx, () => recordDirectory(ctx));
     const id = virtualIdOf(ctx.model);
     if (id === undefined || state.kind !== "ok" || boundedHistory(sessionManager) === undefined) return;
     const rc = contextFor(ctx, state.value, id, pinOf(ctx));
@@ -423,8 +446,9 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   };
 
   /**
-   * A fork or /new carries the scope an entry or the latch set. A default scope is not carried, so
-   * the new session decides its own, and neither is an unreadable one, whose value is unknown.
+   * A fork or /new carries the scope the latch, an entry or the work directories set. A default
+   * scope is not carried, so the new session decides its own, and neither is an unreadable one,
+   * whose value is unknown.
    */
   const leaveScope = (event: SessionShutdownEvent, ctx: ExtensionContext): void => {
     const { reason, targetSessionFile: target } = event;

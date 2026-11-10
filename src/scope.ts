@@ -6,10 +6,14 @@
 //   1. PI_SMART_ROUTER_SCOPE=work, latched in the process slot by the factory: work, whatever the
 //      session's entries say;
 //   2. the session's latest scope entry, exactly as the router writes it;
-//   3. otherwise personal, the default.
+//   3. the work directories of the roster as it is now: work for a session whose working directory
+//      lies under one of them, so a roster load that lists a running session's directory moves
+//      that session at once;
+//   4. otherwise personal, the default.
 //
-// The roster's work directories act through rule 2: at every session start, a session in the
-// default scope whose working directory lies under one of them is given a work entry (src/router.ts).
+// The first time rule 3 decides a session's scope, at session start or at its next idle input, the
+// router records it as a work entry, so that rule 2 keeps it whatever the roster says later
+// (src/router.ts).
 //
 // The read fails closed. A malformed entry, a custom_message of the type, or a session whose
 // entries cannot be read has an unreadable scope: routing resolves in work scope, the narrower one,
@@ -34,11 +38,18 @@ export interface ScopeEntryData {
 }
 
 export type ScopeState =
-  | { readonly kind: "ok"; readonly scope: Scope; readonly source: "latch" | "entry" | "default" }
+  | { readonly kind: "ok"; readonly scope: Scope; readonly source: "latch" | "entry" | "directory" | "default" }
   | { readonly kind: "unreadable"; readonly reason: string };
+
+/** Where a session works: its working directory, and the work directories of the roster as it is now. */
+export interface WorkDirectories {
+  readonly cwd: string;
+  readonly directories: readonly string[];
+}
 
 const KEYS: ReadonlySet<string> = new Set(["v", "scope", "by", "at"]);
 const LATCHED: ScopeState = Object.freeze({ kind: "ok", scope: "work", source: "latch" });
+const BY_DIRECTORY: ScopeState = Object.freeze({ kind: "ok", scope: "work", source: "directory" });
 const DEFAULT: ScopeState = Object.freeze({ kind: "ok", scope: "personal", source: "default" });
 
 const isScope = (value: unknown): value is Scope => value === "personal" || value === "work";
@@ -56,8 +67,12 @@ export function parseScopeEntry(entry: unknown): ScopeEntryData | undefined {
   return { v: 1, scope, by, at };
 }
 
-/** A session's scope. Never throws: a session whose scope entries cannot be read has an unreadable scope. */
-export function readScope(sessionManager: unknown, latched: boolean): ScopeState {
+/**
+ * A session's scope, by the four rules above. `work` is undefined when the roster lists no work
+ * directories. Never throws: a session whose scope entries cannot be read has an unreadable scope,
+ * which the work directories do not override.
+ */
+export function readScope(sessionManager: unknown, latched: boolean, work: WorkDirectories | undefined): ScopeState {
   if (latched) return LATCHED;
   const view = boundedHistory(sessionManager);
   if (view === undefined) return { kind: "unreadable", reason: "this Pi has no bounded session history" };
@@ -67,7 +82,7 @@ export function readScope(sessionManager: unknown, latched: boolean): ScopeState
   } catch (error) {
     return { kind: "unreadable", reason: `reading its ${SCOPE_ENTRY} entries failed: ${firstLine(error)}` };
   }
-  if (entry === undefined || entry === null) return DEFAULT;
+  if (entry === undefined || entry === null) return work !== undefined && underDirectory(work.cwd, work.directories) ? BY_DIRECTORY : DEFAULT;
   const data = parseScopeEntry(entry);
   if (data === undefined) return { kind: "unreadable", reason: `the latest ${SCOPE_ENTRY} entry is not one the router wrote` };
   return { kind: "ok", scope: data.scope, source: "entry" };
@@ -85,16 +100,21 @@ function withoutTrailingSlashes(path: string): string {
 }
 
 /**
- * Whether a working directory lies under one of these directories: compared as text on whole path
- * segments, so /x/work holds /x/work, /x/work/ and /x/work/a but not /x/workshop. Nothing is
+ * The first of these directories that a working directory lies under: compared as text on whole
+ * path segments, so /x/work holds /x/work, /x/work/ and /x/work/a but not /x/workshop. Nothing is
  * resolved: a symlinked spelling of a directory is not under it. A path that is not absolute is
  * under nothing and holds nothing.
  */
-export function underDirectory(cwd: string, directories: readonly string[]): boolean {
-  if (!cwd.startsWith("/")) return false;
-  return directories.some((directory) => {
+export function workDirectoryOf(cwd: string, directories: readonly string[]): string | undefined {
+  if (!cwd.startsWith("/")) return undefined;
+  return directories.find((directory) => {
     if (!directory.startsWith("/")) return false;
     const base = withoutTrailingSlashes(directory);
     return cwd === base || cwd.startsWith(`${base}/`);
   });
+}
+
+/** Whether a working directory lies under one of these directories (see workDirectoryOf). */
+export function underDirectory(cwd: string, directories: readonly string[]): boolean {
+  return workDirectoryOf(cwd, directories) !== undefined;
 }

@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { utimesSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import test, { afterEach, beforeEach, describe } from "node:test";
 
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
@@ -8,9 +10,10 @@ import { ENV_SCOPE, LEVEL_ENTRY, LEVEL_KEY, PIN_ENTRY, SCOPE_ENTRY, STATUS_KEY }
 import { directoryFailedNotice, directoryNotice, scopeCarriedNotice, scopeCarryFailedNotice, scopeUnreadable, scopeUnserved } from "../src/errors.ts";
 import { policyFromRoster } from "../src/local.ts";
 import { processSlot, scopeLatched } from "../src/owners.ts";
-import { parseScopeEntry, readScope, scopeEntry, underDirectory } from "../src/scope.ts";
-import type { ScopeEntryData, ScopeState } from "../src/scope.ts";
-import { CHATGPT, DEEPSEEK, FakeCatalog, GLM, heraModels, model, NOW, rosterFixture, SOL } from "./support/catalog.ts";
+import { createRouter } from "../src/router.ts";
+import { parseScopeEntry, readScope, scopeEntry, underDirectory, workDirectoryOf } from "../src/scope.ts";
+import type { ScopeEntryData, ScopeState, WorkDirectories } from "../src/scope.ts";
+import { CHATGPT, DEEPSEEK, FakeCatalog, GLM, heraModels, KIMI, model, NOW, rosterFixture, SOL } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
 import { agentDir, assistant, FakeRuntime, load, request, resetSlot, routed, start } from "./support/pi.ts";
 import type { FakeSession, Loaded, LoadOptions } from "./support/pi.ts";
@@ -18,6 +21,11 @@ import type { FakeSession, Loaded, LoadOptions } from "./support/pi.ts";
 const HERA_V2 = fixture("roster-hera-v2.json");
 const WORK_DIRECTORY = "/Users/johnw/src/positron";
 const APP = "/Users/johnw/src/positron/app";
+/** A directory Hera's roster does not list until a test adds it. */
+const ACME = "/Users/johnw/src/acme";
+const ACME_APP = "/Users/johnw/src/acme/app";
+const UNDER: WorkDirectories = { cwd: APP, directories: [WORK_DIRECTORY] };
+const OUTSIDE: WorkDirectories = { cwd: ACME_APP, directories: [WORK_DIRECTORY] };
 const PLANNING = "plan the migration to the new store";
 const WORK_TERRA = "openai-codex-3/gpt-6.1-terra";
 const NATIVE_TERRA = "openai-codex/gpt-6.1-terra";
@@ -25,6 +33,7 @@ const AT = new Date(NOW).toISOString();
 const OK_WORK_LATCH: ScopeState = { kind: "ok", scope: "work", source: "latch" };
 const OK_WORK_ENTRY: ScopeState = { kind: "ok", scope: "work", source: "entry" };
 const OK_PERSONAL_ENTRY: ScopeState = { kind: "ok", scope: "personal", source: "entry" };
+const OK_WORK_DIRECTORY: ScopeState = { kind: "ok", scope: "work", source: "directory" };
 const DEFAULT: ScopeState = { kind: "ok", scope: "personal", source: "default" };
 
 beforeEach(resetSlot);
@@ -43,8 +52,21 @@ function holding(entry: unknown): object {
 
 const custom = (data: unknown, type = "custom") => ({ type, customType: SCOPE_ENTRY, data, id: "e1", parentId: null, timestamp: AT });
 
-/** The session's scope, read as the router reads it. */
-const scopeOf = (loaded: Loaded): ScopeState => readScope(loaded.session.ctx.sessionManager, scopeLatched(processSlot()));
+/** The scope the latch and the session's entries give, without the work directories: what is recorded. */
+const scopeOf = (loaded: Loaded): ScopeState => readScope(loaded.session.ctx.sessionManager, scopeLatched(processSlot()), undefined);
+
+/** Rewrite Hera's version 2 roster with these work directories, with a later modification time. */
+function listDirectories(dir: string, directories: readonly string[]): void {
+  const roster = JSON.parse(HERA_V2);
+  roster.scopes.work.directories = directories;
+  const path = join(dir, "smart-router.json");
+  writeFileSync(path, JSON.stringify(roster));
+  utimesSync(path, new Date(), new Date(Date.now() + 5_000));
+}
+
+/** How many times the session was told that the work directories put it in work scope. */
+const directoryNotices = (loaded: Loaded, cwd: string, directory: string): number =>
+  loaded.session.notices.filter((notice) => notice.message === directoryNotice(cwd, directory)).length;
 
 /** The data of the session's scope entries, oldest first. */
 const scopeEntries = (loaded: Loaded): unknown[] => loaded.session.entries.filter((entry) => entry.customType === SCOPE_ENTRY).map((entry) => entry.data);
@@ -140,30 +162,39 @@ describe("a scope entry", () => {
 });
 
 describe("readScope", () => {
-  test("the latch comes first: a personal entry, a malformed one, and an unreadable session are all in work scope", () => {
-    assert.deepEqual(readScope(holding(custom(scopeEntry("personal", "command", NOW))), true), OK_WORK_LATCH);
-    assert.deepEqual(readScope(holding(custom({ v: 9 })), true), OK_WORK_LATCH);
-    assert.deepEqual(readScope(undefined, true), OK_WORK_LATCH);
+  test("the latch comes first: a personal entry, a malformed one, an unreadable session and the work directories all give it", () => {
+    assert.deepEqual(readScope(holding(custom(scopeEntry("personal", "command", NOW))), true, undefined), OK_WORK_LATCH);
+    assert.deepEqual(readScope(holding(custom({ v: 9 })), true, undefined), OK_WORK_LATCH);
+    assert.deepEqual(readScope(undefined, true, undefined), OK_WORK_LATCH);
+    assert.deepEqual(readScope(holding(undefined), true, UNDER), OK_WORK_LATCH);
   });
 
-  test("then the session's latest entry, then personal", () => {
-    assert.deepEqual(readScope(holding(undefined), false), DEFAULT);
-    assert.deepEqual(readScope(holding(null), false), DEFAULT);
-    assert.deepEqual(readScope(holding(custom(scopeEntry("work", "directory", NOW))), false), OK_WORK_ENTRY);
-    assert.deepEqual(readScope(holding(custom(scopeEntry("personal", "carried", NOW))), false), OK_PERSONAL_ENTRY);
+  test("then the session's latest entry, then the work directories, then personal", () => {
+    assert.deepEqual(readScope(holding(undefined), false, undefined), DEFAULT);
+    assert.deepEqual(readScope(holding(null), false, undefined), DEFAULT);
+    assert.deepEqual(readScope(holding(custom(scopeEntry("work", "directory", NOW))), false, undefined), OK_WORK_ENTRY);
+    assert.deepEqual(readScope(holding(custom(scopeEntry("personal", "carried", NOW))), false, undefined), OK_PERSONAL_ENTRY);
+    assert.deepEqual(readScope(holding(undefined), false, UNDER), OK_WORK_DIRECTORY);
+    assert.deepEqual(readScope(holding(null), false, UNDER), OK_WORK_DIRECTORY);
+    assert.deepEqual(readScope(holding(undefined), false, OUTSIDE), DEFAULT);
+    assert.deepEqual(readScope(holding(undefined), false, { cwd: APP, directories: [] }), DEFAULT);
+    assert.deepEqual(readScope(holding(custom(scopeEntry("personal", "command", NOW))), false, UNDER), OK_PERSONAL_ENTRY, "an entry outranks the directories");
   });
 
-  test("fails closed: a malformed entry, a session without the bounded readers and a reader that throws are unreadable", () => {
+  test("fails closed: a malformed entry, a session without the bounded readers and a reader that throws are unreadable, under a work directory too", () => {
     const unreadable = (state: ScopeState, pattern: RegExp, label: string): void => {
       assert.equal(state.kind, "unreadable", label);
       if (state.kind === "unreadable") assert.match(state.reason, pattern, label);
     };
-    unreadable(readScope(holding(custom({ v: 1, scope: "work" })), false), /^the latest smart-router\.scope entry is not one the router wrote$/, "malformed");
-    unreadable(readScope(holding(custom(scopeEntry("work", "command", NOW), "custom_message")), false), /not one the router wrote/, "a custom_message");
-    unreadable(readScope(undefined, false), /no bounded session history/, "no session manager");
-    unreadable(readScope({ getLatestCustomEntry: () => undefined }, false), /no bounded session history/, "no recent-entries reader");
+    unreadable(readScope(holding(custom({ v: 1, scope: "work" })), false, undefined), /^the latest smart-router\.scope entry is not one the router wrote$/, "malformed");
+    unreadable(readScope(holding(custom(scopeEntry("work", "command", NOW), "custom_message")), false, undefined), /not one the router wrote/, "a custom_message");
+    unreadable(readScope(undefined, false, undefined), /no bounded session history/, "no session manager");
+    unreadable(readScope({ getLatestCustomEntry: () => undefined }, false, undefined), /no bounded session history/, "no recent-entries reader");
     const failing = { getLatestCustomEntry: () => assert.fail("database is locked"), getRecentActiveEntries: () => [] };
-    unreadable(readScope(failing, false), /^reading its smart-router\.scope entries failed: database is locked$/, "a reader that throws");
+    unreadable(readScope(failing, false, undefined), /^reading its smart-router\.scope entries failed: database is locked$/, "a reader that throws");
+    unreadable(readScope(holding(custom({ v: 1, scope: "work" })), false, UNDER), /not one the router wrote/, "malformed, under a work directory");
+    unreadable(readScope(failing, false, UNDER), /database is locked/, "a reader that throws, under a work directory");
+    unreadable(readScope(undefined, false, UNDER), /no bounded session history/, "no session manager, under a work directory");
   });
 
   test("reads the latest entry over the whole session with the bounded reader, and the latch reads nothing", () => {
@@ -175,9 +206,9 @@ describe("readScope", () => {
       },
       getRecentActiveEntries: () => [],
     };
-    readScope(manager, false);
+    readScope(manager, false, UNDER);
     assert.deepEqual(calls, [[SCOPE_ENTRY, { scope: "all" }]]);
-    readScope(manager, true);
+    readScope(manager, true, UNDER);
     assert.equal(calls.length, 1);
   });
 });
@@ -206,6 +237,8 @@ test("underDirectory matches whole path segments, as text, and ignores a trailin
     ["/x/work", ["x/work"], false],
   ];
   for (const [cwd, directories, expected] of cases) assert.equal(underDirectory(cwd, directories), expected, `${cwd} under ${JSON.stringify(directories)}`);
+  assert.equal(workDirectoryOf(APP, ["/Users/johnw/src/positronic", "/Users/johnw/src", WORK_DIRECTORY]), "/Users/johnw/src", "the first that holds it, in roster order");
+  assert.equal(workDirectoryOf(APP, [ACME]), undefined);
 });
 
 describe("handoffs", () => {
@@ -241,7 +274,7 @@ describe("handoffs", () => {
       await parent.host.emit("session_shutdown", { reason: "fork", targetSessionFile: "/sessions/p-fork.jsonl" });
       const child = await begin({ dir, id: "child", file: "/sessions/p-fork.jsonl", runtime: new FakeRuntime() }, "fork");
       assert.deepEqual(scopeEntries(child), [{ v: 1, scope: "work", by: "carried", at: NOW }]);
-      assert.deepEqual(readScope(child.session.ctx.sessionManager, false), OK_WORK_ENTRY, "without the latch, the entry keeps it in work scope");
+      assert.deepEqual(readScope(child.session.ctx.sessionManager, false, undefined), OK_WORK_ENTRY, "without the latch, the entry keeps it in work scope");
     });
   });
 
@@ -285,6 +318,19 @@ describe("handoffs", () => {
     assert.deepEqual(scopeEntries(child), [{ v: 1, scope: "work", by: "carried", at: NOW }]);
     assert.equal(child.session.pinEntries().length, 1, "the pin was carried too");
     assert.deepEqual([processSlot().handoffs.size, processSlot().scopeHandoffs?.size], [0, 0]);
+  });
+
+  test("a scope is handed on even when Pi's agent directory cannot be found", async (t) => {
+    const build: NonNullable<LoadOptions["build"]> = (pi, options) =>
+      createRouter(pi, {
+        ...options,
+        agentDir: () => {
+          throw new Error("HOME is not set");
+        },
+      });
+    const parent = await begin({ dir: agentDir(t), id: "parent", file: "/sessions/p.jsonl", cwd: APP, build, setup: recorded("work") });
+    await parent.host.emit("session_shutdown", { reason: "new", targetSessionFile: "/sessions/p-new.jsonl" });
+    assert.equal(processSlot().scopeHandoffs?.get("/sessions/p-new.jsonl"), "work");
   });
 
   test("a scope that cannot be recorded in the new session says so", async (t) => {
@@ -370,8 +416,9 @@ describe("the work directories", () => {
     });
   });
 
-  test("a scope that cannot be recorded says so", async (t) => {
-    const loaded = load({ dir: agentDir(t, { roster: HERA_V2 }), cwd: APP, now: () => NOW });
+  test("a scope that cannot be recorded says so once, and the session stays in work scope while the roster lists its directory", async (t) => {
+    const dir = agentDir(t, { roster: HERA_V2 });
+    const loaded = load({ dir, cwd: APP, file: "/sessions/read-only.jsonl", runtime: new FakeRuntime(workCatalog()), now: () => NOW });
     loaded.host.api.appendEntry = () => {
       throw new Error("the session file is read-only");
     };
@@ -380,10 +427,87 @@ describe("the work directories", () => {
     const notice = directoryFailedNotice(APP, WORK_DIRECTORY, "the session file is read-only");
     assert.equal(
       notice,
-      `pi-smart-router: this session belongs in work scope because ${APP} is under ${WORK_DIRECTORY}, but its scope could not be recorded (the session file is read-only). Run /smart-router scope work before you send anything.`,
+      `pi-smart-router: this session is in work scope because ${APP} is under ${WORK_DIRECTORY}, but its scope could not be recorded (the session file is read-only), so it stays in work scope only while the roster lists that directory.`,
     );
     assert.deepEqual(loaded.session.notices, [{ type: "error", message: notice }]);
-    assert.deepEqual(scopeOf(loaded), DEFAULT);
+    assert.deepEqual([scopeOf(loaded), readScope(loaded.session.ctx.sessionManager, false, UNDER)], [DEFAULT, OK_WORK_DIRECTORY]);
+    assert.equal(routed(loaded.runtime.route("auto", request("direct"))), WORK_TERRA);
+    await loaded.host.emit("input", { text: "fix the build", source: "interactive" });
+    await loaded.host.emit("input", { text: "and the tests", source: "interactive" });
+    assert.equal(loaded.session.notices.length, 1, "it tries once per session, so it says so once");
+    // The work scope the directories gave it goes with a /new into the session it creates.
+    await loaded.host.emit("session_shutdown", { reason: "new", targetSessionFile: "/sessions/read-only-new.jsonl" });
+    const child = await begin({ dir, id: "child", cwd: ACME_APP, file: "/sessions/read-only-new.jsonl", runtime: new FakeRuntime(workCatalog()) }, "new");
+    assert.deepEqual(scopeEntries(child), [{ v: 1, scope: "work", by: "carried", at: NOW }]);
+  });
+});
+
+describe("a roster that comes to list a running session's directory", () => {
+  const NOTICE = `pi-smart-router: this session is in work scope because ${ACME_APP} is under ${ACME}.`;
+
+  test("routes in personal scope until then; after /smart-router reload the next request routes in work scope, records one entry and says so once", async (t) => {
+    const dir = agentDir(t, { roster: HERA_V2 });
+    const loaded = await begin({ dir, cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) });
+    assert.equal(routed(loaded.runtime.route("auto", request("direct"))), DEEPSEEK, "a directory the roster does not list: personal scope");
+    await loaded.host.emit("input", { text: "fix the build", source: "interactive" });
+    assert.deepEqual([scopeEntries(loaded), messages(loaded)], [[], []]);
+    listDirectories(dir, [WORK_DIRECTORY, ACME]);
+    await loaded.host.command("smart-router", "reload");
+    assert.equal(directoryNotice(ACME_APP, ACME), NOTICE);
+    // The roster as it is now decides at once, before anything is recorded.
+    assert.equal(routed(loaded.runtime.route("auto", request("direct"))), WORK_TERRA, "work scope at once");
+    assert.deepEqual(scopeEntries(loaded), [], "recorded at the next idle input");
+    await loaded.host.emit("input", { text: "and the tests", source: "interactive" });
+    const signal = loaded.session.startRun();
+    assert.equal(routed(loaded.runtime.route("auto", request("continuation", { signal }))), WORK_TERRA, "the next request routes in work scope");
+    loaded.session.endRun();
+    assert.deepEqual(scopeEntries(loaded), [{ v: 1, scope: "work", by: "directory", at: NOW }]);
+    assert.equal(directoryNotices(loaded, ACME_APP, ACME), 1);
+    await loaded.host.emit("input", { text: "and the docs", source: "interactive" });
+    await loaded.host.emit("session_start", { reason: "reload" });
+    assert.deepEqual([scopeEntries(loaded).length, directoryNotices(loaded, ACME_APP, ACME)], [1, 1], "recorded once, and said once");
+    // Recorded, the scope no longer depends on the roster.
+    listDirectories(dir, [WORK_DIRECTORY]);
+    await loaded.host.command("smart-router", "reload");
+    assert.equal(routed(loaded.runtime.route("auto", request("direct"))), WORK_TERRA);
+  });
+
+  test("a roster edit is picked up at the next idle input, which records the entry, whatever the selection", async (t) => {
+    const dir = agentDir(t, { roster: HERA_V2 });
+    const loaded = await begin({ dir, cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) });
+    const physical = load({ dir, id: "physical", cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()), now: () => NOW });
+    physical.session.select(KIMI);
+    await physical.host.emit("session_start", { reason: "startup" });
+    listDirectories(dir, [WORK_DIRECTORY, ACME]);
+    for (const session of [loaded, physical]) {
+      await session.host.emit("input", { text: "fix the build", source: "interactive" });
+      assert.deepEqual(scopeEntries(session), [{ v: 1, scope: "work", by: "directory", at: NOW }], session.session.id);
+      assert.deepEqual(messages(session), [NOTICE], session.session.id);
+    }
+    assert.equal(routed(loaded.runtime.route("auto", request("direct"))), WORK_TERRA);
+  });
+
+  test("a session with a personal entry stays personal across that reload", async (t) => {
+    const dir = agentDir(t, { roster: HERA_V2 });
+    const loaded = await begin({ dir, cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()), setup: recorded("personal") });
+    listDirectories(dir, [WORK_DIRECTORY, ACME]);
+    await loaded.host.command("smart-router", "reload");
+    await loaded.host.emit("input", { text: "fix the build", source: "interactive" });
+    assert.equal(routed(loaded.runtime.route("auto", request("direct"))), DEEPSEEK);
+    assert.deepEqual([scopeEntries(loaded).length, scopeOf(loaded), directoryNotices(loaded, ACME_APP, ACME)], [1, OK_PERSONAL_ENTRY, 0]);
+  });
+
+  test("the latch still wins: nothing is recorded, and the scope is the latch's", async (t) => {
+    await withScope("work", async () => {
+      const dir = agentDir(t, { roster: HERA_V2 });
+      const loaded = await begin({ dir, cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) });
+      listDirectories(dir, [WORK_DIRECTORY, ACME]);
+      await loaded.host.command("smart-router", "reload");
+      await loaded.host.emit("input", { text: "fix the build", source: "interactive" });
+      assert.deepEqual(readScope(loaded.session.ctx.sessionManager, scopeLatched(processSlot()), { cwd: ACME_APP, directories: [ACME] }), OK_WORK_LATCH);
+      assert.deepEqual([scopeEntries(loaded), directoryNotices(loaded, ACME_APP, ACME)], [[], 0]);
+      assert.equal(routed(loaded.runtime.route("auto", request("direct"))), WORK_TERRA);
+    });
   });
 });
 
