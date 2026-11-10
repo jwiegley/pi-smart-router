@@ -951,13 +951,14 @@ const LABELS = {
 /**
  * The level scenarios' fleet: both Codex accounts with one model per tier, OpenRouter with the
  * personal ladder's second candidates, and the local model. Each Codex and OpenRouter model declares
- * 272,000 and 128,000 unless `limits` gives it others, by ref.
+ * 272,000 and 128,000, and the local model 262,144 and 81,920, unless `limits` gives it others, by
+ * ref.
  */
 function levelsFleet(limits: Readonly<Record<string, Partial<Limits>>> = {}): FauxSpec[] {
   const models = (provider: string, ids: readonly string[]): Array<{ id: string; contextWindow: number; maxTokens: number }> =>
     ids.map((id) => ({ id, contextWindow: 272_000, maxTokens: 128_000, ...limits[`${provider}/${id}`] }));
   return [
-    { provider: "local-a", baseUrl: "http://localhost:0", contextWindow: 262_144, maxTokens: 81_920 },
+    { provider: "local-a", baseUrl: "http://localhost:0", contextWindow: 262_144, maxTokens: 81_920, ...limits["local-a/m"] },
     { provider: "openai-codex-2", api: "openai-codex-responses", models: models("openai-codex-2", CODEX_IDS) },
     { provider: "openai-codex-3", api: "openai-codex-responses", models: models("openai-codex-3", CODEX_IDS) },
     { provider: "openrouter", models: models("openrouter", OPENROUTER_IDS) },
@@ -1631,6 +1632,8 @@ test("1. under a version 2 roster, both models declare limits from every level o
       [WORK.low]: { contextWindow: 100_000, maxTokens: 64_000 },
       // A later candidate is no level's model while the one before it is available.
       "openrouter/deepseek/deepseek-v4.1-flash-1017": { contextWindow: 50_000, maxTokens: 8_000 },
+      // The local model is smaller than any of auto's, and auto never routes to it.
+      "local-a/m": { contextWindow: 20_000, maxTokens: 4_000 },
     }),
   });
   const declared = (pi: Pi): unknown[][] =>
@@ -1640,7 +1643,7 @@ test("1. under a version 2 roster, both models declare limits from every level o
     });
   const expected = [
     ["auto", 100_000, 32_000],
-    ["local", 262_144, 81_920],
+    ["local", 20_000, 4_000],
   ];
   const pi = await world.start({ persisted: true, select: "smart-router/auto" });
   assert.deepEqual(declared(pi), expected, "in a personal session");
