@@ -1311,6 +1311,22 @@ describe("a run's record", () => {
     );
   });
 
+  test("names only an answer of its own run, never one from a run whose end never came", async (t) => {
+    const loaded = await hera(t);
+    await say(loaded, "x #high");
+    assert.equal(firstRequest(loaded), SOL);
+    await loaded.host.emit("message_end", { message: assistant(SOL) });
+    // No agent_settled for that run: the next input drops its level unrecorded.
+    loaded.session.endRun();
+    await say(loaded, "y #high");
+    assert.equal(await runPrompt(loaded, "y"), SOL);
+    await finish(loaded, SOL, { stopReason: "error", errorMessage: "terminated" });
+    assert.deepEqual(
+      levelEntries(loaded).map((record) => [record.tier, "ref" in record ? record.ref : "no ref"]),
+      [["high", "no ref"]],
+    );
+  });
+
   test("names the model that answered when a switch moved the run to smart-router/local", async (t) => {
     const loaded = await hera(t);
     await say(loaded, "x #high");
