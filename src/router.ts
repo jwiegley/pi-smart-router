@@ -9,6 +9,9 @@
 // every pi.on and registerCommand call in one place, after the router exists. No timer, watcher,
 // socket or other handle is ever opened; the files are read at session_start, at idle prompts when
 // they changed, and on demand. Jev is asked through Pi's model registry, which makes the request.
+// No message text is kept: a keyed digest of it binds a plan to its message's run.
+import { createHmac, randomBytes } from "node:crypto";
+
 import type { Api, Model, Usage } from "@earendil-works/pi-ai";
 import type {
   ExtensionAPI,
@@ -103,13 +106,14 @@ export interface Session extends SessionRecord {
   directoryTried: boolean;
   /** The token of the latest input that planned: an input that waited for Jev plans only if no newer input has planned since. */
   plannedToken: number;
-  /** The text, without its tag, of the message whose plan `plan` holds; meaningful only while `plan` is set. */
-  planText: string | undefined;
+  /** The digest of the text, without its tag, of the message whose plan `plan` holds; meaningful only while `plan` is set. */
+  planDigest: string | undefined;
   /** How many idle messages the router passed since the latest prompt's run started. */
   inputsSinceRun: number;
   /**
-   * The texts, without tags, of the messages the router passed, busy or idle, whose own runs have not
-   * started: the REMEMBERED most recent, oldest first. A prompt's run forgets only its own text.
+   * The digests of the texts, without tags, of the messages the router passed, busy or idle, whose
+   * own runs have not started: the REMEMBERED most recent, oldest first. A prompt's run forgets only
+   * its own.
    */
   readonly remembered: Set<string>;
 }
@@ -171,11 +175,19 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   let self: Owner | undefined;
   /** How many idle inputs this instance has seen: each one's token. */
   let inputs = 0;
+  /**
+   * A message's text as the records hold it: its HMAC-SHA-256 under a key each instance draws at
+   * random. Equal texts give equal digests, and the text is taken as its UTF-16 code units, so the
+   * digests tell apart exactly the texts === does. Unlike a bare hash, a digest is no help in
+   * guessing a short text without the key.
+   */
+  const key = randomBytes(32);
+  const digestOf = (text: string): string => createHmac("sha256", key).update(text, "utf16le").digest("base64");
 
   const recordOf = (sessionId: string): Session => {
     let record = records.get(sessionId);
     if (record === undefined) {
-      record = { ...newRecord(), guard: newGuardState(), directoryTried: false, plannedToken: 0, planText: undefined, inputsSinceRun: 0, remembered: new Set() };
+      record = { ...newRecord(), guard: newGuardState(), directoryTried: false, plannedToken: 0, planDigest: undefined, inputsSinceRun: 0, remembered: new Set() };
       records.set(sessionId, record);
     }
     return record;
@@ -464,7 +476,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     const record = recordOf(ctx.sessionManager.getSessionId());
     const previous = record.lastInput;
     record.plan = undefined;
-    record.planText = undefined;
+    record.planDigest = undefined;
     record.pendingLevel = undefined;
     record.lastInput = undefined;
     return previous;
@@ -502,7 +514,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     };
 
   /** Plan an idle input's run with the session as it is now: after a wait, its selection, pin, scope and roster may have moved. */
-  const plan = (ctx: ExtensionContext, record: Session, text: string, level: LevelInput, token: number): Plan | undefined => {
+  const plan = (ctx: ExtensionContext, record: Session, text: string, digest: string, level: LevelInput, token: number): Plan | undefined => {
     if (!ctx.isIdle()) return undefined;
     const { sessionManager } = ctx;
     const state = loaded(roster.current());
@@ -513,13 +525,14 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     const rc = contextFor(ctx, state.value, id, pinOf(ctx));
     const planned = planUserTurn({ rc, text, last: record.last, now: now(), reserve: reserveFor(pi.getSettings(), id), level });
     record.plan = planned;
-    record.planText = text;
+    record.planDigest = digest;
     record.plannedToken = token;
     return planned;
   };
 
   /**
-   * Whether a plan or a pending level made for a message's text belongs to the run a prompt starts.
+   * Whether a plan or a pending level made for a message belongs to the run a prompt starts. The
+   * message's text and the prompt are compared by their digests (digestOf).
    * Pi starts a message's run once the message's input handlers return, whenever that is: two
    * messages that overlap a Jev wait start their runs in either order, and a message a later
    * extension's async input handler holds, even one typed while a run streamed, can start its run
@@ -543,14 +556,14 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
    * - a message a later extension rewrites into the text of a steer the router still remembers goes
    *   unplanned, which is the safe direction.
    */
-  const ownsRun = (record: Session, text: string | undefined, prompt: string): boolean =>
-    text !== undefined && (text === prompt || (!record.remembered.has(prompt) && record.inputsSinceRun === 1));
+  const ownsRun = (record: Session, digest: string | undefined, prompt: string): boolean =>
+    digest !== undefined && (digest === prompt || (!record.remembered.has(prompt) && record.inputsSinceRun === 1));
 
   /** Remember a message until its own run starts: the REMEMBERED most recent, the oldest forgotten first. */
-  const remember = (record: Session, text: string): void => {
+  const remember = (record: Session, digest: string): void => {
     const { remembered } = record;
-    remembered.delete(text);
-    remembered.add(text);
+    remembered.delete(digest);
+    remembered.add(digest);
     for (const oldest of remembered) {
       if (remembered.size <= REMEMBERED) break;
       remembered.delete(oldest);
@@ -564,17 +577,18 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   // refuses (plan()), where Jev is not asked either (askFor). A version 2 run on auto, unpinned,
   // takes the level its last input planned with when an extension resends that text
   // (pi-idle-check), else its tag's, with Jev's opinion asked and recorded without waiting, else
-  // Jev's answer, waited for. The plan and its pending level carry the message's text, which binds
-  // them to the run the message's prompt starts.
+  // Jev's answer, waited for. The plan and its pending level carry the digest of the message's text,
+  // which binds them to the run the message's prompt starts.
   const planInput = async (event: InputEvent, ctx: ExtensionContext, tagged: Tagged | undefined, previous: LastInput | undefined): Promise<void> => {
     const tier = tagged?.tier;
     const text = tagged === undefined ? event.text : tagged.text;
+    const digest = digestOf(text);
     const { sessionManager } = ctx;
     const sessionId = sessionManager.getSessionId();
     const record = recordOf(sessionId);
     // A message typed while a run streams can still start a run of its own, when a later handler
     // holds it until that run ends: its text tells its run from the messages that plan meanwhile.
-    remember(record, text);
+    remember(record, digest);
     if (!ctx.isIdle()) {
       if (tier !== undefined) notify(ctx, tagIgnoredNotice(tier, "busy"), "warning");
       return;
@@ -602,7 +616,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     let opinion = false;
     const view = boundedHistory(sessionManager);
     if (id === "auto" && !pinned && value?.version === 2 && view !== undefined) {
-      if (tagged === undefined && event.source === "extension" && previous?.text === text) {
+      if (tagged === undefined && event.source === "extension" && previous?.digest === digest) {
         level = previous.level;
       } else if (tier !== undefined) {
         level = { tag: tier };
@@ -624,11 +638,11 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         }
       }
     }
-    const planned = plan(ctx, record, text, level, token);
+    const planned = plan(ctx, record, text, digest, level, token);
     const planLevel = planned?.level;
     if (planned === undefined || planLevel === undefined || planned.signal === "local") return;
-    record.pendingLevel = { token, text, level: planLevel, keyword: { signal: planned.signal, reason: planned.reason }, at: now(), jev: opinion ? "pending" : level.jev };
-    record.lastInput = { text, level };
+    record.pendingLevel = { token, digest, level: planLevel, keyword: { signal: planned.signal, reason: planned.reason }, at: now(), jev: opinion ? "pending" : level.jev };
+    record.lastInput = { digest, level };
     if (planLevel.steppedUp && planned.decision.ok) notify(ctx, stepUpNotice(planLevel.start, planLevel.tier, planned.decision.choice.model.id), "info");
   };
 
@@ -773,22 +787,23 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
             // failed to start; a tagged one is lost, and this run says so as a prompt's run does.
             const tagged = record.plan?.level?.source === "tag";
             record.plan = undefined;
-            record.planText = undefined;
+            record.planDigest = undefined;
             record.pendingLevel = undefined;
             record.lastInput = undefined;
             if (tagged) notify(ctx, unmatchedTagNotice(), "warning");
           } else {
             // A prompt's run takes only its own message's plan and pending level, never another's.
-            if (record.plan !== undefined && !ownsRun(record, record.planText, event.prompt)) {
+            const prompt = digestOf(event.prompt);
+            if (record.plan !== undefined && !ownsRun(record, record.planDigest, prompt)) {
               const tagged = record.plan.level?.source === "tag";
               record.plan = undefined;
-              record.planText = undefined;
+              record.planDigest = undefined;
               if (tagged) notify(ctx, unmatchedTagNotice(), "warning");
             }
-            if (record.pendingLevel !== undefined && !ownsRun(record, record.pendingLevel.text, event.prompt)) record.pendingLevel = undefined;
+            if (record.pendingLevel !== undefined && !ownsRun(record, record.pendingLevel.digest, prompt)) record.pendingLevel = undefined;
             // This prompt's message has started its run; the others it remembers have not.
             record.inputsSinceRun = 0;
-            record.remembered.delete(event.prompt);
+            record.remembered.delete(prompt);
           }
         });
         // Every run starts here, so a run without an input (a custom message's, a goal-x
@@ -804,7 +819,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         guarded("agent_settled", ctx, () => {
           const record = recordOf(ctx.sessionManager.getSessionId());
           record.plan = undefined;
-          record.planText = undefined;
+          record.planDigest = undefined;
           record.runPick = undefined;
         }),
       );

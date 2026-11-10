@@ -3,6 +3,7 @@
 // only records its opinion), and the run is planned with the tier chosen. Unit tests on the fake
 // host of test/support/pi.ts; no Pi runtime is started.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test, { afterEach, beforeEach, describe } from "node:test";
@@ -380,7 +381,10 @@ describe("an untagged message", () => {
     const level = { scope: "personal", tier: "low", asked: "low", start: "low", source: "jev", steppedUp: false, returnedToFirst: false, jev };
     const pending = recordOf(loaded)?.pendingLevel;
     assert.equal(typeof pending?.token, "number");
-    assert.deepEqual(pending && { ...pending, token: 0 }, { token: 0, text: "rename foo to bar", level, keyword: { signal: "trivial", reason: "triage:keyword_economical" }, at: NOW, jev });
+    // The message's text is held as a digest, the same one the last input holds.
+    assert.match(pending?.digest ?? "", /^[A-Za-z0-9+/]{43}=$/);
+    assert.equal(recordOf(loaded)?.lastInput?.digest, pending?.digest);
+    assert.deepEqual(pending && { ...pending, token: 0, digest: "" }, { token: 0, digest: "", level, keyword: { signal: "trivial", reason: "triage:keyword_economical" }, at: NOW, jev });
     assert.equal(firstRequest(loaded), LUNA);
     assert.deepEqual(recordOf(loaded)?.history.at(-1)?.level, level);
   });
@@ -630,13 +634,15 @@ describe("a session replaced, or a newer input, during the wait", () => {
     const { one, two, earlier, later } = await overlap(loaded, "go ahead", "rename foo to bar");
     earlier.resolve(jevAnswer(LOW));
     assert.deepEqual(await one, [undefined]);
+    const own = recordOf(loaded)?.pendingLevel;
     // Its input handlers have returned, so Pi starts the earlier message's run.
     assert.equal(await runPrompt(loaded, "go ahead"), LUNA);
     assert.deepEqual(recordOf(loaded)?.history.at(-1)?.level?.jev, outcome(LOW, "low"));
     later.resolve(jevAnswer(HIGH));
     assert.deepEqual(await two, [undefined]);
     assert.equal(recordOf(loaded)?.plan, undefined, "the later message found the session busy, and planned nothing");
-    assert.deepEqual([recordOf(loaded)?.pendingLevel?.text, recordOf(loaded)?.pendingLevel?.jev], ["go ahead", outcome(LOW, "low")], "the run's pending level is its own");
+    assert.ok(own !== undefined && recordOf(loaded)?.pendingLevel === own, "the run's pending level is its own");
+    assert.deepEqual(own?.jev, outcome(LOW, "low"));
   });
 
   test("of two messages overlapping a Jev wait, a later answer that comes first plans the later message; the earlier message's run never takes that plan", { timeout: 10_000 }, async (t) => {
@@ -646,10 +652,12 @@ describe("a session replaced, or a newer input, during the wait", () => {
       const { one, two, earlier, later } = await overlap(loaded, "go ahead", "rename foo to bar");
       later.resolve(jevAnswer(HIGH));
       assert.deepEqual(await two, [undefined]);
+      const its = recordOf(loaded)?.pendingLevel;
       earlier.resolve(jevAnswer(LOW));
       assert.deepEqual(await one, [undefined]);
       const name = earlierRunsFirst ? "Pi starts the earlier message's run first" : "Pi starts the later message's run first";
-      assert.deepEqual([recordOf(loaded)?.plan?.level?.tier, recordOf(loaded)?.pendingLevel?.text], ["high", "rename foo to bar"], `${name}: the earlier message planned nothing over the later one's plan`);
+      assert.ok(its !== undefined && recordOf(loaded)?.pendingLevel === its, `${name}: the earlier message planned nothing over the later one's plan`);
+      assert.deepEqual([recordOf(loaded)?.plan?.level?.tier, its?.jev], ["high", outcome(HIGH, "high")], name);
       if (earlierRunsFirst) {
         assert.equal(await runPrompt(loaded, "go ahead"), TERRA, name);
         assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level], ["stick:default", undefined], `${name}: it routes unplanned`);
@@ -720,7 +728,7 @@ describe("a message a later extension's input handler holds, handles or changes"
     // X is typed once the run has ended: idle and tagged, it plans at the router, then the later handler holds it.
     const x = say(loaded, "design the new storage layer #super");
     await settled();
-    assert.deepEqual([recordOf(loaded)?.plan?.level?.tier, recordOf(loaded)?.pendingLevel?.text], ["super", "design the new storage layer"]);
+    assert.deepEqual([recordOf(loaded)?.plan?.level?.tier, recordOf(loaded)?.pendingLevel?.level.tier, recordOf(loaded)?.pendingLevel?.level.source], ["super", "super", "tag"]);
     // M's handlers return first. Pi is no longer streaming, so M starts a run of its own, with its own prompt.
     holdM.resolve();
     await m;
@@ -1051,6 +1059,80 @@ describe("a message held through another message's whole run", () => {
     assert.equal(recordOf(loaded)?.remembered.size, 64);
     await finish(loaded, LUNA);
     await strayRun("steer 7", () => hold7.resolve(), again, "design the new cache layer");
+  });
+});
+
+describe("what the router keeps of a message's text", () => {
+  /** Every string in a value, keys included, through objects, arrays, Sets and Maps. */
+  const stringsIn = (value: unknown, seen = new Set<unknown>()): string[] => {
+    if (typeof value === "string") return [value];
+    if (typeof value !== "object" || value === null || seen.has(value)) return [];
+    seen.add(value);
+    const parts: unknown[] = value instanceof Map ? [...value.entries()].flat() : value instanceof Set ? [...value] : Object.entries(value).flat();
+    return parts.flatMap((part) => stringsIn(part, seen));
+  };
+
+  test("is a digest under each router's own key: the records hold neither the text nor its bare hash", async (t) => {
+    const MARK = "quixotic-zebra";
+    const texts = [`${MARK} rename foo to bar`, `${MARK} and the tests`] as const;
+    const bare = texts.flatMap((text) =>
+      (["utf8", "utf16le"] as const).flatMap((input) => (["hex", "base64", "base64url"] as const).map((output) => createHash("sha256").update(text, input).digest(output))),
+    );
+    const digestsOf = async (id: string) => {
+      resetSlot();
+      const loaded = await hera(t, { id });
+      loaded.runtime.answer = async () => jevAnswer(LOW);
+      const check = (when: string): void => {
+        const strings = stringsIn(recordOf(loaded));
+        assert.deepEqual(strings.filter((value) => value.includes(MARK)), [], `${id}, ${when}: no text`);
+        assert.deepEqual(strings.filter((value) => bare.includes(value)), [], `${id}, ${when}: no bare hash`);
+      };
+      // A tagged message plans and its run starts, and a steer comes before the run's first request.
+      await say(loaded, `${texts[0]} #high`);
+      const signal = loaded.session.startRun();
+      await loaded.host.emit("before_agent_start", { messageType: "user", prompt: texts[0] });
+      await say(loaded, texts[1], { streamingBehavior: "steer" });
+      check("before the first request");
+      const record = recordOf(loaded);
+      assert.ok(record?.plan !== undefined && record.planDigest !== undefined && record.pendingLevel !== undefined && record.lastInput !== undefined, id);
+      const digests = { plan: record.planDigest, pending: record.pendingLevel.digest, last: record.lastInput.digest, remembered: [...record.remembered] };
+      // The first request takes the plan and records the run's level.
+      assert.equal(routed(loaded.runtime.route("auto", request("user", { signal }))), SOL);
+      await finish(loaded, SOL);
+      assert.deepEqual(recordOf(loaded)?.history.at(-1)?.level?.source, "tag");
+      check("after the run");
+      return digests;
+    };
+    const one = await digestsOf("one");
+    const two = await digestsOf("two");
+    assert.deepEqual([one.pending, one.last, one.remembered.length], [one.plan, one.plan, 1], "one router digests a text the same each time; the run forgot its own");
+    assert.notEqual(two.plan, one.plan, "another router's digest of the same text differs");
+    assert.notDeepEqual(two.remembered, one.remembered);
+  });
+
+  test("tells apart exactly the texts that differ, even by a lone surrogate alone", async (t) => {
+    const loaded = await hera(t);
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    const later = laterExtension(loaded);
+    await say(loaded, "go ahead");
+    assert.equal(await runPrompt(loaded, "go ahead"), LUNA);
+    // M and X differ only in their last UTF-16 code unit, a lone surrogate each, which UTF-8 would make the same.
+    const [m, x] = ["fix the failing test \uD800", "fix the failing test \uD801"] as const;
+    const [holdM, holdX] = [deferred<void>(), deferred<void>()];
+    later.holds.set(m, holdM.promise);
+    later.holds.set(x, holdX.promise);
+    const heldM = say(loaded, m, { streamingBehavior: "steer" });
+    await settled();
+    await finish(loaded, LUNA);
+    const heldX = say(loaded, `${x} #super`);
+    await settled();
+    assert.equal(recordOf(loaded)?.plan?.level?.tier, "super");
+    holdM.resolve();
+    await heldM;
+    assert.equal(await runPrompt(loaded, m), LUNA, "M's run takes no plan of X's");
+    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level], ["stick:last", undefined]);
+    holdX.resolve();
+    await heldX;
   });
 });
 

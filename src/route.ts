@@ -75,10 +75,11 @@ export interface PendingLevel {
   /** The input's token: a tagged run's opinion lands here only while the token is unchanged. */
   readonly token: number;
   /**
-   * The text, without its tag, of the message that planned the level: it belongs only to the run
-   * that message's prompt starts (src/router.ts). Prompt text, so never recorded.
+   * The router's keyed digest of the text, without its tag, of the message that planned the level:
+   * the level belongs only to the run that message's prompt starts (src/router.ts). The router keeps
+   * no prompt text, and the digest is never recorded either.
    */
-  readonly text: string;
+  readonly digest: string;
   readonly level: PlanLevel;
   /** The keyword classifier's signal and reason for the text. */
   readonly keyword: Classification;
@@ -93,9 +94,9 @@ export interface PendingLevel {
   jev: JevOutcome | "pending" | undefined;
 }
 
-/** The latest planned input: its text without the tag, and the level input it planned with. */
+/** The latest planned input: the router's keyed digest of its text without the tag, and the level input it planned with. */
 export interface LastInput {
-  readonly text: string;
+  readonly digest: string;
   readonly level: LevelInput;
 }
 
