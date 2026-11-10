@@ -125,10 +125,11 @@ export interface Session extends SessionRecord {
   inputsSinceRun: number;
   /**
    * The digests of the texts, without tags, of the messages the router passed, busy or idle, whose
-   * own runs have not started: the REMEMBERED most recent, oldest first. A prompt's run forgets only
-   * its own.
+   * own runs have not started, each with how many such messages carry that text: the REMEMBERED most
+   * recent texts, oldest first. A prompt's run forgets one message of its own text, so a held message
+   * typed again is still remembered after the retyped one's run.
    */
-  readonly remembered: Set<string>;
+  readonly remembered: Map<string, number>;
 }
 
 export interface Router extends OwnerRouter {
@@ -221,7 +222,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         levelRun: false,
         planDigest: undefined,
         inputsSinceRun: 0,
-        remembered: new Set(),
+        remembered: new Map(),
       };
       records.set(sessionId, record);
     }
@@ -678,15 +679,23 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   const ownsRun = (record: Session, digest: string | undefined, prompt: string): boolean =>
     digest !== undefined && (digest === prompt || (!record.remembered.has(prompt) && record.inputsSinceRun === 1));
 
-  /** Remember a message until its own run starts: the REMEMBERED most recent, the oldest forgotten first. */
+  /** Remember a message until its own run starts: the REMEMBERED most recent texts, each counted, the oldest forgotten first. */
   const remember = (record: Session, digest: string): void => {
     const { remembered } = record;
+    const count = remembered.get(digest) ?? 0;
     remembered.delete(digest);
-    remembered.add(digest);
-    for (const oldest of remembered) {
+    remembered.set(digest, count + 1);
+    for (const oldest of remembered.keys()) {
       if (remembered.size <= REMEMBERED) break;
       remembered.delete(oldest);
     }
+  };
+
+  /** A prompt's run started: forget one message of its text. */
+  const forgetOne = (record: Session, digest: string): void => {
+    const count = record.remembered.get(digest) ?? 0;
+    if (count > 1) record.remembered.set(digest, count - 1);
+    else record.remembered.delete(digest);
   };
 
   // The decision point: a prompt typed while the session is idle plans its run. Input that
@@ -958,7 +967,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
             record.levelRun = record.pendingLevel !== undefined;
             // This prompt's message has started its run; the others it remembers have not.
             record.inputsSinceRun = 0;
-            record.remembered.delete(prompt);
+            forgetOne(record, prompt);
           }
           // A run without a level of its own shows none, rather than an earlier run's.
           if (record.pendingLevel === undefined) showLevel(ctx, record, undefined);

@@ -1046,6 +1046,36 @@ describe("a message held through another message's whole run", () => {
     assert.deepEqual(lastNotice(loaded), { type: "warning", message: UNMATCHED });
   });
 
+  test("a held steer typed again keeps its memory: the retyped message's run forgets one of the two, and the steer's own run takes no other plan (F1)", async (t) => {
+    const loaded = await hera(t);
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    const later = laterExtension(loaded);
+    await say(loaded, "go ahead");
+    const first = await runPrompt(loaded, "go ahead");
+    const holdS = deferred<void>();
+    later.holds.set("fix the failing test", holdS.promise);
+    const s = say(loaded, "fix the failing test", { streamingBehavior: "steer" });
+    await settled();
+    await finish(loaded, first);
+    // The same text, typed again while the steer is held, is not held: it plans, runs and ends.
+    later.holds.delete("fix the failing test");
+    await say(loaded, "fix the failing test");
+    const retyped = await runPrompt(loaded, "fix the failing test");
+    await finish(loaded, retyped);
+    const holdX = deferred<void>();
+    later.holds.set("design the new storage layer", holdX.promise);
+    const x = say(loaded, "design the new storage layer #super");
+    await settled();
+    assert.equal(recordOf(loaded)?.plan?.level?.tier, "super", "X planned");
+    holdS.resolve();
+    await s;
+    assert.equal(await runPrompt(loaded, "fix the failing test"), retyped, "the last responder, not X's SUPER");
+    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel], ["stick:last", undefined, undefined]);
+    assert.deepEqual(lastNotice(loaded), { type: "warning", message: UNMATCHED });
+    holdX.resolve();
+    await x;
+  });
+
   test("remembers the 64 most recent messages whose runs have not started, forgetting the oldest first", async (t) => {
     const loaded = await hera(t);
     loaded.runtime.answer = async () => jevAnswer(LOW);
@@ -1118,7 +1148,7 @@ describe("what the router keeps of a message's text", () => {
       check("before the first request");
       const record = recordOf(loaded);
       assert.ok(record?.plan !== undefined && record.planDigest !== undefined && record.pendingLevel !== undefined && record.lastInput !== undefined, id);
-      const digests = { plan: record.planDigest, pending: record.pendingLevel.digest, last: record.lastInput.digest, remembered: [...record.remembered] };
+      const digests = { plan: record.planDigest, pending: record.pendingLevel.digest, last: record.lastInput.digest, remembered: [...record.remembered.keys()] };
       // The first request takes the plan and records the run's level.
       assert.equal(routed(loaded.runtime.route("auto", request("user", { signal }))), SOL);
       await finish(loaded, SOL);
