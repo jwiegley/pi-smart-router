@@ -1143,6 +1143,34 @@ git commit -S -m "Add the four-level Jev design and its implementation plan"
      release.
 - [ ] **Step 6: Commit.**
   `git add README.md CHANGELOG.md AGENTS.md test/scan.test.ts package.json package-lock.json test/package.test.ts && git commit -S -m "Document four Jev-classified levels and scope; release 1.3.0-jw.2"`
+
+  **Controller rulings (after Tasks 3, 5, 7, 8, 9 and 10, binding; they amend Steps 1-6):**
+  - The implementer does Steps 1 to 6 only. Step 7 (publish or stop) belongs to the controller,
+    after the final whole-branch review and a fess audit. Never push or tag.
+  - The README describes these as built:
+    - The directory rule applies on every read. A running or resumed session with no scope entry,
+      whose directory is under a work directory, moves to work scope, and the entry is recorded once.
+      The plan's earlier wording "only for a session with no assistant message yet" is superseded.
+    - The work selection guard covers every hook the pin guards, below the pin. It uses routing's
+      account check, including the Multi-Pass label. While a reload fails, it remembers the last
+      valid roster's work directories and bindings.
+    - Rollout order: write the version 2 work roster before setting `PI_SMART_ROUTER_SCOPE=work`. A
+      latched process with a version 1 roster, or with no roster loaded, sends nothing unless pinned.
+    - A roster with a classifier must not exclude `openrouter/*`. The classifier model is checked
+      against the exclusions, and the work guard already stops OpenRouter models picked by hand.
+    - A scope set by an entry is not inherited by subagent children (pi-subagents, goal-x auditors)
+      or by CLI forks that skip `session_shutdown`. Run work in a work directory or in a latched
+      process.
+    - Training: each `smart-router.level` record pairs with its run's first user message. Steers
+      and follow-ups can sit between them. Records hold no prompt text and no digest.
+    - Known limits of binding a plan to its run, from the `ownsRun` comment, stated briefly:
+      - identical texts can't be told apart;
+      - a held message whose prompt a later handler also rewrites;
+      - the 64-message memory;
+      - after a message that never starts its own run, the next rewritten run goes unplanned.
+  - The mutant check in Step 5 also covers `src/redact.ts`, `src/guards.ts` (the work policy) and
+    the router's plan binding (`ownsRun`).
+
 - [ ] **Step 7: Publish or stop.** John authorized the push and the tag on 2026-11-09, but only if
   all of these hold:
   - `npm run check` passes;
@@ -1166,3 +1194,8 @@ git commit -S -m "Add the four-level Jev design and its implementation plan"
   - confirming the account pi-warden uses at work;
   - the version 2 rosters;
   - measuring Jev's latency.
+  - the paid live checks deferred from 1.3.0-jw.1 (John, 2026-11-09, per psr-pack): routed Codex
+    turns to `gpt-6.1-sol` and `gpt-6-astra`, a Kimi turn to `kimi-k3.1-pro`, and Clio's
+    codex-compat check (design Q11). Each paid turn needs John's OK.
+  - nix-zm64: the new release's Linux gallery check must fail on any "failed to load" line, or
+    assert that `smart-router/auto` is registered.
