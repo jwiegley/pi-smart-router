@@ -127,7 +127,10 @@ export interface PlanLevel {
   readonly trigger?: RiskyTrigger;
   /** Whether the pick moved up from the tier it started from, which could not take the run. */
   readonly steppedUp: boolean;
-  /** Whether the pick is another candidate of the role that holds the model that answered last. */
+  /**
+   * Whether the pick ranks before the model that answered last, in that model's role: the role is
+   * back on an earlier candidate. A move off the latest responder to a later candidate is no return.
+   */
   readonly returnedToFirst: boolean;
   /** The outcome an untagged run waited for. */
   readonly jev?: JevOutcome;
@@ -195,6 +198,13 @@ function tierOf(rc: ResolveContext, section: ScopeSection, ref: string): Tier | 
   return role === undefined ? undefined : TIERS.find((tier) => section.levels[tier].role === role);
 }
 
+/** Whether a pick ranks before `later` among its role's candidates. */
+function ranksBefore(rc: ResolveContext, choice: Choice, later: string): boolean {
+  const models = rc.roster.roles.find((role) => role.name === choice.role)?.models ?? [];
+  const at = models.indexOf(choice.ref);
+  return at >= 0 && at < models.indexOf(later);
+}
+
 /**
  * From `start` upward, the first tier whose role's first available candidate fits the conversation.
  * The start tier's pick carries `code`, a higher tier's `step-up`. When no tier can take the run,
@@ -246,7 +256,7 @@ function planLevel(p: PlanInput, section: ScopeSection, signal: Signal): Pick<Pl
     source,
     ...(trigger === undefined ? {} : { trigger }),
     steppedUp: tier !== start,
-    returnedToFirst: choice !== undefined && last !== undefined && last.ref !== choice.ref && roleOf(rc.roster, last.ref)?.name === choice.role,
+    returnedToFirst: choice !== undefined && last !== undefined && ranksBefore(rc, choice, last.ref),
     ...(tag !== undefined || jev === undefined ? {} : { jev }),
   };
   return { role: choice?.role, code: choice?.code ?? code, decision, level };

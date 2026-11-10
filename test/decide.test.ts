@@ -676,6 +676,15 @@ describe("v2 levels", () => {
     assert.equal(cooled.level?.returnedToFirst, false);
   });
 
+  test("a move off a cooled latest responder to a later candidate is no return", () => {
+    const jev = answer("high");
+    const cooldowns = new Cooldowns();
+    cooldowns.cool(SOL, 1, NOW, 30);
+    const away = planV2(PLAIN, { rc: v2(v2Catalog(), { cooldowns }), level: { jev }, last: last(SOL, MINUTE) });
+    expectPlan(away, GLM_CLOUD, "jev");
+    assert.equal(away.level?.returnedToFirst, false);
+  });
+
   test("a work-scope run takes its tier's work-account model", () => {
     const result = planV2(FRANCE, { rc: v2(v2Catalog(), { scope: "work" }) });
     expectPlan(result, WORK_TERRA, "keyword");
