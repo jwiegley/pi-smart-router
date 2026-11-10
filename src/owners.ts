@@ -15,15 +15,16 @@
 //   4. otherwise the router refuses with its own non-retryable error.
 //
 // The slot holds only process-wide state: the owners, the catalog objects their registrations
-// produced, the environment latches, pin and scope handoffs and the pi-cache-optimizer adapter's
-// registration. Per-session records live in each router instance. Every load of this module,
-// /reload included, shares the slot, so it holds plain data and is checked by shape, never by class
-// identity. The scope's fields came later: they are optional and made on first use, so a slot an
-// earlier load made still has the shape.
+// produced, the environment latches, pin and scope handoffs, what the last valid roster said of
+// work scope, and the pi-cache-optimizer adapter's registration. Per-session records live in each
+// router instance. Every load of this module, /reload included, shares the slot, so it holds plain
+// data and is checked by shape, never by class identity. The scope's fields came later: they are
+// optional and made on first use, so a slot an earlier load made still has the shape.
 import { createHash } from "node:crypto";
 
 import type { ExtensionContext, ModelRoute, ModelRouteRequest } from "@earendil-works/pi-coding-agent";
 
+import type { ScopedAccounts } from "./accounts.ts";
 import type { ActiveRoute } from "./cache-optimizer.ts";
 import { SLOT_KEY } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
@@ -71,6 +72,8 @@ export interface Slot {
   readonly handoffs: Map<string, unknown>;
   /** Scopes handed to the session a fork or /new creates, keyed by its session file; made on first use. */
   scopeHandoffs?: Map<string, unknown>;
+  /** What the last valid roster loaded in the process said of work scope (RosterMemory); made at the first valid load, and checked by shape when read. */
+  lastRoster?: unknown;
   /** The pi-cache-optimizer adapter and its registration, while any owner is live. */
   adapter: { readonly adapter: object; readonly unregister: () => void } | undefined;
 }
@@ -151,6 +154,35 @@ export function takeScopeHandoff(slot: Slot, file: string): Scope | undefined {
   const value = handoffs.get(file);
   handoffs.delete(file);
   return value === "personal" || value === "work" ? value : undefined;
+}
+
+/**
+ * What the slot keeps of the last valid roster loaded in the process: what the scope and the work
+ * guard read of it while a later load fails, so that a reload that fails, in this instance or in one
+ * a /reload builds, never moves a work session to personal scope or widens what it may select.
+ */
+export interface RosterMemory {
+  /** The work scope's directories; none for a roster without a work scope. */
+  readonly directories: readonly string[];
+  /** The scope each provider is bound to; none for a version 1 roster. */
+  readonly accounts: ScopedAccounts;
+}
+
+/** Keep what the scope and the work guard read of a roster that loaded. */
+export function rememberRoster(slot: Slot, memory: RosterMemory): void {
+  slot.lastRoster = memory;
+}
+
+/** What the slot keeps of the last valid roster loaded in the process; undefined before any, or when another load of this module kept another shape. */
+export function rememberedRoster(slot: Slot): RosterMemory | undefined {
+  const memory = slot.lastRoster;
+  if (!isRecord(memory)) return undefined;
+  const { directories, accounts } = memory;
+  if (!Array.isArray(directories) || !directories.every((directory) => typeof directory === "string") || !(accounts instanceof Map)) return undefined;
+  for (const [provider, binding] of accounts) {
+    if (typeof provider !== "string" || !isRecord(binding) || (binding.scope !== "personal" && binding.scope !== "work")) return undefined;
+  }
+  return { directories, accounts };
 }
 
 export function sessionHash(sessionId: string): string {

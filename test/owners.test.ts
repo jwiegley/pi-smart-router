@@ -17,6 +17,8 @@ import {
   leaveScopeHandoff,
   ownerBySignal,
   processSlot,
+  rememberedRoster,
+  rememberRoster,
   scopeLatched,
   sessionHash,
   takeScopeHandoff,
@@ -201,6 +203,31 @@ describe("scope handoffs", () => {
     slot.scopeHandoffs?.set("/sessions/z.jsonl", { scope: "work" });
     assert.equal(takeScopeHandoff(slot, "/sessions/z.jsonl"), undefined, "a value of another shape is not a scope");
     assert.equal(slot.scopeHandoffs?.size, 0);
+  });
+});
+
+describe("the last valid roster", () => {
+  test("is kept in the slot from the first load, and a memory of another shape reads as none without failing the slot", () => {
+    const slot = processSlot();
+    assert.equal("lastRoster" in slot, false, "nothing is kept until a roster loads");
+    assert.equal(rememberedRoster(slot), undefined);
+    const accounts = new Map([["openai-codex-3", { scope: "work" as const }]]);
+    rememberRoster(slot, { directories: ["/x/work"], accounts });
+    assert.deepEqual(rememberedRoster(slot), { directories: ["/x/work"], accounts });
+    const others: Array<[string, unknown]> = [
+      ["not an object", "x"],
+      ["directories as text", { directories: "/x/work", accounts }],
+      ["a directory that is not text", { directories: [1], accounts }],
+      ["accounts in a plain object", { directories: [], accounts: { "openai-codex-3": { scope: "work" } } }],
+      ["a scope that is neither", { directories: [], accounts: new Map([["openai-codex-3", { scope: "team" }]]) }],
+      ["a binding that is not an object", { directories: [], accounts: new Map([["openai-codex-3", "work"]]) }],
+      ["a provider that is not text", { directories: [], accounts: new Map([[3, { scope: "work" }]]) }],
+    ];
+    for (const [name, other] of others) {
+      slot.lastRoster = other;
+      assert.equal(rememberedRoster(slot), undefined, name);
+      assert.equal(processSlot(), slot, `${name}: the slot keeps its shape`);
+    }
   });
 });
 

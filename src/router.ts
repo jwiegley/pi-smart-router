@@ -1,8 +1,8 @@
 // One instance of the router: the session whose extension runtime loaded it, the two files it
-// reads, its per-session records and cooldowns, the limits both models declare, the pin's guards
-// and handoffs, the session's scope with its handoffs and work directories, a message's tag and
-// Jev's request, the /smart-router command, what it tells pi-cache-optimizer, and the handlers
-// wire() registers.
+// reads, its per-session records and cooldowns, the limits both models declare, the guards of the
+// pin and of work scope, the pin's handoffs, the session's scope with its handoffs and work
+// directories, a message's tag and Jev's request, the /smart-router command, what it tells
+// pi-cache-optimizer, and the handlers wire() registers.
 //
 // createRouter only builds closures. It makes no pi.on, registration or command call, so a throw
 // while it is built leaves only the two refusing models index.ts registered, and wire() makes
@@ -25,6 +25,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 import { labelsFile, needsLabels } from "./accounts.ts";
+import type { ScopedAccounts } from "./accounts.ts";
 import { registerAdapter, unregisterAdapter } from "./cache-optimizer.ts";
 import type { ActiveRoute } from "./cache-optimizer.ts";
 import { smartRouterCommand } from "./commands.ts";
@@ -61,8 +62,8 @@ import type { GuardState } from "./guards.ts";
 import { askJev, buildContext, recentMessages } from "./jev.ts";
 import type { JevOutcome } from "./jev.ts";
 import { EMPTY_POLICY, policyFromRoster } from "./local.ts";
-import { healDisplaced, isLive, isLiveOwner, join, leave, leaveScopeHandoff, ownerBySignal, scopeLatched, sessionHash, takeScopeHandoff } from "./owners.ts";
-import type { Owner, OwnerRouter, Slot } from "./owners.ts";
+import { healDisplaced, isLive, isLiveOwner, join, leave, leaveScopeHandoff, ownerBySignal, rememberedRoster, rememberRoster, scopeLatched, sessionHash, takeScopeHandoff } from "./owners.ts";
+import type { Owner, OwnerRouter, RosterMemory, Slot } from "./owners.ts";
 import { latchEnvPolicy, leaveHandoff, pinOn, readPin, takeHandoff } from "./pin.ts";
 import type { PinReading } from "./pin.ts";
 import { coolFrom, Cooldowns, resolveContext } from "./resolve.ts";
@@ -97,7 +98,7 @@ export interface RouterOptions {
 }
 
 /**
- * What a router instance keeps per session: the route records, the pin's guard state, whether it
+ * What a router instance keeps per session: the route records, the guards' state, whether it
  * tried to record the work directories' scope, and what binds a plan to the run that uses it.
  */
 export interface Session extends SessionRecord {
@@ -163,6 +164,15 @@ function smallest(decisions: readonly Decision[]): Limits {
 const sameLimits = (a: Readonly<Record<VirtualId, Limits>>, b: Readonly<Record<VirtualId, Limits>>): boolean =>
   VIRTUAL_IDS.every((id) => a[id].contextWindow === b[id].contextWindow && a[id].maxTokens === b[id].maxTokens);
 
+/** No account bindings: a version 1 roster's, as work scope reads them, and those known before any roster has loaded. */
+const NO_ACCOUNTS: ScopedAccounts = new Map();
+
+/** What the scope and the work guard read of a valid roster: its work directories, and its accounts' scopes. */
+const memoryOf = (value: Roster): RosterMemory => ({
+  directories: scopeSection(value, "work")?.directories ?? [],
+  accounts: value.version === 2 ? value.accounts : NO_ACCOUNTS,
+});
+
 export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   const { slot, now } = options;
   const files = { agentDir: options.agentDir, uid: options.uid, fs: options.fs, now };
@@ -173,6 +183,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   const reported = new Set<string>();
   let limits = BOTH_DEFAULT;
   let self: Owner | undefined;
+  /** The latest valid roster this instance loaded, whose work directories and bindings the slot keeps. */
+  let lastLoaded: Roster | undefined;
   /** How many idle inputs this instance has seen: each one's token. */
   let inputs = 0;
   /**
@@ -206,13 +218,28 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   const pinOf = (ctx: ExtensionContext): PinReading => readPin(managerOf(ctx), slot.env);
 
   /**
-   * The session's working directory and the work directories of the roster as it is now; undefined
-   * without any. Never throws: a roster that cannot be read, or a stale context, has none.
+   * What the scope and the work guard read of the roster: its work directories and account bindings
+   * as it is now, else, while it fails to load, those of the last valid roster loaded in the process
+   * (the slot keeps them), else none. Never throws: an agent directory that cannot be found counts
+   * as a roster that fails to load.
+   */
+  const rosterFacts = (): RosterMemory | undefined => {
+    try {
+      const state = loaded(roster.current());
+      if (state.kind === "ok") return memoryOf(state.value);
+    } catch {
+      // As for a roster that fails to load.
+    }
+    return rememberedRoster(slot);
+  };
+
+  /**
+   * The session's working directory and the work directories that rosterFacts gives; undefined
+   * without any. Never throws: a stale context has none.
    */
   const workOf = (ctx: ExtensionContext): WorkDirectories | undefined => {
     try {
-      const state = loaded(roster.current());
-      const directories = state.kind === "ok" ? (scopeSection(state.value, "work")?.directories ?? []) : [];
+      const directories = rosterFacts()?.directories ?? [];
       if (directories.length === 0) return undefined;
       const { cwd } = ctx;
       return typeof cwd === "string" ? { cwd, directories } : undefined;
@@ -222,12 +249,15 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   };
 
   /**
-   * A session's scope, read fail closed: the latch, the session's entry, then the roster's work
-   * directories as they are now. A context whose session cannot be read has an unreadable scope.
+   * A session's scope, read fail closed: the latch, the session's entry, then the work directories
+   * that rosterFacts gives. A context whose session cannot be read has an unreadable scope.
    */
   const scopeOf = (ctx: ExtensionContext): ScopeState => readScope(managerOf(ctx), scopeLatched(slot), workOf(ctx));
 
-  const guards = createGuards({ pi, now, pinOf, stateOf: (ctx) => recordOf(ctx.sessionManager.getSessionId()).guard });
+  /** The account bindings that work scope's guard reads, as rosterFacts gives them; none before any roster has loaded. */
+  const accountsOf = (): ScopedAccounts => rosterFacts()?.accounts ?? NO_ACCOUNTS;
+
+  const guards = createGuards({ pi, now, pinOf, scopeOf, accountsOf, stateOf: (ctx) => recordOf(ctx.sessionManager.getSessionId()).guard });
 
   const contextFor = (ctx: ExtensionContext, value: Roster, id: VirtualId, pin: Pin): ResolveContext => {
     const scope = scopeOf(ctx);
@@ -247,9 +277,20 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     });
   };
 
-  /** Every roster load passes here, so the environment switch latches the first valid one's local policy. */
+  /**
+   * Every roster load passes here, so the environment switch latches the first valid one's local
+   * policy, and the slot keeps what the latest valid one says of work scope (rosterFacts). Reading
+   * again a roster this instance already holds is no new load, so it leaves in the slot a roster
+   * another instance loaded since.
+   */
   const loaded = (state: Loaded<Roster>): Loaded<Roster> => {
-    if (state.kind === "ok") latchEnvPolicy(slot.env, state.value);
+    if (state.kind === "ok") {
+      latchEnvPolicy(slot.env, state.value);
+      if (state.value !== lastLoaded) {
+        lastLoaded = state.value;
+        rememberRoster(slot, memoryOf(state.value));
+      }
+    }
     return state;
   };
 

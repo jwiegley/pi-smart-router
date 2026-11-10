@@ -8,7 +8,8 @@
 //   2. the session's latest scope entry, exactly as the router writes it;
 //   3. the work directories of the roster as it is now: work for a session whose working directory
 //      lies under one of them, so a roster load that lists a running session's directory moves
-//      that session at once;
+//      that session at once. While the roster fails to load, the router passes the directories of
+//      the last valid roster loaded in the process (src/router.ts);
 //   4. otherwise personal, the default.
 //
 // The first time rule 3 decides a session's scope, at session start or at its next idle input, the

@@ -538,6 +538,28 @@ describe("smart-router/auto refuses a scope it cannot serve", () => {
     });
   });
 
+  test("pinned too: the scope's refusal comes before the pin, so a pinned, latched version 1 session refuses smart-router/auto, and smart-router/local still routes", async (t) => {
+    await withScope("work", async () => {
+      const loaded = await begin({ dir: agentDir(t), setup: (session) => session.pin(policyFromRoster(rosterFixture("roster-hera.json"))) });
+      const refusal = scopeUnserved("auto", "work", 1);
+      refuses(() => loaded.runtime.route("auto", request("direct")), refusal, "a direct request");
+      const signal = loaded.session.startRun();
+      refuses(() => loaded.runtime.route("auto", request("continuation", { signal })), refusal, "the owned run");
+      refuses(() => loaded.runtime.route("auto", request("continuation", { signal: new AbortController().signal })), refusal, "a foreign request");
+      assert.equal(routed(loaded.runtime.route("local", request("continuation", { signal }))), GLM, "smart-router/local, the pinned session's own route");
+      loaded.session.endRun();
+      assert.equal(routed(loaded.runtime.route("local", request("direct"))), GLM);
+      assert.deepEqual(
+        loaded.router?.record(loaded.session.id)?.history.map((entry) => [entry.virtual, entry.ref]),
+        [
+          ["local", GLM],
+          ["local", GLM],
+        ],
+        "only the local requests reached a model",
+      );
+    });
+  });
+
   test("an unreadable scope, which routing resolves in work scope, the narrower one", async (t) => {
     const dir = agentDir(t, { roster: HERA_V2 });
     const malformed = await begin({ dir, id: "malformed", runtime: new FakeRuntime(workCatalog()), setup: (session) => session.appendCustom(SCOPE_ENTRY, { v: 1, scope: "work" }) });
