@@ -495,7 +495,7 @@ git commit -S -m "Add the four-level Jev design and its implementation plan"
   export interface ResolveContext { /* existing fields */ readonly scope: Scope }
   // src/roster.ts
   export function autoRoles(roster: Roster, scope: Scope): ReadonlySet<string>; // version 1: unchanged set; version 2: the scope's four level roles (empty without that section)
-  export function excludesFor(roster: Roster, scope: Scope, ref: string): readonly string[]; // version 2 work scope with a work-bound provider: BUILTIN_EXCLUDES minus "openai-codex-3/*", plus roster.exclude
+  export function excludesFor(roster: Roster, scope: Scope, ref: string): readonly string[]; // version 2 work scope: liftWorkAlias(roster, ref, <the merged exclusions>); otherwise the merged exclusions unchanged
   // src/accounts.ts
   export function checkAccount(provider: string, roster: Roster, labels: Loaded<Labels> | undefined, scope?: Scope): AccountCheck;
   ```
@@ -532,6 +532,17 @@ git commit -S -m "Add the four-level Jev design and its implementation plan"
 
 **Controller rulings (pre-flight, binding; they amend this task):**
 - `excludesFor` calls Task 3's helper for lifting `openai-codex-3/*`. Do not write the rule twice.
+- (Ruling after Task 3) Task 3's helper is
+  `liftWorkAlias(roster: Pick<RosterV2, "accounts" | "roles" | "scopes">, ref, patterns)`. In a work-scope
+  session, `excludesFor` passes it the merged exclusions that the resolver already uses: the
+  built-ins plus `roster.exclude`, as at `src/resolve.ts:80` and `src/route.ts:185`. Never pass
+  `BUILTIN_EXCLUDES` minus the alias plus `roster.exclude`, because that adds the alias back. Lifting
+  over the merged list is safe because Task 3's validation refuses every `openai-codex-3` ref in a
+  roster whose own `exclude` names the alias.
+- (Ruling after Task 3) For a version 2 roster, `resolveCandidate`'s `not-routable-by-auto` reason
+  (`src/resolve.ts:100`) must not say "neither a routing target nor a fallback", which is version 1
+  wording. Say that the role is not one of the session scope's level roles. Keep version 1's text
+  byte-identical.
 - `autoRoles(roster, scope)` replaces Task 3's interim all-scopes set. `byDefault` uses the
   `medium` role of `rc.scope`.
 - `heraContext()` in `test/support/catalog.ts` defaults `scope` to `personal`. Add that file to
