@@ -91,7 +91,8 @@ describe("buildContext", () => {
 
   test("redacts the message before each of its cuts, so no part of a secret survives wherever a cut falls", () => {
     // Every split, the short ones included: a head fragment such as "sk-proj-Q9Z" is no key shape of
-    // its own, so a cut made first would leave it. Q and Z occur in neither the spaces nor the marker.
+    // its own, so a cut made first would leave it. Only the spaces, the line break a cut inserts and
+    // the marker, or a piece of it, may remain: not even an "s" or an "8" of the secret.
     const secret = `sk-proj-${"Q9Z8".repeat(10)}`;
     const cuts: ReadonlyArray<readonly [string, (split: number) => string, JevContextCaps]> = [
       // capText keeps the first HEAD_CHARS and the last TAIL_CHARS - 1 characters.
@@ -104,7 +105,7 @@ describe("buildContext", () => {
     for (const [cut, text, limits] of cuts) {
       for (let split = 1; split < secret.length; split++) {
         const out = stateOf(buildContext(text(split), [], descriptions, limits)).message;
-        assert.doesNotMatch(out, /[QZ]/, `${cut}, ${split} characters of the secret inside it: ${JSON.stringify(out.trim())}`);
+        assert.match(out, /^[ \n[\]redact]*$/, `${cut}, ${split} characters of the secret inside it: ${JSON.stringify(out.trim())}`);
       }
     }
   });
