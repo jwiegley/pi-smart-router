@@ -3,7 +3,7 @@ import test, { describe } from "node:test";
 
 import type { ClassifierApi, ClassifierContext, ClassifierModel, ClassifierResult } from "@earendil-works/pi-ai";
 
-import { HEAD_CHARS } from "../src/classify.ts";
+import { HEAD_CHARS, TAIL_CHARS } from "../src/classify.ts";
 import {
   askJev,
   buildContext,
@@ -86,6 +86,26 @@ describe("buildContext", () => {
     assert.ok(out.includes(REDACTED));
     for (let i = 0; i + 8 <= secret.length; i++) {
       assert.ok(!out.includes(secret.slice(i, i + 8)), secret.slice(i, i + 8));
+    }
+  });
+
+  test("redacts the message before each of its cuts, so no part of a secret survives wherever a cut falls", () => {
+    // Every split, the short ones included: a head fragment such as "sk-proj-Q9Z" is no key shape of
+    // its own, so a cut made first would leave it. Q and Z occur in neither the spaces nor the marker.
+    const secret = `sk-proj-${"Q9Z8".repeat(10)}`;
+    const cuts: ReadonlyArray<readonly [string, (split: number) => string, JevContextCaps]> = [
+      // capText keeps the first HEAD_CHARS and the last TAIL_CHARS - 1 characters.
+      ["the head cut", (split) => `${" ".repeat(HEAD_CHARS - split)}${secret}${" ".repeat(8000)}`, { ...caps, totalChars: 32000 }],
+      ["the tail cut", (split) => `${" ".repeat(30000)}${secret}${" ".repeat(TAIL_CHARS - 1 - split)}`, { ...caps, totalChars: 32000 }],
+      // Then totalChars, here 1000: the first 800 and the last 199 characters.
+      ["totalChars's head cut", (split) => `${" ".repeat(800 - split)}${secret}${" ".repeat(4000)}`, { ...caps, totalChars: 1000 }],
+      ["totalChars's tail cut", (split) => `${" ".repeat(4000)}${secret}${" ".repeat(199 - split)}`, { ...caps, totalChars: 1000 }],
+    ];
+    for (const [cut, text, limits] of cuts) {
+      for (let split = 1; split < secret.length; split++) {
+        const out = stateOf(buildContext(text(split), [], descriptions, limits)).message;
+        assert.doesNotMatch(out, /[QZ]/, `${cut}, ${split} characters of the secret inside it: ${JSON.stringify(out.trim())}`);
+      }
     }
   });
 
