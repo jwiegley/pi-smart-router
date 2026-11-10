@@ -14,6 +14,8 @@ import { PROVIDER, VIRTUAL_API } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import type { Attempt } from "./decide.ts";
 import type { Scope } from "./roster.ts";
+import { tierLabel } from "./tiers.ts";
+import type { Tier } from "./tiers.ts";
 
 /** An error route() throws. Pi turns it into an error response attributed to the virtual model. */
 export class RouterError extends Error {}
@@ -152,9 +154,34 @@ export function scopeCarryFailedNotice(scope: Scope, reason: string): string {
   return `pi-smart-router: the session this one came from was in ${scope} scope, but its scope could not be recorded here (${reason}). Run /smart-router scope ${scope} before you send anything.`;
 }
 
-/** What one role's candidates said, as a refusal lists it. */
-function describeAttempt(attempt: Attempt, index: number): string {
-  const label = index === 0 ? attempt.role : `fallback ${attempt.role}`;
+/** Shown when a message was only a level tag: nothing is sent. */
+export function tagOnlyNotice(tier: Tier): string {
+  return `pi-smart-router: the message was only a ${tierLabel(tier)} tag, so nothing was sent. Put the tag at the end of a message.`;
+}
+
+const TAG_IGNORED = {
+  busy: "a run is under way, and it keeps its model until it ends",
+  pinned: "this session is pinned to local models",
+  version: "levels need a version 2 roster",
+} as const;
+
+/** Why a tag cannot set its run's level: a fixed cause, or the selection when it is not smart-router/auto. */
+export type TagIgnored = keyof typeof TAG_IGNORED | { readonly selection: string };
+
+/** Shown when a tag was removed from a message but cannot set its run's level. */
+export function tagIgnoredNotice(tier: Tier, why: TagIgnored): string {
+  const cause = typeof why === "string" ? TAG_IGNORED[why] : `only smart-router/auto routes by level, and the selection is ${why.selection}`;
+  return `pi-smart-router: the ${tierLabel(tier)} tag was removed and has no effect, because ${cause}.`;
+}
+
+/** Shown when a version 2 run went to a higher tier than the one its pick started at. */
+export function stepUpNotice(start: Tier, tier: Tier, modelId: string): string {
+  return `pi-smart-router: no ${tierLabel(start)} model can take this run, so it goes to ${tierLabel(tier)} (${modelId}).`;
+}
+
+/** What one role's candidates said, as a refusal lists it: the first role, then each `later` one. */
+function describeAttempt(attempt: Attempt, index: number, later: string): string {
+  const label = index === 0 ? attempt.role : `${later} ${attempt.role}`;
   if (!attempt.exists) return `${label}: no such role in the roster`;
   if (attempt.candidates.length === 0) return `${label}: no candidates`;
   return `${label}: ${attempt.candidates.map((candidate) => `${candidate.ref}: ${candidate.detail}`).join("; ")}`;
@@ -163,6 +190,8 @@ function describeAttempt(attempt: Attempt, index: number): string {
 export interface UnroutableContext {
   readonly localOnly: boolean;
   readonly pinned: boolean;
+  /** Whether the roles after the first are a version 2 run's step-ups to higher tiers, not version 1's declared fallback. */
+  readonly stepUps?: boolean;
 }
 
 /** No candidate could take the request: every role tried and why, or the problem found first. */
@@ -177,7 +206,8 @@ export function unroutable(
   }
   const subject = context.localOnly ? "no local model" : "no model";
   const pinned = context.pinned ? " while this session is pinned to local models" : "";
-  const detail = failure.attempts.map(describeAttempt).join("; ");
+  const later = context.stepUps === true ? "step-up" : "fallback";
+  const detail = failure.attempts.map((attempt, index) => describeAttempt(attempt, index, later)).join("; ");
   const cause = `${subject} can take this request${pinned}${detail === "" ? "" : ` (${detail})`}`;
   const changed = context.pinned && failure.attempts.some((attempt) => attempt.candidates.some((candidate) => candidate.detail === PIN_POLICY_CHANGED));
   const way = changed

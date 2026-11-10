@@ -2,20 +2,22 @@
 //
 // FakeRuntime follows Pi's ModelRuntime where the router depends on it: virtual models are kept
 // by provider and id, a registration replaces the earlier one and produces a new catalog object,
-// and the catalog lists virtual models beside the physical ones. FakeSession is one session with
-// its context; every getter of the context throws once the session is disposed, as a stale Pi
-// context does, and its session manager refuses whole-history reads. FakeHost is one session's
-// extension runtime: the API a factory receives, which stages registrations until the session
-// binds, as Pi's loader does, and the handlers events are emitted to, in registration order. Its
-// setModel follows AgentSession.setModel: it assigns the selection, records a model_change and
-// then awaits every model_select handler, so a handler can switch again from inside it. The
-// session's dialogs are Pi's own selector component, answered with scripted keys.
+// and the catalog lists virtual models beside the physical ones. Its registry finds the classifier
+// models a test adds, and classify logs every call and answers as the test scripts it. FakeSession
+// is one session with its context; every getter of the context throws once the session is
+// disposed, as a stale Pi context does, and its session manager refuses whole-history reads.
+// FakeHost is one session's extension runtime: the API a factory receives, which stages
+// registrations until the session binds, as Pi's loader does, and the handlers events are emitted
+// to, in registration order, with input chained as Pi chains it. Its setModel follows
+// AgentSession.setModel: it assigns the selection, records a model_change and then awaits every
+// model_select handler, so a handler can switch again from inside it. The session's dialogs are
+// Pi's own selector component, answered with scripted keys.
 import assert from "node:assert/strict";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { TestContext } from "node:test";
 
-import type { Api, AssistantMessage, Model, Usage } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, ClassifierApi, ClassifierContext, ClassifierModel, ClassifierResult, Model, Usage } from "@earendil-works/pi-ai";
 import { ExtensionSelectorComponent, initTheme } from "@earendil-works/pi-coding-agent";
 import type {
   ExtensionAPI,
@@ -33,12 +35,14 @@ import type {
 import { install } from "../../index.ts";
 import { PIN_ENTRY, PROVIDER, ROUTING_REGISTRY_KEY, SLOT_KEY } from "../../src/constants.ts";
 import type { VirtualId } from "../../src/constants.ts";
+import { isRecord } from "../../src/files.ts";
+import type { ClassifierRegistry } from "../../src/jev.ts";
 import type { LocalPolicy } from "../../src/local.ts";
 import { pinOff, pinOn } from "../../src/pin.ts";
 import { refOf } from "../../src/resolve.ts";
 import { createRouter } from "../../src/router.ts";
 import type { Router, RouterOptions } from "../../src/router.ts";
-import { FakeCatalog, heraModels, NOW } from "./catalog.ts";
+import { FakeCatalog, heraModels, NOW, OPENROUTER } from "./catalog.ts";
 import { fixture, scratch, write } from "./fixtures.ts";
 
 type Route = (request: ModelRouteRequest) => ModelRoute | Promise<ModelRoute>;
@@ -122,11 +126,46 @@ function latest<T>(items: readonly T[], match: (item: T) => boolean): T | undefi
   return undefined;
 }
 
+/** A classifier model, as Pi's catalog lists one: OpenRouter's Jev speaks typesafe-system-one. */
+export function classifierModel(ref: string): ClassifierModel<ClassifierApi> {
+  const slash = ref.indexOf("/");
+  assert.ok(slash > 0, ref);
+  return {
+    type: "classifier",
+    provider: ref.slice(0, slash),
+    id: ref.slice(slash + 1),
+    name: ref,
+    api: "typesafe-system-one",
+    baseUrl: OPENROUTER,
+    input: ["text"],
+    cost: { input: 0.042, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 262_144,
+  };
+}
+
+/** A failed classification, as pi-ai reports one: classify never rejects. */
+export function classifierError(model: ClassifierModel<ClassifierApi>, errorMessage: string): ClassifierResult {
+  return { api: model.api, provider: model.provider, model: model.id, answers: {}, stopReason: "error", errorMessage, timestamp: NOW };
+}
+
+/** One classify call, as the registry received it. */
+export interface ClassifyCall {
+  readonly model: ClassifierModel<ClassifierApi>;
+  readonly context: ClassifierContext;
+  readonly options: { readonly timeoutMs: number; readonly maxRetries: number };
+}
+
 export class FakeRuntime {
   readonly catalog: FakeCatalog;
   readonly virtual = new Map<string, { readonly model: Model<Api>; readonly route: Route }>();
   registrations = 0;
-  readonly registry: Pick<ExtensionContext["modelRegistry"], "find" | "getAvailable" | "hasConfiguredAuth" | "getProviderAuthStatus">;
+  /** The classifier models findOfType finds, by ref: none until a test adds one. */
+  readonly classifiers = new Map<string, ClassifierModel<ClassifierApi>>();
+  /** Every classify call, in order. */
+  readonly classifyCalls: ClassifyCall[] = [];
+  /** How classify answers a call. Until a test scripts it, every call fails. */
+  answer: (call: ClassifyCall) => Promise<ClassifierResult> = async (call) => classifierError(call.model, "no answer was scripted");
+  readonly registry: Pick<ExtensionContext["modelRegistry"], "find" | "getAvailable" | "hasConfiguredAuth" | "getProviderAuthStatus"> & ClassifierRegistry;
 
   constructor(catalog: FakeCatalog = new FakeCatalog(heraModels())) {
     this.catalog = catalog;
@@ -135,7 +174,20 @@ export class FakeRuntime {
       getAvailable: () => this.getAvailable(),
       hasConfiguredAuth: (model) => this.hasConfiguredAuth(model),
       getProviderAuthStatus: () => ({ configured: true, source: "stored" }),
+      findOfType: (type, provider, id) => (type === "classifier" ? this.classifiers.get(`${provider}/${id}`) : undefined),
+      classify: (model, context, options) => {
+        const call: ClassifyCall = { model, context, options };
+        this.classifyCalls.push(call);
+        return this.answer(call);
+      },
     };
+  }
+
+  /** Add a classifier model that findOfType finds. */
+  addClassifier(ref: string): ClassifierModel<ClassifierApi> {
+    const added = classifierModel(ref);
+    this.classifiers.set(ref, added);
+    return added;
   }
 
   register(definition: Omit<ExtensionVirtualModel, "route"> & { readonly route: Route }): void {
@@ -454,9 +506,22 @@ export class FakeHost {
     for (const apply of this.staged.splice(0)) apply();
   }
 
+  /**
+   * Emit an event to every handler, in registration order, and return their results. Input chains
+   * as Pi's emitInput does: each handler sees the text and images the handlers before it left, and
+   * `handled` stops the chain. Unlike Pi, which reports a handler that throws and carries on, the
+   * throw reaches the test.
+   */
   async emit(event: string, payload: Record<string, unknown> = {}): Promise<unknown[]> {
     const results: unknown[] = [];
-    for (const handler of this.handlers.get(event) ?? []) results.push(await handler({ type: event, ...payload }, this.session.ctx));
+    let current: Record<string, unknown> = { type: event, ...payload };
+    for (const handler of this.handlers.get(event) ?? []) {
+      const result = await handler({ ...current }, this.session.ctx);
+      results.push(result);
+      if (event !== "input" || !isRecord(result)) continue;
+      if (result.action === "handled") break;
+      if (result.action === "transform") current = { ...current, text: result.text, images: result.images ?? current.images };
+    }
     return results;
   }
 

@@ -1,18 +1,20 @@
 // One instance of the router: the session whose extension runtime loaded it, the two files it
 // reads, its per-session records and cooldowns, the limits both models declare, the pin's guards
-// and handoffs, the session's scope with its handoffs and work directories, the /smart-router
-// command, what it tells pi-cache-optimizer, and the handlers wire() registers.
+// and handoffs, the session's scope with its handoffs and work directories, a message's tag and
+// Jev's request, the /smart-router command, what it tells pi-cache-optimizer, and the handlers
+// wire() registers.
 //
 // createRouter only builds closures. It makes no pi.on, registration or command call, so a throw
 // while it is built leaves only the two refusing models index.ts registered, and wire() makes
 // every pi.on and registerCommand call in one place, after the router exists. No timer, watcher,
 // socket or other handle is ever opened; the files are read at session_start, at idle prompts when
-// they changed, and on demand.
+// they changed, and on demand. Jev is asked through Pi's model registry, which makes the request.
 import type { Api, Model, Usage } from "@earendil-works/pi-ai";
 import type {
   ExtensionAPI,
   ExtensionContext,
   InputEvent,
+  InputEventResult,
   MessageEndEvent,
   ModelRoute,
   ModelRouteRequest,
@@ -27,7 +29,7 @@ import type { CommandHost, Files } from "./commands.ts";
 import { COMMAND, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, PIN_ENTRY, PROVIDER, SCOPE_ENTRY, VIRTUAL_API, VIRTUAL_IDS } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { pickInRole, planUserTurn, reserveFor } from "./decide.ts";
-import type { Decision, LastResponder } from "./decide.ts";
+import type { Decision, LastResponder, LevelInput, Plan } from "./decide.ts";
 import {
   carriedNotice,
   carryFailedNotice,
@@ -43,11 +45,17 @@ import {
   scopeUnreadable,
   scopeUnserved,
   stale,
+  stepUpNotice,
+  tagIgnoredNotice,
+  tagOnlyNotice,
 } from "./errors.ts";
+import type { TagIgnored } from "./errors.ts";
 import { isRecord } from "./files.ts";
 import type { FileSystem, Loaded } from "./files.ts";
-import { createGuards, newGuardState } from "./guards.ts";
+import { createGuards, describeModel, newGuardState } from "./guards.ts";
 import type { GuardState } from "./guards.ts";
+import { askJev, buildContext, recentMessages } from "./jev.ts";
+import type { JevOutcome } from "./jev.ts";
 import { EMPTY_POLICY, policyFromRoster } from "./local.ts";
 import { healDisplaced, isLive, isLiveOwner, join, leave, leaveScopeHandoff, ownerBySignal, scopeLatched, sessionHash, takeScopeHandoff } from "./owners.ts";
 import type { Owner, OwnerRouter, Slot } from "./owners.ts";
@@ -55,12 +63,15 @@ import { latchEnvPolicy, leaveHandoff, pinOn, readPin, takeHandoff } from "./pin
 import type { PinReading } from "./pin.ts";
 import { coolFrom, Cooldowns, resolveContext } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
-import { boundedHistory, newRecord, predict, requireBoundedHistory, routeOther, routeOwned } from "./route.ts";
-import type { BoundedHistory, Pin, RouteInput, SessionRecord } from "./route.ts";
+import { boundedHistory, newRecord, planApplies, predict, requireBoundedHistory, routeOther, routeOwned } from "./route.ts";
+import type { BoundedHistory, LastInput, Pin, RouteInput, SessionRecord } from "./route.ts";
 import { autoRoles, parseRef, rosterFile, scopeSection } from "./roster.ts";
-import type { Roster } from "./roster.ts";
+import type { Roster, RosterV2 } from "./roster.ts";
 import { readScope, scopeEntry, workDirectoryOf } from "./scope.ts";
 import type { ScopeEntryData, ScopeState, WorkDirectories } from "./scope.ts";
+import { parseTag } from "./tags.ts";
+import type { Tagged } from "./tags.ts";
+import type { Tier } from "./tiers.ts";
 
 export interface Limits {
   readonly contextWindow: number;
@@ -81,11 +92,16 @@ export interface RouterOptions {
   readonly fs?: FileSystem | undefined;
 }
 
-/** What a router instance keeps per session: the route records, the pin's guard state, and whether it tried to record the work directories' scope. */
+/**
+ * What a router instance keeps per session: the route records, the pin's guard state, whether it
+ * tried to record the work directories' scope, and the latest idle input's token.
+ */
 export interface Session extends SessionRecord {
   readonly guard: GuardState;
   /** Whether this instance has tried to record the scope the work directories gave the session. It tries once. */
   directoryTried: boolean;
+  /** The token of the session's latest idle input: an input that waited for Jev plans only while it is still this one. */
+  inputToken: number;
 }
 
 export interface Router extends OwnerRouter {
@@ -101,6 +117,7 @@ export interface Router extends OwnerRouter {
 
 const BOTH_DEFAULT: Readonly<Record<VirtualId, Limits>> = Object.freeze({ auto: DEFAULT_LIMITS, local: DEFAULT_LIMITS });
 const UNPINNED: Pin = Object.freeze({ on: false, policy: EMPTY_POLICY });
+const HANDLED: InputEventResult = Object.freeze({ action: "handled" });
 /** How far back session_start looks for the latest successful response. */
 const SEED_ENTRIES = 16;
 
@@ -140,11 +157,13 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   const reported = new Set<string>();
   let limits = BOTH_DEFAULT;
   let self: Owner | undefined;
+  /** How many idle inputs this instance has seen: each one's token. */
+  let inputs = 0;
 
   const recordOf = (sessionId: string): Session => {
     let record = records.get(sessionId);
     if (record === undefined) {
-      record = { ...newRecord(), guard: newGuardState(), directoryTried: false };
+      record = { ...newRecord(), guard: newGuardState(), directoryTried: false, inputToken: 0 };
       records.set(sessionId, record);
     }
     return record;
@@ -296,8 +315,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   };
 
   // What pi-cache-optimizer reads through the adapter, for the owner's session: the run's plan,
-  // else the run's pick, else what a continuation would pick now. Only the owner's own loop and
-  // its message_end change it.
+  // else the run's pick, else what a continuation would pick now; nothing when the request would be
+  // refused. Only the owner's own loop and its message_end change it.
   const activeRoute = (id: VirtualId): ActiveRoute | undefined => {
     try {
       const owner = self;
@@ -305,12 +324,14 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       const { ctx } = owner;
       const state = loaded(roster.current());
       if (state.kind !== "ok" || boundedHistory(ctx.sessionManager) === undefined) return undefined;
+      // smart-router/auto has no pick in a scope that prepare() refuses: the refusal lands in the catch.
+      if (id === "auto") requireScope(state.value, ctx);
       const rc = contextFor(ctx, state.value, id, pinOf(ctx));
       const record = records.get(owner.sessionId) ?? newRecord();
       const at = now();
       const answer = (model: Model<Api>, status: ActiveRoute["status"]): ActiveRoute => ({ provider: model.provider, modelId: model.id, api: model.api, status, at });
       const { plan, runPick } = record;
-      if (plan !== undefined && plan.virtualId === id && plan.localOnly === rc.localOnly) {
+      if (plan !== undefined && planApplies(plan, id, rc)) {
         // The run's first request takes the planned model, or refuses when the plan found none.
         return plan.decision.ok ? answer(plan.decision.choice.model, "planned") : undefined;
       }
@@ -367,9 +388,10 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
 
   /**
    * The work directories decide a session's scope on every read (scopeOf), so a roster load that
-   * lists a running session's directory moves it at once. The first time they do, at session start
-   * or at the next idle input, the router records the scope as a work entry, so that it no longer
-   * depends on the roster, and says so. It tries once per session: a session whose entry cannot be
+   * lists a running session's directory moves it at once. The first time they do, at session start,
+   * at the next idle input or at the start of the next run, the router records the scope as a work
+   * entry, so that it no longer depends on the roster, and says so. Never from prepare(), which can
+   * run for another session's request. It tries once per session: a session whose entry cannot be
    * written is told once, and stays in work scope while the roster lists its directory.
    */
   const recordDirectory = (ctx: ExtensionContext): void => {
@@ -418,19 +440,123 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     }
   };
 
-  // The decision point: a prompt typed while the session is idle plans its run. Input that
-  // arrives while a run starts or streams (steering, follow-ups) neither plans nor drops. A roster
-  // edit read here that lists the session's directory is recorded before the run is planned.
-  const plan = (event: InputEvent, ctx: ExtensionContext): void => {
-    if (!ctx.isIdle()) return;
+  /**
+   * An idle input heals a displaced registration and drops the plan, the pending level and the last
+   * input, which it returns: an extension's resend of the same text plans with its level again.
+   */
+  const resetInput = (ctx: ExtensionContext): LastInput | undefined => {
+    if (!ctx.isIdle()) return undefined;
+    heal(ctx);
+    const record = recordOf(ctx.sessionManager.getSessionId());
+    const previous = record.lastInput;
+    record.plan = undefined;
+    record.pendingLevel = undefined;
+    record.lastInput = undefined;
+    return previous;
+  };
+
+  /**
+   * Jev's answer for a version 2 run on auto, or undefined when Jev is not asked: the roster has no
+   * classifier, or the session's scope cannot be read or has no levels. Jev reads the text without
+   * its tag, the conversation before it (the message is not in the session yet) and the scope's
+   * descriptions, redacted, then cut to the classifier's caps. Never rejects: a request that cannot
+   * be built, such as for text too long to redact, fails as an error before anything is sent.
+   */
+  const askFor = (ctx: ExtensionContext, value: RosterV2, view: BoundedHistory, text: string): Promise<JevOutcome> | undefined => {
+    const settings = value.classifier;
+    const scope = scopeOf(ctx);
+    const section = scope.kind === "ok" ? scopeSection(value, scope.scope) : undefined;
+    if (settings === undefined || section === undefined) return undefined;
+    try {
+      const { levels } = section;
+      const descriptions: Record<Tier, string> = { low: levels.low.describe, medium: levels.medium.describe, high: levels.high.describe, super: levels.super.describe };
+      const { messages } = settings.context;
+      const recent = messages === 0 ? [] : recentMessages(view.getRecentActiveEntries({ type: "message", limit: messages * 4 }), messages);
+      return askJev(ctx.modelRegistry, settings, buildContext(text, recent, descriptions, settings.context), now);
+    } catch {
+      return Promise.resolve<JevOutcome>({ kind: "failure", model: settings.model, failure: "error", ms: 0 });
+    }
+  };
+
+  /** A tagged run's opinion lands in its pending level while that is still the session's and this input's. */
+  const landOpinion =
+    (sessionId: string, record: Session, token: number) =>
+    (jev: JevOutcome): void => {
+      const pending = records.get(sessionId) === record ? record.pendingLevel : undefined;
+      if (pending?.token === token) pending.jev = jev;
+    };
+
+  /** Plan an idle input's run with the session as it is now: after a wait, its selection, pin, scope and roster may have moved. */
+  const plan = (ctx: ExtensionContext, record: SessionRecord, text: string, level: LevelInput): Plan | undefined => {
+    if (!ctx.isIdle()) return undefined;
     const { sessionManager } = ctx;
-    const record = recordOf(sessionManager.getSessionId());
+    const state = loaded(roster.current());
+    const id = virtualIdOf(ctx.model);
+    if (id === undefined || state.kind !== "ok" || boundedHistory(sessionManager) === undefined) return undefined;
+    const rc = contextFor(ctx, state.value, id, pinOf(ctx));
+    const planned = planUserTurn({ rc, text, last: record.last, now: now(), reserve: reserveFor(pi.getSettings(), id), level });
+    record.plan = planned;
+    return planned;
+  };
+
+  // The decision point: a prompt typed while the session is idle plans its run. Input that
+  // arrives while a run starts or streams (steering, follow-ups) neither plans nor drops; its tag
+  // is removed with a notice. A roster edit read here that lists the session's directory is
+  // recorded before the run is planned. A version 2 run on auto, unpinned, takes the level its last
+  // input planned with when an extension resends that text (pi-idle-check), else its tag's, with
+  // Jev's opinion asked and recorded without waiting, else Jev's answer, waited for.
+  const planInput = async (event: InputEvent, ctx: ExtensionContext, tagged: Tagged | undefined, previous: LastInput | undefined): Promise<void> => {
+    const tier = tagged?.tier;
+    if (!ctx.isIdle()) {
+      if (tier !== undefined) notify(ctx, tagIgnoredNotice(tier, "busy"), "warning");
+      return;
+    }
+    const text = tagged === undefined ? event.text : tagged.text;
+    const { sessionManager } = ctx;
+    const sessionId = sessionManager.getSessionId();
+    const record = recordOf(sessionId);
+    const token = ++inputs;
+    record.inputToken = token;
     const state = refreshFiles();
     guarded("input", ctx, () => recordDirectory(ctx));
     const id = virtualIdOf(ctx.model);
-    if (id === undefined || state.kind !== "ok" || boundedHistory(sessionManager) === undefined) return;
-    const rc = contextFor(ctx, state.value, id, pinOf(ctx));
-    record.plan = planUserTurn({ rc, text: event.text, last: record.last, now: now(), reserve: reserveFor(pi.getSettings(), id) });
+    const pinned = pinOf(ctx).on;
+    const value = state.kind === "ok" ? state.value : undefined;
+    if (tier !== undefined) {
+      const why: TagIgnored | undefined = pinned ? "pinned" : id !== "auto" ? { selection: describeModel(ctx.model) } : value?.version === 1 ? "version" : undefined;
+      if (why !== undefined) notify(ctx, tagIgnoredNotice(tier, why), "warning");
+    }
+    let level: LevelInput = {};
+    let opinion = false;
+    const view = boundedHistory(sessionManager);
+    if (id === "auto" && !pinned && value?.version === 2 && view !== undefined) {
+      if (tagged === undefined && event.source === "extension" && previous?.text === text) {
+        level = previous.level;
+      } else if (tier !== undefined) {
+        level = { tag: tier };
+        const asked = askFor(ctx, value, view, text);
+        if (asked !== undefined) {
+          opinion = true;
+          void asked.then(landOpinion(sessionId, record, token)).catch(() => {
+            // An opinion only feeds the record, so there is nothing to do when landing it fails.
+          });
+        }
+      } else {
+        const asked = askFor(ctx, value, view, text);
+        if (asked !== undefined) {
+          const jev = await asked;
+          // The session ended, or a newer input took over, during the wait.
+          if (records.get(sessionId) !== record || record.inputToken !== token) return;
+          level = { jev };
+        }
+      }
+    }
+    const planned = plan(ctx, record, text, level);
+    const planLevel = planned?.level;
+    if (planned === undefined || planLevel === undefined || planned.signal === "local") return;
+    record.pendingLevel = { token, level: planLevel, keyword: { signal: planned.signal, reason: planned.reason }, at: now(), jev: opinion ? "pending" : level.jev };
+    record.lastInput = { text, level };
+    if (planLevel.steppedUp && planned.decision.ok) notify(ctx, stepUpNotice(planLevel.start, planLevel.tier, planned.decision.choice.model.id), "info");
   };
 
   const messageEnd = (event: MessageEndEvent, ctx: ExtensionContext): void => {
@@ -546,21 +672,38 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
 
     wire(target) {
       target.on("session_start", (_event, ctx) => guardedAsync("session_start", ctx, () => start(ctx)));
-      target.on("input", (event, ctx) => {
-        guarded("input", ctx, () => {
-          if (!ctx.isIdle()) return;
-          heal(ctx);
-          recordOf(ctx.sessionManager.getSessionId()).plan = undefined;
-        });
-        const veto = guards.input(ctx);
-        if (veto === undefined) guarded("input", ctx, () => plan(event, ctx));
-        return veto;
+      target.on("input", async (event, ctx) => {
+        // The tag first: whatever fails after this, the model never sees it, and a message that is
+        // only a tag is never sent.
+        const tagged = parseTag(event.text);
+        const result: InputEventResult | undefined = tagged === undefined ? undefined : tagged.text === "" ? HANDLED : { action: "transform", text: tagged.text };
+        try {
+          const previous = guarded("input", ctx, () => resetInput(ctx));
+          const veto = guards.input(ctx);
+          if (veto !== undefined) return veto;
+          if (tagged !== undefined && tagged.text === "") {
+            notify(ctx, tagOnlyNotice(tagged.tier), "warning");
+          } else {
+            await planInput(event, ctx, tagged, previous);
+          }
+        } catch (error) {
+          report("input", ctx, error);
+        }
+        return result;
       });
-      target.on("before_agent_start", (event, ctx) =>
+      target.on("before_agent_start", (event, ctx) => {
         guarded("before_agent_start", ctx, () => {
-          if (event.messageType === "custom") recordOf(ctx.sessionManager.getSessionId()).plan = undefined;
-        }),
-      );
+          if (event.messageType !== "custom") return;
+          // A custom message's run has no input: what an earlier input planned or kept is not its.
+          const record = recordOf(ctx.sessionManager.getSessionId());
+          record.plan = undefined;
+          record.pendingLevel = undefined;
+          record.lastInput = undefined;
+        });
+        // Every run starts here, so a run without an input (a custom message's, a goal-x
+        // continuation's) records the work directories' scope too.
+        guarded("before_agent_start", ctx, () => recordDirectory(ctx));
+      });
       target.on("turn_start", async (_event, ctx) => {
         guarded("turn_start", ctx, () => void heal(ctx));
         await guards.turnStart(ctx);

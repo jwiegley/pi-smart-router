@@ -25,11 +25,13 @@ import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { ModelRoute, ModelRouteReason, ModelRouteRequest } from "@earendil-works/pi-coding-agent";
 
 import { isCodexProvider, subscriptionKind } from "./accounts.ts";
+import type { Classification } from "./classify.ts";
 import { VIRTUAL_API } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { eligibleRole, NO_LOCAL_SECTION, noScopeSection, pickInRole } from "./decide.ts";
-import type { Choice, Decision, LastResponder, Plan, PlanLevel } from "./decide.ts";
+import type { Choice, Decision, LastResponder, LevelInput, Plan, PlanLevel } from "./decide.ts";
 import { invariant, noBoundedHistory, unroutable } from "./errors.ts";
+import type { JevOutcome } from "./jev.ts";
 import { checkLocal } from "./local.ts";
 import type { LocalPolicy } from "./local.ts";
 import { coolFrom, failureKind, refOf, resolveCandidate } from "./resolve.ts";
@@ -68,16 +70,45 @@ export interface HistoryEntry {
 
 export const HISTORY_LIMIT = 50;
 
+/**
+ * A version 2 run's level, kept from the input that planned it until the run's record is written.
+ * Never prompt text.
+ */
+export interface PendingLevel {
+  /** The input's token: a tagged run's opinion lands here only while the token is unchanged. */
+  readonly token: number;
+  readonly level: PlanLevel;
+  /** The keyword classifier's signal and reason for the text. */
+  readonly keyword: Classification;
+  /** When the run was planned. */
+  readonly at: number;
+  /**
+   * Jev's outcome: the one an untagged run waited for, or a tagged run's opinion, "pending" until it
+   * arrives; undefined when Jev was not asked.
+   */
+  jev: JevOutcome | "pending" | undefined;
+}
+
+/** The latest planned input: its text without the tag, and the level input it planned with. */
+export interface LastInput {
+  readonly text: string;
+  readonly level: LevelInput;
+}
+
 /** What a router instance keeps per session. */
 export interface SessionRecord {
   plan: Plan | undefined;
   runPick: RunPick | undefined;
   last: LastResponder | undefined;
   readonly history: HistoryEntry[];
+  /** The planned version 2 run's level, until its record is written. */
+  pendingLevel: PendingLevel | undefined;
+  /** What an extension's resend of the same text (pi-idle-check) plans with again. */
+  lastInput: LastInput | undefined;
 }
 
 export function newRecord(): SessionRecord {
-  return { plan: undefined, runPick: undefined, last: undefined, history: [] };
+  return { plan: undefined, runPick: undefined, last: undefined, history: [], pendingLevel: undefined, lastInput: undefined };
 }
 
 /** The fork's bounded session readers. Pi 1.5.0's npm types lack them, so they are detected. */
@@ -171,15 +202,21 @@ function retry(rc: ResolveContext, request: ModelRouteRequest, record: SessionRe
 }
 
 /**
- * The run's plan, consumed: it is never used twice, and never for another selection. A plan on auto
- * is used only under the roster version it was made for: a version 1 plan has no level, and a
- * version 2 plan is used only in the scope it was made in. A local-only plan carries no account.
+ * Whether a run's plan applies to a request as the session is now: the same model, local-only or
+ * not, and on auto, the roster version it was made for: a version 1 plan has no level, and a
+ * version 2 plan applies only in the scope it was made in. A local-only plan carries no account.
+ * The run's first request (takePlan) and what pi-cache-optimizer is told (activeRoute) both ask.
  */
+export function planApplies(plan: Plan, id: VirtualId, rc: ResolveContext): boolean {
+  if (plan.virtualId !== id || plan.localOnly !== rc.localOnly) return false;
+  return rc.localOnly || (rc.roster.version === 1 ? plan.level === undefined : plan.level?.scope === rc.scope);
+}
+
+/** The run's plan, consumed: it is never used twice, and never where it does not apply. */
 function takePlan(record: SessionRecord, id: VirtualId, rc: ResolveContext): Plan | undefined {
   const { plan } = record;
   record.plan = undefined;
-  if (plan === undefined || plan.virtualId !== id || plan.localOnly !== rc.localOnly) return undefined;
-  return rc.localOnly || (rc.roster.version === 1 ? plan.level === undefined : plan.level?.scope === rc.scope) ? plan : undefined;
+  return plan !== undefined && planApplies(plan, id, rc) ? plan : undefined;
 }
 
 /** The planned model if it still resolves, else the planned role, then its fallback. */
@@ -242,7 +279,8 @@ export function levelFor(rc: ResolveContext, roleName: string, selected: ModelTh
 }
 
 function settle(input: RouteInput, decision: Decision): Choice {
-  if (!decision.ok) throw unroutable(input.id, decision, { localOnly: input.rc.localOnly, pinned: input.pin.on });
+  // A version 2 decision tries more than one role only when its run steps up a tier.
+  if (!decision.ok) throw unroutable(input.id, decision, { localOnly: input.rc.localOnly, pinned: input.pin.on, stepUps: input.rc.roster.version === 2 });
   assertSafe(input.id, input.rc, decision.choice);
   return decision.choice;
 }

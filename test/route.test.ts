@@ -656,7 +656,8 @@ describe("a version 2 run's plan", () => {
       ref: TERRA,
       code: "keyword",
       foreign: false,
-      level: { scope: "personal", ...KEYWORD_MEDIUM },
+      // This runtime's registry has no Jev, so the keywords decided, and the level says why.
+      level: { scope: "personal", ...KEYWORD_MEDIUM, jev: { kind: "failure", model: "openrouter/typesafe/jev-1.14", failure: "unavailable", ms: 0 } },
     });
   });
 

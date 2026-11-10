@@ -550,11 +550,10 @@ describe("smart-router/auto refuses a scope it cannot serve", () => {
     refuses(() => malformed.runtime.route("auto", request("continuation", { signal })), unreadable, "the owned run");
     malformed.session.endRun();
     assert.equal(routed(malformed.runtime.route("local", request("direct"))), GLM, "smart-router/local stays on the LAN");
-    // What pi-cache-optimizer is told shows the scope routing resolves in: work, not personal.
-    assert.deepEqual(
-      [malformed.router?.activeRoute("auto")?.provider, malformed.router?.activeRoute("auto")?.modelId],
-      ["openai-codex-3", "gpt-6.1-terra"],
-    );
+    // pi-cache-optimizer is told of no pick on smart-router/auto, which refuses this scope, and of
+    // smart-router/local's, which it does not.
+    assert.equal(malformed.router?.activeRoute("auto"), undefined);
+    assert.equal(malformed.router?.activeRoute("local")?.modelId, "GLM-5.3-Flash-oQ4e-mtp");
     const personal = await begin({ dir, id: "personal", runtime: new FakeRuntime(workCatalog()) });
     assert.equal(personal.router?.activeRoute("auto")?.modelId, "deepseek/deepseek-v4.1-flash-1017");
 
