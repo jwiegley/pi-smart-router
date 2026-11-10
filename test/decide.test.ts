@@ -17,7 +17,7 @@ import { Cooldowns, refOf, resolveCandidate, resolveContext } from "../src/resol
 import type { ResolveContext } from "../src/resolve.ts";
 import { autoRoles, excludedBy, roleOf } from "../src/roster.ts";
 import type { AccountBinding, Role, Roster } from "../src/roster.ts";
-import { TIERS } from "../src/tiers.ts";
+import { tierRank, TIERS } from "../src/tiers.ts";
 import type { Tier } from "../src/tiers.ts";
 import {
   ASTRA,
@@ -582,36 +582,36 @@ describe("v2 levels", () => {
     const result = planV2(FRANCE);
     expectPlan(result, TERRA, "keyword");
     assert.deepEqual([result.signal, result.role], ["default", "medium"]);
-    assert.deepEqual(result.level, { scope: "personal", tier: "medium", asked: "medium", source: "keyword", steppedUp: false, returnedToFirst: false });
+    assert.deepEqual(result.level, { scope: "personal", tier: "medium", asked: "medium", start: "medium", source: "keyword", steppedUp: false, returnedToFirst: false });
   });
 
   test("Jev's tier decides, not its choice; when Jev fails, the keywords decide and the failure is kept", () => {
     const jev = answer("medium", "high");
     const result = planV2(FRANCE, { level: { jev } });
     expectPlan(result, SOL, "jev");
-    assert.deepEqual(result.level, { scope: "personal", tier: "high", asked: "high", source: "jev", steppedUp: false, returnedToFirst: false, jev });
+    assert.deepEqual(result.level, { scope: "personal", tier: "high", asked: "high", start: "high", source: "jev", steppedUp: false, returnedToFirst: false, jev });
     const failed: JevOutcome = { kind: "failure", model: JEV, failure: "timeout", ms: 1000 };
     const keywords = planV2(FRANCE, { level: { jev: failed } });
     expectPlan(keywords, TERRA, "keyword");
-    assert.deepEqual(keywords.level, { scope: "personal", tier: "medium", asked: "medium", source: "keyword", steppedUp: false, returnedToFirst: false, jev: failed });
+    assert.deepEqual(keywords.level, { scope: "personal", tier: "medium", asked: "medium", start: "medium", source: "keyword", steppedUp: false, returnedToFirst: false, jev: failed });
   });
 
   test("a risky operation raises an untagged run to high, whatever Jev says", () => {
     const jev = answer("low");
     const result = planV2(FORCE_PUSH, { level: { jev } });
     expectPlan(result, SOL, "floor");
-    assert.deepEqual(result.level, { scope: "personal", tier: "high", asked: "low", source: "floor", trigger: "destructive-git", steppedUp: false, returnedToFirst: false, jev });
+    assert.deepEqual(result.level, { scope: "personal", tier: "high", asked: "low", start: "high", source: "floor", trigger: "destructive-git", steppedUp: false, returnedToFirst: false, jev });
   });
 
   test("the floor never lowers a run, and never raises a tagged one", () => {
     // "force push" is one of the planning patterns too, so the keywords ask for super.
     const keywords = planV2(FORCE_PUSH);
     expectPlan(keywords, ASTRA, "keyword");
-    assert.deepEqual(keywords.level, { scope: "personal", tier: "super", asked: "super", source: "keyword", steppedUp: false, returnedToFirst: false });
+    assert.deepEqual(keywords.level, { scope: "personal", tier: "super", asked: "super", start: "super", source: "keyword", steppedUp: false, returnedToFirst: false });
     expectPlan(planV2(FORCE_PUSH, { level: { jev: answer("high") } }), SOL, "jev");
     const tagged = planV2(FORCE_PUSH, { level: { tag: "low" } });
     expectPlan(tagged, LUNA, "tag");
-    assert.deepEqual(tagged.level, { scope: "personal", tier: "low", asked: "low", source: "tag", steppedUp: false, returnedToFirst: false });
+    assert.deepEqual(tagged.level, { scope: "personal", tier: "low", asked: "low", start: "low", source: "tag", steppedUp: false, returnedToFirst: false });
     // A tag outranks Jev, and a tagged run waits for no answer, so its plan keeps none.
     assert.deepEqual(planV2(FORCE_PUSH, { level: { tag: "low", jev: answer("super") } }), tagged);
   });
@@ -622,7 +622,7 @@ describe("v2 levels", () => {
     const jev = answer("low");
     const held = planV2(PLAIN, { level: { jev }, last: astra });
     expectPlan(held, ASTRA, "hold:sticky");
-    assert.deepEqual(held.level, { scope: "personal", tier: "super", asked: "low", source: "jev", steppedUp: false, returnedToFirst: false, jev });
+    assert.deepEqual(held.level, { scope: "personal", tier: "super", asked: "low", start: "super", source: "jev", steppedUp: false, returnedToFirst: false, jev });
   });
 
   test("a latest response from the other scope's roles holds nothing", () => {
@@ -639,7 +639,7 @@ describe("v2 levels", () => {
     const catalog = v2Catalog().add(codex(LUNA, { contextWindow: 128_000 }));
     const held = planV2(PLAIN, { rc: v2(catalog), level: { jev }, last: last(ASTRA, 6 * MINUTE, 120_000) });
     expectPlan(held, ASTRA, "hold:fit");
-    assert.deepEqual(held.level, { scope: "personal", tier: "super", asked: "low", source: "jev", steppedUp: false, returnedToFirst: false, jev });
+    assert.deepEqual(held.level, { scope: "personal", tier: "super", asked: "low", start: "super", source: "jev", steppedUp: false, returnedToFirst: false, jev });
     expectPlan(planV2(PLAIN, { rc: v2(catalog), level: { jev }, last: last(ASTRA, 6 * MINUTE, 100_000) }), LUNA, "reopen:idle");
   });
 
@@ -650,7 +650,7 @@ describe("v2 levels", () => {
     const result = planV2(PLAIN, { rc: v2(catalog), level: { tag: "low" }, last: last(SOL, MINUTE, 100_000) });
     expectPlan(result, TERRA, "step-up");
     assert.equal(result.role, "medium");
-    assert.deepEqual(result.level, { scope: "personal", tier: "medium", asked: "low", source: "tag", steppedUp: true, returnedToFirst: false });
+    assert.deepEqual(result.level, { scope: "personal", tier: "medium", asked: "low", start: "low", source: "tag", steppedUp: true, returnedToFirst: false });
   });
 
   test("a run moves up past a tier with no available candidate, and so does an idle downgrade", () => {
@@ -659,7 +659,7 @@ describe("v2 levels", () => {
     const jev = answer("low");
     const result = planV2(PLAIN, { rc: v2(catalog), level: { jev } });
     expectPlan(result, TERRA, "step-up");
-    assert.deepEqual(result.level, { scope: "personal", tier: "medium", asked: "low", source: "jev", steppedUp: true, returnedToFirst: false, jev });
+    assert.deepEqual(result.level, { scope: "personal", tier: "medium", asked: "low", start: "low", source: "jev", steppedUp: true, returnedToFirst: false, jev });
     // Version 1 refuses a downgrade to a role that cannot take the run; a tier passes it up instead.
     expectPlan(planV2(PLAIN, { rc: v2(catalog), level: { jev }, last: last(ASTRA, 6 * MINUTE) }), TERRA, "step-up");
   });
@@ -668,7 +668,7 @@ describe("v2 levels", () => {
     const jev = answer("high");
     const back = planV2(PLAIN, { level: { jev }, last: last(GLM_CLOUD, MINUTE) });
     expectPlan(back, SOL, "jev");
-    assert.deepEqual(back.level, { scope: "personal", tier: "high", asked: "high", source: "jev", steppedUp: false, returnedToFirst: true, jev });
+    assert.deepEqual(back.level, { scope: "personal", tier: "high", asked: "high", start: "high", source: "jev", steppedUp: false, returnedToFirst: true, jev });
     const cooldowns = new Cooldowns();
     cooldowns.cool(SOL, 1, NOW, 30);
     const cooled = planV2(PLAIN, { rc: v2(v2Catalog(), { cooldowns }), level: { jev }, last: last(GLM_CLOUD, MINUTE) });
@@ -688,16 +688,46 @@ describe("v2 levels", () => {
   test("a work-scope run takes its tier's work-account model", () => {
     const result = planV2(FRANCE, { rc: v2(v2Catalog(), { scope: "work" }) });
     expectPlan(result, WORK_TERRA, "keyword");
-    assert.deepEqual([result.role, result.level], ["work-medium", { scope: "work", tier: "medium", asked: "medium", source: "keyword", steppedUp: false, returnedToFirst: false }]);
+    assert.deepEqual([result.role, result.level], ["work-medium", { scope: "work", tier: "medium", asked: "medium", start: "medium", source: "keyword", steppedUp: false, returnedToFirst: false }]);
   });
 
-  test("a run that no tier can take is refused with every tier's reasons, and keeps no role to pick in again", () => {
-    // Super's only available candidate has a 32,000-token window, and the conversation holds 100,000.
-    const catalog = v2Catalog().add(codex(ASTRA, { contextWindow: 32_000 }));
-    for (const ref of [LUNA, NYX_QWEN, HERA_QWEN, TERRA, DEEPSEEK, SOL, GLM_CLOUD, KIMI]) catalog.unavailable.add(ref);
+  test("the start tier is where the upward pick began, after the floor and the holds", () => {
+    // High has no available candidate, so a run that starts there goes on to super.
+    const catalog = v2Catalog();
+    catalog.unavailable.add(SOL).add(GLM_CLOUD);
+    const jev = answer("low");
+    const floored = planV2(FORCE_PUSH, { rc: v2(catalog), level: { jev } });
+    expectPlan(floored, ASTRA, "step-up");
+    assert.deepEqual(floored.level, { scope: "personal", tier: "super", asked: "low", start: "high", source: "floor", trigger: "destructive-git", steppedUp: true, returnedToFirst: false, jev });
+    // Sol answered a minute ago: the run holds high, sol's tier, and goes on from there.
+    const held = planV2(PLAIN, { rc: v2(catalog), level: { jev }, last: last(SOL, MINUTE) });
+    expectPlan(held, ASTRA, "step-up");
+    assert.deepEqual(held.level, { scope: "personal", tier: "super", asked: "low", start: "high", source: "jev", steppedUp: true, returnedToFirst: false, jev });
+  });
+
+  test("when no tier's first available candidate fits, the highest tier with an available candidate takes the run", () => {
+    // The conversation holds 300,000 tokens, more than any window, so Pi compacts.
+    const huge = last(SOL, MINUTE, 300_000);
+    const result = planV2(PLAIN, { level: { tag: "low" }, last: huge });
+    expectPlan(result, ASTRA, "step-up");
+    assert.equal(result.role, "super");
+    assert.deepEqual(result.level, { scope: "personal", tier: "super", asked: "low", start: "low", source: "tag", steppedUp: true, returnedToFirst: false });
+    // With no super candidate available, high is the highest tier that has one.
+    const catalog = v2Catalog();
+    catalog.unavailable.add(ASTRA).add(KIMI);
+    expectPlan(planV2(PLAIN, { rc: v2(catalog), level: { tag: "low" }, last: huge }), SOL, "step-up");
+    // A run that starts at the highest such tier keeps its own code, and has not stepped up.
+    const top = planV2(PLAIN, { level: { tag: "super" }, last: huge });
+    expectPlan(top, ASTRA, "tag");
+    assert.equal(top.level?.steppedUp, false);
+  });
+
+  test("a run is refused only when no tier from its start has an available candidate, with every tier's reasons and no role", () => {
+    const catalog = v2Catalog();
+    for (const ref of [LUNA, NYX_QWEN, HERA_QWEN, TERRA, DEEPSEEK, SOL, GLM_CLOUD, ASTRA, KIMI]) catalog.unavailable.add(ref);
     const result = planV2(PLAIN, { rc: v2(catalog), level: { tag: "low" }, last: last(SOL, MINUTE, 100_000) });
     assert.deepEqual([result.role, result.code], [undefined, "tag"]);
-    assert.deepEqual(result.level, { scope: "personal", tier: "low", asked: "low", source: "tag", steppedUp: false, returnedToFirst: false });
+    assert.deepEqual(result.level, { scope: "personal", tier: "low", asked: "low", start: "low", source: "tag", steppedUp: false, returnedToFirst: false });
     assert.ok(!result.decision.ok, JSON.stringify(result.decision));
     assert.equal(result.decision.problem, undefined);
     assert.deepEqual(
@@ -706,10 +736,15 @@ describe("v2 levels", () => {
         ["low", true, [[LUNA, "not-available"], [NYX_QWEN, "not-available"], [HERA_QWEN, "not-available"]]],
         ["medium", true, [[TERRA, "not-available"], [DEEPSEEK, "not-available"]]],
         ["high", true, [[SOL, "not-available"], [GLM_CLOUD, "not-available"]]],
-        ["super", true, [[ASTRA, "does-not-fit"]]],
+        ["super", true, [[ASTRA, "not-available"], [KIMI, "not-available"]]],
       ],
     );
-    assert.equal(result.decision.attempts[3]?.candidates[0]?.detail, "the conversation would not fit its context window");
+    // A run never goes down: low and medium are available, but a run tagged high cannot use them.
+    const lower = v2Catalog();
+    for (const ref of [SOL, GLM_CLOUD, ASTRA, KIMI]) lower.unavailable.add(ref);
+    const high = planV2(PLAIN, { rc: v2(lower), level: { tag: "high" } });
+    assert.ok(!high.decision.ok, JSON.stringify(high.decision));
+    assert.deepEqual(high.decision.attempts.map((attempt) => attempt.role), ["high", "super"]);
   });
 
   test("a scope the roster does not serve is refused before any level", () => {
@@ -750,7 +785,7 @@ describe("v2 levels", () => {
     const REFS = [LUNA, NYX_QWEN, HERA_QWEN, TERRA, DEEPSEEK, SOL, GLM_CLOUD, ASTRA, KIMI, ...WORK_REFS, GLM, NATIVE_SOL, "openrouter/someone/else"];
     const work = V2.scopes.work;
     assert.ok(work !== undefined);
-    const seen: Record<string, number> = { picked: 0, refused: 0, "step-up": 0, tag: 0, jev: 0, keyword: 0, floor: 0, "hold:sticky": 0, "hold:fit": 0, "reopen:idle": 0 };
+    const seen: Record<string, number> = { picked: 0, refused: 0, oversized: 0, "step-up": 0, tag: 0, jev: 0, keyword: 0, floor: 0, "hold:sticky": 0, "hold:fit": 0, "reopen:idle": 0 };
     for (let index = 1; index <= CASES; index += 1) {
       const seed = SEED + index;
       const rand = prng(seed);
@@ -782,18 +817,29 @@ describe("v2 levels", () => {
       const where = `seed ${seed} (case ${index} of ${CASES}): ${JSON.stringify({ text, level, last: latest, unavailable: [...catalog.unavailable], stickyIdleMinutes: roster.stickyIdleMinutes })}`;
       const planned = result.level;
       assert.ok(planned !== undefined && planned.scope === "work", where);
+      assert.equal(planned.steppedUp, tierRank(planned.tier) > tierRank(planned.start), where);
+      // Whether a tier has an available candidate, and the tiers above a tier.
+      const available = (tier: Tier): boolean => pickInRole(rc, work.levels[tier].role, { fallback: false, code: "t" }).ok;
+      const from = (tier: Tier): readonly Tier[] => TIERS.slice(tierRank(tier));
       if (result.decision.ok) {
         const { choice } = result.decision;
         assert.equal(choice.model.provider, "openai-codex-3", where);
         assert.equal(choice.role, work.levels[planned.tier].role, where);
         assert.equal(planned.steppedUp, choice.code === "step-up", where);
+        // A pick too small for the conversation is the highest tier with an available candidate.
+        if (!fits({ last: latest, text, now: NOW, reserve: 16_384 }, choice.model)) {
+          assert.ok(from(planned.tier).slice(1).every((tier) => !available(tier)), `${where}: a tier above the oversized pick has an available candidate`);
+          seen.oversized = (seen.oversized ?? 0) + 1;
+        }
         seen.picked = (seen.picked ?? 0) + 1;
       } else {
+        // A refusal means no tier from the start has an available candidate.
+        assert.ok(from(planned.start).every((tier) => !available(tier)), `${where}: refused, though a tier from the start has an available candidate`);
         seen.refused = (seen.refused ?? 0) + 1;
       }
       seen[result.code] = (seen[result.code] ?? 0) + 1;
     }
-    // The run is not vacuous: every source, hold and step-up happened, and so did refusals.
+    // The run is not vacuous: every source, hold and step-up happened, and so did oversized picks and refusals.
     t.diagnostic(JSON.stringify(seen));
     for (const [name, count] of Object.entries(seen)) assert.ok(count > 0, `no ${name} in ${CASES} cases from seed ${SEED}: ${JSON.stringify(seen)}`);
   });

@@ -632,7 +632,7 @@ describe("a version 2 run's plan", () => {
   const WORK_TERRA = "openai-codex-3/gpt-6.1-terra";
   const HERA_V2 = rosterFixtureV2("roster-hera-v2.json");
   const VIRTUAL = model("smart-router/auto", { api: "pi-virtual", baseUrl: "" });
-  const KEYWORD_MEDIUM = { tier: "medium", asked: "medium", source: "keyword", steppedUp: false, returnedToFirst: false } as const;
+  const KEYWORD_MEDIUM = { tier: "medium", asked: "medium", start: "medium", source: "keyword", steppedUp: false, returnedToFirst: false } as const;
   const v2Catalog = (): FakeCatalog => new FakeCatalog([...heraModels(), codex(TERRA), codex(WORK_TERRA)]);
   const owned = (rc: ResolveContext, record: SessionRecord): RouteInput => ({
     id: rc.virtualId,

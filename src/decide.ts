@@ -12,6 +12,8 @@
 // hold rules above, comparing tiers; a tagged run does neither. The tier's role takes its first
 // available candidate, not the latest response's. A tier with no available candidate, or whose
 // first available candidate is too small for the conversation, passes the run up to the next tier.
+// When no tier's first available candidate fits, the highest tier with one takes the run, as
+// version 1 would send it and Pi compacts: only a run with no available candidate at all is refused.
 import type { Api, Model, Usage } from "@earendil-works/pi-ai";
 import { calculateContextTokens, DEFAULT_COMPACTION_SETTINGS, estimateTokens } from "@earendil-works/pi-coding-agent";
 
@@ -118,14 +120,19 @@ export type LevelSource = "tag" | "jev" | "keyword" | "floor";
 /** Why a version 2 run on auto went to its tier. Never prompt text. */
 export interface PlanLevel {
   readonly scope: Scope;
-  /** The tier whose role the plan picked in; when it picked none, the tier it started from. */
+  /** The tier whose role the plan picked in; when it picked none, `start`. */
   readonly tier: Tier;
   /** The tier the tag, Jev or the keywords asked for, before the floor, the hold rules and any step-up. */
   readonly asked: Tier;
+  /** The tier the upward pick began at: `asked` after the floor and the hold rules. */
+  readonly start: Tier;
   readonly source: LevelSource;
   /** The risky operation that raised the run to the floor. */
   readonly trigger?: RiskyTrigger;
-  /** Whether the pick moved up from the tier it started from, which could not take the run. */
+  /**
+   * Whether `tier` ranks above `start`: each tier from `start` below it had no available candidate,
+   * or its first available candidate was too small for the conversation.
+   */
   readonly steppedUp: boolean;
   /**
    * Whether the pick ranks before the model that answered last, in that model's role: the role is
@@ -190,7 +197,6 @@ export function noScopeSection(scope: Scope): string {
 const FLOOR: Tier = "high";
 const STEP_UP = "step-up";
 const NO_SCOPE = "no-scope";
-const DOES_NOT_FIT = "the conversation would not fit its context window";
 
 /** The tier of a scope whose role holds a ref. */
 function tierOf(rc: ResolveContext, section: ScopeSection, ref: string): Tier | undefined {
@@ -206,20 +212,21 @@ function ranksBefore(rc: ResolveContext, choice: Choice, later: string): boolean
 }
 
 /**
- * From `start` upward, the first tier whose role's first available candidate fits the conversation.
- * The start tier's pick carries `code`, a higher tier's `step-up`. When no tier can take the run,
- * every tier's reasons, and the start tier.
+ * From `start` upward, the first tier whose role's first available candidate fits the conversation;
+ * when none fits, the highest tier with an available candidate. Fit alone never refuses: version 1
+ * sends such a run, and Pi compacts. The start tier's pick carries `code`, a higher tier's
+ * `step-up`. When no tier has an available candidate, every tier's reasons, and the start tier.
  */
 function climb(p: PlanInput, section: ScopeSection, start: Tier, code: string): { readonly tier: Tier; readonly decision: Decision } {
   const attempts: Attempt[] = [];
+  let highest: { readonly tier: Tier; readonly decision: Decision } | undefined;
   for (let tier: Tier | undefined = start; tier !== undefined; tier = tierAbove(tier)) {
-    const role = section.levels[tier].role;
-    const decision = pickInRole(p.rc, role, { fallback: false, code: tier === start ? code : STEP_UP });
+    const decision = pickInRole(p.rc, section.levels[tier].role, { fallback: false, code: tier === start ? code : STEP_UP });
     if (!decision.ok) attempts.push(...decision.attempts);
     else if (fits(p, decision.choice.model)) return { tier, decision };
-    else attempts.push({ role, exists: true, candidates: [{ ok: false, ref: decision.choice.ref, reason: "does-not-fit", detail: DOES_NOT_FIT }] });
+    else highest = { tier, decision };
   }
-  return { tier: start, decision: { ok: false, attempts } };
+  return highest ?? { tier: start, decision: { ok: false, attempts } };
 }
 
 /** A version 2 run on auto, in a scope the roster serves. A refusal keeps no role, so the run's request does not pick in one again. */
@@ -253,9 +260,10 @@ function planLevel(p: PlanInput, section: ScopeSection, signal: Signal): Pick<Pl
     scope: rc.scope,
     tier,
     asked,
+    start,
     source,
     ...(trigger === undefined ? {} : { trigger }),
-    steppedUp: tier !== start,
+    steppedUp: tierRank(tier) > tierRank(start),
     returnedToFirst: choice !== undefined && last !== undefined && ranksBefore(rc, choice, last.ref),
     ...(tag !== undefined || jev === undefined ? {} : { jev }),
   };
