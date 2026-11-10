@@ -370,6 +370,25 @@ describe("scopes and their levels", () => {
     assert.equal(scopeSection(longest, "work")?.levels.high.describe.length, 2000);
   });
 
+  test("a description's length counts code points, not UTF-16 units", () => {
+    const emoji = "😀";
+    assert.equal(emoji.length, 2);
+    for (const count of [1001, 2000]) {
+      const roster = valid(
+        edited((r) => {
+          r.scopes.work.levels.high.describe = emoji.repeat(count);
+        }),
+      );
+      assert.equal(scopeSection(roster, "work")?.levels.high.describe, emoji.repeat(count), `${count} code points, ${2 * count} units`);
+    }
+    invalid(
+      edited((r) => {
+        r.scopes.work.levels.high.describe = emoji.repeat(2001);
+      }),
+      "scopes.work.levels.high.describe: must be at most 2000 characters",
+    );
+  });
+
   test("each scope's level roles rank in level order", () => {
     invalid(
       edited((r) => {

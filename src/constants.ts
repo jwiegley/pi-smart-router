@@ -67,7 +67,7 @@ export const CLASSIFIER_CLOSE_CALL = { default: 0.15, min: 0, max: 0.5 } as cons
 export const CLASSIFIER_MESSAGES = { default: 6, min: 0, max: 20 } as const;
 export const CLASSIFIER_MESSAGE_CHARS = { default: 1500, min: 200, max: 8000 } as const;
 export const CLASSIFIER_TOTAL_CHARS = { default: 12_000, min: 1000, max: 32_000 } as const;
-/** The longest level description Jev reads, in characters. */
+/** The longest level description Jev reads, in characters, counted as Unicode code points. */
 export const DESCRIBE_MAX_CHARS = 2000;
 
 /** The pin's session entry, the environment switch, the status item, the command and the process slots. */

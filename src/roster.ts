@@ -595,7 +595,7 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
         fail(`${where}.role`, `"${role}" must rank above "${below.role}", the role of the ${below.tier} level`);
       }
       const describe = text(own(entry, "describe"), `${where}.describe`);
-      if (describe.length > DESCRIBE_MAX_CHARS) fail(`${where}.describe`, `must be at most ${DESCRIBE_MAX_CHARS} characters`);
+      if ([...describe].length > DESCRIBE_MAX_CHARS) fail(`${where}.describe`, `must be at most ${DESCRIBE_MAX_CHARS} characters`);
       levelOf.set(role, { scope, tier });
       below = { tier, role };
       return { role, describe };
