@@ -719,10 +719,11 @@ A record holds no prompt text and no digest of it. It pairs with its run's first
 earlier in the same session; the run's steers and follow-ups can sit between them. That message
 lacks the tag, which the record keeps.
 
-`/smart-router was low|medium|high|super` labels a run with the level it should have had: during a
-run, the run in flight, and otherwise the latest record on the active branch. It appends a record
-with source `correction`, that level, and `refers`, the `at` of the run it names; a correction of a
-correction names the same run. Nothing is sent again.
+`/smart-router was low|medium|high|super` labels a run with the level it should have had: the run in
+flight, from its start until its record is written, and otherwise the latest record on the active
+branch, never the level of a message whose run never started. It appends a record with source
+`correction`, that level, and `refers`, the `at` of the run it names; a correction of a correction
+names the same run. Nothing is sent again.
 
 **Training** is an agent review, when John asks for one. An agent session on the host reads that
 host's session files for these records and the user messages they pair with, reports per scope and

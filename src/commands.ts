@@ -56,8 +56,13 @@ export interface CommandHost {
   pinOf(ctx: ExtensionContext): PinReading;
   /** The session's scope, as routing and the guards read it: the latch, the session's entry, then the work directories. */
   scopeOf(ctx: ExtensionContext): ScopeState;
-  /** The session's records: its decisions, its guard state, and the level of the run planned or in flight. */
-  session(ctx: ExtensionContext): { readonly history: readonly HistoryEntry[]; readonly guard: GuardState; readonly pendingLevel: PendingLevel | undefined } | undefined;
+  /**
+   * The session's records: its decisions, its guard state, the level of the run planned or in
+   * flight, and whether that level is a started run's, whose record is not yet written.
+   */
+  session(ctx: ExtensionContext):
+    | { readonly history: readonly HistoryEntry[]; readonly guard: GuardState; readonly pendingLevel: PendingLevel | undefined; readonly levelRun: boolean }
+    | undefined;
   /** A resolver context for one of the two models, built as routing builds it: in the session's scope, or in `scope`. */
   resolver(ctx: ExtensionContext, roster: Roster, id: VirtualId, pin: Pin, scope?: Scope): ResolveContext;
 }
@@ -507,13 +512,17 @@ async function scopeCommand(host: CommandHost, ctx: ExtensionContext, option: st
  * A correction of the last run: a label only, appended as a record of its own, and nothing is sent
  * again. A correction of a correction corrects the same run.
  *
- * Pi runs a command at once while a run streams. That run has no record until it settles, though the
- * footer already shows it, so it is the run corrected, by the `at` and scope its record will carry.
- * Otherwise the run is the latest on this branch: while idle, a pending level is a message's whose
- * run has not started.
+ * Pi runs a command at once while a run streams, and a run has no record until the router's
+ * agent_settled handler writes it, though the footer already shows it. So a run whose level the
+ * router bound to it when it started is the run corrected until then, by the `at` and scope its
+ * record will carry, whatever Pi says of idleness meanwhile: after the run ends, another extension's
+ * agent_settled handler can still be running. Otherwise the run is the latest on this branch. A
+ * pending level that no run took, such as a message's that a later extension handled, is never the
+ * run corrected.
  */
 function was(host: CommandHost, ctx: ExtensionContext, tier: Tier): Answer {
-  const inFlight = ctx.isIdle() ? undefined : host.session(ctx)?.pendingLevel;
+  const session = host.session(ctx);
+  const inFlight = session?.levelRun === true ? session.pendingLevel : undefined;
   let previous: LevelRecord | undefined;
   if (inFlight !== undefined) {
     previous = levelRecord(inFlight, undefined, false);

@@ -112,6 +112,13 @@ export interface Session extends SessionRecord {
   levelShown: boolean;
   /** The model of the current run's last assistant message that ended without an error: the one its record names. */
   answered: string | undefined;
+  /**
+   * Whether pendingLevel is the level of a run that has started: set when a prompt's run takes its
+   * own message's level, cleared when that run's record is written at agent_settled. /smart-router
+   * was corrects that run until then, whatever Pi says of the session's idleness meanwhile, and never
+   * a level that no run took.
+   */
+  levelRun: boolean;
   /** The digest of the text, without its tag, of the message whose plan `plan` holds; meaningful only while `plan` is set. */
   planDigest: string | undefined;
   /** How many idle messages the router passed since the latest prompt's run started. */
@@ -211,6 +218,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         plannedToken: 0,
         levelShown: false,
         answered: undefined,
+        levelRun: false,
         planDigest: undefined,
         inputsSinceRun: 0,
         remembered: new Set(),
@@ -590,6 +598,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     record.plan = undefined;
     record.planDigest = undefined;
     record.pendingLevel = undefined;
+    record.levelRun = false;
     record.lastInput = undefined;
     return previous;
   };
@@ -755,6 +764,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     const planLevel = planned?.level;
     if (planned === undefined || planLevel === undefined || planned.signal === "local") return;
     record.pendingLevel = { token, digest, level: planLevel, keyword: { signal: planned.signal, reason: planned.reason }, at: now(), jev: opinion ? "pending" : level.jev };
+    record.levelRun = false;
     record.lastInput = { digest, level };
     // A plan that found no model shows none: its run is refused at its first request.
     showLevel(ctx, record, planned.decision.ok ? footerText(planLevel, planned.decision.choice.model.id) : undefined);
@@ -792,6 +802,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     record.planDigest = undefined;
     record.runPick = undefined;
     record.pendingLevel = undefined;
+    record.levelRun = false;
     record.answered = undefined;
     if (pending !== undefined) pi.appendEntry(LEVEL_ENTRY, levelRecord(pending, answered, aborted));
   };
@@ -930,6 +941,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
             record.plan = undefined;
             record.planDigest = undefined;
             record.pendingLevel = undefined;
+            record.levelRun = false;
             record.lastInput = undefined;
             if (tagged) notify(ctx, unmatchedTagNotice(), "warning");
           } else {
@@ -942,6 +954,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
               if (tagged) notify(ctx, unmatchedTagNotice(), "warning");
             }
             if (record.pendingLevel !== undefined && !ownsRun(record, record.pendingLevel.digest, prompt)) record.pendingLevel = undefined;
+            // The level this run kept is now a started run's, until its record is written.
+            record.levelRun = record.pendingLevel !== undefined;
             // This prompt's message has started its run; the others it remembers have not.
             record.inputsSinceRun = 0;
             record.remembered.delete(prompt);
