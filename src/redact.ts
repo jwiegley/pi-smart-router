@@ -1,10 +1,15 @@
-// Secret redaction for text sent to the classifier. It first turns each escaped line break or tab
-// (\n, \r or \t, as JSON and a repr write them) into a space, so that it ends a value and starts a
-// name as the whitespace it stands for does; the classifier needs only the words, so the space
-// costs it nothing. The input is untrusted and unbounded, so every pattern is linear: a start
-// anchored by a lookbehind or a fixed literal, character classes with no overlapping adjacent
-// quantifiers, and lazy scans that consume to their end.
+// Secret redaction for text sent to the classifier. It first hides URL passwords in the raw text,
+// where a backslash before t, r or n can be a Windows DOMAIN\user name's (CORP\tom), not an escape.
+// Then it turns each escaped line break or tab (\n, \r or \t, as JSON and a repr write them) into
+// a space, so that it ends a value and starts a name as the whitespace it stands for does; the
+// classifier needs only the words, so the space costs it nothing. The input is untrusted and
+// unbounded, so every pattern is linear: a start anchored by a lookbehind or a fixed literal,
+// character classes with no overlapping adjacent quantifiers, and lazy scans that consume to their
+// end.
 export const REDACTED = "[redacted]";
+
+// The user stays, the password goes; the user may be empty (redis://:pass@host).
+const URL_PASSWORD = /(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*:\/\/[^\s:/@]*:)[^\s@/]+(?=@)/gi;
 
 // An escaped line break or tab: a backslash and n, r or t.
 const ESCAPED_BREAK = /\\[nrt]/g;
@@ -26,8 +31,6 @@ const PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bxapp-[A-Za-z0-9-]+/g, REDACTED],
   [/\bAIza[0-9A-Za-z_-]{35}/g, REDACTED],
   [/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, REDACTED],
-  // The user stays, the password goes; the user may be empty (redis://:pass@host).
-  [/(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*:\/\/[^\s:/@]*:)[^\s@/]+(?=@)/gi, `$1${REDACTED}`],
 ];
 
 // A name and its separator, never the value, so the value of a harmless key is scanned for more
@@ -76,7 +79,7 @@ function mixedCase(run: string): boolean {
 
 /** The text with credentials replaced by REDACTED. */
 export function redact(text: string): string {
-  let out = text.replace(ESCAPED_BREAK, " ");
+  let out = text.replace(URL_PASSWORD, `$1${REDACTED}`).replace(ESCAPED_BREAK, " ");
   for (const [pattern, replacement] of PATTERNS) out = out.replace(pattern, replacement);
   out = redactValues(out, NAME_SEPARATOR, VALUE, (m) => m[1]!);
   out = redactValues(out, FLAG_SPACE, FLAG_VALUE, (m) => m[1]!.slice(2));

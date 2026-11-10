@@ -224,6 +224,35 @@ describe("redact", () => {
     });
   }
 
+  // A Windows DOMAIN\user name is no escape: the backslash before t, r or n in CORP\tom is the
+  // user's. The URL password must be found before \t, \r and \n read as spaces and split the URL.
+  const domainUsers: ReadonlyArray<readonly [string, string]> = [
+    ["a proxy URL, CORP\\tom", "http://CORP\\tom:hunter2X9@proxy.corp:8080"],
+    ["a proxy URL, CORP\\rsmith", "http://CORP\\rsmith:hunter2X9@proxy.corp:8080"],
+    ["a proxy URL, AD\\nancy", "https://AD\\nancy:hunter2X9@proxy.corp:3128"],
+    ["a shell export with the backslash escaped", 'export HTTPS_PROXY="http://CORP\\\\tom:hunter2X9@proxy.corp:8080"'],
+    ["VS Code's settings.json", '{"http.proxy": "http://CORP\\\\tom:hunter2X9@proxy.corp:8080", "http.proxyStrictSSL": false}'],
+    ["an npm config line", "npm config set proxy http://CORP\\tom:hunter2X9@proxy.corp:8080"],
+    ["pip's --proxy", "pip install --proxy http://CORP\\tom:hunter2X9@proxy.corp:8080 requests"],
+    ["git's http.proxy", "git config --global http.proxy http://CORP\\tom:hunter2X9@proxy.corp:8080"],
+    ["a git-credentials line", "https://CORP\\tom:hunter2X9@git.corp.example"],
+    ["an smb URL", "smb://CORP\\tom:hunter2X9@fileserver/share"],
+  ];
+
+  for (const [name, input] of domainUsers) {
+    test(`hides the password of a DOMAIN\\user URL: ${name}`, () => {
+      const out = redact(input);
+      assert.ok(out.includes(REDACTED), out);
+      assert.ok(!out.includes("hunter2X9"), out);
+    });
+  }
+
+  test("leaves a backslash before any other letter as it is, uppercase T included", () => {
+    for (const text of ["CORP\\Tom", "C:\\Temp", "logged in as CORP\\Tom from C:\\Temp\\New"]) {
+      assert.equal(redact(text), text);
+    }
+  });
+
   test("redacts every part of a private key block and a vendor token that the backstops would miss", () => {
     const block = `-----BEGIN PGP PRIVATE KEY BLOCK-----\n\n${pgpBody}\nshort/Tail+9\n-----END PGP PRIVATE KEY BLOCK-----`;
     assert.equal(redact(`${block}`), REDACTED);
