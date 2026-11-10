@@ -86,9 +86,11 @@ sends nothing unless pinned.
   a classifier, it asks Pi's model registry for one classifier request per routed run on
   smart-router/auto, with a per-attempt timeout and no retries. It never does so under the pin, on
   smart-router/local, for a steer or follow-up, or without a classifier.
-- What Jev reads is redacted before any cap, in both scopes: escaped line breaks and tabs become
-  spaces, and then secret shapes are replaced, by patterns that are linear in the text. Status lists
-  the classifier among what can still send data off the machine.
+- What Jev reads is redacted before any cap, in both scopes: passwords in URLs are replaced in the
+  text as written, so that a `DOMAIN\user` name's backslash is not read as an escape; then escaped
+  line breaks and tabs become spaces, and then the other secret shapes are replaced, all by patterns
+  that are linear in the text. Status lists the classifier among what can still send data off the
+  machine.
 - The router keeps no prompt text: it binds plans by HMAC-SHA-256 digests under a key each instance
   draws at random, and records hold neither text nor digest.
 - No OpenRouter model answers a work session, routed or picked by hand; Jev's request is the one

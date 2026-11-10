@@ -505,14 +505,16 @@ labelled choices and returns one, with a probability for each. Under a version 2
   or thinking, read through the bounded `getRecentActiveEntries`; and the four `describe` texts of
   the session's scope, as the criteria of the choices. Its one question asks how much model
   intelligence the message needs for the work it asks for now.
-- **Redaction runs first**, in both scopes. Escaped line breaks and tabs (`\n`, `\r` and `\t`, as
-  JSON writes them) become spaces, so that they end a value as the whitespace they stand for does.
-  Then secret shapes become `[redacted]`: `Authorization` headers in any scheme, JWTs, private-key
-  blocks, keys and tokens with a known prefix (`sk-`, `sk_live_`, `ghp_`, `github_pat_`, `glpat-`,
-  `hf_`, `npm_`, `xoxb-`, `AIza`, `AKIA` and others), passwords in URLs, the value after a key or a
-  flag whose name says secret, password, credential or token, or ends in key (`api_key=…`,
-  `--password …`), and long mixed-case strings of 40 or more characters. Every pattern is linear in
-  the text, so a huge paste cannot stall Pi. It is pattern matching: it catches the shapes it knows.
+- **Redaction runs first**, in both scopes. Passwords in URLs become `[redacted]` first, in the text
+  as written, where the backslash of a `DOMAIN\user` name (`CORP\tom`) is no escape. Then escaped
+  line breaks and tabs (`\n`, `\r` and `\t`, as JSON writes them) become spaces, so that they end a
+  value as the whitespace they stand for does. Then the other secret shapes become `[redacted]`:
+  `Authorization` headers in any scheme, JWTs, private-key blocks, keys and tokens with a known
+  prefix (`sk-`, `sk_live_`, `ghp_`, `github_pat_`, `glpat-`, `hf_`, `npm_`, `xoxb-`, `AIza`, `AKIA`
+  and others), the value after a key or a flag whose name says secret, password, credential or
+  token, or ends in key (`api_key=…`, `--password …`), and long mixed-case strings of 40 or more
+  characters. Every pattern is linear in the text, so a huge paste cannot stall Pi. It is pattern
+  matching: it catches the shapes it knows.
 - **Then the caps.** The message keeps its first 16 KiB and last 4 KiB, as the keywords see it, then
   its head and tail within `totalChars` (12000); each earlier message keeps its last `messageChars`
   (1500) characters; and earlier messages are kept, newest first, only while the whole stays within
