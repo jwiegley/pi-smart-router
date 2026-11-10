@@ -521,6 +521,23 @@ describe("exclusions in version 2", () => {
     );
   });
 
+  test("only the built-in openai-codex-3/* is lifted: the roster's own stays in force", () => {
+    invalid(
+      edited((r) => {
+        r.exclude = ["openai-codex/*", "openai-codex-3/*"];
+      }),
+      'roles[5].models[0]: "openai-codex-3/gpt-6-luna" is excluded by openai-codex-3/*',
+    );
+    const workOnAlias = (exclude?: readonly string[]): Json =>
+      edited((r) => {
+        for (const role of r.roles) role.models = role.models.map((ref: string) => ref.replace(/^openai-codex\//, "openai-codex-3/"));
+        r.accounts = { "openai-codex-3": { multiPassLabel: "Positron work", scope: "work" } };
+        if (exclude !== undefined) r.exclude = exclude;
+      }, WORK);
+    assert.deepEqual(valid(workOnAlias()).roles[0]?.models, ["openai-codex-3/gpt-6-luna"], "the control: lifted for the work levels");
+    invalid(workOnAlias(["openai-codex-3/*"]), 'roles[0].models[0]: "openai-codex-3/gpt-6-luna" is excluded by openai-codex-3/*');
+  });
+
   test("openai-codex-3/* is lifted only in a work level's role", () => {
     invalid(
       edited((r) => r.roles.push({ name: "spare", models: ["openai-codex-3/gpt-6-nova"] })),

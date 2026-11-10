@@ -99,7 +99,7 @@ export interface RosterV1 {
 
 export interface RosterV2 {
   readonly version: 2;
-  /** The built-in exclusions, then the roster's own. A work level lifts one of them (liftWorkAlias). */
+  /** The built-in exclusions, then the roster's own. A work level lifts only the built-in openai-codex-3/* (liftWorkAlias). */
   readonly exclude: readonly string[];
   /** The ladder, cheapest or weakest first. Each ref belongs to exactly one role. */
   readonly roles: readonly Role[];
@@ -164,8 +164,10 @@ function levelRoles(section: ScopeSection | undefined): string[] {
 
 /**
  * The exclusions that apply to a ref: `patterns`, less openai-codex-3/* when the ref's provider is
- * bound as a work account and its role is one of the work scope's level roles. Everywhere else,
- * that built-in exclusion keeps Hera's work account out of reach.
+ * bound as a work account and its role is one of the work scope's level roles. The helper knows no
+ * session, so its callers lift only in a work-scope session. Validation lifts only the built-in
+ * pattern, so a valid roster whose own exclude names openai-codex-3/* holds no openai-codex-3 ref,
+ * and lifting over its merged exclusions at runtime reaches none.
  */
 export function liftWorkAlias(roster: Pick<RosterV2, "accounts" | "roles" | "scopes">, ref: string, patterns: readonly string[]): readonly string[] {
   const provider = parseRef(ref)?.provider;
@@ -497,8 +499,9 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
           return pattern;
         });
   const exclude = [...new Set([...BUILTIN_EXCLUDES, ...rosterExcludes])];
-  // The work alias's exclusion waits until the levels show the refs a work level lifts it for.
-  const early = exclude.filter((pattern) => pattern !== WORK_ALIAS_EXCLUDE);
+  // Only the built-in work alias waits until the levels show the refs a work level lifts it for.
+  // The roster's own exclusions apply in full, so one that names the alias stays in force.
+  const early = [...new Set([...BUILTIN_EXCLUDES.filter((pattern) => pattern !== WORK_ALIAS_EXCLUDE), ...rosterExcludes])];
 
   const names = new Set<string>();
   const holders = new Map<string, string>();
@@ -608,7 +611,7 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
   }
 
   for (const { where, ref } of refs) {
-    const pattern = excludedBy(liftWorkAlias({ accounts, roles, scopes }, ref, exclude), ref);
+    const pattern = excludedBy(liftWorkAlias({ accounts, roles, scopes }, ref, BUILTIN_EXCLUDES), ref);
     if (pattern !== undefined) fail(where, `"${ref}" is excluded by ${pattern}`);
   }
 
