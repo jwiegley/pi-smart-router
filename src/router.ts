@@ -110,6 +110,8 @@ export interface Session extends SessionRecord {
   plannedToken: number;
   /** Whether the footer shows a level item this instance set: only then does a run without a level clear it. */
   levelShown: boolean;
+  /** The model of the current run's last assistant message that ended without an error: the one its record names. */
+  answered: string | undefined;
   /** The digest of the text, without its tag, of the message whose plan `plan` holds; meaningful only while `plan` is set. */
   planDigest: string | undefined;
   /** How many idle messages the router passed since the latest prompt's run started. */
@@ -208,6 +210,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         directoryTried: false,
         plannedToken: 0,
         levelShown: false,
+        answered: undefined,
         planDigest: undefined,
         inputsSinceRun: 0,
         remembered: new Set(),
@@ -765,23 +768,25 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     const record = records.get(sessionId);
     const pick = record?.runPick;
     if (record?.pendingLevel !== undefined && pick?.id === "auto" && pick.ref === ref) showLevel(ctx, record, footerText(record.pendingLevel.level, message.model));
+    if (record !== undefined) record.answered = ref;
     if (message.stopReason === "aborted") return;
     recordOf(sessionId).last = { ref, at: now(), usage: message.usage };
   };
 
   /**
-   * At agent_settled, the run is over: its level, if it had one, is recorded with the model the
-   * run's last request went to, through either of the router's models, and the run's plan, pick and
-   * level are dropped, whether or not the record could be appended. A run without a level of its own
-   * records nothing.
+   * At agent_settled, the run is over: its level, if it had one, is recorded with the model of its
+   * last assistant message that ended without an error, whichever route or selection sent it, and
+   * with none when no model answered. The run's plan, pick, level and answer are dropped, whether or
+   * not the record could be appended. A run without a level of its own records nothing.
    */
   const settle = (record: Session, aborted: boolean): void => {
-    const { pendingLevel: pending, runPick: pick } = record;
+    const { pendingLevel: pending, answered } = record;
     record.plan = undefined;
     record.planDigest = undefined;
     record.runPick = undefined;
     record.pendingLevel = undefined;
-    if (pending !== undefined) pi.appendEntry(LEVEL_ENTRY, levelRecord(pending, pick?.ref, aborted));
+    record.answered = undefined;
+    if (pending !== undefined) pi.appendEntry(LEVEL_ENTRY, levelRecord(pending, answered, aborted));
   };
 
   /**
@@ -908,6 +913,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       target.on("before_agent_start", (event, ctx) => {
         guarded("before_agent_start", ctx, () => {
           const record = recordOf(ctx.sessionManager.getSessionId());
+          // A run starts with no answer of its own.
+          record.answered = undefined;
           if (event.messageType === "custom") {
             // A custom message's run has no input: what an earlier input planned or kept is not its.
             // Each run's end drops the plan, so one still set is a level no run took, or whose run

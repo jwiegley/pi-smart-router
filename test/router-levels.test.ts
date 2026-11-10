@@ -1266,7 +1266,7 @@ describe("a run's record", () => {
     assert.equal(levelEntries(loaded).length, 1, "a settle without a pending level records nothing");
   });
 
-  test("names the model the run's last request went to, after a retry moved the run", async (t) => {
+  test("names the model that answered, after a retry moved the run", async (t) => {
     const loaded = await hera(t);
     await say(loaded, "x #high");
     const signal = loaded.session.startRun();
@@ -1278,6 +1278,36 @@ describe("a run's record", () => {
     assert.deepEqual(
       levelEntries(loaded).map((record) => [record.source, record.tier, record.ref]),
       [["tag", "high", GLM_CLOUD]],
+    );
+  });
+
+  test("names the model of the run's last answer that ended without an error, and no model when none answered", async (t) => {
+    const loaded = await hera(t);
+    // An answer, then a turn that ends on an error: the answer's model is named.
+    await say(loaded, "x #high");
+    const signal = loaded.session.startRun();
+    assert.equal(routed(loaded.runtime.route("auto", request("user", { signal }))), SOL);
+    await loaded.host.emit("message_end", { message: assistant(SOL, { stopReason: "toolUse" }) });
+    await loaded.host.emit("message_end", { message: assistant(SOL, { stopReason: "error", errorMessage: "terminated" }) });
+    await loaded.host.emit("agent_settled", { aborted: false });
+    loaded.session.endRun();
+    // A run that ends on "terminated" before any answer.
+    await say(loaded, "y #high");
+    assert.equal(firstRequest(loaded), SOL);
+    await finish(loaded, SOL, { stopReason: "error", errorMessage: "terminated" });
+    // A run refused at its first request: the error is the router's own, and no model answered.
+    for (const ref of [SOL, GLM_CLOUD, ASTRA, KIMI]) loaded.runtime.catalog.unavailable.add(ref);
+    await say(loaded, "z #high");
+    const refused = loaded.session.startRun();
+    assert.throws(() => loaded.runtime.route("auto", request("user", { signal: refused })), /no model can take this request/);
+    await finish(loaded, "smart-router/auto", { api: "pi-virtual", stopReason: "error", errorMessage: "refused" });
+    assert.deepEqual(
+      levelEntries(loaded).map((record) => [record.tier, "ref" in record ? record.ref : "no ref"]),
+      [
+        ["high", SOL],
+        ["high", "no ref"],
+        ["high", "no ref"],
+      ],
     );
   });
 
@@ -1382,9 +1412,10 @@ describe("a run's record", () => {
     assert.deepEqual(
       records.map((record) => [record.source, record.tag, record.ref]),
       [
-        ["tag", "high", SOL],
+        ["tag", "high", undefined],
         ["tag", "high", SOL],
       ],
+      "the first run ended on terminated, so no model answered it",
     );
     assert.deepEqual(records[0]?.jev, { model: JEV, choice: "low", probabilities: LOW, confidence: 0.8, ms: 0 });
     assert.equal(records[1] !== undefined && "jev" in records[1], false, "the resend asked Jev nothing");

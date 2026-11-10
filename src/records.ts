@@ -49,8 +49,8 @@ export interface LevelRecord {
   /** Absent when Jev was not asked for the run. */
   readonly jev?: JevRecord;
   /**
-   * The model the run's last request went to, through either of the router's models, so a run that a
-   * switch moved to smart-router/local names the local model; absent when no request was routed.
+   * The model of the run's last assistant message that ended without an error, whichever route or
+   * selection sent it; absent when no model answered, as for a run refused or ended on an error.
    */
   readonly ref?: string;
   /** The run went to a higher tier than the one its pick started at. */
