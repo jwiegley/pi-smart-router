@@ -38,6 +38,8 @@ const FORBIDDEN: ReadonlyArray<readonly [string, RegExp]> = [
   ["WebSocket", /\bWebSocket\b/],
   ["fetch(", /\bfetch\s*\(/],
   ["setInterval/setTimeout", /\bset(?:Interval|Timeout)\b/],
+  ["setImmediate", /\bsetImmediate\b/],
+  ["AbortSignal.timeout", /\bAbortSignal\.timeout\b/],
   ["ModelRuntime.create", /\bModelRuntime\s*\.\s*create\b/],
   ["SettingsManager.create", /\bSettingsManager\s*\.\s*create\b/],
 ];
@@ -101,5 +103,8 @@ test("the scanners catch what they are meant to catch", () => {
   assert.deepEqual(specifiers(`import type {\n  T,\n} from "@earendil-works/pi-ai";`), ["@earendil-works/pi-ai"]);
   const hits = (text: string) => FORBIDDEN.filter(([, pattern]) => pattern.test(text)).map(([label]) => label);
   assert.deepEqual(hits("const m = await import ('x'); setTimeout(f); globalThis.fetch (u)"), ["import(", "fetch(", "setInterval/setTimeout"]);
+  assert.deepEqual(hits("setImmediate(f); const signal = AbortSignal.timeout(1000);"), ["setImmediate", "AbortSignal.timeout"]);
   assert.deepEqual(hits("'rename', 'retrieval (x)', 'prefetch(x)', 'requirements (y)'"), []);
+  // The router's own signal matching names the type, never the timer.
+  assert.deepEqual(hits("signal: AbortSignal | undefined; AbortSignal.any([a]); 'immediately', 'setImmediately'"), []);
 });
