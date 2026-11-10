@@ -163,6 +163,7 @@ const TAG_IGNORED = {
   busy: "a run is under way, and it keeps its model until it ends",
   pinned: "this session is pinned to local models",
   version: "levels need a version 2 roster",
+  scope: "smart-router/auto refuses this session's scope",
 } as const;
 
 /** Why a tag cannot set its run's level: a fixed cause, or the selection when it is not smart-router/auto. */

@@ -70,21 +70,24 @@ export interface HistoryEntry {
 
 export const HISTORY_LIMIT = 50;
 
-/**
- * A version 2 run's level, kept from the input that planned it until the run's record is written.
- * Never prompt text.
- */
+/** A version 2 run's level, kept from the input that planned it until the run's record is written. */
 export interface PendingLevel {
   /** The input's token: a tagged run's opinion lands here only while the token is unchanged. */
   readonly token: number;
+  /**
+   * The text, without its tag, of the message that planned the level: it belongs only to the run
+   * that message's prompt starts (src/router.ts). Prompt text, so never recorded.
+   */
+  readonly text: string;
   readonly level: PlanLevel;
   /** The keyword classifier's signal and reason for the text. */
   readonly keyword: Classification;
   /** When the run was planned. */
   readonly at: number;
   /**
-   * Jev's outcome: the one an untagged run waited for, or a tagged run's opinion, "pending" until it
-   * arrives; undefined when Jev was not asked.
+   * Jev's outcome for the level: the one an untagged run waited for, or the original message's when
+   * an extension's resend reused that message's level and Jev was not asked again; for a tagged run,
+   * Jev's opinion, "pending" until it arrives. Undefined when Jev was not asked for the level.
    */
   jev: JevOutcome | "pending" | undefined;
 }

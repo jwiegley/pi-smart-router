@@ -520,8 +520,9 @@ describe("smart-router/auto refuses a scope it cannot serve", () => {
         refusal.message,
         "smart-router/auto: this session is in work scope, which a version 1 roster does not serve. Nothing was sent. Give the roster a work scope (version 2), or choose a model with /model.",
       );
-      // The owned run: the prompt plans, and the run's first request refuses.
+      // The owned run: the prompt plans nothing for a scope auto refuses, and the run's first request refuses.
       await loaded.host.emit("input", { text: PLANNING, source: "interactive" });
+      assert.equal(loaded.router?.record(loaded.session.id)?.plan, undefined);
       const signal = loaded.session.startRun();
       refuses(() => loaded.runtime.route("auto", request("user", { signal })), refusal, "the owned run");
       refuses(() => loaded.runtime.route("auto", request("continuation", { signal })), refusal, "a continuation");

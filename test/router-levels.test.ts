@@ -132,6 +132,30 @@ function firstRequest(loaded: Loaded): string {
   return routed(loaded.runtime.route("auto", request("user", { signal })));
 }
 
+/**
+ * Start a prompt's run as Pi's _startRun does once the prompt's input handlers have returned: the
+ * session turns busy, before_agent_start carries the prompt (expanded, when Pi expands a template
+ * or skill), and the run's first request routes.
+ */
+async function runPrompt(loaded: Loaded, prompt: string): Promise<string> {
+  const signal = loaded.session.startRun();
+  await loaded.host.emit("before_agent_start", { messageType: "user", prompt });
+  return routed(loaded.runtime.route("auto", request("user", { signal })));
+}
+
+/** Two messages that overlap a Jev wait, and the two answers, settled when the test says. */
+async function overlap(loaded: Loaded, first: string, second: string) {
+  const answers = [deferred<ClassifierResult>(), deferred<ClassifierResult>()] as const;
+  const queue = answers.map((answer) => answer.promise);
+  loaded.runtime.answer = () => queue.shift() ?? Promise.reject(new Error("one call per message"));
+  const one = say(loaded, first);
+  await settled();
+  const two = say(loaded, second);
+  await settled();
+  assert.equal(calls(loaded), 2, "both messages are waiting for Jev");
+  return { one, two, earlier: answers[0], later: answers[1] };
+}
+
 /** The run ends: a response from `ref`, then agent_settled. */
 async function finish(loaded: Loaded, ref: string, init: Parameters<typeof assistant>[1] = {}): Promise<void> {
   await loaded.host.emit("message_end", { message: assistant(ref, init) });
@@ -156,11 +180,12 @@ async function withEnv(name: string, value: string, run: () => Promise<void>): P
 }
 
 describe("a trailing tag", () => {
-  test("is removed with a transform, and the run goes to its tier at once while Jev's opinion is asked without waiting", { timeout: 10_000 }, async (t) => {
+  test("is removed with a transform, and the run goes to its tier at once while Jev's opinion is asked without waiting", async (t) => {
     const loaded = await hera(t);
     loaded.runtime.answer = () => new Promise(() => {});
-    assert.deepEqual(await say(loaded, "go ahead #high"), [{ action: "transform", text: "go ahead" }]);
-    assert.equal(calls(loaded), 1, "Jev was asked once, and the input did not wait for an answer that never comes");
+    const first = await Promise.race([say(loaded, "go ahead #high"), settled().then(() => "it waited")]);
+    assert.deepEqual(first, [{ action: "transform", text: "go ahead" }], "the input returns before an answer that never comes");
+    assert.equal(calls(loaded), 1, "Jev was asked once");
     assert.equal(recordOf(loaded)?.pendingLevel?.jev, "pending");
     assert.equal(firstRequest(loaded), SOL);
     assert.deepEqual(recordOf(loaded)?.history.at(-1)?.level, TAGGED_HIGH);
@@ -283,6 +308,24 @@ describe("a trailing tag", () => {
     assert.deepEqual([calls(local), calls(physical)], [0, 0]);
   });
 
+  test("has no effect in a scope smart-router/auto refuses, where nothing is planned and Jev is not asked", async (t) => {
+    const unreadable = await hera(t, { id: "unreadable", setup: (session) => session.appendCustom(SCOPE_ENTRY, { v: 9 }) });
+    const unserved = await start({ dir: agentDir(t, { roster: fixture("roster-work.json") }), runtime: heraRuntime(), id: "unserved", now: () => NOW });
+    for (const loaded of [unreadable, unserved]) {
+      const name = loaded.session.id;
+      loaded.runtime.answer = async () => jevAnswer(LOW);
+      assert.deepEqual(await say(loaded, "go ahead"), [undefined], name);
+      assert.deepEqual([recordOf(loaded)?.plan, recordOf(loaded)?.pendingLevel, recordOf(loaded)?.lastInput], [undefined, undefined, undefined], name);
+      assert.deepEqual(await say(loaded, "go ahead #high"), [{ action: "transform", text: "go ahead" }], name);
+      assert.deepEqual(
+        loaded.session.notices,
+        [{ type: "warning", message: "pi-smart-router: the HIGH tag was removed and has no effect, because smart-router/auto refuses this session's scope." }],
+        `${name}: the notice, and no step-up`,
+      );
+      assert.deepEqual([recordOf(loaded)?.plan, recordOf(loaded)?.pendingLevel, recordOf(loaded)?.lastInput, calls(loaded)], [undefined, undefined, undefined, 0], name);
+    }
+  });
+
   test("has no effect under a version 1 roster: removed with a notice, Jev is not asked, and the run is planned as version 1 plans", async (t) => {
     const loaded = await start({ dir: agentDir(t), runtime: heraRuntime(), now: () => NOW });
     assert.deepEqual(await say(loaded, "x #high"), [{ action: "transform", text: "x" }]);
@@ -305,7 +348,7 @@ describe("an untagged message", () => {
     const level = { scope: "personal", tier: "low", asked: "low", start: "low", source: "jev", steppedUp: false, returnedToFirst: false, jev };
     const pending = recordOf(loaded)?.pendingLevel;
     assert.equal(typeof pending?.token, "number");
-    assert.deepEqual(pending && { ...pending, token: 0 }, { token: 0, level, keyword: { signal: "trivial", reason: "triage:keyword_economical" }, at: NOW, jev });
+    assert.deepEqual(pending && { ...pending, token: 0 }, { token: 0, text: "rename foo to bar", level, keyword: { signal: "trivial", reason: "triage:keyword_economical" }, at: NOW, jev });
     assert.equal(firstRequest(loaded), LUNA);
     assert.deepEqual(recordOf(loaded)?.history.at(-1)?.level, level);
   });
@@ -492,7 +535,8 @@ describe("a session replaced, or a newer input, during the wait", () => {
     const late = deferred<ClassifierResult>();
     runtime.answer = () => late.promise;
     const old = await start({ dir, runtime, id: "old", file: "/sessions/old.jsonl", now: () => NOW });
-    assert.deepEqual(await say(old, "go ahead #high"), [{ action: "transform", text: "go ahead" }]);
+    const first = await Promise.race([say(old, "go ahead #high"), settled().then(() => "it waited")]);
+    assert.deepEqual(first, [{ action: "transform", text: "go ahead" }], "the transform comes back at once");
     await old.host.emit("session_shutdown", { reason: "new", targetSessionFile: "/sessions/new.jsonl" });
     old.session.dispose();
     const fresh = await start({ dir, runtime, id: "new", file: "/sessions/new.jsonl", now: () => NOW });
@@ -549,34 +593,66 @@ describe("a session replaced, or a newer input, during the wait", () => {
     assert.equal(dropped?.jev, "pending", "nor in the pending level the next message dropped");
   });
 
-  test("of two messages waiting for Jev, only the later one plans, whichever answer comes first", { timeout: 10_000 }, async (t) => {
-    for (const laterFirst of [true, false]) {
+  test("of two messages overlapping a Jev wait, an earlier answer that comes first plans its own message, whose run uses that plan", { timeout: 10_000 }, async (t) => {
+    const loaded = await hera(t);
+    const { one, two, earlier, later } = await overlap(loaded, "go ahead", "rename foo to bar");
+    earlier.resolve(jevAnswer(LOW));
+    assert.deepEqual(await one, [undefined]);
+    // Its input handlers have returned, so Pi starts the earlier message's run.
+    assert.equal(await runPrompt(loaded, "go ahead"), LUNA);
+    assert.deepEqual(recordOf(loaded)?.history.at(-1)?.level?.jev, outcome(LOW, "low"));
+    later.resolve(jevAnswer(HIGH));
+    assert.deepEqual(await two, [undefined]);
+    assert.equal(recordOf(loaded)?.plan, undefined, "the later message found the session busy, and planned nothing");
+    assert.deepEqual([recordOf(loaded)?.pendingLevel?.text, recordOf(loaded)?.pendingLevel?.jev], ["go ahead", outcome(LOW, "low")], "the run's pending level is its own");
+  });
+
+  test("of two messages overlapping a Jev wait, a later answer that comes first plans the later message; the earlier message's run never takes that plan", { timeout: 10_000 }, async (t) => {
+    for (const earlierRunsFirst of [true, false]) {
       resetSlot();
-      const loaded = await hera(t, { id: `later-first-${laterFirst}` });
-      const answers = [deferred<ClassifierResult>(), deferred<ClassifierResult>()];
-      const pending = answers.map((answer) => answer.promise);
-      loaded.runtime.answer = () => pending.shift() ?? Promise.reject(new Error("one call per message"));
-      const one = say(loaded, "go ahead");
-      await settled();
-      const two = say(loaded, "rename foo to bar");
-      await settled();
-      const [earlier, later] = answers;
-      const name = `the later answer came ${laterFirst ? "first" : "last"}`;
-      if (laterFirst) {
-        later?.resolve(jevAnswer(HIGH));
-        assert.deepEqual(await two, [undefined], name);
-        earlier?.resolve(jevAnswer(LOW));
-        assert.deepEqual(await one, [undefined], name);
+      const loaded = await hera(t, { id: `earlier-runs-first-${earlierRunsFirst}` });
+      const { one, two, earlier, later } = await overlap(loaded, "go ahead", "rename foo to bar");
+      later.resolve(jevAnswer(HIGH));
+      assert.deepEqual(await two, [undefined]);
+      earlier.resolve(jevAnswer(LOW));
+      assert.deepEqual(await one, [undefined]);
+      const name = earlierRunsFirst ? "Pi starts the earlier message's run first" : "Pi starts the later message's run first";
+      assert.deepEqual([recordOf(loaded)?.plan?.level?.tier, recordOf(loaded)?.pendingLevel?.text], ["high", "rename foo to bar"], `${name}: the earlier message planned nothing over the later one's plan`);
+      if (earlierRunsFirst) {
+        assert.equal(await runPrompt(loaded, "go ahead"), TERRA, name);
+        assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level], ["stick:default", undefined], `${name}: it routes unplanned`);
+        assert.equal(recordOf(loaded)?.pendingLevel, undefined, `${name}: and the later message's level and Jev answer are not its`);
       } else {
-        earlier?.resolve(jevAnswer(LOW));
-        assert.deepEqual(await one, [undefined], name);
-        later?.resolve(jevAnswer(HIGH));
-        assert.deepEqual(await two, [undefined], name);
+        assert.equal(await runPrompt(loaded, "rename foo to bar"), SOL, name);
+        assert.deepEqual(recordOf(loaded)?.history.at(-1)?.level?.jev, outcome(HIGH, "high"), name);
       }
-      assert.deepEqual([recordOf(loaded)?.plan?.level?.tier, recordOf(loaded)?.plan?.level?.source], ["high", "jev"], name);
-      assert.equal(recordOf(loaded)?.pendingLevel?.level.tier, "high", name);
-      assert.equal(firstRequest(loaded), SOL, name);
     }
+  });
+
+  test("a run whose prompt Pi expanded, or a later extension changed, keeps the plan of the only message since the last run; with two messages it goes unplanned", { timeout: 10_000 }, async (t) => {
+    const expanded = '<skill name="review" location="/skills/review/SKILL.md">\nReview the change.\n</skill>\n\nsrc/a.ts';
+    const loaded = await hera(t);
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    assert.deepEqual(await say(loaded, "/skill:review src/a.ts #high"), [{ action: "transform", text: "/skill:review src/a.ts" }]);
+    assert.equal(await runPrompt(loaded, expanded), SOL, "the tag's tier");
+    assert.equal(recordOf(loaded)?.history.at(-1)?.level?.source, "tag");
+    await finish(loaded, SOL);
+    // Each run starts the count again: the next single message's changed prompt keeps its plan too.
+    assert.deepEqual(await say(loaded, "/skill:review src/a.ts #super"), [{ action: "transform", text: "/skill:review src/a.ts" }]);
+    assert.equal(await runPrompt(loaded, expanded), ASTRA, "the tag's tier");
+    await finish(loaded, ASTRA);
+    // Two messages since the last run, and a prompt that is neither's text: it cannot be told whose.
+    const waiting = deferred<ClassifierResult>();
+    loaded.runtime.answer = () => waiting.promise;
+    const one = say(loaded, "/skill:review src/b.ts");
+    await settled();
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    assert.deepEqual(await say(loaded, "/skill:review src/c.ts #high"), [{ action: "transform", text: "/skill:review src/c.ts" }]);
+    assert.equal(recordOf(loaded)?.plan?.level?.tier, "high");
+    assert.equal(await runPrompt(loaded, expanded.replace("a.ts", "c.ts")), ASTRA, "it sticks to the last responder");
+    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel], ["stick:last", undefined, undefined]);
+    waiting.resolve(jevAnswer(LOW));
+    assert.deepEqual(await one, [undefined]);
   });
 
   test("a message whose session started a run during the wait plans nothing", { timeout: 10_000 }, async (t) => {
