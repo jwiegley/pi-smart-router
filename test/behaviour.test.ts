@@ -1207,6 +1207,18 @@ test("L4 no classifier call when pinned, on local, with PI_SMART_ROUTER_LOCAL_ON
     const pi = await world.start({ select: "smart-router/auto" });
     delete process.env.PI_SMART_ROUTER_LOCAL_ONLY;
     assert.equal(pi.selection(), "smart-router/local");
+    // The variable pins the session, not only its first selection: smart-router/auto, forced back,
+    // is refused by the pin's guard, tag or not, and nothing reaches Jev or a cloud model.
+    const refused =
+      "pi-smart-router: this session is pinned to local models, and smart-router/auto is not local, so the prompt was not sent. Choose smart-router/local or a local model with /model, or run /smart-router local off.";
+    pi.force("smart-router/auto");
+    await pi.prompt(PROMPTS.planning);
+    await pi.prompt("Fix the parser #high");
+    assert.equal(count(pi, refused), 2, "both prompts were refused");
+    assert.deepEqual(world.jev.calls, []);
+    assert.deepEqual(called(world.counts()), {});
+    // Back on smart-router/local, the session routes locally, still without Jev.
+    pi.force("smart-router/local");
     await pi.prompt(PROMPTS.planning);
     await pi.prompt("Fix the parser #high");
     assert.equal(answered(pi), "local-a/m");
