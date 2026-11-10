@@ -9,11 +9,13 @@
 //
 // Version 2 plans a tier in the session's scope instead: a trailing tag's, else Jev's, else the
 // keywords'. An untagged run rises to at least high when it names a risky operation, and keeps the
-// hold rules above, comparing tiers; a tagged run does neither. The tier's role takes its first
-// available candidate, not the latest response's. A tier with no available candidate, or whose
-// first available candidate is too small for the conversation, passes the run up to the next tier.
-// When no tier's first available candidate fits, the highest tier with one takes the run, as
-// version 1 would send it and Pi compacts: only a run with no available candidate at all is refused.
+// hold rules above, comparing tiers; a tagged run does neither. A hold is a preference, not a
+// floor: when the held tier and every tier above it have no available candidate, the run climbs
+// from its own tier instead. The tier's role takes its first available candidate, not the latest
+// response's. A tier with no available candidate, or whose first available candidate is too small
+// for the conversation, passes the run up to the next tier. When no tier's first available
+// candidate fits, the highest tier with one takes the run, as version 1 would send it and Pi
+// compacts: a run is refused only when neither its own tier nor any above it has an available one.
 import type { Api, Model, Usage } from "@earendil-works/pi-ai";
 import { calculateContextTokens, DEFAULT_COMPACTION_SETTINGS, estimateTokens } from "@earendil-works/pi-coding-agent";
 
@@ -124,7 +126,11 @@ export interface PlanLevel {
   readonly tier: Tier;
   /** The tier the tag, Jev or the keywords asked for, before the floor, the hold rules and any step-up. */
   readonly asked: Tier;
-  /** The tier the upward pick began at: `asked` after the floor and the hold rules. */
+  /**
+   * The tier the upward pick began at: `asked` after the floor and the hold rules. A hold whose tier
+   * and every tier above it had no available candidate gives way, and the pick began at `asked` after
+   * the floor alone.
+   */
   readonly start: Tier;
   readonly source: LevelSource;
   /** The risky operation that raised the run to the floor. */
@@ -239,7 +245,9 @@ function planLevel(p: PlanInput, section: ScopeSection, signal: Signal): Pick<Pl
   const risky = tag === undefined ? riskyTrigger(p.text) : undefined;
   const trigger = risky !== undefined && tierRank(asked) < tierRank(FLOOR) ? risky : undefined;
   const source: LevelSource = trigger === undefined ? given : "floor";
-  let start = trigger === undefined ? asked : FLOOR;
+  // The run's own tier: the one it asked for, or the floor.
+  const own = trigger === undefined ? asked : FLOOR;
+  let start = own;
   let code: string = source;
   const sticky = tag === undefined && last !== undefined ? tierOf(rc, section, last.ref) : undefined;
   if (last !== undefined && sticky !== undefined && tierRank(start) < tierRank(sticky)) {
@@ -254,7 +262,15 @@ function planLevel(p: PlanInput, section: ScopeSection, signal: Signal): Pick<Pl
       code = held ? "hold:fit" : "reopen:idle";
     }
   }
-  const { tier, decision } = climb(p, section, start, code);
+  let planned = climb(p, section, start, code);
+  // A hold is a preference, not a floor: when the held tier and every tier above it have no
+  // available candidate, the run climbs again from its own tier.
+  if (!planned.decision.ok && start !== own) {
+    start = own;
+    code = source;
+    planned = climb(p, section, start, code);
+  }
+  const { tier, decision } = planned;
   const choice = decision.ok ? decision.choice : undefined;
   const level: PlanLevel = {
     scope: rc.scope,

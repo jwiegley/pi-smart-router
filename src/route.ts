@@ -7,8 +7,9 @@
 // request (a session that shares the runtime but has no instance of its own, such as goal-x's
 // default auditor) route without changing any of them.
 //
-//   owner user          the run's plan (a version 2 plan on auto only in the scope it was made
-//                       in), else as a continuation (steering, follow-ups)
+//   owner user          the run's plan (on auto, only under the roster version it was made for,
+//                       and under version 2 in its scope), else as a continuation (steering,
+//                       follow-ups)
 //   owner continuation  previous, else the run's pick, else the last responder: that model if it
 //                       resolves, else its role, else the role's fallback; with no base, the
 //                       default role (the local role when local-only) and its fallback
@@ -170,14 +171,15 @@ function retry(rc: ResolveContext, request: ModelRouteRequest, record: SessionRe
 }
 
 /**
- * The run's plan, consumed: it is never used twice, and never for another selection. A version 2
- * plan on auto is used only in the scope it was made in; a local-only plan carries no account.
+ * The run's plan, consumed: it is never used twice, and never for another selection. A plan on auto
+ * is used only under the roster version it was made for: a version 1 plan has no level, and a
+ * version 2 plan is used only in the scope it was made in. A local-only plan carries no account.
  */
 function takePlan(record: SessionRecord, id: VirtualId, rc: ResolveContext): Plan | undefined {
   const { plan } = record;
   record.plan = undefined;
   if (plan === undefined || plan.virtualId !== id || plan.localOnly !== rc.localOnly) return undefined;
-  return rc.localOnly || rc.roster.version === 1 || plan.level?.scope === rc.scope ? plan : undefined;
+  return rc.localOnly || (rc.roster.version === 1 ? plan.level === undefined : plan.level?.scope === rc.scope) ? plan : undefined;
 }
 
 /** The planned model if it still resolves, else the planned role, then its fallback. */

@@ -643,6 +643,44 @@ describe("v2 levels", () => {
     expectPlan(planV2(PLAIN, { rc: v2(catalog), level: { jev }, last: last(ASTRA, 6 * MINUTE, 100_000) }), LUNA, "reopen:idle");
   });
 
+  test("a hold is a preference: when the held tier and every tier above it have no available candidate, the run climbs from its own tier", () => {
+    // Astra answered a minute ago and is cooling now, and kimi is unavailable, so super can take nothing.
+    const cooldowns = new Cooldowns();
+    cooldowns.cool(ASTRA, 1, NOW, 30);
+    cooldowns.cool(WORK_ASTRA, 2, NOW, 30);
+    const catalog = v2Catalog();
+    catalog.unavailable.add(KIMI);
+    const MEDIUM = { tier: "medium", asked: "medium", start: "medium", source: "keyword", steppedUp: false, returnedToFirst: false } as const;
+    const work = planV2(FRANCE, { rc: v2(catalog, { cooldowns, scope: "work" }), last: last(WORK_ASTRA, MINUTE) });
+    expectPlan(work, WORK_TERRA, "keyword");
+    assert.deepEqual(work.level, { scope: "work", ...MEDIUM });
+    const personal = planV2(FRANCE, { rc: v2(catalog, { cooldowns }), last: last(ASTRA, MINUTE) });
+    expectPlan(personal, TERRA, "keyword");
+    assert.deepEqual(personal.level, { scope: "personal", ...MEDIUM });
+    // Idle, the run would hold super because luna is too small; it climbs from low instead.
+    const small = v2Catalog().add(codex(LUNA, { contextWindow: 128_000 }));
+    small.unavailable.add(KIMI);
+    const jev = answer("low");
+    const fit = planV2(PLAIN, { rc: v2(small, { cooldowns }), level: { jev }, last: last(ASTRA, 6 * MINUTE, 120_000) });
+    expectPlan(fit, TERRA, "step-up");
+    assert.deepEqual(fit.level, { scope: "personal", tier: "medium", asked: "low", start: "low", source: "jev", steppedUp: true, returnedToFirst: false, jev });
+    // The floor stays a minimum: a risky run climbs again from high, not from the tier it asked for.
+    const floored = planV2(FORCE_PUSH, { rc: v2(catalog, { cooldowns }), level: { jev }, last: last(ASTRA, MINUTE) });
+    expectPlan(floored, SOL, "floor");
+    assert.deepEqual(floored.level, { scope: "personal", tier: "high", asked: "low", start: "high", source: "floor", trigger: "destructive-git", steppedUp: false, returnedToFirst: false, jev });
+  });
+
+  test("a held run whose own tier and every tier above it have no available candidate is still refused", () => {
+    const catalog = v2Catalog();
+    for (const ref of [TERRA, DEEPSEEK, SOL, GLM_CLOUD, ASTRA, KIMI]) catalog.unavailable.add(ref);
+    const result = planV2(FRANCE, { rc: v2(catalog), last: last(ASTRA, MINUTE) });
+    assert.deepEqual([result.role, result.code], [undefined, "keyword"]);
+    assert.deepEqual(result.level, { scope: "personal", tier: "medium", asked: "medium", start: "medium", source: "keyword", steppedUp: false, returnedToFirst: false });
+    assert.ok(!result.decision.ok, JSON.stringify(result.decision));
+    // Low's candidates are available, but a run never goes below its own tier.
+    assert.deepEqual(result.decision.attempts.map((attempt) => attempt.role), ["medium", "high", "super"]);
+  });
+
   test("a tagged run moves up a tier when the conversation would not fit its tier's first available model", () => {
     // Low's only available candidate has a 32,000-token window, and the conversation holds 100,000.
     const catalog = v2Catalog().add(codex(LUNA, { contextWindow: 32_000 }));

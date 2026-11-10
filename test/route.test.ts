@@ -684,6 +684,23 @@ describe("a version 2 run's plan", () => {
     assert.deepEqual([record.history.at(-1)?.code, record.history.at(-1)?.level], ["keyword", { scope: "work", ...KEYWORD_MEDIUM }]);
   });
 
+  test("is never used under a version 1 roster, nor a version 1 plan under a version 2 roster", () => {
+    const v2 = heraContext({ roster: HERA_V2, catalog: v2Catalog() });
+    const v1 = heraContext({ catalog: v2Catalog() });
+    const record = newRecord();
+    record.plan = planUserTurn({ rc: v2, text: FRANCE, last: undefined, now: NOW, reserve: 0 });
+    assert.ok(record.plan.level !== undefined, "a version 2 plan carries its level");
+    // The roster became version 1 before the run's first request: the plan is dropped, and the run sticks.
+    assert.equal(routed(routeOwned(owned(v1, record))), DEEPSEEK);
+    assert.deepEqual([record.history.at(-1)?.role, record.history.at(-1)?.code], ["worker", "stick:default"]);
+    // And the other way: a version 1 plan, which has no level, is dropped under a version 2 roster.
+    const other = newRecord();
+    other.plan = planUserTurn({ rc: v1, text: FRANCE, last: undefined, now: NOW, reserve: 0 });
+    assert.equal(other.plan.level, undefined);
+    assert.equal(routed(routeOwned(owned(v2, other))), TERRA);
+    assert.deepEqual([other.history.at(-1)?.role, other.history.at(-1)?.code], ["medium", "stick:default"]);
+  });
+
   test("a local-only plan, which has no level, is used as before", () => {
     const local = heraContext({ roster: HERA_V2, virtualId: "local" });
     const record = newRecord();
