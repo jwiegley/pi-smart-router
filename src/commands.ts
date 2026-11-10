@@ -25,11 +25,12 @@ import { checkLocal, EMPTY_POLICY, policyFromRoster } from "./local.ts";
 import type { LocalPolicy } from "./local.ts";
 import { describePin, describePolicy, pinOff, pinOn } from "./pin.ts";
 import type { PinReading } from "./pin.ts";
-import { correctionRecord, levelNote, readLevelRecord } from "./records.ts";
+import { correctionRecord, levelNote, levelRecord, readLevelRecord } from "./records.ts";
+import type { LevelRecord } from "./records.ts";
 import { clock, resolveCandidate } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
 import { boundedHistory, HISTORY_LIMIT } from "./route.ts";
-import type { HistoryEntry, Pin } from "./route.ts";
+import type { HistoryEntry, PendingLevel, Pin } from "./route.ts";
 import { autoRoles, parseRef, SCOPES, servesScope } from "./roster.ts";
 import type { Roster, RosterV1, RosterV2, Scope } from "./roster.ts";
 import { scopeEntry } from "./scope.ts";
@@ -55,7 +56,8 @@ export interface CommandHost {
   pinOf(ctx: ExtensionContext): PinReading;
   /** The session's scope, as routing and the guards read it: the latch, the session's entry, then the work directories. */
   scopeOf(ctx: ExtensionContext): ScopeState;
-  session(ctx: ExtensionContext): { readonly history: readonly HistoryEntry[]; readonly guard: GuardState } | undefined;
+  /** The session's records: its decisions, its guard state, and the level of the run planned or in flight. */
+  session(ctx: ExtensionContext): { readonly history: readonly HistoryEntry[]; readonly guard: GuardState; readonly pendingLevel: PendingLevel | undefined } | undefined;
   /** A resolver context for one of the two models, built as routing builds it: in the session's scope, or in `scope`. */
   resolver(ctx: ExtensionContext, roster: Roster, id: VirtualId, pin: Pin, scope?: Scope): ResolveContext;
 }
@@ -475,14 +477,25 @@ async function scopeCommand(host: CommandHost, ctx: ExtensionContext, option: st
 }
 
 /**
- * A correction of the latest run on this branch: a label only, appended as a record of its own, and
- * nothing is sent again. A correction of a correction corrects the same run.
+ * A correction of the last run: a label only, appended as a record of its own, and nothing is sent
+ * again. A correction of a correction corrects the same run.
+ *
+ * Pi runs a command at once while a run streams. That run has no record until it settles, though the
+ * footer already shows it, so it is the run corrected, by the `at` and scope its record will carry.
+ * Otherwise the run is the latest on this branch: while idle, a pending level is a message's whose
+ * run has not started.
  */
 function was(host: CommandHost, ctx: ExtensionContext, tier: Tier): Answer {
-  const latest = boundedHistory(ctx.sessionManager)?.getLatestCustomEntry(LEVEL_ENTRY, { scope: "active" });
-  if (latest === undefined || latest === null) return warning("pi-smart-router: no routed run to correct in this session yet.");
-  const previous = readLevelRecord(latest);
-  if (previous === undefined) return warning("pi-smart-router: the latest smart-router.level entry is not one the router wrote, so there is no run to correct.");
+  const inFlight = ctx.isIdle() ? undefined : host.session(ctx)?.pendingLevel;
+  let previous: LevelRecord | undefined;
+  if (inFlight !== undefined) {
+    previous = levelRecord(inFlight, undefined, false);
+  } else {
+    const latest = boundedHistory(ctx.sessionManager)?.getLatestCustomEntry(LEVEL_ENTRY, { scope: "active" });
+    if (latest === undefined || latest === null) return warning("pi-smart-router: no routed run to correct in this session yet.");
+    previous = readLevelRecord(latest);
+    if (previous === undefined) return warning("pi-smart-router: the latest smart-router.level entry is not one the router wrote, so there is no run to correct.");
+  }
   host.pi.appendEntry(LEVEL_ENTRY, correctionRecord(previous, tier, host.now()));
   return info(`pi-smart-router: recorded that the last run should have been ${tierLabel(tier)}.`);
 }

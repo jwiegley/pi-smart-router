@@ -658,6 +658,54 @@ describe("was", () => {
     assert.equal(loaded.session.wholeHistoryReads, 0);
   });
 
+  test("while a run is in flight, corrects that run, which has no record until it settles: a session's first run, and a later one", async (t) => {
+    let now = NOW;
+    const loaded = await start({ dir: agentDir(t, { roster: HERA_V2 }), runtime: priced(), now: () => now });
+    /** A prompt whose run has made its first request and not yet settled. */
+    const inFlight = async (text: string): Promise<void> => {
+      await loaded.host.emit("input", { text, source: "interactive" });
+      const signal = loaded.session.startRun();
+      loaded.runtime.route("auto", request("user", { signal }));
+    };
+    const settles = async (ref: string): Promise<void> => {
+      await loaded.host.emit("message_end", { message: assistant(ref) });
+      await loaded.host.emit("agent_settled", { aborted: false });
+      loaded.session.endRun();
+    };
+    await inFlight("x #super");
+    now = NOW + 10_000;
+    assert.deepEqual(await answer(loaded, "was high"), { type: "info", message: "pi-smart-router: recorded that the last run should have been HIGH." });
+    await settles(ASTRA);
+    now = NOW + 60_000;
+    await inFlight("y #high");
+    now = NOW + 70_000;
+    // The correction names the run's scope, whatever the session's is by then.
+    assert.equal((await answer(loaded, "scope work")).message, "pi-smart-router: scope work (entry).");
+    assert.deepEqual(await answer(loaded, "was super"), { type: "info", message: "pi-smart-router: recorded that the last run should have been SUPER." });
+    await settles(SOL);
+    assert.deepEqual(
+      entriesOf(loaded, LEVEL_ENTRY).map((entry) => [entry.source, entry.at, entry.scope, entry.tier, entry.refers]),
+      [
+        ["correction", NOW + 10_000, "personal", "high", NOW],
+        ["tag", NOW, "personal", "super", undefined],
+        ["correction", NOW + 70_000, "personal", "super", NOW + 60_000],
+        ["tag", NOW + 60_000, "personal", "high", undefined],
+      ],
+    );
+  });
+
+  test("while idle, a message that planned but whose run has not started is not the run corrected", async (t) => {
+    let now = NOW;
+    const loaded = await start({ dir: agentDir(t, { roster: HERA_V2 }), runtime: priced(), now: () => now });
+    assert.equal(await routeRun(loaded, "x #super"), ASTRA);
+    now = NOW + 60_000;
+    // A later extension handles this message, so its run never starts, and its level stays pending.
+    await loaded.host.emit("input", { text: "y #high", source: "interactive" });
+    assert.equal(loaded.router?.record(loaded.session.id)?.pendingLevel?.at, NOW + 60_000);
+    assert.deepEqual(await answer(loaded, "was low"), { type: "info", message: "pi-smart-router: recorded that the last run should have been LOW." });
+    assert.equal(entriesOf(loaded, LEVEL_ENTRY).at(-1)?.refers, NOW);
+  });
+
   test("with no routed run in the session, says so and records nothing: a new session, and a version 1 roster's runs, which have no level", async (t) => {
     const fresh = await heraV2(t, { id: "fresh" });
     const v1 = await hera(t);
