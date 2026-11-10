@@ -893,6 +893,21 @@ git commit -S -m "Add the four-level Jev design and its implementation plan"
 **Controller rulings (pre-flight, binding; they amend this task):**
 - `isCodexProvider` comes from Task 3 (`src/accounts.ts`), not Task 4.
 - John ruled that the guard applies in work scope only. There is no personal-scope guard.
+- (Rulings after Tasks 4 and 5, all binding)
+  - Add one helper in `src/accounts.ts` that says whether a provider is a work-bound Codex provider,
+    taking the accounts map, for example `isWorkCodex(accounts, provider)`. Use it in roster
+    validation (`src/roster.ts`, the work-level check), in `assertSafe`'s work-scope check
+    (`src/route.ts`) and in the work guard. Drop `checkAccount`'s `?? "personal"` default, which can
+    never fire.
+  - A scope whose source is `directory` (Task 5) is work scope for the guard.
+  - While the roster fails to load, the guard and `scopeOf` use the work directories and account
+    bindings of the last roster that loaded in this process. If none has loaded, a work-scope
+    session allows only `smart-router/auto`, which refuses while the roster is invalid. A session
+    under a work directory must never read as personal just because a reload failed. Test both
+    cases.
+  - Keep `prepare()`'s scope refusal ahead of the pin, failing closed. Add a test that a pinned,
+    latched version 1 `smart-router/auto` request is refused, while `smart-router/local` still
+    routes.
 
 ### Task 9: Records, corrections, history, the footer and commands
 
