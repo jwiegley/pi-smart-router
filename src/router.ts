@@ -771,8 +771,9 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
 
   /**
    * At agent_settled, the run is over: its level, if it had one, is recorded with the model the
-   * run's last request went to, and the run's plan, pick and level are dropped, whether or not the
-   * record could be appended. A run without a level of its own records nothing.
+   * run's last request went to, through either of the router's models, and the run's plan, pick and
+   * level are dropped, whether or not the record could be appended. A run without a level of its own
+   * records nothing.
    */
   const settle = (record: Session, aborted: boolean): void => {
     const { pendingLevel: pending, runPick: pick } = record;
@@ -780,7 +781,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     record.planDigest = undefined;
     record.runPick = undefined;
     record.pendingLevel = undefined;
-    if (pending !== undefined) pi.appendEntry(LEVEL_ENTRY, levelRecord(pending, pick?.id === "auto" ? pick.ref : undefined, aborted));
+    if (pending !== undefined) pi.appendEntry(LEVEL_ENTRY, levelRecord(pending, pick?.ref, aborted));
   };
 
   /**

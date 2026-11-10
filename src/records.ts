@@ -48,7 +48,10 @@ export interface LevelRecord {
   readonly keyword?: { readonly signal: Signal; readonly reason: string };
   /** Absent when Jev was not asked for the run. */
   readonly jev?: JevRecord;
-  /** The model the run's last request went to; absent when no request was routed. */
+  /**
+   * The model the run's last request went to, through either of the router's models, so a run that a
+   * switch moved to smart-router/local names the local model; absent when no request was routed.
+   */
   readonly ref?: string;
   /** The run went to a higher tier than the one its pick started at. */
   readonly steppedUp?: true;

@@ -704,6 +704,19 @@ describe("in work scope, a refusal offers only what the work guard keeps", () =>
     }
   });
 
+  test("a scope that cannot be read, under the pin: the pin's rules apply, so any model", async (t) => {
+    const loaded = await begin({
+      dir: agentDir(t, { roster: HERA_V2 }),
+      runtime: new FakeRuntime(workCatalog()),
+      setup: (session) => {
+        session.appendCustom(SCOPE_ENTRY, { v: 9 });
+        session.pin(policyFromRoster(rosterFixture("roster-hera.json")));
+      },
+    });
+    refuses(() => loaded.runtime.route("auto", request("direct")), scopeUnreadable("auto", "the latest smart-router.scope entry is not one the router wrote"), "pinned");
+    assert.match(refusalOf(() => loaded.runtime.route("auto", request("direct"))), /, or choose a model with \/model\.$/);
+  });
+
   test("no work model available: the refusal lists the tier and offers a work Codex model", async (t) => {
     const loaded = await begin({ dir: agentDir(t, { roster: HERA_V2 }), runtime: new FakeRuntime(), setup: recorded("work") });
     assert.equal(

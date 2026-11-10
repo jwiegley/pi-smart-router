@@ -512,6 +512,10 @@ describe("scope", () => {
     const loaded = await heraV2(t, { select: "local", setup: (session) => session.pin(POLICY_V2) });
     assert.deepEqual(await answer(loaded, "scope work"), { type: "info", message: "pi-smart-router: scope work (entry)." });
     assert.equal(`${loaded.session.model?.provider}/${loaded.session.model?.id}`, "smart-router/local");
+    // A selection outside the pin is the pin's to switch back, at the next guard; work scope does not report it.
+    loaded.session.force(KIMI);
+    assert.deepEqual(await answer(loaded, "scope work"), { type: "info", message: "pi-smart-router: scope work (entry)." });
+    assert.equal(`${loaded.session.model?.provider}/${loaded.session.model?.id}`, KIMI);
   });
 
   test("status reads the work directories as the roster lists them now, and an unreadable scope says why", async (t) => {
@@ -667,8 +671,14 @@ describe("was", () => {
   test("does not correct a latest level entry the router did not write", async (t) => {
     const loaded = await heraV2(t);
     await routeRun(loaded, "x #high");
-    for (const data of [{ v: 2, at: NOW, scope: "personal", source: "tag", tier: "high" }, { v: 1, at: NOW, scope: "personal", source: "correction", tier: "high" }, "high"]) {
-      loaded.session.appendCustom(LEVEL_ENTRY, data);
+    const malformed: ReadonlyArray<readonly [unknown, "custom" | "custom_message"]> = [
+      [{ v: 2, at: NOW, scope: "personal", source: "tag", tier: "high" }, "custom"],
+      [{ v: 1, at: NOW, scope: "personal", source: "correction", tier: "high" }, "custom"],
+      ["high", "custom"],
+      [{ v: 1, at: NOW, scope: "personal", source: "tag", tier: "high" }, "custom_message"],
+    ];
+    for (const [data, type] of malformed) {
+      loaded.session.appendCustom(LEVEL_ENTRY, data, type);
       const before = loaded.session.entries.length;
       assert.deepEqual(await answer(loaded, "was low"), {
         type: "warning",

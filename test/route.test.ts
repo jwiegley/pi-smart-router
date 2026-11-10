@@ -472,6 +472,16 @@ describe("the final assertions", () => {
     refuses(() => assertSafe("local", heraContext({ virtualId: "local" }), safe), /which is not in the local role; this is a bug in pi-smart-router/);
   });
 
+  test("the way out offers a work Codex model while the work guard holds the session, and any model under the pin", () => {
+    const work = heraContext({ scope: "work" });
+    const deepseek = work.catalog.find("openrouter", "deepseek/deepseek-v4.1-flash-1017");
+    assert.ok(deepseek !== undefined);
+    const worker = { role: "worker", ref: DEEPSEEK, model: deepseek, code: "t" };
+    refuses(() => assertSafe("auto", work, worker), /this is a bug in pi-smart-router\. Nothing was sent\. Choose a work Codex model with \/model\.$/);
+    const pinned = heraContext({ scope: "work", localOnly: true, pinned: true });
+    refuses(() => assertSafe("auto", pinned, worker), /which is not in the local role; this is a bug in pi-smart-router\. Nothing was sent\. Choose a model with \/model\.$/);
+  });
+
   test("a version 1 roster is unchanged in personal scope, and in work scope passes only a local-only pick", () => {
     const personal = heraContext();
     const work = heraContext({ scope: "work" });

@@ -1281,6 +1281,20 @@ describe("a run's record", () => {
     );
   });
 
+  test("names the model that answered when a switch moved the run to smart-router/local", async (t) => {
+    const loaded = await hera(t);
+    await say(loaded, "x #high");
+    const signal = loaded.session.startRun();
+    assert.equal(routed(loaded.runtime.route("auto", request("user", { signal }))), SOL);
+    // /smart-router local on, or /model, puts smart-router/local in charge of the run's next turn.
+    assert.equal(routed(loaded.runtime.route("local", request("continuation", { signal }))), GLM);
+    await finish(loaded, GLM);
+    assert.deepEqual(
+      levelEntries(loaded).map((record) => [record.tier, record.ref]),
+      [["high", GLM]],
+    );
+  });
+
   test("an aborted run's record says so", async (t) => {
     const loaded = await hera(t);
     loaded.runtime.answer = async () => jevAnswer(LOW);
@@ -1327,6 +1341,32 @@ describe("a run's record", () => {
     ]);
   });
 
+  test("carries the floor's trigger, a step-up and a return to the tier's first candidate", async (t) => {
+    let clock = NOW;
+    const runtime = heraRuntime();
+    const loaded = await hera(t, { runtime, now: () => clock });
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    await say(loaded, "force push the branch");
+    await finish(loaded, firstRequest(loaded));
+    for (const ref of [LUNA, NYX_QWEN, HERA_QWEN]) runtime.catalog.unavailable.add(ref);
+    await say(loaded, "x #low");
+    await finish(loaded, firstRequest(loaded));
+    runtime.catalog.unavailable.clear();
+    await loaded.host.emit("message_end", { message: assistant(SOL, { stopReason: "error", errorMessage: "You've hit your usage limit." }) });
+    await say(loaded, "y #high");
+    await finish(loaded, firstRequest(loaded));
+    clock = NOW + 31 * 60_000;
+    await say(loaded, "z #high");
+    await finish(loaded, firstRequest(loaded));
+    const pick = (record: Record<string, unknown>) => [record.source, record.asked, record.tier, record.trigger, record.steppedUp, record.returnedToFirst, record.ref];
+    assert.deepEqual(levelEntries(loaded).map(pick), [
+      ["floor", "low", "high", "destructive-git", undefined, undefined, SOL],
+      ["tag", "low", "medium", undefined, true, undefined, TERRA],
+      ["tag", "high", "high", undefined, undefined, undefined, GLM_CLOUD],
+      ["tag", "high", "high", undefined, undefined, true, SOL],
+    ]);
+  });
+
   test("a resend that reused a tagged message's level records the tag, and no opinion of Jev's", async (t) => {
     const loaded = await hera(t);
     loaded.runtime.answer = async () => jevAnswer(LOW);
@@ -1358,9 +1398,13 @@ describe("a run's record", () => {
     const v1 = await hera(t, { id: "v1", roster: fixture("roster-hera.json") });
     for (const loaded of [physical, local, pinned, v1]) {
       loaded.runtime.answer = async () => jevAnswer(LOW);
-      for (const text of ["rename foo to bar", "go ahead #high"]) {
+      for (const [text, prompt] of [
+        ["rename foo to bar", "rename foo to bar"],
+        ["go ahead #high", "go ahead"],
+      ] as const) {
         await say(loaded, text);
         const signal = loaded.session.startRun();
+        await loaded.host.emit("before_agent_start", { messageType: "user", prompt });
         const selected = loaded.session.model;
         const ref = selected?.provider === "smart-router" ? routed(loaded.runtime.route(selected.id === "local" ? "local" : "auto", request("user", { signal }))) : KIMI;
         await finish(loaded, ref);
