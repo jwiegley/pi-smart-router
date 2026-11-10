@@ -59,8 +59,8 @@ import { isRecord } from "./files.ts";
 import type { FileSystem, Loaded } from "./files.ts";
 import { createGuards, describeModel, newGuardState } from "./guards.ts";
 import type { GuardState } from "./guards.ts";
-import { askJev, buildContext, recentMessages } from "./jev.ts";
-import type { JevOutcome } from "./jev.ts";
+import { askJev, buildContext, jevAsk, recentMessages } from "./jev.ts";
+import type { JevAsk, JevOutcome } from "./jev.ts";
 import { EMPTY_POLICY, policyFromRoster } from "./local.ts";
 import { healDisplaced, isLive, isLiveOwner, join, leave, leaveScopeHandoff, ownerBySignal, rememberedRoster, rememberRoster, scopeLatched, sessionHash, takeScopeHandoff } from "./owners.ts";
 import type { Owner, OwnerRouter, RosterMemory, Slot } from "./owners.ts";
@@ -72,7 +72,7 @@ import type { ResolveContext } from "./resolve.ts";
 import { boundedHistory, newRecord, planApplies, predict, requireBoundedHistory, routeOther, routeOwned } from "./route.ts";
 import type { BoundedHistory, LastInput, Pin, RouteInput, SessionRecord } from "./route.ts";
 import { autoRoles, parseRef, rosterFile, SCOPES, scopeSection, servesScope } from "./roster.ts";
-import type { Roster, RosterV2, Scope, ScopedBinding } from "./roster.ts";
+import type { Roster, Scope, ScopedBinding } from "./roster.ts";
 import { readScope, scopeEntry, workDirectoryOf } from "./scope.ts";
 import type { ScopeEntryData, ScopeState, WorkDirectories } from "./scope.ts";
 import { parseTag } from "./tags.ts";
@@ -595,22 +595,18 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   };
 
   /**
-   * Jev's answer for a version 2 run on auto, or undefined when Jev is not asked: the roster has no
-   * classifier, or the session's scope cannot be read or has no levels. Jev reads the text without
-   * its tag, the conversation before it (the message is not in the session yet) and the scope's
+   * Jev's answer about a message, asked with what jevAsk gave. Jev reads the text without its tag,
+   * the conversation before it (the message is not in the session yet) and the scope's
    * descriptions, redacted, then cut to the classifier's caps. Never rejects: a request that cannot
    * be built, such as for text too long to redact, fails as an error before anything is sent.
    */
-  const askFor = (ctx: ExtensionContext, value: RosterV2, view: BoundedHistory, text: string): Promise<JevOutcome> | undefined => {
-    const settings = value.classifier;
-    const scope = scopeOf(ctx);
-    const section = scope.kind === "ok" ? scopeSection(value, scope.scope) : undefined;
-    if (settings === undefined || section === undefined) return undefined;
+  const askFor = (ctx: ExtensionContext, ask: JevAsk, text: string): Promise<JevOutcome> => {
+    const { settings, section, history } = ask;
     try {
       const { levels } = section;
       const descriptions: Record<Tier, string> = { low: levels.low.describe, medium: levels.medium.describe, high: levels.high.describe, super: levels.super.describe };
       const { messages } = settings.context;
-      const recent = messages === 0 ? [] : recentMessages(view.getRecentActiveEntries({ type: "message", limit: messages * 4 }), messages);
+      const recent = messages === 0 ? [] : recentMessages(history.getRecentActiveEntries({ type: "message", limit: messages * 4 }), messages);
       return askJev(ctx.modelRegistry, settings, buildContext(text, recent, descriptions, settings.context), now);
     } catch {
       return Promise.resolve<JevOutcome>({ kind: "failure", model: settings.model, failure: "error", ms: 0 });
@@ -688,7 +684,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   // arrives while a run starts or streams (steering, follow-ups) neither plans nor drops; its tag
   // is removed with a notice. A roster edit read here that lists the session's directory is
   // recorded before the run is planned, and nothing is planned for a scope smart-router/auto
-  // refuses (plan()), where Jev is not asked either (askFor). A version 2 run on auto, unpinned,
+  // refuses (plan()), where Jev is not asked either (jevAsk). A version 2 run on auto, unpinned,
   // takes the level its last input planned with when an extension resends that text
   // (pi-idle-check), else its tag's, with Jev's opinion asked and recorded without waiting, else
   // Jev's answer, waited for. The plan and its pending level carry the digest of the message's text,
@@ -726,31 +722,34 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
               : undefined;
       if (why !== undefined) notify(ctx, tagIgnoredNotice(tier, why), "warning");
     }
-    let level: LevelInput = {};
+    // An extension's resend of the latest message's text (pi-idle-check) keeps that message's level.
+    const reused = tagged === undefined && event.source === "extension" && previous?.digest === digest ? previous.level : undefined;
+    const ask = jevAsk({
+      idle: ctx.isIdle(),
+      selection: id,
+      pinned,
+      roster: value,
+      history: boundedHistory(sessionManager),
+      scope: scopeOf(ctx),
+      resend: reused !== undefined,
+    });
+    // A level input counts only where levels route: planUserTurn ignores it under version 1, on
+    // smart-router/local and under the pin, and plan() plans nothing off the router's models.
+    let level: LevelInput = reused ?? (tier === undefined ? {} : { tag: tier });
     let opinion = false;
-    const view = boundedHistory(sessionManager);
-    if (id === "auto" && !pinned && value?.version === 2 && view !== undefined) {
-      if (tagged === undefined && event.source === "extension" && previous?.digest === digest) {
-        level = previous.level;
-      } else if (tier !== undefined) {
-        level = { tag: tier };
-        const asked = askFor(ctx, value, view, text);
-        if (asked !== undefined) {
-          opinion = true;
-          void asked.then(landOpinion(sessionId, record, token)).catch(() => {
-            // An opinion only feeds the record, so there is nothing to do when landing it fails.
-          });
-        }
-      } else {
-        const asked = askFor(ctx, value, view, text);
-        if (asked !== undefined) {
-          const jev = await asked;
-          // The session ended during the wait, or a newer message has planned since. A stale token
-          // alone does not stop it: an earlier message whose answer comes first plans its own run.
-          if (records.get(sessionId) !== record || record.plannedToken > token) return;
-          level = { jev };
-        }
-      }
+    if (ask !== undefined && tier !== undefined) {
+      opinion = true;
+      void askFor(ctx, ask, text)
+        .then(landOpinion(sessionId, record, token))
+        .catch(() => {
+          // An opinion only feeds the record, so there is nothing to do when landing it fails.
+        });
+    } else if (ask !== undefined) {
+      const jev = await askFor(ctx, ask, text);
+      // The session ended during the wait, or a newer message has planned since. A stale token
+      // alone does not stop it: an earlier message whose answer comes first plans its own run.
+      if (records.get(sessionId) !== record || record.plannedToken > token) return;
+      level = { jev };
     }
     const planned = plan(ctx, record, text, digest, level, token);
     const planLevel = planned?.level;

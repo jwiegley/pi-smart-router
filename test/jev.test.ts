@@ -10,13 +10,21 @@ import {
   interpret,
   JEV_INSTRUCTIONS,
   JEV_QUESTION,
+  jevAsk,
   recentMessages,
   type ClassifierRegistry,
   type JevContextCaps,
+  type JevGate,
   type JevSettings,
 } from "../src/jev.ts";
 import { REDACTED } from "../src/redact.ts";
+import type { BoundedHistory } from "../src/route.ts";
+import { parseRoster } from "../src/roster.ts";
+import type { Roster } from "../src/roster.ts";
+import type { ScopeState } from "../src/scope.ts";
 import { TIERS, type Tier } from "../src/tiers.ts";
+import { rosterFixture, rosterFixtureV2 } from "./support/catalog.ts";
+import { fixture } from "./support/fixtures.ts";
 
 const descriptions: Record<Tier, string> = { low: "L", medium: "M", high: "H", super: "S" };
 const caps: JevContextCaps = { messages: 6, messageChars: 1500, totalChars: 12000 };
@@ -161,6 +169,63 @@ describe("buildContext", () => {
       ["m3", "m4"],
     );
     assert.deepEqual(stateOf(buildContext("x", recent, descriptions, { ...caps, messages: 0 })).recent, []);
+  });
+});
+
+describe("jevAsk", () => {
+  const roster = rosterFixtureV2("roster-hera-v2.json");
+  const history: BoundedHistory = { getLatestCustomEntry: () => undefined, getRecentActiveEntries: () => [] };
+  const personal: ScopeState = { kind: "ok", scope: "personal", source: "default" };
+  /** A message Jev is asked about: every condition holds. */
+  const asked: JevGate = { idle: true, selection: "auto", pinned: false, roster, history, scope: personal, resend: false };
+  /** A version 2 roster from a fixture, edited as JSON. */
+  const edited = (name: string, edit: (json: Record<string, unknown>) => void): Roster => {
+    const json = JSON.parse(fixture(name)) as Record<string, unknown>;
+    edit(json);
+    const parsed = parseRoster(JSON.stringify(json));
+    assert.ok(parsed.ok, parsed.ok ? "" : parsed.error);
+    return parsed.value;
+  };
+
+  test("asks with the classifier, the scope's levels and the bounded readers when every condition holds", () => {
+    assert.deepEqual(jevAsk(asked), { settings: roster.classifier, section: roster.scopes.personal, history });
+    const work: ScopeState = { kind: "ok", scope: "work", source: "entry" };
+    assert.deepEqual(jevAsk({ ...asked, scope: work }), { settings: roster.classifier, section: roster.scopes.work, history });
+  });
+
+  test("never asks for a steer or a follow-up, which a run already under way receives", () => {
+    assert.equal(jevAsk({ ...asked, idle: false }), undefined);
+  });
+
+  test("never asks off smart-router/auto: on smart-router/local, or on a physical model", () => {
+    assert.equal(jevAsk({ ...asked, selection: "local" }), undefined);
+    assert.equal(jevAsk({ ...asked, selection: undefined }), undefined);
+  });
+
+  test("never asks in a pinned session, pinned by its entry or by PI_SMART_ROUTER_LOCAL_ONLY", () => {
+    assert.equal(jevAsk({ ...asked, pinned: true }), undefined);
+  });
+
+  test("never asks without the bounded session readers", () => {
+    assert.equal(jevAsk({ ...asked, history: undefined }), undefined);
+  });
+
+  test("never asks again for an extension's resend of the latest message, which keeps that message's level", () => {
+    assert.equal(jevAsk({ ...asked, resend: true }), undefined);
+  });
+
+  test("never asks without a version 2 roster that has a classifier", () => {
+    const unclassified = edited("roster-hera-v2.json", (json) => delete json.classifier);
+    for (const without of [undefined, rosterFixture("roster-hera.json"), unclassified]) {
+      assert.equal(jevAsk({ ...asked, roster: without }), undefined, String(without?.version));
+    }
+  });
+
+  test("never asks in a scope that cannot be read, or that the roster does not serve", () => {
+    assert.equal(jevAsk({ ...asked, scope: { kind: "unreadable", reason: "a malformed entry" } }), undefined);
+    const workOnly = edited("roster-work.json", (json) => (json.classifier = {}));
+    assert.equal(jevAsk({ ...asked, roster: workOnly }), undefined);
+    assert.notEqual(jevAsk({ ...asked, roster: workOnly, scope: { kind: "ok", scope: "work", source: "latch" } }), undefined);
   });
 });
 

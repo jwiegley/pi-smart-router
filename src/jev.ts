@@ -3,8 +3,12 @@
 import type { ClassifierApi, ClassifierContext, ClassifierModel, ClassifierResult } from "@earendil-works/pi-ai";
 
 import { capText } from "./classify.ts";
+import type { VirtualId } from "./constants.ts";
 import { redact } from "./redact.ts";
-import { parseRef } from "./roster.ts";
+import type { BoundedHistory } from "./route.ts";
+import { parseRef, scopeSection } from "./roster.ts";
+import type { Roster, ScopeSection } from "./roster.ts";
+import type { ScopeState } from "./scope.ts";
 import { closeCallTier, isTier, TIERS, type Tier } from "./tiers.ts";
 
 export const JEV_QUESTION = "level";
@@ -131,6 +135,46 @@ export function interpret(result: ClassifierResult, closeCall: number, model: st
     confidence: answer.confidence,
     ms,
   };
+}
+
+/** What the router reads at a message's input to decide whether Jev is asked about it. */
+export interface JevGate {
+  /** Whether the session is idle: a message that arrives while a run is under way is a steer or a follow-up. */
+  readonly idle: boolean;
+  /** The router model selected, if one is: only smart-router/auto routes by level. */
+  readonly selection: VirtualId | undefined;
+  /** Whether the session is pinned, by its entry or by PI_SMART_ROUTER_LOCAL_ONLY. */
+  readonly pinned: boolean;
+  /** The roster, when it loaded. */
+  readonly roster: Roster | undefined;
+  /** The fork's bounded session readers, through which Jev's context is read; undefined on a Pi without them. */
+  readonly history: BoundedHistory | undefined;
+  /** The session's scope, read fail closed. */
+  readonly scope: ScopeState;
+  /** Whether the message is an extension's resend of the latest message's text, which keeps that message's level. */
+  readonly resend: boolean;
+}
+
+/** What Jev is asked with: the classifier's settings, the session's scope's levels, and the readers of its conversation. */
+export interface JevAsk {
+  readonly settings: JevSettings;
+  readonly section: ScopeSection;
+  readonly history: BoundedHistory;
+}
+
+/**
+ * Whether Jev is asked about a message, and with what. Never for a steer or a follow-up, off
+ * smart-router/auto, under the pin, without the bounded readers, for an extension's resend of the
+ * latest message, without a version 2 roster's classifier, or in a scope that cannot be read or
+ * that the roster does not serve. Pure: the router reads every condition first. The pin's guard
+ * already refuses a pinned session's prompt on smart-router/auto; this checks the pin as well.
+ */
+export function jevAsk(gate: JevGate): JevAsk | undefined {
+  const { roster, scope, history } = gate;
+  if (!gate.idle || gate.selection !== "auto" || gate.pinned || history === undefined || gate.resend) return undefined;
+  if (roster?.version !== 2 || roster.classifier === undefined || scope.kind !== "ok") return undefined;
+  const section = scopeSection(roster, scope.scope);
+  return section === undefined ? undefined : { settings: roster.classifier, section, history };
 }
 
 /** The part of Pi's ModelRegistry that askJev uses; tests pass a fake. */
