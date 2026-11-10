@@ -24,7 +24,7 @@
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { ModelRoute, ModelRouteReason, ModelRouteRequest } from "@earendil-works/pi-coding-agent";
 
-import { isCodexProvider, subscriptionKind } from "./accounts.ts";
+import { isWorkCodex, subscriptionKind } from "./accounts.ts";
 import type { Classification } from "./classify.ts";
 import { VIRTUAL_API } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
@@ -246,9 +246,8 @@ function outsideScope(rc: ResolveContext, provider: string): string | undefined 
   const { roster } = rc;
   const local = rc.localOnly && subscriptionKind(provider) === undefined;
   if (roster.version === 1) return rc.scope === "work" && !local ? "is outside this session's work scope, which a version 1 roster does not serve" : undefined;
-  const workBound = isWorkBound(roster, provider);
-  if (rc.scope === "personal") return workBound ? "is on a work-bound account, and this session is in personal scope" : undefined;
-  if ((workBound && isCodexProvider(provider)) || local) return undefined;
+  if (rc.scope === "personal") return isWorkBound(roster, provider) ? "is on a work-bound account, and this session is in personal scope" : undefined;
+  if (isWorkCodex(roster.accounts, provider) || local) return undefined;
   return "is not on a work-bound Codex account, and this session is in work scope";
 }
 

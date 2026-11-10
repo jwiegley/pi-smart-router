@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test, { describe } from "node:test";
 
-import { isCodexProvider } from "../src/accounts.ts";
+import { isCodexProvider, isWorkCodex } from "../src/accounts.ts";
 import { BUILTIN_EXCLUDES } from "../src/constants.ts";
 import { autoRoles, excludedBy, excludesFor, isWorkBound, liftWorkAlias, parseRoster, SCOPES, scopeSection } from "../src/roster.ts";
 import type { RosterV2, ScopedBinding } from "../src/roster.ts";
@@ -146,6 +146,17 @@ describe("reading a roster's scopes and bindings", () => {
     }
     const others = ["openai-codex-", "openai-codex-x", "openai-codexx", "openai-codex-2x", "openai-codex-2-3", "xopenai-codex-2", "OpenAI-Codex", "openai", "openrouter", "anthropic", "anthropic-2", "github-copilot-2", ""];
     for (const provider of others) assert.equal(isCodexProvider(provider), false, provider);
+  });
+
+  test("isWorkCodex is a Codex provider that the bindings tie to the work scope", () => {
+    const hera = rosterFixtureV2("roster-hera-v2.json").accounts;
+    assert.equal(isWorkCodex(hera, "openai-codex-3"), true);
+    assert.equal(isWorkCodex(hera, "openai-codex-2"), false, "a personal binding");
+    assert.equal(isWorkCodex(hera, "openai-codex"), false, "no binding");
+    assert.equal(isWorkCodex(hera, "openrouter"), false);
+    assert.equal(isWorkCodex(rosterFixtureV2("roster-work.json").accounts, "openai-codex"), true, "a native login bound to work");
+    assert.equal(isWorkCodex(new Map([["anthropic-2", { scope: "work" as const }]]), "anthropic-2"), false, "work-bound, but not Codex");
+    assert.equal(isWorkCodex(new Map(), "openai-codex-3"), false, "no bindings, as before any roster has loaded");
   });
 
   test("auto reaches the session scope's level roles, none without that scope, and never the local role", () => {

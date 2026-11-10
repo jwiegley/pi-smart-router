@@ -28,6 +28,18 @@ export function isCodexProvider(provider: string): boolean {
   return CODEX_PROVIDER.test(provider);
 }
 
+/** Account bindings as the scope rules read them: the scope each provider is bound to. Only a version 2 roster binds any. */
+export type ScopedAccounts = ReadonlyMap<string, { readonly scope: Scope }>;
+
+/**
+ * Whether a provider is a work-bound Codex provider: Codex, and bound to the work scope. It is the
+ * only kind of account a work level holds (roster validation), a work-scope pick goes to (assertSafe)
+ * and a work-scope session may select by hand (the work guard).
+ */
+export function isWorkCodex(accounts: ScopedAccounts, provider: string): boolean {
+  return isCodexProvider(provider) && accounts.get(provider)?.scope === "work";
+}
+
 /** Multi-Pass's labels, keyed by the provider each subscription registers (`openai-codex-2`). */
 export type Labels = ReadonlyMap<string, string | undefined>;
 
@@ -100,7 +112,7 @@ export function checkAccount(provider: string, roster: Roster, labels: Loaded<La
   if (binding === undefined) return { ok: false, reason: `${provider} has no account binding in the roster` };
   const wanted = binding.label.trim();
   // The scope a version 2 binding names, when the check is made in a session's scope.
-  const bound = roster.version === 2 && scope !== undefined ? (roster.accounts.get(provider)?.scope ?? "personal") : undefined;
+  const bound = roster.version === 2 && scope !== undefined ? roster.accounts.get(provider)?.scope : undefined;
   if (bound !== undefined && bound !== scope) return { ok: false, reason: `the roster binds ${provider} to the ${bound} scope, but this session is in the ${scope} scope` };
   const work = bound === "work";
   if (work && !REFUSED_LABEL.test(wanted)) return { ok: false, reason: `the roster binds ${provider} to "${wanted}", which names neither work nor Positron` };

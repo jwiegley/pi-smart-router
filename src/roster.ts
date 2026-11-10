@@ -5,7 +5,7 @@
 // classifier. Validation is strict and fails closed: the first error, with its location, makes the
 // whole file invalid, and there is no last-known-good copy. Unknown keys are refused at every
 // level, so the file has nowhere to hold a key, token, header, base URL or environment.
-import { isCodexProvider, subscriptionKind } from "./accounts.ts";
+import { isWorkCodex, subscriptionKind } from "./accounts.ts";
 import {
   ALL_LEVELS,
   BUILTIN_EXCLUDES,
@@ -603,9 +603,8 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
   for (const { where, ref, provider, role } of refs) {
     const level = levelOf.get(role);
     if (level === undefined) continue;
-    const workBound = boundToWork(accounts, provider);
-    if (level.scope === "personal" && workBound) fail(where, `"${ref}" is in ${levelName(level)}, but ${provider} is work-bound`);
-    if (level.scope === "work" && !(workBound && isCodexProvider(provider))) {
+    if (level.scope === "personal" && boundToWork(accounts, provider)) fail(where, `"${ref}" is in ${levelName(level)}, but ${provider} is work-bound`);
+    if (level.scope === "work" && !isWorkCodex(accounts, provider)) {
       fail(where, `"${ref}" is in ${levelName(level)}, which takes only work-bound Codex models`);
     }
   }
