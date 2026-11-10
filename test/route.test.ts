@@ -6,7 +6,7 @@ import test, { afterEach, beforeEach, describe } from "node:test";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 
 import { policyFromRoster } from "../src/local.ts";
-import { assertSafe } from "../src/route.ts";
+import { assertSafe, newRecord, predict } from "../src/route.ts";
 import {
   ASTRA,
   DEEPSEEK,
@@ -21,6 +21,7 @@ import {
   NOW,
   OPENROUTER,
   rosterFixture,
+  rosterFixtureV2,
   SOL,
   WORK_SOL,
 } from "./support/catalog.ts";
@@ -301,7 +302,7 @@ describe("refusals", () => {
     const dir = agentDir(t);
     const edited = await start({ dir });
     assert.equal(routed(edited.runtime.route("auto", request("direct"))), DEEPSEEK);
-    writeFileSync(join(dir, "smart-router.json"), JSON.stringify({ version: 2 }));
+    writeFileSync(join(dir, "smart-router.json"), JSON.stringify({ version: 3 }));
     utimesSync(join(dir, "smart-router.json"), new Date(), new Date(Date.now() + 5_000));
     await edited.host.emit("input", { text: TRIVIAL, source: "interactive" });
     refuses(() => edited.runtime.route("auto", request("direct")), /is invalid \(version: must be 1/);
@@ -451,5 +452,18 @@ describe("the final assertions", () => {
     ];
     for (const [name, context, choice, pattern] of cases) refuses(() => assertSafe(context.virtualId, context, choice), pattern, name);
     refuses(() => assertSafe("local", heraContext({ virtualId: "local" }), safe), /which is not in the local role; this is a bug in pi-smart-router/);
+  });
+});
+
+describe("a version 2 roster's default role", () => {
+  test("is the personal scope's medium level, and without a personal scope there is none", () => {
+    const hera = predict(heraContext({ roster: rosterFixtureV2("roster-hera-v2.json") }), newRecord());
+    assert.ok(hera.ok, JSON.stringify(hera));
+    assert.deepEqual([hera.choice.role, hera.choice.ref, hera.choice.code], ["medium", DEEPSEEK, "stick:default"], "terra is not in Hera's test catalog");
+    assert.deepEqual(predict(heraContext({ roster: rosterFixtureV2("roster-work.json") }), newRecord()), {
+      ok: false,
+      attempts: [],
+      problem: "the roster has no personal scope",
+    });
   });
 });

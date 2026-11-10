@@ -24,14 +24,14 @@ import type { ModelRoute, ModelRouteReason, ModelRouteRequest } from "@earendil-
 
 import { BUILTIN_EXCLUDES, VIRTUAL_API } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
-import { eligibleRole, NO_LOCAL_SECTION, pickInRole } from "./decide.ts";
+import { eligibleRole, NO_LOCAL_SECTION, noScopeSection, pickInRole } from "./decide.ts";
 import type { Choice, Decision, LastResponder, Plan } from "./decide.ts";
 import { invariant, noBoundedHistory, unroutable } from "./errors.ts";
 import { checkLocal } from "./local.ts";
 import type { LocalPolicy } from "./local.ts";
 import { coolFrom, failureKind, refOf, resolveCandidate } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
-import { autoRoles, excludedBy, roleOf } from "./roster.ts";
+import { autoRoles, excludedBy, roleOf, scopeSection } from "./roster.ts";
 
 /** A session's pin as routing sees it. */
 export interface Pin {
@@ -107,10 +107,14 @@ export interface RouteInput {
 const previousRef = (request: ModelRouteRequest): string | undefined =>
   request.previous === undefined ? undefined : refOf(request.previous.model);
 
-/** The default role, or the local role while local-only, and its fallback when not local-only. */
+/**
+ * The default role, or the local role while local-only, and its fallback when not local-only.
+ * Version 2's default is the personal scope's medium level.
+ */
 function byDefault(rc: ResolveContext, code: string): Decision {
-  const role = rc.localOnly ? rc.roster.local?.role : rc.roster.routing.default;
-  if (role === undefined) return { ok: false, attempts: [], problem: NO_LOCAL_SECTION };
+  const { roster } = rc;
+  const role = rc.localOnly ? roster.local?.role : roster.version === 1 ? roster.routing.default : scopeSection(roster, "personal")?.levels.medium.role;
+  if (role === undefined) return { ok: false, attempts: [], problem: rc.localOnly ? NO_LOCAL_SECTION : noScopeSection("personal") };
   return pickInRole(rc, role, { fallback: !rc.localOnly, code });
 }
 

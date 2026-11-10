@@ -159,6 +159,20 @@ describe("status", () => {
     ]);
   });
 
+  test("shows a version 2 roster's roles and accounts, with no routing line and no fallback warning", async (t) => {
+    const loaded = await hera(t, { roster: fixture("roster-hera-v2.json") });
+    const { message, type } = await answer(loaded, "status");
+    assert.equal(type, "info", message);
+    const lines = message.split("\n");
+    assert.ok(lines.includes("Roles on this host, cheapest first:"), message);
+    assert.ok(lines.includes("Accounts:"), message);
+    assert.ok(lines.some((line) => line.startsWith("  work-super: openai-codex-3/gpt-6-astra ")), message);
+    assert.deepEqual(
+      lines.filter((line) => line.startsWith("Routing:") || line.startsWith("Warning:")),
+      [],
+    );
+  });
+
   test("reports a failure instead of throwing", async (t) => {
     const dir = agentDir(t);
     let broken = false;

@@ -20,6 +20,13 @@ export function subscriptionKind(provider: string): SubscriptionKind | undefined
   return undefined;
 }
 
+const CODEX_PROVIDER = /^openai-codex(?:-[0-9]+)?$/;
+
+/** Whether a provider is Codex: the native openai-codex login or a Multi-Pass alias of it. */
+export function isCodexProvider(provider: string): boolean {
+  return CODEX_PROVIDER.test(provider);
+}
+
 /** Multi-Pass's labels, keyed by the provider each subscription registers (`openai-codex-2`). */
 export type Labels = ReadonlyMap<string, string | undefined>;
 

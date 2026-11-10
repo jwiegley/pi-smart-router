@@ -17,6 +17,7 @@ import { isRecord, own } from "./files.ts";
 import { resolveCandidate } from "./resolve.ts";
 import type { Resolution, ResolveContext } from "./resolve.ts";
 import { autoRoles, rankOf, roleOf } from "./roster.ts";
+import type { Scope } from "./roster.ts";
 
 /** The latest successful physical response of a session. */
 export interface LastResponder {
@@ -55,14 +56,15 @@ export interface PickOptions {
   readonly prefer?: string | undefined;
   /** Never taken: the model whose request just failed. */
   readonly skip?: string | undefined;
-  /** Whether the role's declared fallback may take over. Never while local-only. */
+  /** Whether the role's declared fallback may take over. Never while local-only; version 2 declares none. */
   readonly fallback: boolean;
   readonly code: string;
 }
 
 /**
  * The first candidate of a role that resolves, else, when allowed, the first of the role's declared
- * fallback role: one hop, never further. Otherwise every candidate's reason.
+ * fallback role: one hop, never further. Otherwise every candidate's reason. Only version 1's
+ * routing table declares fallbacks.
  */
 export function pickInRole(rc: ResolveContext, roleName: string, options: PickOptions): Decision {
   const attempts: Attempt[] = [];
@@ -85,7 +87,7 @@ export function pickInRole(rc: ResolveContext, roleName: string, options: PickOp
   };
   const inRole = firstIn(roleName, options.prefer);
   if (inRole !== undefined) return { ok: true, choice: { role: roleName, ref: inRole.ref, model: inRole.model, code: options.code } };
-  const target = options.fallback && !rc.localOnly ? rc.roster.routing.fallback.get(roleName) : undefined;
+  const target = options.fallback && !rc.localOnly && rc.roster.version === 1 ? rc.roster.routing.fallback.get(roleName) : undefined;
   if (target !== undefined) {
     const other = firstIn(target, undefined);
     if (other !== undefined) {
@@ -104,7 +106,10 @@ export interface Plan {
   readonly reason: string;
   /** The role decided, before any fallback; undefined when there is none to decide. */
   readonly role: string | undefined;
-  /** The history code of the decision: `signal:*`, `hold:sticky`, `hold:fit`, `reopen:idle`, `local`. */
+  /**
+   * The history code of the decision: `signal:*`, `hold:sticky`, `hold:fit`, `reopen:idle`, `local`,
+   * or `v2-unplanned` for a version 2 roster's run on auto, which this planner refuses.
+   */
   readonly code: string;
   /** The model the decision picked when it was made, or why there was none. */
   readonly decision: Decision;
@@ -131,6 +136,13 @@ export function eligibleRole(rc: ResolveContext, ref: string): string | undefine
 
 export const NO_LOCAL_SECTION = "the roster has no local section";
 
+/** A version 2 roster that serves no such scope. */
+export function noScopeSection(scope: Scope): string {
+  return `the roster has no ${scope} scope`;
+}
+
+const V2_UNPLANNED = "version 2 planning is not built yet";
+
 export function planUserTurn(p: PlanInput): Plan {
   const { rc } = p;
   const plan = (signal: Plan["signal"], reason: string, role: string | undefined, code: string, decision: Decision): Plan => ({
@@ -148,6 +160,7 @@ export function planUserTurn(p: PlanInput): Plan {
     return plan("local", "local-only", role, "local", pickInRole(rc, role, { fallback: false, code: "local" }));
   }
   const { signal, reason } = classify(p.text);
+  if (rc.roster.version === 2) return plan(signal, reason, undefined, "v2-unplanned", { ok: false, attempts: [], problem: V2_UNPLANNED });
   const target = rc.roster.routing[signal];
   const sticky = p.last === undefined ? undefined : eligibleRole(rc, p.last.ref);
   let role = target;

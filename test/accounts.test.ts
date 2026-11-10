@@ -6,12 +6,13 @@ import type { AccountCheck, Labels } from "../src/accounts.ts";
 import { MULTI_PASS_MAX_BYTES } from "../src/constants.ts";
 import type { Loaded } from "../src/files.ts";
 import { parseRoster } from "../src/roster.ts";
-import type { AccountBinding, Roster } from "../src/roster.ts";
+import type { AccountBinding, RosterV1 } from "../src/roster.ts";
 import { expectKind, fixture, scratch, write } from "./support/fixtures.ts";
 
-function roster(name: string): Roster {
+function roster(name: string): RosterV1 {
   const parsed = parseRoster(fixture(name));
   assert.ok(parsed.ok, parsed.ok ? "" : parsed.error);
+  assert.ok(parsed.value.version === 1, `${name} is not a version 1 roster`);
   return parsed.value;
 }
 
@@ -19,7 +20,7 @@ const HERA = roster("roster-hera.json");
 const OTHERS = roster("roster-other-hosts.json");
 
 /** A roster whose bindings are set directly, as if validation had been bypassed. */
-function bound(bindings: Array<[string, AccountBinding]>): Roster {
+function bound(bindings: Array<[string, AccountBinding]>): RosterV1 {
   return { ...HERA, accounts: new Map(bindings) };
 }
 

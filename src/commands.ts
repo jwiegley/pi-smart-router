@@ -3,9 +3,10 @@
 //
 // status shows the roster's state, the selection, the pin and the lock, each role's candidates on
 // this host with the resolver's verdict and the catalog price, the account bindings with each
-// provider's auth source (never a credential), the routing table, the last decision, what can
-// still send data off the machine, and a warning for any fallback that moves a run onto Codex's
-// API from another one. It replaces upstream's doctor, plan, stats, pricing and mode commands.
+// provider's auth source (never a credential), a version 1 roster's routing table, the last
+// decision, what can still send data off the machine, and a warning for any version 1 fallback
+// that moves a run onto Codex's API from another one. It replaces upstream's doctor, plan, stats,
+// pricing and mode commands.
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 
@@ -27,7 +28,7 @@ import type { ResolveContext } from "./resolve.ts";
 import { boundedHistory, HISTORY_LIMIT } from "./route.ts";
 import type { HistoryEntry, Pin } from "./route.ts";
 import { autoRoles, parseRef } from "./roster.ts";
-import type { Roster } from "./roster.ts";
+import type { Roster, RosterV1 } from "./roster.ts";
 
 export interface Files {
   readonly roster: Loaded<Roster>;
@@ -192,7 +193,7 @@ function accountLines(ctx: ExtensionContext, roster: Roster, labels: Loaded<Labe
   ];
 }
 
-function routingLine(roster: Roster): string {
+function routingLine(roster: RosterV1): string {
   const { routing } = roster;
   const fallbacks = [...routing.fallback].map(([from, to]) => `${from} → ${to}`);
   return `Routing: default ${routing.default}, trivial ${routing.trivial}, complex ${routing.complex}, planning ${routing.planning}; ${
@@ -201,7 +202,7 @@ function routingLine(roster: Roster): string {
 }
 
 /** Fallbacks that move a run onto Codex's API from another: the system prompt may have been rewritten for the source model. */
-function codexWarnings(host: CommandHost, ctx: ExtensionContext, roster: Roster): string[] {
+function codexWarnings(host: CommandHost, ctx: ExtensionContext, roster: RosterV1): string[] {
   const rc = host.resolver(ctx, roster, "auto", UNPINNED);
   const usesCodex = (name: string): boolean => roster.roles.find((role) => role.name === name)?.models.some((ref) => catalogModel(rc, ref)?.api === CODEX_API) ?? false;
   return [...roster.routing.fallback]
@@ -225,8 +226,8 @@ export function statusText(host: CommandHost, ctx: ExtensionContext): string {
   const lock = lockLine(session?.guard.lock);
   if (lock !== undefined) lines.push(lock);
   if (roster.kind === "ok") {
-    lines.push("Roles on this host, cheapest first:", ...roleLines(host, ctx, roster.value, pin), ...accountLines(ctx, roster.value, labels), routingLine(roster.value));
-    lines.push(...codexWarnings(host, ctx, roster.value));
+    lines.push("Roles on this host, cheapest first:", ...roleLines(host, ctx, roster.value, pin), ...accountLines(ctx, roster.value, labels));
+    if (roster.value.version === 1) lines.push(routingLine(roster.value), ...codexWarnings(host, ctx, roster.value));
   }
   const last = session?.history.at(-1);
   lines.push(`Last decision: ${last === undefined ? "none yet" : describeEntry(last)}`);

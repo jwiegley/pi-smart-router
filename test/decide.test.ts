@@ -33,6 +33,7 @@ import {
   NOW,
   OPENROUTER,
   rosterFixture,
+  rosterFixtureV2,
   SOL,
   WORK_SOL,
 } from "./support/catalog.ts";
@@ -236,6 +237,25 @@ describe("local-only plans", () => {
     const result = plan(PLANNING, { rc: heraContext({ roster: rest, virtualId: "local" }) });
     assert.deepEqual(result.decision, { ok: false, attempts: [], problem: NO_LOCAL_SECTION });
     assert.equal(result.role, undefined);
+  });
+});
+
+describe("a version 2 roster, before its planner", () => {
+  const V2 = rosterFixtureV2("roster-hera-v2.json");
+
+  test("auto refuses its runs as not planned yet, while smart-router/local plans as before", () => {
+    const auto = plan(TRIVIAL, { rc: heraContext({ roster: V2 }) });
+    assert.deepEqual([auto.signal, auto.role, auto.code], ["trivial", undefined, "v2-unplanned"]);
+    assert.deepEqual(auto.decision, { ok: false, attempts: [], problem: "version 2 planning is not built yet" });
+    expectPlan(plan(TRIVIAL, { rc: heraContext({ roster: V2, virtualId: "local" }) }), GLM, "local");
+  });
+
+  test("a role never falls back", () => {
+    const catalog = new FakeCatalog(heraModels());
+    catalog.unavailable.add(DEEPSEEK);
+    const decision = pickInRole(contextWith(catalog, { roster: V2 }), "medium", { fallback: true, code: "t" });
+    assert.equal(decision.ok, false, JSON.stringify(decision));
+    assert.deepEqual(decision.ok ? [] : decision.attempts.map((attempt) => attempt.role), ["medium"]);
   });
 });
 

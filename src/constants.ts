@@ -23,12 +23,15 @@ export type Level = (typeof ALL_LEVELS)[number];
 export const DEFAULT_CONTEXT_WINDOW = 128_000;
 export const DEFAULT_MAX_TOKENS = 16_384;
 
+/** Hera's work account alias. A version 2 work level lifts its exclusion for a work-bound account. */
+export const WORK_ALIAS_EXCLUDE = "openai-codex-3/*";
+
 /**
  * Exclusions no roster can remove: exact `provider/id` refs and `provider/*` globs. They guard
  * names; the account bindings guard accounts.
  */
 export const BUILTIN_EXCLUDES: readonly string[] = [
-  "openai-codex-3/*",
+  WORK_ALIAS_EXCLUDE,
   "hermes/*",
   "openrouter/openrouter/auto",
   "smart-router/*",
@@ -53,6 +56,19 @@ export const MULTI_PASS_MAX_BYTES = 256 * 1024;
 /** Roster defaults and their allowed ranges, in whole minutes. */
 export const STICKY_IDLE_MINUTES = { default: 5, min: 0, max: 1440 } as const;
 export const COOLDOWN_MINUTES = { default: 30, min: 1, max: 1440 } as const;
+
+/**
+ * The version 2 classifier's defaults and allowed ranges. The model names a Jev version, so that a
+ * tuned closeCall keeps its meaning until the roster moves to another.
+ */
+export const CLASSIFIER_MODEL = "openrouter/typesafe/jev-1.14";
+export const CLASSIFIER_TIMEOUT_MS = { default: 1000, min: 100, max: 1000 } as const;
+export const CLASSIFIER_CLOSE_CALL = { default: 0.15, min: 0, max: 0.5 } as const;
+export const CLASSIFIER_MESSAGES = { default: 6, min: 0, max: 20 } as const;
+export const CLASSIFIER_MESSAGE_CHARS = { default: 1500, min: 200, max: 8000 } as const;
+export const CLASSIFIER_TOTAL_CHARS = { default: 12_000, min: 1000, max: 32_000 } as const;
+/** The longest level description Jev reads, in characters. */
+export const DESCRIBE_MAX_CHARS = 2000;
 
 /** The pin's session entry, the environment switch, the status item, the command and the process slots. */
 export const PIN_ENTRY = "smart-router.pin";
