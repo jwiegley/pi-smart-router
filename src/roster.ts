@@ -134,12 +134,12 @@ export function excludedBy(patterns: readonly string[], ref: string): string | u
 }
 
 /** The role a ref belongs to. */
-export function roleOf(roster: Roster, ref: string): Role | undefined {
+export function roleOf(roster: Pick<Roster, "roles">, ref: string): Role | undefined {
   return roster.roles.find((role) => role.models.includes(ref));
 }
 
 /** A role's position on the ladder, or -1. */
-export function rankOf(roster: Roster, name: string): number {
+export function rankOf(roster: Pick<Roster, "roles">, name: string): number {
   return roster.roles.findIndex((role) => role.name === name);
 }
 
@@ -171,7 +171,7 @@ function levelRoles(section: ScopeSection | undefined): string[] {
  */
 export function liftWorkAlias(roster: Pick<RosterV2, "accounts" | "roles" | "scopes">, ref: string, patterns: readonly string[]): readonly string[] {
   const provider = parseRef(ref)?.provider;
-  const role = roster.roles.find((entry) => entry.models.includes(ref))?.name;
+  const role = roleOf(roster, ref)?.name;
   const lifted = provider !== undefined && role !== undefined && boundToWork(roster.accounts, provider) && levelRoles(roster.scopes.work).includes(role);
   return lifted ? patterns.filter((pattern) => pattern !== WORK_ALIAS_EXCLUDE) : patterns;
 }
@@ -274,31 +274,52 @@ function minutes(value: unknown, path: string, range: Range): number {
   return count(value, path, range, "minutes");
 }
 
-function validate(value: unknown): Roster {
-  if (!isRecord(value)) fail("roster", "must be a JSON object");
-  const version = own(value, "version");
-  if (version === undefined) fail("version", "is required");
-  if (version === 2) return validateV2(value);
-  if (version !== 1) fail("version", `must be 1 or 2, not ${JSON.stringify(version)}`);
-  const root = object(value, "", TOP_KEYS);
+// The checks both versions make, with version 1's messages.
 
-  const rosterExcludes =
-    own(root, "exclude") === undefined
-      ? []
-      : array(own(root, "exclude"), "exclude", false).map((item, index) => {
-          const where = `exclude[${index}]`;
-          const pattern = text(item, where);
-          const ref = parseRef(pattern);
-          if (ref === undefined || !PROVIDER_ID.test(ref.provider) || (ref.id !== "*" && !MODEL_ID.test(ref.id))) {
-            fail(where, `"${pattern}" is neither a provider/id ref nor a provider/* pattern`);
-          }
-          return pattern;
-        });
-  const exclude = [...new Set([...BUILTIN_EXCLUDES, ...rosterExcludes])];
+/** The roster's own exclusions: exact provider/id refs and provider/* patterns. */
+function parseExcludes(root: Record<string, unknown>): string[] {
+  if (own(root, "exclude") === undefined) return [];
+  return array(own(root, "exclude"), "exclude", false).map((item, index) => {
+    const where = `exclude[${index}]`;
+    const pattern = text(item, where);
+    const ref = parseRef(pattern);
+    if (ref === undefined || !PROVIDER_ID.test(ref.provider) || (ref.id !== "*" && !MODEL_ID.test(ref.id))) {
+      fail(where, `"${pattern}" is neither a provider/id ref nor a provider/* pattern`);
+    }
+    return pattern;
+  });
+}
 
+/** An exact provider/id ref, with no glob and no whitespace, and its provider. */
+function exactRef(value: unknown, where: string): { readonly ref: string; readonly provider: string } {
+  const ref = text(value, where);
+  const parsed = parseRef(ref);
+  if (parsed === undefined || !PROVIDER_ID.test(parsed.provider) || !MODEL_ID.test(parsed.id)) fail(where, `"${ref}" is not an exact provider/id ref`);
+  return { ref, provider: parsed.provider };
+}
+
+/** A model ref in a role: where the roster writes it, its provider, and the role's name. */
+interface RoleRef {
+  readonly where: string;
+  readonly ref: string;
+  readonly provider: string;
+  readonly role: string;
+}
+
+interface ParsedRoles {
+  readonly roles: readonly Role[];
+  readonly names: ReadonlySet<string>;
+  /** Every model ref, in the roster's order. */
+  readonly refs: readonly RoleRef[];
+  /** A role name the roster defines; any other is an error at `where`. */
+  readonly roleName: (item: unknown, where: string) => string;
+}
+
+/** The roles: unique names, exact refs that each sit in one role and match none of `patterns`, and their thinking. */
+function parseRoles(root: Record<string, unknown>, patterns: readonly string[]): ParsedRoles {
   const names = new Set<string>();
   const holders = new Map<string, string>();
-  const refs: Array<{ readonly where: string; readonly ref: string; readonly provider: string }> = [];
+  const refs: RoleRef[] = [];
   const roles = array(own(root, "roles"), "roles", true).map((item, index): Role => {
     const path = `roles[${index}]`;
     const entry = object(item, path, ROLE_KEYS);
@@ -308,17 +329,13 @@ function validate(value: unknown): Roster {
     names.add(name);
     const models = array(own(entry, "models"), `${path}.models`, true).map((model, position) => {
       const where = `${path}.models[${position}]`;
-      const ref = text(model, where);
-      const parsed = parseRef(ref);
-      if (parsed === undefined || !PROVIDER_ID.test(parsed.provider) || !MODEL_ID.test(parsed.id)) {
-        fail(where, `"${ref}" is not an exact provider/id ref`);
-      }
+      const { ref, provider } = exactRef(model, where);
       const holder = holders.get(ref);
       if (holder !== undefined) fail(where, holder === name ? `"${ref}" is listed twice` : `"${ref}" is already in role "${holder}"`);
-      const pattern = excludedBy(exclude, ref);
+      const pattern = excludedBy(patterns, ref);
       if (pattern !== undefined) fail(where, `"${ref}" is excluded by ${pattern}`);
       holders.set(ref, name);
-      refs.push({ where, ref, provider: parsed.provider });
+      refs.push({ where, ref, provider, role: name });
       return ref;
     });
     const given = own(entry, "thinking");
@@ -328,12 +345,77 @@ function validate(value: unknown): Roster {
     }
     return { name, models, thinking: thinking as Thinking };
   });
-
   const roleName = (item: unknown, where: string): string => {
     const name = text(item, where);
     if (!names.has(name)) fail(where, `"${name}" is not a role`);
     return name;
   };
+  return { roles, names, refs, roleName };
+}
+
+/** A binding of a subscription provider, which may hold only `keys`: its kind, the field holding its label, and that label, trimmed. */
+function bindingLabel(
+  provider: string,
+  item: unknown,
+  keys: readonly string[],
+): { readonly binding: Record<string, unknown>; readonly kind: AccountBinding["kind"]; readonly field: string; readonly label: string } {
+  const path = `accounts.${provider}`;
+  const kind = subscriptionKind(provider);
+  if (kind === undefined) {
+    fail(path, `${provider} is not a subscription provider: openai-codex, anthropic, github-copilot, or a Multi-Pass alias of one`);
+  }
+  const binding = object(item, path, keys);
+  if (kind === "alias" && own(binding, "native") !== undefined) fail(path, 'a Multi-Pass alias is bound with "multiPassLabel", not "native"');
+  if (kind === "native" && own(binding, "multiPassLabel") !== undefined) fail(path, 'a native login is bound with "native", not "multiPassLabel"');
+  const field = kind === "alias" ? "multiPassLabel" : "native";
+  return { binding, kind: kind === "alias" ? "multi-pass" : "native", field, label: text(own(binding, field), `${path}.${field}`).trim() };
+}
+
+/** Every ref to a subscription provider needs that provider's binding. */
+function requireBindings(refs: readonly RoleRef[], accounts: ReadonlyMap<string, AccountBinding>): void {
+  for (const { where, ref, provider } of refs) {
+    if (subscriptionKind(provider) !== undefined && !accounts.has(provider)) {
+      fail(where, `"${ref}" uses the subscription provider ${provider}, which needs a binding in accounts`);
+    }
+  }
+}
+
+/** The local section: its role, providers that cover that role's models, and local hosts. `checkRole` is a further rule for the role, checked first. */
+function parseLocal(root: Record<string, unknown>, parsed: ParsedRoles, checkRole?: (role: string) => void): LocalSection | undefined {
+  if (own(root, "local") === undefined) return undefined;
+  const section = object(own(root, "local"), "local", LOCAL_KEYS);
+  const role = parsed.roleName(own(section, "role"), "local.role");
+  checkRole?.(role);
+  const providers = uniqueTexts(own(section, "providers"), "local.providers", true, (provider, where) => {
+    if (!PROVIDER_ID.test(provider)) fail(where, `"${provider}" is not a provider id`);
+  });
+  for (const { ref, provider, role: holder } of parsed.refs) {
+    if (holder === role && !providers.includes(provider)) {
+      fail("local.providers", `must include ${provider}, the provider of "${ref}" in the local role "${role}"`);
+    }
+  }
+  const hosts = uniqueTexts(own(section, "hosts"), "local.hosts", true, (host, where) => {
+    const canonical = canonicalHost(host);
+    if (canonical === undefined) fail(where, `"${host}" is not a host name`);
+    if (canonical !== host) fail(where, `write "${canonical}", not "${host}"`);
+    if (!isLocalHost(host)) {
+      fail(where, `"${host}" is not a local host: use localhost, a loopback, private, link-local or unique-local address, or a .lan, .local or .home.arpa name`);
+    }
+  });
+  return { role, providers, hosts };
+}
+
+function validate(value: unknown): Roster {
+  if (!isRecord(value)) fail("roster", "must be a JSON object");
+  const version = own(value, "version");
+  if (version === undefined) fail("version", "is required");
+  if (version === 2) return validateV2(value);
+  if (version !== 1) fail("version", `must be 1 or 2, not ${JSON.stringify(version)}`);
+  const root = object(value, "", TOP_KEYS);
+
+  const exclude = [...new Set([...BUILTIN_EXCLUDES, ...parseExcludes(root)])];
+  const parsed = parseRoles(root, exclude);
+  const { roles, names, roleName } = parsed;
 
   const routingObject = object(required(own(root, "routing"), "routing"), "routing", ROUTING_KEYS);
   const defaultRole = roleName(own(routingObject, "default"), "routing.default");
@@ -359,48 +441,14 @@ function validate(value: unknown): Roster {
   const accounts = new Map<string, AccountBinding>();
   if (own(root, "accounts") !== undefined) {
     for (const [provider, item] of entries(object(own(root, "accounts"), "accounts", "map"))) {
-      const path = `accounts.${provider}`;
-      const kind = subscriptionKind(provider);
-      if (kind === undefined) {
-        fail(path, `${provider} is not a subscription provider: openai-codex, anthropic, github-copilot, or a Multi-Pass alias of one`);
-      }
-      const binding = object(item, path, BINDING_KEYS);
-      if (kind === "alias" && own(binding, "native") !== undefined) fail(path, 'a Multi-Pass alias is bound with "multiPassLabel", not "native"');
-      if (kind === "native" && own(binding, "multiPassLabel") !== undefined) fail(path, 'a native login is bound with "native", not "multiPassLabel"');
-      const field = kind === "alias" ? "multiPassLabel" : "native";
-      const label = text(own(binding, field), `${path}.${field}`).trim();
-      if (REFUSED_LABEL.test(label)) fail(`${path}.${field}`, `the label "${label}" is refused`);
-      accounts.set(provider, { kind: kind === "alias" ? "multi-pass" : "native", label });
+      const { kind, field, label } = bindingLabel(provider, item, BINDING_KEYS);
+      if (REFUSED_LABEL.test(label)) fail(`accounts.${provider}.${field}`, `the label "${label}" is refused`);
+      accounts.set(provider, { kind, label });
     }
   }
-  for (const { where, ref, provider } of refs) {
-    if (subscriptionKind(provider) !== undefined && !accounts.has(provider)) {
-      fail(where, `"${ref}" uses the subscription provider ${provider}, which needs a binding in accounts`);
-    }
-  }
+  requireBindings(parsed.refs, accounts);
 
-  let local: LocalSection | undefined;
-  if (own(root, "local") !== undefined) {
-    const section = object(own(root, "local"), "local", LOCAL_KEYS);
-    const role = roleName(own(section, "role"), "local.role");
-    const providers = uniqueTexts(own(section, "providers"), "local.providers", true, (provider, where) => {
-      if (!PROVIDER_ID.test(provider)) fail(where, `"${provider}" is not a provider id`);
-    });
-    for (const { ref, provider } of refs) {
-      if (holders.get(ref) === role && !providers.includes(provider)) {
-        fail("local.providers", `must include ${provider}, the provider of "${ref}" in the local role "${role}"`);
-      }
-    }
-    const hosts = uniqueTexts(own(section, "hosts"), "local.hosts", true, (host, where) => {
-      const canonical = canonicalHost(host);
-      if (canonical === undefined) fail(where, `"${host}" is not a host name`);
-      if (canonical !== host) fail(where, `write "${canonical}", not "${host}"`);
-      if (!isLocalHost(host)) {
-        fail(where, `"${host}" is not a local host: use localhost, a loopback, private, link-local or unique-local address, or a .lan, .local or .home.arpa name`);
-      }
-    });
-    local = { role, providers, hosts };
-  }
+  const local = parseLocal(root, parsed);
 
   return {
     version: 1,
@@ -431,14 +479,6 @@ interface LevelName {
 const levelName = (level: LevelName): string => `the ${level.scope} scope's ${level.tier} level`;
 
 const isScope = (value: unknown): value is Scope => typeof value === "string" && (SCOPES as readonly string[]).includes(value);
-
-/** An exact provider/id ref, with no glob and no whitespace, and its provider. */
-function exactRef(value: unknown, where: string): { readonly ref: string; readonly provider: string } {
-  const ref = text(value, where);
-  const parsed = parseRef(ref);
-  if (parsed === undefined || !PROVIDER_ID.test(parsed.provider) || !MODEL_ID.test(parsed.id)) fail(where, `"${ref}" is not an exact provider/id ref`);
-  return { ref, provider: parsed.provider };
-}
 
 /** A work directory: absolute and written plainly, since a session's directory is compared with it as text. */
 function workDirectory(directory: string, where: string): void {
@@ -487,76 +527,24 @@ function classifierSettings(value: unknown, exclude: readonly string[]): JevSett
 /**
  * Version 2, checked in this order: the keys, the exclusions, the roles, the accounts and their
  * scopes, the scopes and their levels, each level's accounts, the work alias's exclusion, the local
- * section, the classifier and the minutes. The checks version 1 also makes keep its messages.
+ * section, the classifier and the minutes. The checks it shares with version 1 are version 1's
+ * helpers, so they keep version 1's messages.
  */
 function validateV2(value: Record<string, unknown>): RosterV2 {
   const root = object(value, "", V2_TOP_KEYS);
 
-  const rosterExcludes =
-    own(root, "exclude") === undefined
-      ? []
-      : array(own(root, "exclude"), "exclude", false).map((item, index) => {
-          const where = `exclude[${index}]`;
-          const pattern = text(item, where);
-          const ref = parseRef(pattern);
-          if (ref === undefined || !PROVIDER_ID.test(ref.provider) || (ref.id !== "*" && !MODEL_ID.test(ref.id))) {
-            fail(where, `"${pattern}" is neither a provider/id ref nor a provider/* pattern`);
-          }
-          return pattern;
-        });
+  const rosterExcludes = parseExcludes(root);
   const exclude = [...new Set([...BUILTIN_EXCLUDES, ...rosterExcludes])];
   // Only the built-in work alias waits until the levels show the refs a work level lifts it for.
   // The roster's own exclusions apply in full, so one that names the alias stays in force.
-  const early = [...new Set([...BUILTIN_EXCLUDES.filter((pattern) => pattern !== WORK_ALIAS_EXCLUDE), ...rosterExcludes])];
-
-  const names = new Set<string>();
-  const holders = new Map<string, string>();
-  const refs: Array<{ readonly where: string; readonly ref: string; readonly provider: string; readonly role: string }> = [];
-  const roles = array(own(root, "roles"), "roles", true).map((item, index): Role => {
-    const path = `roles[${index}]`;
-    const entry = object(item, path, ROLE_KEYS);
-    const name = text(own(entry, "name"), `${path}.name`);
-    if (!ROLE_NAME.test(name)) fail(`${path}.name`, `"${name}" must match ${ROLE_NAME.source}`);
-    if (names.has(name)) fail(`${path}.name`, `role "${name}" is defined twice`);
-    names.add(name);
-    const models = array(own(entry, "models"), `${path}.models`, true).map((model, position) => {
-      const where = `${path}.models[${position}]`;
-      const { ref, provider } = exactRef(model, where);
-      const holder = holders.get(ref);
-      if (holder !== undefined) fail(where, holder === name ? `"${ref}" is listed twice` : `"${ref}" is already in role "${holder}"`);
-      const pattern = excludedBy(early, ref);
-      if (pattern !== undefined) fail(where, `"${ref}" is excluded by ${pattern}`);
-      holders.set(ref, name);
-      refs.push({ where, ref, provider, role: name });
-      return ref;
-    });
-    const given = own(entry, "thinking");
-    const thinking = given === undefined ? "selected" : given;
-    if (thinking !== "selected" && (typeof thinking !== "string" || !LEVELS.includes(thinking))) {
-      fail(`${path}.thinking`, `must be "selected" or one of ${LEVELS.join(", ")}`);
-    }
-    return { name, models, thinking: thinking as Thinking };
-  });
-
-  const roleName = (item: unknown, where: string): string => {
-    const name = text(item, where);
-    if (!names.has(name)) fail(where, `"${name}" is not a role`);
-    return name;
-  };
+  const parsed = parseRoles(root, [...new Set([...BUILTIN_EXCLUDES.filter((pattern) => pattern !== WORK_ALIAS_EXCLUDE), ...rosterExcludes])]);
+  const { roles, refs, roleName } = parsed;
 
   const accounts = new Map<string, ScopedBinding>();
   if (own(root, "accounts") !== undefined) {
     for (const [provider, item] of entries(object(own(root, "accounts"), "accounts", "map"))) {
+      const { binding, kind, field, label } = bindingLabel(provider, item, SCOPED_BINDING_KEYS);
       const path = `accounts.${provider}`;
-      const kind = subscriptionKind(provider);
-      if (kind === undefined) {
-        fail(path, `${provider} is not a subscription provider: openai-codex, anthropic, github-copilot, or a Multi-Pass alias of one`);
-      }
-      const binding = object(item, path, SCOPED_BINDING_KEYS);
-      if (kind === "alias" && own(binding, "native") !== undefined) fail(path, 'a Multi-Pass alias is bound with "multiPassLabel", not "native"');
-      if (kind === "native" && own(binding, "multiPassLabel") !== undefined) fail(path, 'a native login is bound with "native", not "multiPassLabel"');
-      const field = kind === "alias" ? "multiPassLabel" : "native";
-      const label = text(own(binding, field), `${path}.${field}`).trim();
       const given = own(binding, "scope");
       const scope = given === undefined ? "personal" : given;
       if (!isScope(scope)) fail(`${path}.scope`, 'must be "personal" or "work"');
@@ -564,19 +552,14 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
       if (scope === "work" && !REFUSED_LABEL.test(label)) {
         fail(`${path}.${field}`, `the label "${label}" is refused for a work binding, whose label must contain work or Positron`);
       }
-      accounts.set(provider, { kind: kind === "alias" ? "multi-pass" : "native", label, scope });
+      accounts.set(provider, { kind, label, scope });
     }
   }
-  for (const { where, ref, provider } of refs) {
-    if (subscriptionKind(provider) !== undefined && !accounts.has(provider)) {
-      fail(where, `"${ref}" uses the subscription provider ${provider}, which needs a binding in accounts`);
-    }
-  }
+  requireBindings(refs, accounts);
 
   // Each level has a role of its own, and a scope's level roles climb the ladder from low to super.
   const scopesObject = object(required(own(root, "scopes"), "scopes"), "scopes", SCOPES);
   if (entries(scopesObject).length === 0) fail("scopes", "must not be empty");
-  const rank = (name: string): number => roles.findIndex((role) => role.name === name);
   const levelOf = new Map<string, LevelName>();
   const scopes: Partial<Record<Scope, ScopeSection>> = {};
   for (const scope of SCOPES) {
@@ -591,7 +574,7 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
       const role = roleName(own(entry, "role"), `${where}.role`);
       const holder = levelOf.get(role);
       if (holder !== undefined) fail(`${where}.role`, `"${role}" is already the role of ${levelName(holder)}`);
-      if (below !== undefined && rank(role) < rank(below.role)) {
+      if (below !== undefined && rankOf(parsed, role) < rankOf(parsed, below.role)) {
         fail(`${where}.role`, `"${role}" must rank above "${below.role}", the role of the ${below.tier} level`);
       }
       const describe = text(own(entry, "describe"), `${where}.describe`);
@@ -621,30 +604,11 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
     if (pattern !== undefined) fail(where, `"${ref}" is excluded by ${pattern}`);
   }
 
-  let local: LocalSection | undefined;
-  if (own(root, "local") !== undefined) {
-    const section = object(own(root, "local"), "local", LOCAL_KEYS);
-    const role = roleName(own(section, "role"), "local.role");
+  // The local role is no level's: smart-router/auto never routes to it.
+  const local = parseLocal(root, parsed, (role) => {
     const level = levelOf.get(role);
     if (level !== undefined) fail("local.role", `"${role}" is already the role of ${levelName(level)}`);
-    const providers = uniqueTexts(own(section, "providers"), "local.providers", true, (provider, where) => {
-      if (!PROVIDER_ID.test(provider)) fail(where, `"${provider}" is not a provider id`);
-    });
-    for (const { ref, provider, role: holder } of refs) {
-      if (holder === role && !providers.includes(provider)) {
-        fail("local.providers", `must include ${provider}, the provider of "${ref}" in the local role "${role}"`);
-      }
-    }
-    const hosts = uniqueTexts(own(section, "hosts"), "local.hosts", true, (host, where) => {
-      const canonical = canonicalHost(host);
-      if (canonical === undefined) fail(where, `"${host}" is not a host name`);
-      if (canonical !== host) fail(where, `write "${canonical}", not "${host}"`);
-      if (!isLocalHost(host)) {
-        fail(where, `"${host}" is not a local host: use localhost, a loopback, private, link-local or unique-local address, or a .lan, .local or .home.arpa name`);
-      }
-    });
-    local = { role, providers, hosts };
-  }
+  });
 
   const classifier = own(root, "classifier") === undefined ? undefined : classifierSettings(own(root, "classifier"), exclude);
 
