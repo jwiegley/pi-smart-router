@@ -8,16 +8,18 @@ export interface Tagged {
   readonly text: string;
 }
 
-const TAGS: Readonly<Record<string, Tier>> = {
-  "#super": "super",
-  "#s": "super",
-  "#high": "high",
-  "#h": "high",
-  "#medium": "medium",
-  "#m": "medium",
-  "#low": "low",
-  "#l": "low",
-};
+// A Map has no inherited keys. An object literal would answer "constructor" and "__proto__" from
+// its prototype, and those words would be cut from the message.
+const TAGS: ReadonlyMap<string, Tier> = new Map<string, Tier>([
+  ["#super", "super"],
+  ["#s", "super"],
+  ["#high", "high"],
+  ["#h", "high"],
+  ["#medium", "medium"],
+  ["#m", "medium"],
+  ["#low", "low"],
+  ["#l", "low"],
+]);
 
 export function parseTag(text: string): Tagged | undefined {
   const body = text.trimEnd();
@@ -25,6 +27,6 @@ export function parseTag(text: string): Tagged | undefined {
   let start = body.length;
   while (start > 0 && !/\s/.test(body[start - 1] as string)) start--;
   if (start === body.length) return undefined;
-  const tier = TAGS[body.slice(start).toLowerCase()];
+  const tier = TAGS.get(body.slice(start).toLowerCase());
   return tier === undefined ? undefined : { tier, text: body.slice(0, start).trimEnd() };
 }

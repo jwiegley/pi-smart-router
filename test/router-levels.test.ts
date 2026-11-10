@@ -166,6 +166,17 @@ describe("a trailing tag", () => {
     assert.deepEqual(recordOf(loaded)?.history.at(-1)?.level, TAGGED_HIGH);
   });
 
+  test("is never a last word an object inherits: the message keeps it, with no notice, and Jev reads all of it", async (t) => {
+    const loaded = await hera(t);
+    loaded.runtime.answer = async () => jevAnswer(MEDIUM);
+    for (const text of ["add a logger parameter to the constructor", "what is the __proto__"]) {
+      assert.deepEqual(await say(loaded, text), [undefined], text);
+      assert.equal(loaded.runtime.classifyCalls.at(-1)?.context.state.message, text, text);
+      assert.deepEqual([recordOf(loaded)?.plan?.level?.tier, recordOf(loaded)?.plan?.level?.source], ["medium", "jev"], text);
+    }
+    assert.deepEqual(loaded.session.notices, []);
+  });
+
   test("leaves a later extension the text without it; a message that is only a tag reaches no later extension", async (t) => {
     const loaded = await hera(t);
     const seen: string[] = [];

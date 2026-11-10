@@ -19,6 +19,13 @@ describe("parseTag", () => {
     }
   });
 
+  test("never takes a name an object inherits for a tag, so the word stays in the message", () => {
+    for (const word of ["constructor", "Constructor", "__proto__", "toString", "hasOwnProperty"]) {
+      assert.equal(parseTag(`add a logger parameter to the ${word}`), undefined, word);
+      assert.equal(parseTag(word), undefined, word);
+    }
+  });
+
   test("stays linear on a huge token, and reads the tag after it", () => {
     const blob = "a".repeat(300_000);
     const started = Date.now();
