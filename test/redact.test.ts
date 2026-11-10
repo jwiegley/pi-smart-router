@@ -6,6 +6,8 @@ import { redact, REDACTED } from "../src/redact.ts";
 const pgpBody = "lQOYBF1bU2kBCAC7nV3rXQ9p+Kq/2mZtYw8sH4dLcE6aR0uJfGiT5vNoBxWy1zA3";
 const awsSecret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
 const mixed40 = "aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dE3fG5hJ7k";
+// A 32-character lowercase hex key: no backstop matches it, so only its name can hide it.
+const hexKey = "4f1c9e2ab7d35e8c0a6b2d9f17e3c5a8";
 
 describe("redact", () => {
   const secrets: ReadonlyArray<readonly [string, string, string]> = [
@@ -158,6 +160,8 @@ describe("redact", () => {
       ['the password: "it fails when I click "save" in the dialog', `the password: ${REDACTED} fails when I click "save" in the dialog`],
       ["the --token 'refresh logic breaks when the user's session ends", `the --token ${REDACTED} logic breaks when the user's session ends`],
       ['the --token "it fails when I click "save" in the dialog', `the --token ${REDACTED} fails when I click "save" in the dialog`],
+      ["masterkey: 'it is in the user's vault, see 'docs' now", `masterkey: ${REDACTED} is in the user's vault, see 'docs' now`],
+      ["the --token 'it breaks when the user's 'save' runs", `the --token ${REDACTED} breaks when the user's 'save' runs`],
     ];
     for (const [input, want] of cases) assert.equal(redact(input), want);
   });
@@ -167,12 +171,14 @@ describe("redact", () => {
       ['{\\"password\\": \\"hunter2\\"}', "hunter2"],
       ['{"Authorization": "Bearer \\"q8Zt1rLm9XaQ\\""}', "q8Zt1rLm9XaQ"],
       ['headers=dict(Authorization="Bearer q8Zt1rLm9XaQ")', "q8Zt1rLm9XaQ"],
+      ['Authorization\\": Bearer q8Zt1rLm9XaQ', "q8Zt1rLm9XaQ"],
     ];
     for (const [input, secret] of cases) {
       const out = redact(input);
       assert.ok(out.includes(REDACTED) && !out.includes(secret), out);
     }
     assert.equal(redact('{\\"password\\": \\"hunter 2\\"}'), `{\\"password\\": ${REDACTED}}`);
+    assert.equal(redact('{"command": "mysql --password \\"hunter 2\\" -u root"}'), `{"command": "mysql --password ${REDACTED} -u root"}`);
   });
 
   test("hides the whole Authorization credential when it holds a JSON escape", () => {
@@ -189,6 +195,34 @@ describe("redact", () => {
       assert.ok(out.includes(REDACTED) && !out.includes(tail), out);
     }
   });
+
+  // JSON and a repr write a line break or a tab as a backslash and a letter. Each reads as one
+  // space, so it ends the value before it and the name after it stays, with its value hidden.
+  const escapedBreaks: ReadonlyArray<readonly [string, string, string]> = [
+    [
+      "the API key after an escaped line break in a JSON log line",
+      `{"msg": "request headers", "raw": "Authorization: Bearer q8Zt1rLm\\nX-Api-Key: ${hexKey}\\n"}`,
+      `{"msg": "request headers", "raw": "${REDACTED} X-Api-Key: ${REDACTED} "}`,
+    ],
+    [
+      "the proxy credential after an escaped CRLF",
+      `"Authorization: Basic dXNlcjpw\\r\\nProxy-Authorization: Basic ${hexKey}\\r\\n"`,
+      `"${REDACTED}  Proxy-${REDACTED}  "`,
+    ],
+    ["the token header after an escaped CRLF", `"Authorization: Bearer abc\\r\\nX-Auth-Token: ${hexKey}"`, `"${REDACTED}  X-Auth-Token: ${REDACTED}"`],
+    ["the vault token after an escaped line break", `"Authorization: Bearer abc\\nX-Vault-Token: ${hexKey}"`, `"${REDACTED} X-Vault-Token: ${REDACTED}"`],
+    ["the password after an escaped line break", '"Authorization: Bearer abc\\npassword: hunter2"', `"${REDACTED} password: ${REDACTED}"`],
+    ["the password after an escaped tab", '"Authorization: Bearer abc\\tpassword: hunter2"', `"${REDACTED} password: ${REDACTED}"`],
+    ["a credential after an escaped CRLF", "\\r\\nAuthorization: Bearer q8Zt1rLm9XaQ", `  ${REDACTED}`],
+    ["the API key after a password and an escaped line break", `"password: hunter2\\napi_key: ${hexKey}"`, `"password: ${REDACTED} api_key: ${REDACTED}"`],
+    ["the API key flag after a password flag and an escaped line break", `"--password hunter2\\n--api-key ${hexKey}"`, `"--password ${REDACTED} --api-key ${REDACTED}"`],
+  ];
+
+  for (const [name, input, want] of escapedBreaks) {
+    test(`hides ${name}`, () => {
+      assert.equal(redact(input), want);
+    });
+  }
 
   test("redacts every part of a private key block and a vendor token that the backstops would miss", () => {
     const block = `-----BEGIN PGP PRIVATE KEY BLOCK-----\n\n${pgpBody}\nshort/Tail+9\n-----END PGP PRIVATE KEY BLOCK-----`;
@@ -253,6 +287,12 @@ describe("redact", () => {
       "--key 'a'b ".repeat(18200),
       '--key "a"b '.repeat(18200),
       `--token "${"a ".repeat(100000)}"b`,
+      "\\n".repeat(100000),
+      "\\\\t".repeat(66700),
+      "\\r\\nAuthorization: Bearer q8Zt".repeat(6700),
+      "Authorization: Bearer abc\\npassword: x".repeat(5300),
+      "password: a\\napi_key: b\\n".repeat(8400),
+      "--password a\\t--api-key b\\t".repeat(7500),
     ];
     for (const input of inputs) {
       const start = performance.now();

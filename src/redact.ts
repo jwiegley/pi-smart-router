@@ -1,11 +1,18 @@
-// Secret redaction for text sent to the classifier. The input is untrusted and unbounded, so
-// every pattern is linear: a start anchored by a lookbehind or a fixed literal, character classes
-// with no overlapping adjacent quantifiers, and lazy scans that consume to their end.
+// Secret redaction for text sent to the classifier. It first turns each escaped line break or tab
+// (\n, \r or \t, as JSON and a repr write them) into a space, so that it ends a value and starts a
+// name as the whitespace it stands for does; the classifier needs only the words, so the space
+// costs it nothing. The input is untrusted and unbounded, so every pattern is linear: a start
+// anchored by a lookbehind or a fixed literal, character classes with no overlapping adjacent
+// quantifiers, and lazy scans that consume to their end.
 export const REDACTED = "[redacted]";
+
+// An escaped line break or tab: a backslash and n, r or t.
+const ESCAPED_BREAK = /\\[nrt]/g;
 
 const PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   // Header, in plain or JSON form: the whole value, whatever its scheme. The value runs to the next
-  // space, quote or semicolon, so a JSON escape inside it (\/, \u002B) never cuts it short.
+  // space, quote or semicolon, so a JSON escape inside it (\/, \u002B) never cuts it short; an
+  // escaped line break, a space by now, ends it.
   [/\bAuthorization\\?["']?[ \t]*:[ \t]*\\?["']?(?:[A-Za-z]+[ \t]+)?\\?["']?[^\s"';]+/gi, REDACTED],
   [/(?<![\w-])eyJ[\w-]+\.[\w-]+\.[\w-]*/g, REDACTED],
   [/-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|$)/g, REDACTED],
@@ -69,7 +76,7 @@ function mixedCase(run: string): boolean {
 
 /** The text with credentials replaced by REDACTED. */
 export function redact(text: string): string {
-  let out = text;
+  let out = text.replace(ESCAPED_BREAK, " ");
   for (const [pattern, replacement] of PATTERNS) out = out.replace(pattern, replacement);
   out = redactValues(out, NAME_SEPARATOR, VALUE, (m) => m[1]!);
   out = redactValues(out, FLAG_SPACE, FLAG_VALUE, (m) => m[1]!.slice(2));
