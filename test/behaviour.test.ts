@@ -8,21 +8,29 @@
 // coverage of a goal-x-style auditor (§5.1), and the refusal on an upstream Pi without the fork's
 // bounded session reads. Each asserts which faux provider received each request, with the
 // provider's call count; ./support/host.ts describes the harness.
+//
+// The L tests are the four levels' scenarios, the behaviour-suite list of the Jev-levels design, on
+// version 2 rosters shaped like Hera's: both Codex accounts, OpenRouter and a local model, with
+// Jev faked by a classifier provider registered through Pi's provider `classifiers` hook. L9
+// checks that a version 1 roster's texts did not change.
 import "./support/sandboxed.ts";
 
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import type { TestContext } from "node:test";
 
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 
 import type { RoutingRegistry } from "../src/cache-optimizer.ts";
-import { ROUTING_REGISTRY_KEY, SLOT_KEY } from "../src/constants.ts";
+import { ENV_SCOPE, LEVEL_ENTRY, LEVEL_KEY, ROUTING_REGISTRY_KEY, SCOPE_ENTRY, SLOT_KEY, VIRTUAL_IDS } from "../src/constants.ts";
 import type { Owner, Slot } from "../src/owners.ts";
-import type { Router } from "../src/router.ts";
+import type { Limits, Router } from "../src/router.ts";
+import { TIERS } from "../src/tiers.ts";
+import type { Tier } from "../src/tiers.ts";
 import { keepsSystemPrompt } from "./support/co.ts";
 import type { Snapshot } from "./support/co.ts";
 import {
@@ -41,7 +49,7 @@ import {
   withoutBoundedReaders,
   World,
 } from "./support/host.ts";
-import type { FauxCall, Pi, WorldOptions } from "./support/host.ts";
+import type { FauxCall, FauxSpec, JevCall, Pi, RosterJsonV2, WorldOptions } from "./support/host.ts";
 
 const TIMEOUT = { timeout: 60_000 };
 
@@ -884,4 +892,726 @@ test("on upstream Pi 1.5.0, without the fork's bounded session reads, both model
   await pi.prompt(PROMPTS.plain);
   assert.match(pi.lastAssistant()?.errorMessage ?? "", /^smart-router\/\w+: this Pi has no bounded session history \(getLatestCustomEntry and getRecentActiveEntries\)\. Nothing was sent\./);
   assert.deepEqual(called(world.counts()), {});
+});
+
+// ─── The four levels, on version 2 rosters ───────────────────────────────────
+
+const CODEX_IDS = ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra"] as const;
+const OPENROUTER_IDS = ["deepseek/deepseek-v4.1-flash-1017", "z-ai/glm-5.3", "moonshotai/kimi-k3.1-pro"] as const;
+/** The fake classifier's one model, which the version 2 rosters name; never OpenRouter's Jev. */
+const JEV_MODEL = "jev-fake/jev";
+
+/** Each tier's first model: on John's personal Codex account, and on the work account. */
+const PERSONAL: Readonly<Record<Tier, string>> = {
+  low: "openai-codex-2/gpt-6-luna",
+  medium: "openai-codex-2/gpt-6.1-terra",
+  high: "openai-codex-2/gpt-6.1-sol",
+  super: "openai-codex-2/gpt-6-astra",
+};
+const WORK: Readonly<Record<Tier, string>> = {
+  low: "openai-codex-3/gpt-6-luna",
+  medium: "openai-codex-3/gpt-6.1-terra",
+  high: "openai-codex-3/gpt-6.1-sol",
+  super: "openai-codex-3/gpt-6-astra",
+};
+
+/** The descriptions Jev reads in each scope. Work's are worded apart, so a test can tell which scope's descriptions Jev read. */
+const DESCRIBE: Readonly<Record<Tier, string>> = {
+  low: "Mechanical or trivial work that follows a clear specification",
+  medium: "Engineering, implementation and validation",
+  high: "Deep thought, review, and the design of verification",
+  super: "Deep thought, research, design and planning",
+};
+const WORK_DESCRIBE: Readonly<Record<Tier, string>> = {
+  low: "At work: mechanical or trivial work that follows a clear specification",
+  medium: "At work: engineering, implementation and validation",
+  high: "At work: deep thought, review, and the design of verification",
+  super: "At work: deep thought, research, design and planning",
+};
+
+/** Jev's answer with 80% on one tier. */
+const JEV: Readonly<Record<Tier, Readonly<Record<Tier, number>>>> = {
+  low: { low: 0.8, medium: 0.1, high: 0.05, super: 0.05 },
+  medium: { low: 0.1, medium: 0.8, high: 0.05, super: 0.05 },
+  high: { low: 0.05, medium: 0.1, high: 0.8, super: 0.05 },
+  super: { low: 0.05, medium: 0.05, high: 0.1, super: 0.8 },
+};
+
+/** Multi-Pass's labels, as on Hera: alias #2 is John's personal account, #3 the work account. */
+const LABELS = {
+  subscriptions: [
+    { provider: "openai-codex", index: 2, label: "personal" },
+    { provider: "openai-codex", index: 3, label: "Positron work" },
+  ],
+};
+
+/**
+ * The level scenarios' fleet: both Codex accounts with one model per tier, OpenRouter with the
+ * personal ladder's second candidates, and the local model. Each Codex and OpenRouter model declares
+ * 272,000 and 128,000 unless `limits` gives it others, by ref.
+ */
+function levelsFleet(limits: Readonly<Record<string, Partial<Limits>>> = {}): FauxSpec[] {
+  const models = (provider: string, ids: readonly string[]): Array<{ id: string; contextWindow: number; maxTokens: number }> =>
+    ids.map((id) => ({ id, contextWindow: 272_000, maxTokens: 128_000, ...limits[`${provider}/${id}`] }));
+  return [
+    { provider: "local-a", baseUrl: "http://localhost:0", contextWindow: 262_144, maxTokens: 81_920 },
+    { provider: "openai-codex-2", api: "openai-codex-responses", models: models("openai-codex-2", CODEX_IDS) },
+    { provider: "openai-codex-3", api: "openai-codex-responses", models: models("openai-codex-3", CODEX_IDS) },
+    { provider: "openrouter", models: models("openrouter", OPENROUTER_IDS) },
+  ];
+}
+
+/**
+ * A version 2 roster shaped like Hera's: personal levels take Codex first, then OpenRouter; work
+ * levels take only the work account; the local role serves smart-router/local and the pin; Jev is
+ * the fake classifier unless `classifier` is false.
+ */
+function rosterV2(options: { readonly directories?: readonly string[]; readonly classifier?: boolean } = {}): RosterJsonV2 {
+  const levels = (prefix: string, describe: Readonly<Record<Tier, string>>) => ({
+    low: { role: `${prefix}low`, describe: describe.low },
+    medium: { role: `${prefix}medium`, describe: describe.medium },
+    high: { role: `${prefix}high`, describe: describe.high },
+    super: { role: `${prefix}super`, describe: describe.super },
+  });
+  return {
+    version: 2,
+    roles: [
+      { name: "local", models: ["local-a/m"] },
+      { name: "low", models: [PERSONAL.low] },
+      { name: "medium", models: [PERSONAL.medium, "openrouter/deepseek/deepseek-v4.1-flash-1017"] },
+      { name: "high", models: [PERSONAL.high, "openrouter/z-ai/glm-5.3"] },
+      { name: "super", models: [PERSONAL.super, "openrouter/moonshotai/kimi-k3.1-pro"] },
+      ...TIERS.map((tier) => ({ name: `work-${tier}`, models: [WORK[tier]] })),
+    ],
+    scopes: {
+      personal: { levels: levels("", DESCRIBE) },
+      work: { levels: levels("work-", WORK_DESCRIBE), ...(options.directories === undefined ? {} : { directories: [...options.directories] }) },
+    },
+    accounts: { "openai-codex-2": { multiPassLabel: "personal" }, "openai-codex-3": { multiPassLabel: "Positron work", scope: "work" } },
+    ...(options.classifier === false ? {} : { classifier: { model: JEV_MODEL } }),
+    local: { role: "local", providers: ["local-a"], hosts: ["localhost"] },
+  };
+}
+
+/** A world for the level scenarios: their fleet, Multi-Pass's labels, a version 2 roster, and new sessions on smart-router/auto. */
+function levelsWorld(t: TestContext, options: { readonly roster?: RosterJsonV2; readonly fleet?: readonly FauxSpec[] } = {}): World {
+  return new World(t, {
+    roster: options.roster ?? rosterV2(),
+    multiPass: LABELS,
+    fleet: options.fleet ?? levelsFleet(),
+    settings: { ...BASE_SETTINGS, defaultProvider: "smart-router", defaultModel: "auto" },
+  });
+}
+
+/** The model that answered the session's latest response, as provider/id; it must have answered. */
+function answered(pi: Pi): string {
+  const message = pi.lastAssistant();
+  assert.ok(message !== undefined, "a response");
+  assert.equal(message.stopReason, "stop", message.errorMessage);
+  return `${message.provider}/${message.model}`;
+}
+
+/** The data of a session's custom entries of one type, oldest first, on every branch. */
+function entriesOf(pi: Pi, customType: string): Array<Record<string, unknown>> {
+  return pi.session.sessionManager
+    .getEntries()
+    .flatMap((entry) => (entry.type === "custom" && entry.customType === customType ? [entry.data as Record<string, unknown>] : []));
+}
+
+/** The level records of routed runs, oldest first: every level entry but the corrections. */
+const runRecords = (pi: Pi): Array<Record<string, unknown>> => entriesOf(pi, LEVEL_ENTRY).filter((record) => record.source !== "correction");
+
+/** A session's scope entries, as [scope, what recorded it]. */
+const scopeEntries = (pi: Pi): unknown[][] => entriesOf(pi, SCOPE_ENTRY).map((entry) => [entry.scope, entry.by]);
+
+/** The fields of a record that `like` names, to compare with `like`. */
+function fields(record: Record<string, unknown> | undefined, like: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.keys(like).map((key) => [key, record?.[key]]));
+}
+
+/** How many notices say exactly this. */
+const count = (pi: Pi, text: string): number => pi.ui.notices.filter((item) => item.message === text).length;
+
+/** The latest routing decision, as /smart-router history shows it, without its time. */
+async function lastDecision(pi: Pi): Promise<string> {
+  await pi.command("history 1");
+  return (notice(pi, /routing decisions/).split("\n")[1] ?? "").replace(/^ {2}\d\d:\d\d:\d\d /, "");
+}
+
+/** The criteria of each question one classification asked. */
+const criteriaOf = (call: JevCall | undefined): unknown[] => Object.values(call?.context.questions ?? {}).map((question) => question.criteria);
+
+/** Wait until a gated request reaches its model; a run that ends first fails the test rather than leaving it waiting. */
+async function reached(slow: { readonly started: Promise<void> }, run: Promise<unknown>): Promise<void> {
+  const ended = run.then(() => "ended", () => "ended");
+  assert.equal(await Promise.race([slow.started.then(() => "started"), ended]), "started", "the run ended before its request reached the model");
+}
+
+test("L1 a tag routes at once past hold:sticky, never reaches the payload, and survives a resend", TIMEOUT, async (t) => {
+  const world = levelsWorld(t);
+  const pi = await world.start({ select: "smart-router/auto" });
+  world.jev.answer(JEV.super);
+  await pi.prompt("Survey the options for the session store");
+  assert.equal(answered(pi), PERSONAL.super);
+  // An untagged message that Jev puts at HIGH stays on SUPER's model while the session is busy.
+  world.jev.answer(JEV.high);
+  await pi.prompt("Check the error paths");
+  assert.equal(answered(pi), PERSONAL.super);
+  assert.equal(await lastDecision(pi), "smart-router/auto user: super → openai-codex-2/gpt-6-astra (hold:sticky, triage:no_fast_path) [personal SUPER (jev HIGH 80%)]");
+
+  // A tagged message goes to HIGH at once. Jev's opinion of it is asked, and the run does not wait for it.
+  world.jev.hang();
+  const codex = world.faux("openai-codex-2");
+  const mark = codex.calls.length;
+  await pi.prompt("Fix the parser #high");
+  assert.equal(world.jev.calls.length, 3, "Jev was asked for its opinion");
+  assert.equal(world.jev.calls[2]?.result, undefined, "and had not answered when the run ended");
+  assert.equal(answered(pi), PERSONAL.high);
+  const sent = codex.calls.slice(mark);
+  assert.deepEqual(
+    sent.map((call) => [call.ref, call.lastUser]),
+    [[PERSONAL.high, "Fix the parser"]],
+    "the model received the text without its tag",
+  );
+  assert.doesNotMatch(JSON.stringify(sent[0]?.payload), /#high/, "and so did the payload");
+  assert.doesNotMatch(JSON.stringify(pi.session.messages), /#high/, "the session keeps no tag either");
+  assert.equal(await lastDecision(pi), "smart-router/auto user: high → openai-codex-2/gpt-6.1-sol (tag, triage:no_fast_path) [personal HIGH (tag)]");
+  const tagged = { source: "tag", tag: "high", tier: "high", jev: { late: true } };
+  assert.deepEqual(fields(runRecords(pi).at(-1), tagged), tagged);
+
+  // pi-idle-check resends the text without its tag: the run keeps the tag's level, where Jev would
+  // now say SUPER, and Jev is not asked again.
+  world.jev.answer(JEV.super);
+  await pi.resend("Fix the parser");
+  assert.equal(answered(pi), PERSONAL.high);
+  assert.equal(world.jev.calls.length, 3, "no second classifier call");
+  assert.equal(await lastDecision(pi), "smart-router/auto user: high → openai-codex-2/gpt-6.1-sol (tag, triage:no_fast_path) [personal HIGH (tag)]");
+  const resent = { source: "tag", tag: "high", tier: "high", jev: undefined };
+  assert.deepEqual(fields(runRecords(pi).at(-1), resent), resent);
+  assert.deepEqual(called(world.counts()), { "openai-codex-2": 4 });
+});
+
+test("L2 a tagged level steps up, with a notice, when the conversation does not fit", TIMEOUT, async (t) => {
+  // LOW's model declares a 32k window, and the conversation already holds 40,000 tokens.
+  const world = levelsWorld(t, { fleet: levelsFleet({ [PERSONAL.low]: { contextWindow: 32_000 } }) });
+  const codex = world.faux("openai-codex-2");
+  const sessionManager = history(world, "smart-router/auto", [["Load the fixtures", response(codex, { id: "gpt-6.1-terra", tokens: 40_000, timestamp: Date.now() - 1_000 })]]);
+  const pi = await world.start({ sessionManager });
+  await pi.prompt("Rename the helper #low");
+  assert.equal(answered(pi), PERSONAL.medium);
+  assert.equal(notice(pi, /can take this run/), "pi-smart-router: no LOW model can take this run, so it goes to MEDIUM (gpt-6.1-terra).");
+  assert.equal(pi.ui.status(LEVEL_KEY), "personal MEDIUM → gpt-6.1-terra (tag)");
+  assert.equal(await lastDecision(pi), "smart-router/auto user: medium → openai-codex-2/gpt-6.1-terra (step-up, triage:keyword_economical) [personal MEDIUM (tag)]");
+  const record = { source: "tag", tag: "low", asked: "low", tier: "medium", steppedUp: true, ref: PERSONAL.medium };
+  assert.deepEqual(fields(runRecords(pi).at(-1), record), record);
+  assert.deepEqual(world.refCounts(), { [PERSONAL.medium]: 1 }, "LOW's model received nothing, and nothing was compacted");
+});
+
+test("L3 untagged runs follow Jev; a close call goes higher; failure, refusal and timeout fall back to keywords", TIMEOUT, async (t) => {
+  const world = levelsWorld(t);
+  const pi = await world.start({ select: "smart-router/auto" });
+  const footer = (): string | undefined => pi.ui.status(LEVEL_KEY);
+  // Each run's tier is at least the one before it, so no hold applies.
+  world.jev.fail("System One API error (500): upstream connect error");
+  await pi.prompt(PROMPTS.trivial);
+  assert.equal(answered(pi), PERSONAL.low);
+  assert.equal(footer(), "personal LOW → gpt-6-luna (keywords; jev error)");
+  // pi-ai has no refusal branch: OpenRouter's refusal reaches the router as an error.
+  world.jev.fail('System One API error (403): {"error":{"message":"The request was refused"}}');
+  await pi.prompt(PROMPTS.plain);
+  assert.equal(answered(pi), PERSONAL.medium);
+  assert.equal(footer(), "personal MEDIUM → gpt-6.1-terra (keywords; jev error)");
+  // A close call: MEDIUM leads HIGH by less than closeCall, so the run goes to HIGH.
+  world.jev.answer({ low: 0.05, medium: 0.45, high: 0.4, super: 0.1 });
+  await pi.prompt("Walk me through the cache layer");
+  assert.equal(answered(pi), PERSONAL.high);
+  assert.equal(footer(), "personal HIGH → gpt-6.1-sol (jev 40%)");
+  // A classifier that answers nothing: the run goes on with the keywords' tier once timeoutMs passes.
+  world.jev.hang();
+  const started = Date.now();
+  await pi.prompt(PROMPTS.complex);
+  const waited = Date.now() - started;
+  assert.ok(waited < 1_500, `the run went on after ${waited} ms`);
+  assert.equal(answered(pi), PERSONAL.high);
+  assert.equal(footer(), "personal HIGH → gpt-6.1-sol (keywords; jev timeout)");
+  // Jev's tier, where the keywords would say MEDIUM.
+  world.jev.answer(JEV.super);
+  await pi.prompt("Hello again");
+  assert.equal(answered(pi), PERSONAL.super);
+  assert.equal(footer(), "personal SUPER → gpt-6-astra (jev 80%)");
+  // A choice outside the four tiers is a failure too.
+  world.jev.answer(JEV.low, "other");
+  await pi.prompt(PROMPTS.planning);
+  assert.equal(answered(pi), PERSONAL.super);
+  assert.equal(footer(), "personal SUPER → gpt-6-astra (keywords; jev malformed)");
+
+  // Every request reached the classifier with the roster's deadline and no retries.
+  assert.deepEqual(
+    world.jev.calls.map((call) => [call.timeoutMs, call.maxRetries]),
+    world.jev.calls.map(() => [1_000, 0]),
+  );
+  assert.equal(world.jev.calls.length, 6);
+  assert.deepEqual(
+    runRecords(pi).map((record) => {
+      const jev = record.jev as { readonly failure?: string; readonly choice?: string } | undefined;
+      return [record.source, record.tier, jev?.failure ?? jev?.choice];
+    }),
+    [
+      ["keyword", "low", "error"],
+      ["keyword", "medium", "error"],
+      ["jev", "high", "medium"],
+      ["keyword", "high", "timeout"],
+      ["jev", "super", "super"],
+      ["keyword", "super", "malformed"],
+    ],
+  );
+});
+
+test("L4 no classifier call when pinned, on local, with PI_SMART_ROUTER_LOCAL_ONLY, for a steer, or without a classifier", TIMEOUT, async (t) => {
+  await t.test("pinned", async (t) => {
+    const world = levelsWorld(t);
+    const pi = await world.start({ select: "smart-router/auto" });
+    await pi.command("local on");
+    assert.equal(pi.selection(), "smart-router/local");
+    await pi.prompt(PROMPTS.plain);
+    await pi.prompt("Fix the parser #high");
+    assert.equal(answered(pi), "local-a/m");
+    assert.equal(notice(pi, /tag was removed/), "pi-smart-router: the HIGH tag was removed and has no effect, because this session is pinned to local models.");
+    // smart-router/auto, forced back, is refused by the pin's guard before anything is planned.
+    pi.force("smart-router/auto");
+    await pi.prompt(PROMPTS.planning);
+    assert.deepEqual(world.jev.calls, []);
+    assert.deepEqual(called(world.counts()), { "local-a": 2 });
+  });
+
+  await t.test("on smart-router/local", async (t) => {
+    const world = levelsWorld(t);
+    const pi = await world.start({ select: "smart-router/local" });
+    await pi.prompt(PROMPTS.plain);
+    await pi.prompt("Fix the parser #high");
+    assert.equal(answered(pi), "local-a/m");
+    assert.equal(
+      notice(pi, /tag was removed/),
+      "pi-smart-router: the HIGH tag was removed and has no effect, because only smart-router/auto routes by level, and the selection is smart-router/local.",
+    );
+    assert.deepEqual(world.jev.calls, []);
+    assert.deepEqual(called(world.counts()), { "local-a": 2 });
+  });
+
+  await t.test("with PI_SMART_ROUTER_LOCAL_ONLY", async (t) => {
+    const world = levelsWorld(t);
+    process.env.PI_SMART_ROUTER_LOCAL_ONLY = "1";
+    const pi = await world.start({ select: "smart-router/auto" });
+    delete process.env.PI_SMART_ROUTER_LOCAL_ONLY;
+    assert.equal(pi.selection(), "smart-router/local");
+    await pi.prompt(PROMPTS.planning);
+    await pi.prompt("Fix the parser #high");
+    assert.equal(answered(pi), "local-a/m");
+    assert.deepEqual(world.jev.calls, []);
+    assert.deepEqual(called(world.counts()), { "local-a": 2 });
+  });
+
+  await t.test("for a steer or a follow-up", async (t) => {
+    const world = levelsWorld(t);
+    const pi = await world.start({ select: "smart-router/auto" });
+    const slow = gate();
+    world.faux("openai-codex-2").respond(slow.step);
+    // A run without a message of its own, as goal-x's continuations start one, asks Jev nothing either.
+    const run = pi.custom();
+    await reached(slow, run);
+    await pi.session.prompt("Also check the lock order", { streamingBehavior: "steer" });
+    await pi.session.prompt("And the error paths #high", { streamingBehavior: "steer" });
+    await pi.session.prompt("Then sum it up", { streamingBehavior: "followUp" });
+    slow.release();
+    await run;
+    assert.deepEqual(world.jev.calls, []);
+    assert.equal(
+      notice(pi, /tag was removed/),
+      "pi-smart-router: the HIGH tag was removed and has no effect, because a run is under way, and it keeps its model until it ends.",
+    );
+    assert.match(JSON.stringify(pi.session.messages), /And the error paths/);
+    assert.doesNotMatch(JSON.stringify(pi.session.messages), /#high/, "the steer reached the model without its tag");
+  });
+
+  await t.test("without a classifier", async (t) => {
+    const world = levelsWorld(t, { roster: rosterV2({ classifier: false }) });
+    const pi = await world.start({ select: "smart-router/auto" });
+    await pi.prompt(PROMPTS.plain);
+    assert.equal(answered(pi), PERSONAL.medium);
+    assert.equal(pi.ui.status(LEVEL_KEY), "personal MEDIUM → gpt-6.1-terra (keywords)");
+    await pi.prompt("Fix the parser #high");
+    assert.equal(answered(pi), PERSONAL.high);
+    assert.deepEqual(world.jev.calls, []);
+  });
+});
+
+test("L5 scope: the latch, the entry carried into /new and a fork, resume, directories, and confirmation for work to personal", TIMEOUT, async (t) => {
+  /** What a session the work directories moved is told. */
+  const moved = (world: World): string => `pi-smart-router: this session is in work scope because ${world.cwd} is under ${world.cwd}.`;
+
+  await t.test("the latch puts every session of the process in work scope, and moving to personal is refused", async (t) => {
+    const world = levelsWorld(t);
+    process.env[ENV_SCOPE] = "work";
+    const pi = await world.start({ persisted: true, select: "smart-router/auto" });
+    delete process.env[ENV_SCOPE];
+    await pi.command("scope");
+    assert.equal(notice(pi, /^pi-smart-router: scope/), "pi-smart-router: scope work (latch).");
+    await pi.prompt(PROMPTS.plain);
+    assert.equal(answered(pi), WORK.medium);
+    await pi.command("scope personal");
+    assert.equal(
+      notice(pi, /PI_SMART_ROUTER_SCOPE/),
+      "pi-smart-router: PI_SMART_ROUTER_SCOPE pins every session of this process to work scope, so this one cannot be moved to personal.",
+    );
+    assert.deepEqual(pi.ui.dialogs, [], "it is refused without a question");
+    await pi.runtime.newSession();
+    await pi.prompt(PROMPTS.plain);
+    assert.equal(answered(pi), WORK.medium, "the latch holds after the variable is gone");
+    assert.deepEqual(called(world.counts()), { "openai-codex-3": 2 });
+  });
+
+  await t.test("an entry: work at once, carried into a fork and /new, and enforced at resume", async (t) => {
+    const world = levelsWorld(t);
+    const pi = await world.start({ persisted: true, select: "smart-router/auto" });
+    await pi.prompt(PROMPTS.plain);
+    assert.equal(answered(pi), PERSONAL.medium);
+    const personal = pi.session.sessionFile;
+    await pi.runtime.newSession();
+    await pi.prompt(PROMPTS.plain);
+    assert.equal(answered(pi), PERSONAL.medium, "a default scope is not carried");
+    await pi.command("scope work");
+    assert.equal(notice(pi, /^pi-smart-router: scope/), "pi-smart-router: scope work (entry).");
+    await pi.prompt(PROMPTS.plain);
+    assert.equal(answered(pi), WORK.medium, "personal to work takes effect at once");
+    // A selection recorded behind the guards' back, as an extension that writes the session could.
+    pi.session.sessionManager.appendModelChange("openrouter", "z-ai/glm-5.3");
+    const work = pi.session.sessionFile;
+    assert.ok(personal !== undefined && work !== undefined);
+
+    // A fork from before the scope entry: the branch it copies holds none, so only the handoff can carry it.
+    await pi.runtime.fork(userEntry(pi, 0));
+    assert.deepEqual(scopeEntries(pi), [["work", "carried"]]);
+    await pi.prompt(PROMPTS.plain);
+    assert.equal(answered(pi), WORK.medium);
+    await pi.runtime.newSession();
+    assert.deepEqual(scopeEntries(pi), [["work", "carried"]]);
+    await pi.prompt(PROMPTS.plain);
+    assert.equal(answered(pi), WORK.medium);
+    assert.equal(count(pi, "pi-smart-router: this session is in work scope, as the session it came from was."), 2);
+
+    // Resumed, the work session's entry holds, and the work guard switches the selection it restored.
+    await pi.runtime.switchSession(work);
+    assert.equal(pi.selection(), "smart-router/auto");
+    assert.equal(count(pi, "pi-smart-router: this session is in work scope, so its selection openrouter/z-ai/glm-5.3 was switched to smart-router/auto."), 1);
+    await pi.prompt(PROMPTS.plain);
+    assert.equal(answered(pi), WORK.medium);
+    // Resumed, the personal session is personal.
+    await pi.runtime.switchSession(personal);
+    await pi.command("scope");
+    assert.equal(notice(pi, /^pi-smart-router: scope/), "pi-smart-router: scope personal (default).");
+    await pi.prompt(PROMPTS.plain);
+    assert.equal(answered(pi), PERSONAL.medium);
+    assert.equal(world.faux("openrouter").callCount, 0);
+  });
+
+  await t.test("work directories: a running session moves at its next idle input, recorded once, and a new session starts in work scope", async (t) => {
+    const world = levelsWorld(t);
+    const pi = await world.start({ persisted: true, select: "smart-router/auto" });
+    await pi.prompt(PROMPTS.plain);
+    assert.equal(answered(pi), PERSONAL.medium);
+    // The roster now lists the session's directory. The next idle input reads it, records the scope, and routes in work scope.
+    world.writeRoster(rosterV2({ directories: [world.cwd] }));
+    await pi.prompt(PROMPTS.plain);
+    assert.equal(answered(pi), WORK.medium);
+    assert.deepEqual(scopeEntries(pi), [["work", "directory"]]);
+    await pi.prompt(PROMPTS.plain);
+    assert.equal(answered(pi), WORK.medium);
+    assert.deepEqual(scopeEntries(pi), [["work", "directory"]], "the entry is recorded once");
+    assert.equal(count(pi, moved(world)), 1, "and the session is told once");
+
+    // A session that starts under a work directory starts in work scope.
+    const other = await world.start({ persisted: true, select: "smart-router/auto" });
+    assert.deepEqual(scopeEntries(other), [["work", "directory"]]);
+    assert.equal(count(other, moved(world)), 1);
+    await other.prompt(PROMPTS.plain);
+    assert.equal(answered(other), WORK.medium);
+  });
+
+  await t.test("work directories at resume: a session with turns but no entry moves to work scope, one with a personal entry stays", async (t) => {
+    const world = levelsWorld(t);
+    const pi = await world.start({ persisted: true, select: "smart-router/auto" });
+    await pi.prompt(PROMPTS.plain);
+    const plain = pi.session.sessionFile;
+    await pi.runtime.newSession();
+    await pi.command("scope personal");
+    assert.equal(notice(pi, /^pi-smart-router: scope/), "pi-smart-router: scope personal (entry).");
+    await pi.prompt(PROMPTS.plain);
+    const kept = pi.session.sessionFile;
+    assert.ok(plain !== undefined && kept !== undefined);
+    world.writeRoster(rosterV2({ directories: [world.cwd] }));
+
+    await pi.runtime.switchSession(plain);
+    assert.deepEqual(scopeEntries(pi), [["work", "directory"]]);
+    assert.equal(count(pi, moved(world)), 1);
+    await pi.prompt(PROMPTS.plain);
+    assert.equal(answered(pi), WORK.medium);
+
+    await pi.runtime.switchSession(kept);
+    await pi.command("scope");
+    assert.equal(notice(pi, /^pi-smart-router: scope/), "pi-smart-router: scope personal (entry).");
+    await pi.prompt(PROMPTS.plain);
+    assert.equal(answered(pi), PERSONAL.medium);
+  });
+
+  await t.test("work to personal asks first, says the earlier turns are work content, and moves only on that answer", async (t) => {
+    const world = levelsWorld(t);
+    const pi = await world.start({ select: "smart-router/auto" });
+    await pi.command("scope work");
+    await pi.prompt(PROMPTS.plain);
+    assert.equal(answered(pi), WORK.medium);
+    const question = {
+      title: "Move this session to personal scope?\nIts earlier turns are work content, and the next requests would send them to personal accounts.",
+      options: ["Keep this session in work scope", "Move it to personal scope (earlier turns are work content)"],
+    };
+    // Escape, and the first answer, keep work scope.
+    pi.ui.answers.push(undefined, "Keep this session in work scope");
+    await pi.command("scope personal");
+    await pi.command("scope personal");
+    assert.deepEqual(pi.ui.dialogs, [question, question]);
+    assert.equal(count(pi, "pi-smart-router: the session stays in work scope."), 2);
+    await pi.prompt(PROMPTS.plain);
+    assert.equal(answered(pi), WORK.medium);
+    // The second answer moves it.
+    pi.ui.answers.push("Move it to personal scope (earlier turns are work content)");
+    await pi.command("scope personal");
+    assert.equal(notice(pi, /^pi-smart-router: scope/), "pi-smart-router: scope personal (entry).");
+    await pi.prompt(PROMPTS.plain);
+    assert.equal(answered(pi), PERSONAL.medium);
+    assert.deepEqual(scopeEntries(pi), [
+      ["work", "command"],
+      ["personal", "command"],
+    ]);
+    assert.equal(pi.ui.dialogs.length, 3, "personal to work asked nothing");
+  });
+});
+
+test("L6 the work guard switches a hand-picked OpenRouter model back, and work runs reach only the work account", TIMEOUT, async (t) => {
+  const world = levelsWorld(t);
+  const pi = await world.start({ select: "smart-router/auto" });
+  await pi.command("scope work");
+  // A model picked by hand outside the work account is switched back.
+  await pi.session.setModel(pi.model("openrouter/z-ai/glm-5.3"));
+  assert.equal(pi.selection(), "smart-router/auto");
+  assert.equal(count(pi, "pi-smart-router: this session is in work scope, so openrouter/z-ai/glm-5.3 was not kept, and the selection is smart-router/auto again."), 1);
+  // One of the work account's is kept, and answers.
+  await pi.session.setModel(pi.model(WORK.high));
+  assert.equal(pi.selection(), WORK.high);
+  await pi.prompt("Check the error paths");
+  assert.equal(answered(pi), WORK.high);
+  await pi.session.setModel(pi.model("smart-router/auto"));
+
+  // Every tier goes to the work account, and Jev reads the work scope's descriptions.
+  for (const tier of TIERS) {
+    await pi.prompt(`Look at the logs #${tier}`);
+    assert.equal(answered(pi), WORK[tier]);
+  }
+  assert.equal(pi.ui.status(LEVEL_KEY), "work SUPER → gpt-6-astra (tag)");
+  assert.equal(world.jev.calls.length, 4);
+  assert.deepEqual(
+    world.jev.calls.map((call) => criteriaOf(call)),
+    world.jev.calls.map(() => [WORK_DESCRIBE]),
+  );
+
+  // A selection written past model_select: a prompt is refused, and a run without one is switched at turn_start.
+  pi.force("openrouter/z-ai/glm-5.3");
+  const messages = pi.session.messages.length;
+  await pi.prompt("Ship it");
+  assert.equal(pi.session.messages.length, messages, "the prompt was not sent");
+  assert.equal(
+    count(
+      pi,
+      "pi-smart-router: this session is in work scope, and openrouter/z-ai/glm-5.3 is outside it, so the prompt was not sent. Choose smart-router/auto or a work Codex model with /model, or run /smart-router scope personal.",
+    ),
+    1,
+  );
+  await pi.custom();
+  assert.equal(pi.selection(), "smart-router/auto");
+  assert.match(answered(pi), /^openai-codex-3\//);
+  assert.deepEqual(Object.keys(called(world.counts())), ["openai-codex-3"], "nothing reached the personal account or OpenRouter");
+});
+
+test("L7 one smart-router.level record per run; /smart-router was appends a correction", TIMEOUT, async (t) => {
+  const world = levelsWorld(t);
+  const pi = await world.start({ select: "smart-router/auto" });
+  // Run A: one record, which holds neither the prompt's text nor a digest of it.
+  world.jev.answer(JEV.medium);
+  await pi.prompt("Tidy the zebra notes");
+  assert.equal(runRecords(pi).length, 1);
+  const a = runRecords(pi)[0];
+  const ms = (a?.jev as { readonly ms?: unknown } | undefined)?.ms;
+  assert.equal(typeof a?.at, "number");
+  assert.equal(typeof ms, "number");
+  assert.deepEqual(a, {
+    v: 1,
+    at: a?.at,
+    scope: "personal",
+    source: "jev",
+    tier: "medium",
+    asked: "medium",
+    keyword: { signal: "default", reason: "triage:no_fast_path" },
+    jev: { model: JEV_MODEL, choice: "medium", probabilities: JEV.medium, confidence: 0.8, ms },
+    ref: PERSONAL.medium,
+  });
+  assert.equal(pi.ui.status(LEVEL_KEY), "personal MEDIUM → gpt-6.1-terra (jev 80%)");
+  // A command and a run without a level of its own add none, and that run shows no level.
+  await pi.command("status");
+  await pi.custom();
+  assert.equal(runRecords(pi).length, 1);
+  assert.equal(pi.ui.status(LEVEL_KEY), undefined);
+  // Run B, tagged.
+  await pi.prompt("Answer the zebra question #high");
+  assert.equal(runRecords(pi).length, 2);
+  const b = runRecords(pi)[1];
+  const tagged = { scope: "personal", source: "tag", tag: "high", tier: "high", ref: PERSONAL.high };
+  assert.deepEqual(fields(b, tagged), tagged);
+
+  // A correction after the run settled labels that run, and nothing is sent again.
+  const sent = world.refCounts();
+  await pi.command("was low");
+  assert.equal(notice(pi, /^pi-smart-router: recorded/), "pi-smart-router: recorded that the last run should have been LOW.");
+  const corrected = entriesOf(pi, LEVEL_ENTRY).at(-1);
+  assert.deepEqual(corrected, { v: 1, at: corrected?.at, scope: "personal", source: "correction", tier: "low", refers: b?.at });
+  assert.deepEqual(world.refCounts(), sent);
+
+  // A correction sent while a run streams labels the run in flight, before its own record exists.
+  world.jev.answer(JEV.super);
+  const slow = gate();
+  world.faux("openai-codex-2").respond(slow.step);
+  const run = pi.session.prompt("Summarize the zebra notes");
+  await reached(slow, run);
+  await pi.session.prompt("/smart-router was medium");
+  slow.release();
+  await run;
+  await pi.session.waitForIdle();
+  assert.equal(runRecords(pi).length, 3);
+  const c = runRecords(pi)[2];
+  const inFlight = { source: "jev", tier: "super", ref: PERSONAL.super };
+  assert.deepEqual(fields(c, inFlight), inFlight);
+  assert.deepEqual(
+    entriesOf(pi, LEVEL_ENTRY).map((entry) => [entry.source, entry.tier, entry.refers]),
+    [
+      ["jev", "medium", undefined],
+      ["tag", "high", undefined],
+      ["correction", "low", b?.at],
+      ["correction", "medium", c?.at],
+      ["jev", "super", undefined],
+    ],
+  );
+
+  // was reads the active branch: back before run C, the latest run on the branch is B.
+  await pi.session.navigateTree(userEntry(pi, 2), { summarize: false });
+  await pi.command("was super");
+  const branch = { source: "correction", tier: "super", refers: b?.at };
+  assert.deepEqual(fields(entriesOf(pi, LEVEL_ENTRY).at(-1), branch), branch);
+
+  // No record holds the prompts' text, or a digest of it.
+  const recorded = JSON.stringify(entriesOf(pi, LEVEL_ENTRY));
+  assert.doesNotMatch(recorded, /zebra/i);
+  assert.doesNotMatch(recorded, /[A-Za-z0-9+/]{43}=/);
+  // The footer's level item has its own key, smart-router-level, and the pin's key never carried text.
+  assert.deepEqual([...new Set(pi.ui.statusLog.filter((item) => item.text !== undefined).map((item) => item.key))], ["smart-router-level"]);
+  assert.equal(pi.ui.status(), undefined);
+});
+
+test("L8 the risky floor raises a Jev LOW to HIGH, and a tag overrides it", TIMEOUT, async (t) => {
+  const world = levelsWorld(t);
+  const pi = await world.start({ select: "smart-router/auto" });
+  const risky = "Unstage the generated files and git rm the build directory";
+  world.jev.answer(JEV.low);
+  await pi.prompt(risky);
+  assert.equal(answered(pi), PERSONAL.high);
+  assert.equal(pi.ui.status(LEVEL_KEY), "personal HIGH → gpt-6.1-sol (floor)");
+  const floor = { source: "floor", trigger: "destructive-git", asked: "low", tier: "high" };
+  assert.deepEqual(fields(runRecords(pi).at(-1), floor), floor);
+  assert.equal((runRecords(pi).at(-1)?.jev as { readonly choice?: unknown } | undefined)?.choice, "low", "Jev said LOW");
+  // Tagged, the same text goes where the tag says, down from HIGH at once.
+  await pi.prompt(`${risky} #low`);
+  assert.equal(answered(pi), PERSONAL.low);
+  assert.equal(pi.ui.status(LEVEL_KEY), "personal LOW → gpt-6-luna (tag)");
+  const tagged = { source: "tag", tag: "low", tier: "low", trigger: undefined };
+  assert.deepEqual(fields(runRecords(pi).at(-1), tagged), tagged);
+});
+
+test("L9 a version 1 roster keeps its history and status text byte-identical", TIMEOUT, async (t) => {
+  const world = new World(t);
+  const pi = await world.start({ select: "smart-router/auto" });
+  await pi.prompt(PROMPTS.complex);
+  await pi.prompt(PROMPTS.planning);
+  await pi.prompt(PROMPTS.plain);
+  const untimed = (text: string): string => text.replace(/\b\d\d:\d\d:\d\d\b/g, "<time>").replace(/loaded at \d\d:\d\d\b/, "loaded at <time>");
+  await pi.command("history");
+  assert.equal(
+    untimed(notice(pi, /routing decisions/)),
+    [
+      "pi-smart-router: the last 3 routing decisions, oldest first:",
+      "  <time> smart-router/auto user: engineer → cloud-a/m (signal:complex, triage:keyword_frontier)",
+      "  <time> smart-router/auto user: architect → codex-like/m (signal:planning, planning:plan-words)",
+      "  <time> smart-router/auto user: architect → codex-like/m (hold:sticky, triage:no_fast_path)",
+    ].join("\n"),
+  );
+  await pi.command("status");
+  assert.equal(
+    untimed(notice(pi, /^pi-smart-router status/)),
+    [
+      "pi-smart-router status",
+      `Roster: ${join(world.agentDir, "smart-router.json")}: valid, loaded at <time>`,
+      `Selection: smart-router/auto, thinking ${pi.session.thinkingLevel}`,
+      "Pin: off",
+      "Roles on this host, cheapest first:",
+      "  local (the local role): local-a/m ok",
+      "  worker: cloud-b/m ok",
+      "  coder: cloud-c/m ok",
+      "  engineer: cloud-a/m ok",
+      "  architect: codex-like/m ok",
+      "Routing: default worker, trivial worker, complex engineer, planning architect; fallback engineer → coder",
+      "Last decision: <time> smart-router/auto user: architect → codex-like/m (hold:sticky, triage:no_fast_path)",
+      "The pin covers the model only. Still able to send data off this machine: Pi's own /share, /export and /bug.",
+    ].join("\n"),
+  );
+  // A version 1 run has no level: no record, no scope entry, no footer item, and Jev is never asked,
+  // though Pi's registry holds a classifier.
+  assert.deepEqual(entriesOf(pi, LEVEL_ENTRY), []);
+  assert.deepEqual(entriesOf(pi, SCOPE_ENTRY), []);
+  assert.equal(pi.ui.statusLog.some((item) => item.key === "smart-router-level"), false);
+  assert.deepEqual(world.jev.calls, []);
+});
+
+test("1. under a version 2 roster, both models declare limits from every level of both scopes and the local role, whichever scope a session starts in", TIMEOUT, async (t) => {
+  const world = levelsWorld(t, {
+    fleet: levelsFleet({
+      // The smallest output budget is a personal level's, the smallest window a work level's.
+      [PERSONAL.low]: { contextWindow: 200_000, maxTokens: 32_000 },
+      [WORK.low]: { contextWindow: 100_000, maxTokens: 64_000 },
+      // A later candidate is no level's model while the one before it is available.
+      "openrouter/deepseek/deepseek-v4.1-flash-1017": { contextWindow: 50_000, maxTokens: 8_000 },
+    }),
+  });
+  const declared = (pi: Pi): unknown[][] =>
+    VIRTUAL_IDS.map((id) => {
+      const model = pi.model(`smart-router/${id}`);
+      return [id, model.contextWindow, model.maxTokens];
+    });
+  const expected = [
+    ["auto", 100_000, 32_000],
+    ["local", 262_144, 81_920],
+  ];
+  const pi = await world.start({ persisted: true, select: "smart-router/auto" });
+  assert.deepEqual(declared(pi), expected, "in a personal session");
+  await pi.command("scope work");
+  await pi.runtime.newSession();
+  await pi.command("scope");
+  assert.equal(notice(pi, /^pi-smart-router: scope/), "pi-smart-router: scope work (entry).");
+  assert.deepEqual(declared(pi), expected, "in a work session, by a fresh load of the router");
+  await pi.command("reload");
+  assert.doesNotMatch(notice(pi, /^pi-smart-router: reloaded/), /registered both models again/, "and reading the roster again changes nothing");
 });

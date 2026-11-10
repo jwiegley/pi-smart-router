@@ -71,7 +71,7 @@ import { coolFrom, Cooldowns, resolveContext } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
 import { boundedHistory, newRecord, planApplies, predict, requireBoundedHistory, routeOther, routeOwned } from "./route.ts";
 import type { BoundedHistory, LastInput, Pin, RouteInput, SessionRecord } from "./route.ts";
-import { autoRoles, parseRef, rosterFile, scopeSection, servesScope } from "./roster.ts";
+import { autoRoles, parseRef, rosterFile, SCOPES, scopeSection, servesScope } from "./roster.ts";
 import type { Roster, RosterV2, Scope, ScopedBinding } from "./roster.ts";
 import { readScope, scopeEntry, workDirectoryOf } from "./scope.ts";
 import type { ScopeEntryData, ScopeState, WorkDirectories } from "./scope.ts";
@@ -376,13 +376,20 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   };
 
   // auto declares the smallest window and output budget among the first available candidate of
-  // every role it can reach; local declares its first available candidate's.
+  // every role it can reach; local declares its first available candidate's. The limits are the
+  // process's, not the registering session's: under a version 2 roster, auto reaches every level
+  // role of both scopes, each resolved in its own scope, and the local role is resolved in each. A
+  // version 1 roster serves only personal scope, and resolves the same in either.
   const computeLimits = (ctx: ExtensionContext, value: Roster): Record<VirtualId, Limits> => {
-    const reach = contextFor(ctx, value, "auto", UNPINNED);
-    const auto = smallest([...autoRoles(value, reach.scope)].map((role) => pickInRole(reach, role, { fallback: false, code: "limits" })));
+    const scopes: readonly Scope[] = value.version === 2 ? SCOPES : ["personal"];
+    const picks = (id: VirtualId, roles: (scope: Scope) => Iterable<string>): Decision[] =>
+      scopes.flatMap((scope) => {
+        const rc = contextFor(ctx, value, id, UNPINNED, scope);
+        return [...roles(scope)].map((role) => pickInRole(rc, role, { fallback: false, code: "limits" }));
+      });
+    const auto = smallest(picks("auto", (scope) => autoRoles(value, scope)));
     const role = value.local?.role;
-    const local =
-      role === undefined ? DEFAULT_LIMITS : smallest([pickInRole(contextFor(ctx, value, "local", UNPINNED), role, { fallback: false, code: "limits" })]);
+    const local = role === undefined ? DEFAULT_LIMITS : smallest(picks("local", () => [role]));
     return { auto, local };
   };
 
