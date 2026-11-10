@@ -425,7 +425,7 @@ function randomCase(seed: number): Case {
         providers: some(["omlx-hera", "lan-box", "openrouter", "hermes", "openai-codex-3", "router"], 0.5),
         hosts: some(["hera.lan", "localhost", "127.0.0.1", "openrouter.ai", "chatgpt.com", "hera.tail1234.ts.net"], 0.5),
       };
-  const rc = resolveContext({ roster, catalog, labels, cooldowns, now, virtualId, localOnly, policy });
+  const rc = resolveContext({ roster, catalog, labels, cooldowns, now, virtualId, localOnly, policy, scope: "personal" });
   const lastResponder = chance(0.7)
     ? {
         ref: one([...POOL.map((entry) => entry.ref), "spare/model-0"]),
@@ -453,7 +453,7 @@ function assertSafeChoice(rc: ResolveContext, choice: Choice, where: string, pla
   assert.ok(rc.available.has(choice.ref) && rc.catalog.hasConfiguredAuth(choice.model), `${where}: unavailable`);
   assert.ok(checkAccount(choice.model.provider, roster, rc.labels).ok, `${where}: account`);
   if (role.name !== roster.local?.role) assert.equal(rc.cooldowns.until(choice.ref, rc.now), undefined, `${where}: cooling`);
-  if (rc.virtualId === "auto") assert.ok(autoRoles(roster).has(choice.role), `${where}: not routable by auto`);
+  if (rc.virtualId === "auto") assert.ok(autoRoles(roster, rc.scope).has(choice.role), `${where}: not routable by auto`);
   if (rc.localOnly) {
     if (plan) assert.equal(choice.role, roster.local?.role, `${where}: not the local role`);
     assert.ok(checkLocal(choice.model, rc.policy, true).ok, `${where}: outside the policy`);

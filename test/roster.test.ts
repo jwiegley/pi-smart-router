@@ -95,14 +95,14 @@ describe("John's rosters", () => {
     const roster = valid(HERA);
     assert.equal(roster.routing.fallback.get("engineer"), "coder");
     assert.ok(![roster.routing.default, roster.routing.trivial, roster.routing.complex, roster.routing.planning].includes("coder"));
-    assert.deepEqual([...autoRoles(roster)].sort(), ["architect", "coder", "engineer", "thinker", "worker"]);
+    assert.deepEqual([...autoRoles(roster, "personal")].sort(), ["architect", "coder", "engineer", "thinker", "worker"]);
     assert.ok(rankOf(roster, "coder") < rankOf(roster, "engineer"), "a session on the fallback climbs back to sol at once");
     assert.equal(rankOf(roster, "nope"), -1);
   });
 
   test("a role that neither routing nor any fallback names is not routable by auto", () => {
     const roster = valid(edited((r) => delete r.routing.fallback));
-    assert.deepEqual([...autoRoles(roster)].sort(), ["architect", "engineer", "worker"]);
+    assert.deepEqual([...autoRoles(roster, "personal")].sort(), ["architect", "engineer", "worker"]);
   });
 
   test("trivial, complex and planning default to routing.default", () => {

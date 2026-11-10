@@ -22,7 +22,8 @@
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { ModelRoute, ModelRouteReason, ModelRouteRequest } from "@earendil-works/pi-coding-agent";
 
-import { BUILTIN_EXCLUDES, VIRTUAL_API } from "./constants.ts";
+import { isCodexProvider, subscriptionKind } from "./accounts.ts";
+import { VIRTUAL_API } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { eligibleRole, NO_LOCAL_SECTION, noScopeSection, pickInRole } from "./decide.ts";
 import type { Choice, Decision, LastResponder, Plan } from "./decide.ts";
@@ -31,7 +32,7 @@ import { checkLocal } from "./local.ts";
 import type { LocalPolicy } from "./local.ts";
 import { coolFrom, failureKind, refOf, resolveCandidate } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
-import { autoRoles, excludedBy, roleOf, scopeSection } from "./roster.ts";
+import { autoRoles, excludedBy, excludesFor, isWorkBound, roleOf, scopeSection } from "./roster.ts";
 
 /** A session's pin as routing sees it. */
 export interface Pin {
@@ -109,12 +110,12 @@ const previousRef = (request: ModelRouteRequest): string | undefined =>
 
 /**
  * The default role, or the local role while local-only, and its fallback when not local-only.
- * Version 2's default is the personal scope's medium level.
+ * Version 2's default is the medium level of the session's scope.
  */
 function byDefault(rc: ResolveContext, code: string): Decision {
   const { roster } = rc;
-  const role = rc.localOnly ? roster.local?.role : roster.version === 1 ? roster.routing.default : scopeSection(roster, "personal")?.levels.medium.role;
-  if (role === undefined) return { ok: false, attempts: [], problem: rc.localOnly ? NO_LOCAL_SECTION : noScopeSection("personal") };
+  const role = rc.localOnly ? roster.local?.role : roster.version === 1 ? roster.routing.default : scopeSection(roster, rc.scope)?.levels.medium.role;
+  if (role === undefined) return { ok: false, attempts: [], problem: rc.localOnly ? NO_LOCAL_SECTION : noScopeSection(rc.scope) };
   return pickInRole(rc, role, { fallback: !rc.localOnly, code });
 }
 
@@ -182,25 +183,43 @@ function fromPlan(rc: ResolveContext, plan: Plan): Decision {
   return pickInRole(rc, plan.role, { fallback: !rc.localOnly, code: plan.code });
 }
 
+/**
+ * How a pick's provider breaks a version 2 session's scope, if it does. A personal session never
+ * sends to a work-bound account. A work session sends only to the work-bound Codex account, except
+ * that a local-only request keeps the pin's rules, checked after this one: a local model, which
+ * has no account.
+ */
+function outsideScope(rc: ResolveContext, provider: string): string | undefined {
+  const { roster } = rc;
+  if (roster.version !== 2) return undefined;
+  const workBound = isWorkBound(roster, provider);
+  if (rc.scope === "personal") return workBound ? "is on a work-bound account, and this session is in personal scope" : undefined;
+  if ((workBound && isCodexProvider(provider)) || (rc.localOnly && subscriptionKind(provider) === undefined)) return undefined;
+  return "is not on a work-bound Codex account, and this session is in work scope";
+}
+
 /** The router's own invariants, checked on every pick before it is returned. */
 export function assertSafe(id: VirtualId, rc: ResolveContext, choice: Choice): void {
   const { roster } = rc;
+  const outside = outsideScope(rc, choice.model.provider);
   const problem =
-    excludedBy([...BUILTIN_EXCLUDES, ...roster.exclude], choice.ref) !== undefined
+    excludedBy(excludesFor(roster, rc.scope, choice.ref), choice.ref) !== undefined
       ? "is excluded"
       : choice.model.api === VIRTUAL_API
         ? "is a virtual model"
         : refOf(choice.model) !== choice.ref
           ? "is not the catalog entry of that name"
-          : roleOf(roster, choice.ref)?.name !== choice.role
-            ? `is not in the role ${choice.role}`
-            : rc.virtualId === "auto" && !autoRoles(roster).has(choice.role)
-              ? "is in a role smart-router/auto never routes to"
-              : rc.localOnly && choice.role !== roster.local?.role
-                ? "is not in the local role"
-                : rc.localOnly && !checkLocal(choice.model, rc.policy, true).ok
-                  ? "is outside the local policy"
-                  : undefined;
+          : outside !== undefined
+            ? outside
+            : roleOf(roster, choice.ref)?.name !== choice.role
+              ? `is not in the role ${choice.role}`
+              : rc.virtualId === "auto" && !autoRoles(roster, rc.scope).has(choice.role)
+                ? "is in a role smart-router/auto never routes to"
+                : rc.localOnly && choice.role !== roster.local?.role
+                  ? "is not in the local role"
+                  : rc.localOnly && !checkLocal(choice.model, rc.policy, true).ok
+                    ? "is outside the local policy"
+                    : undefined;
   if (problem !== undefined) throw invariant(id, choice.ref, problem);
 }
 

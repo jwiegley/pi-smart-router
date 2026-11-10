@@ -138,7 +138,7 @@ export const HERA_LABELS = labelsOf([
 
 export const NOW = Date.UTC(2026, 10, 8, 14, 0, 0);
 
-/** A resolver context over Hera's roster and catalog, with any part replaced. */
+/** A resolver context over Hera's roster and catalog, in personal scope, with any part replaced. */
 export function heraContext(overrides: Partial<Omit<ResolveContext, "available">> = {}): ResolveContext {
   const roster = overrides.roster ?? rosterFixture("roster-hera.json");
   const virtualId: VirtualId = overrides.virtualId ?? "auto";
@@ -151,6 +151,7 @@ export function heraContext(overrides: Partial<Omit<ResolveContext, "available">
     virtualId,
     localOnly: virtualId === "local",
     policy: policyFromRoster(roster),
+    scope: "personal",
     ...overrides,
   });
 }

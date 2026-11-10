@@ -139,10 +139,10 @@ function price(model: Model<Api> | undefined): string {
 }
 
 function roleLines(host: CommandHost, ctx: ExtensionContext, roster: Roster, pin: PinReading): string[] {
-  const reached = autoRoles(roster);
   const localRole = roster.local?.role;
   const auto = host.resolver(ctx, roster, "auto", UNPINNED);
   const local = host.resolver(ctx, roster, "local", pin);
+  const reached = autoRoles(roster, auto.scope);
   return roster.roles.map((role) => {
     const rc = role.name === localRole ? local : auto;
     const tags = [

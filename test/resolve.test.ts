@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import test, { describe } from "node:test";
 
+import type { VirtualId } from "../src/constants.ts";
 import { EMPTY_POLICY, policyFromRoster } from "../src/local.ts";
 import { clock, coolFrom, Cooldowns, failureKind, resolveCandidate, resolveContext } from "../src/resolve.ts";
 import type { FailedResponse, Resolution, ResolveContext } from "../src/resolve.ts";
-import type { Roster } from "../src/roster.ts";
+import { SCOPES } from "../src/roster.ts";
+import type { Roster, Scope } from "../src/roster.ts";
 import {
   ASTRA,
   DEEPSEEK,
@@ -12,6 +14,7 @@ import {
   GLM,
   GLM_CLOUD,
   HERA_LABELS,
+  HERA_LAN,
   heraContext,
   heraModels,
   KIMI,
@@ -19,12 +22,15 @@ import {
   model,
   NATIVE_SOL,
   NOW,
+  OPENROUTER,
   rosterFixture,
+  rosterFixtureV2,
   SOL,
   WORK_SOL,
 } from "./support/catalog.ts";
 
 const HERA = rosterFixture("roster-hera.json");
+const HERA_V2 = rosterFixtureV2("roster-hera-v2.json");
 
 function refused(resolution: Resolution, reason: string | RegExp, detail?: RegExp): void {
   assert.equal(resolution.ok, false, JSON.stringify(resolution));
@@ -181,6 +187,51 @@ describe("each reason, in order", () => {
     refused(resolveCandidate(SOL, contextWith(catalog, { cooldowns, localOnly: true, labels: labelsOf([]) })), "account");
     refused(resolveCandidate(SOL, contextWith(catalog, { cooldowns, localOnly: true })), /^cooling-until-/);
     refused(resolveCandidate(SOL, contextWith(catalog, { localOnly: true })), "not-local");
+  });
+});
+
+describe("a version 2 roster resolves within the session's scope", () => {
+  const work = (overrides: Partial<Omit<ResolveContext, "available">> = {}): ResolveContext => heraContext({ roster: HERA_V2, scope: "work", ...overrides });
+  const personal = (overrides: Partial<Omit<ResolveContext, "available">> = {}): ResolveContext => heraContext({ roster: HERA_V2, scope: "personal", ...overrides });
+
+  test("the work alias resolves in work scope and is excluded in personal scope", () => {
+    resolves(resolveCandidate(WORK_SOL, work()));
+    refused(resolveCandidate(WORK_SOL, personal()), /^excluded/, /^excluded by openai-codex-3\/\*$/);
+  });
+
+  test("a personal level's models resolve in personal scope and never in work scope", () => {
+    resolves(resolveCandidate(GLM_CLOUD, personal()));
+    resolves(resolveCandidate(SOL, personal()));
+    refused(resolveCandidate(SOL, work()), "account", /^the roster binds openai-codex-2 to the personal scope, but this session is in the work scope$/);
+    refused(resolveCandidate(GLM_CLOUD, work()), "not-routable-by-auto", /^its role high is not one of the work scope's level roles, so smart-router\/auto never routes to it$/);
+  });
+
+  test("auto's refusal names the session scope's level roles, and version 1 keeps its words", () => {
+    refused(resolveCandidate(GLM, personal()), "not-routable-by-auto", /^its role local is not one of the personal scope's level roles, so smart-router\/auto never routes to it$/);
+    refused(resolveCandidate(GLM, heraContext()), "not-routable-by-auto", /^its role local is neither a routing target nor a fallback, so smart-router\/auto never routes to it$/);
+    const stray = new FakeCatalog([...heraModels(), model("openrouter/other/model")]);
+    refused(resolveCandidate("openrouter/other/model", contextWith(stray, { roster: HERA_V2 })), "not-routable-by-auto", /^it is in no role, so smart-router\/auto never routes to it$/);
+  });
+
+  test("a local-only request in work scope still reaches the local role", () => {
+    resolves(resolveCandidate(GLM, work({ virtualId: "local" })));
+  });
+
+  test("of all the roster's models, auto reaches only the work account's in work scope, and never them in personal scope", () => {
+    const refs = HERA_V2.roles.flatMap((role) => role.models);
+    const catalog = new FakeCatalog(refs.map((ref) => model(ref, { baseUrl: ref === GLM ? HERA_LAN : OPENROUTER })));
+    const reached = (scope: Scope, virtualId: VirtualId): string[] => refs.filter((ref) => resolveCandidate(ref, contextWith(catalog, { roster: HERA_V2, scope, virtualId })).ok);
+    assert.deepEqual(reached("work", "auto"), ["openai-codex-3/gpt-6-luna", "openai-codex-3/gpt-6.1-terra", "openai-codex-3/gpt-6.1-sol", "openai-codex-3/gpt-6-astra"]);
+    assert.deepEqual(reached("personal", "auto"), refs.filter((ref) => ref !== GLM && !ref.startsWith("openai-codex-3/")));
+    for (const scope of SCOPES) assert.deepEqual(reached(scope, "local"), [GLM], scope);
+  });
+
+  test("a version 1 roster ignores the scope", () => {
+    for (const virtualId of ["auto", "local"] as const) {
+      for (const ref of [DEEPSEEK, KIMI, GLM_CLOUD, SOL, ASTRA, WORK_SOL, NATIVE_SOL, GLM, "hermes/agent", "smart-router/auto"]) {
+        assert.deepEqual(resolveCandidate(ref, heraContext({ virtualId, scope: "work" })), resolveCandidate(ref, heraContext({ virtualId, scope: "personal" })), `${virtualId} ${ref}`);
+      }
+    }
   });
 });
 

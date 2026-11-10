@@ -5,6 +5,9 @@
 //   cooling-until-HH:MM, not-routable-by-auto (smart-router/auto only),
 //   not-local (local-only requests only).
 //
+// A version 2 roster resolves within the session's scope: the exclusions, the account bindings and
+// the roles auto reaches are that scope's. Version 1 ignores the scope.
+//
 // Also the cooldowns: in memory, per router instance, and fed only by the owner session's own
 // error responses. A usage-limit or authentication error cools its model; a content-filter
 // refusal never does, and neither does any error from a local-role model.
@@ -12,14 +15,14 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 
 import { checkAccount } from "./accounts.ts";
 import type { Labels } from "./accounts.ts";
-import { BUILTIN_EXCLUDES, PROVIDER, VIRTUAL_API } from "./constants.ts";
+import { PROVIDER, VIRTUAL_API } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { PIN_POLICY_CHANGED } from "./errors.ts";
 import type { Loaded } from "./files.ts";
 import { checkLocal, policyFromRoster } from "./local.ts";
 import type { LocalPolicy } from "./local.ts";
-import { autoRoles, excludedBy, parseRef, roleOf } from "./roster.ts";
-import type { Roster } from "./roster.ts";
+import { autoRoles, excludedBy, excludesFor, parseRef, roleOf } from "./roster.ts";
+import type { Roster, Scope } from "./roster.ts";
 
 /** The catalog reads the resolver makes. Pi's ModelRegistry (`ctx.modelRegistry`) has them. */
 export interface Catalog {
@@ -56,6 +59,8 @@ export interface ResolveContext {
   readonly policy: LocalPolicy;
   /** Whether `policy` is a pin's, recorded when John pinned, rather than the roster's own. */
   readonly pinned?: boolean | undefined;
+  /** The session's scope, which a version 2 roster resolves within. */
+  readonly scope: Scope;
 }
 
 export const refOf = (model: { readonly provider: string; readonly id: string }): string => `${model.provider}/${model.id}`;
@@ -77,7 +82,7 @@ export function inLocalRole(roster: Roster, ref: string): boolean {
 
 export function resolveCandidate(ref: string, rc: ResolveContext): Resolution {
   const refuse = (reason: string, detail: string): Resolution => ({ ok: false, ref, reason, detail });
-  const pattern = excludedBy([...BUILTIN_EXCLUDES, ...rc.roster.exclude], ref);
+  const pattern = excludedBy(excludesFor(rc.roster, rc.scope, ref), ref);
   if (pattern !== undefined) return refuse("excluded", `excluded by ${pattern}`);
   const parsed = parseRef(ref);
   const model = parsed === undefined ? undefined : rc.catalog.find(parsed.provider, parsed.id);
@@ -86,7 +91,7 @@ export function resolveCandidate(ref: string, rc: ResolveContext): Resolution {
   if (model.api === VIRTUAL_API) return refuse("virtual", "a virtual model");
   if (!rc.available.has(ref)) return refuse("not-available", "not among the available models");
   if (!rc.catalog.hasConfiguredAuth(model)) return refuse("no-credentials", "its provider has no credentials");
-  const account = checkAccount(parsed.provider, rc.roster, rc.labels);
+  const account = checkAccount(parsed.provider, rc.roster, rc.labels, rc.scope);
   if (!account.ok) return refuse("account", account.reason);
   if (!inLocalRole(rc.roster, ref)) {
     const until = rc.cooldowns.until(ref, rc.now);
@@ -96,8 +101,14 @@ export function resolveCandidate(ref: string, rc: ResolveContext): Resolution {
   }
   if (rc.virtualId === "auto") {
     const role = roleOf(rc.roster, ref);
-    if (role === undefined || !autoRoles(rc.roster).has(role.name)) {
-      return refuse("not-routable-by-auto", `${role === undefined ? "it is in no role" : `its role ${role.name} is neither a routing target nor a fallback`}, so smart-router/auto never routes to it`);
+    if (role === undefined || !autoRoles(rc.roster, rc.scope).has(role.name)) {
+      const why =
+        role === undefined
+          ? "it is in no role"
+          : rc.roster.version === 1
+            ? `its role ${role.name} is neither a routing target nor a fallback`
+            : `its role ${role.name} is not one of the ${rc.scope} scope's level roles`;
+      return refuse("not-routable-by-auto", `${why}, so smart-router/auto never routes to it`);
     }
   }
   if (rc.localOnly) {

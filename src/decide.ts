@@ -130,7 +130,7 @@ export function eligibleRole(rc: ResolveContext, ref: string): string | undefine
   const role = roleOf(rc.roster, ref)?.name;
   if (role === undefined) return undefined;
   if (rc.localOnly) return role === rc.roster.local?.role ? role : undefined;
-  if (rc.virtualId === "auto" && !autoRoles(rc.roster).has(role)) return undefined;
+  if (rc.virtualId === "auto" && !autoRoles(rc.roster, rc.scope).has(role)) return undefined;
   return role;
 }
 

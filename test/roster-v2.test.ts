@@ -3,7 +3,7 @@ import test, { describe } from "node:test";
 
 import { isCodexProvider } from "../src/accounts.ts";
 import { BUILTIN_EXCLUDES } from "../src/constants.ts";
-import { autoRoles, excludedBy, isWorkBound, liftWorkAlias, parseRoster, SCOPES, scopeSection } from "../src/roster.ts";
+import { autoRoles, excludedBy, excludesFor, isWorkBound, liftWorkAlias, parseRoster, SCOPES, scopeSection } from "../src/roster.ts";
 import type { RosterV2, ScopedBinding } from "../src/roster.ts";
 import { rosterFixture, rosterFixtureV2 } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
@@ -148,9 +148,27 @@ describe("reading a roster's scopes and bindings", () => {
     for (const provider of others) assert.equal(isCodexProvider(provider), false, provider);
   });
 
-  test("auto reaches every level role of every scope, and never the local role", () => {
-    assert.deepEqual([...autoRoles(rosterFixtureV2("roster-hera-v2.json"))].sort(), ["high", "low", "medium", "super", "work-high", "work-low", "work-medium", "work-super"]);
-    assert.deepEqual([...autoRoles(rosterFixtureV2("roster-work.json"))].sort(), ["work-high", "work-low", "work-medium", "work-super"]);
+  test("auto reaches the session scope's level roles, none without that scope, and never the local role", () => {
+    const hera = rosterFixtureV2("roster-hera-v2.json");
+    assert.deepEqual([...autoRoles(hera, "personal")], ["low", "medium", "high", "super"]);
+    assert.deepEqual([...autoRoles(hera, "work")], ["work-low", "work-medium", "work-high", "work-super"]);
+    const work = rosterFixtureV2("roster-work.json");
+    assert.deepEqual([...autoRoles(work, "work")], ["work-low", "work-medium", "work-high", "work-super"]);
+    assert.deepEqual([...autoRoles(work, "personal")], [], "the work roster has no personal scope");
+    const v1 = rosterFixture("roster-hera.json");
+    assert.deepEqual([...autoRoles(v1, "work")], [...autoRoles(v1, "personal")], "version 1 ignores the scope");
+  });
+
+  test("excludesFor lifts the work alias from the merged exclusions only in a version 2 work-scope session", () => {
+    const hera = rosterFixtureV2("roster-hera-v2.json");
+    const merged = [...BUILTIN_EXCLUDES, ...hera.exclude];
+    assert.deepEqual(excludesFor(hera, "personal", "openai-codex-3/gpt-6.1-sol"), merged);
+    assert.deepEqual(excludesFor(hera, "work", "openai-codex-3/gpt-6.1-sol"), merged.filter((pattern) => pattern !== "openai-codex-3/*"));
+    assert.deepEqual(excludesFor(hera, "work", "openai-codex-2/gpt-6.1-sol"), merged, "a personal level's ref");
+    const own = { ...hera, exclude: [...hera.exclude, "openai-codex-3/gpt-6.1-sol"] };
+    assert.equal(excludedBy(excludesFor(own, "work", "openai-codex-3/gpt-6.1-sol"), "openai-codex-3/gpt-6.1-sol"), "openai-codex-3/gpt-6.1-sol", "the roster's own exclusions stay in force");
+    const v1 = rosterFixture("roster-hera.json");
+    for (const scope of SCOPES) assert.deepEqual(excludesFor(v1, scope, "openai-codex-3/gpt-6.1-sol"), [...BUILTIN_EXCLUDES, ...v1.exclude], scope);
   });
 
   test("liftWorkAlias lifts openai-codex-3/* only for a work-bound provider's ref in a work level's role", () => {

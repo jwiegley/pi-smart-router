@@ -155,6 +155,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       localOnly: id === "local" || pin.on,
       policy: pin.on ? pin.policy : policyFromRoster(value),
       pinned: pin.on,
+      // Sessions carry no scope of their own yet, so every one resolves in personal scope.
+      scope: "personal",
     });
 
   /** Every roster load passes here, so the environment switch latches the first valid one's local policy. */
@@ -183,7 +185,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   // every role it can reach; local declares its first available candidate's.
   const computeLimits = (ctx: ExtensionContext, value: Roster): Record<VirtualId, Limits> => {
     const reach = contextFor(ctx, value, "auto", UNPINNED);
-    const auto = smallest([...autoRoles(value)].map((role) => pickInRole(reach, role, { fallback: false, code: "limits" })));
+    const auto = smallest([...autoRoles(value, reach.scope)].map((role) => pickInRole(reach, role, { fallback: false, code: "limits" })));
     const role = value.local?.role;
     const local =
       role === undefined ? DEFAULT_LIMITS : smallest([pickInRole(contextFor(ctx, value, "local", UNPINNED), role, { fallback: false, code: "limits" })]);

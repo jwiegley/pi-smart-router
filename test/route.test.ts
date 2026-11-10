@@ -4,11 +4,14 @@ import { join } from "node:path";
 import test, { afterEach, beforeEach, describe } from "node:test";
 
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
+import type { Api, Model } from "@earendil-works/pi-ai";
 
+import type { Choice } from "../src/decide.ts";
 import { policyFromRoster } from "../src/local.ts";
 import { assertSafe, newRecord, predict } from "../src/route.ts";
 import {
   ASTRA,
+  CHATGPT,
   DEEPSEEK,
   FakeCatalog,
   GLM,
@@ -18,6 +21,7 @@ import {
   heraModels,
   KIMI,
   model,
+  NATIVE_SOL,
   NOW,
   OPENROUTER,
   rosterFixture,
@@ -33,6 +37,9 @@ const SID = "session-1";
 const PLANNING = "plan the migration to the new store";
 const TRIVIAL = "Format this file";
 const HERA = rosterFixture("roster-hera.json");
+
+/** A Codex model, as Hera's catalog lists them. */
+const codex = (ref: string): Model<Api> => model(ref, { api: "openai-codex-responses", baseUrl: CHATGPT, contextWindow: 272_000, maxTokens: 128_000 });
 
 beforeEach(resetSlot);
 afterEach(resetSlot);
@@ -453,6 +460,54 @@ describe("the final assertions", () => {
     for (const [name, context, choice, pattern] of cases) refuses(() => assertSafe(context.virtualId, context, choice), pattern, name);
     refuses(() => assertSafe("local", heraContext({ virtualId: "local" }), safe), /which is not in the local role; this is a bug in pi-smart-router/);
   });
+
+  test("a version 1 roster ignores the scope", () => {
+    const work = heraContext({ scope: "work" });
+    const deepseek = work.catalog.find("openrouter", "deepseek/deepseek-v4.1-flash-1017");
+    assert.ok(deepseek !== undefined);
+    assertSafe("auto", work, { role: "worker", ref: DEEPSEEK, model: deepseek, code: "t" });
+    assertSafe("auto", work, { role: "engineer", ref: SOL, model: model(SOL), code: "t" });
+    refuses(() => assertSafe("auto", work, { role: "engineer", ref: WORK_SOL, model: model(WORK_SOL), code: "t" }), /openai-codex-3\/gpt-6\.1-sol, which is excluded/);
+  });
+});
+
+describe("a version 2 session's scope in the final assertions", () => {
+  const HERA_V2 = rosterFixtureV2("roster-hera-v2.json");
+  const pick = (role: string, ref: string): Choice => ({ role, ref, model: model(ref), code: "t" });
+
+  test("a work-scope pick must be the work-bound Codex account's", () => {
+    const work = heraContext({ roster: HERA_V2, scope: "work" });
+    assertSafe("auto", work, pick("work-high", WORK_SOL));
+    refuses(
+      () => assertSafe("auto", work, pick("high", GLM_CLOUD)),
+      /^smart-router\/auto: the router picked openrouter\/z-ai\/glm-5\.3, which is not on a work-bound Codex account, and this session is in work scope; this is a bug in pi-smart-router\./,
+    );
+    refuses(() => assertSafe("auto", work, pick("high", SOL)), /openai-codex-2\/gpt-6\.1-sol, which is not on a work-bound Codex account, and this session is in work scope;/);
+    // A work-bound account that is not Codex, in a work level, as if validation had been bypassed.
+    const claude = "anthropic-2/claude-opus";
+    const anthropic = {
+      ...HERA_V2,
+      roles: HERA_V2.roles.map((role) => (role.name === "work-high" ? { ...role, models: [...role.models, claude] } : role)),
+      accounts: new Map([...HERA_V2.accounts, ["anthropic-2", { kind: "multi-pass", label: "work", scope: "work" } as const]]),
+    };
+    refuses(() => assertSafe("auto", heraContext({ roster: anthropic, scope: "work" }), pick("work-high", claude)), /anthropic-2\/claude-opus, which is not on a work-bound Codex account/);
+  });
+
+  test("a personal-scope pick is never on a work-bound account", () => {
+    const personal = heraContext({ roster: HERA_V2, scope: "personal" });
+    assertSafe("auto", personal, pick("high", SOL));
+    assertSafe("auto", personal, pick("high", GLM_CLOUD));
+    refuses(() => assertSafe("auto", personal, pick("work-high", WORK_SOL)), /openai-codex-3\/gpt-6\.1-sol, which is excluded/);
+    const workOnly = heraContext({ roster: rosterFixtureV2("roster-work.json"), scope: "personal" });
+    refuses(() => assertSafe("auto", workOnly, pick("work-high", NATIVE_SOL)), /openai-codex\/gpt-6\.1-sol, which is on a work-bound account, and this session is in personal scope;/);
+  });
+
+  test("a local-only request in work scope keeps the pin's rules: the local role, and never an account", () => {
+    const local = heraContext({ roster: HERA_V2, scope: "work", virtualId: "local" });
+    assertSafe("local", local, { role: "local", ref: GLM, model: model(GLM, { baseUrl: HERA_LAN }), code: "t" });
+    refuses(() => assertSafe("local", local, pick("high", SOL)), /openai-codex-2\/gpt-6\.1-sol, which is not on a work-bound Codex account, and this session is in work scope;/);
+    refuses(() => assertSafe("local", local, pick("high", GLM_CLOUD)), /openrouter\/z-ai\/glm-5\.3, which is not in the local role;/);
+  });
 });
 
 describe("a version 2 roster's default role", () => {
@@ -465,5 +520,40 @@ describe("a version 2 roster's default role", () => {
       attempts: [],
       problem: "the roster has no personal scope",
     });
+  });
+
+  test("is the session scope's medium level, and without that scope there is none", () => {
+    const catalog = new FakeCatalog([...heraModels(), codex("openai-codex-3/gpt-6.1-terra"), codex("openai-codex/gpt-6.1-terra")]);
+    const hera = predict(heraContext({ roster: rosterFixtureV2("roster-hera-v2.json"), scope: "work", catalog }), newRecord());
+    assert.ok(hera.ok, JSON.stringify(hera));
+    assert.deepEqual([hera.choice.role, hera.choice.ref, hera.choice.code], ["work-medium", "openai-codex-3/gpt-6.1-terra", "stick:default"]);
+    const work = predict(heraContext({ roster: rosterFixtureV2("roster-work.json"), scope: "work", catalog }), newRecord());
+    assert.ok(work.ok, JSON.stringify(work));
+    assert.deepEqual([work.choice.role, work.choice.ref], ["work-medium", "openai-codex/gpt-6.1-terra"]);
+    const v2 = rosterFixtureV2("roster-hera-v2.json");
+    const { work: _work, ...personalScope } = v2.scopes;
+    assert.deepEqual(predict(heraContext({ roster: { ...v2, scopes: personalScope }, scope: "work", catalog }), newRecord()), {
+      ok: false,
+      attempts: [],
+      problem: "the roster has no work scope",
+    });
+  });
+
+  test("a continuation holds the last responder only when the session's scope reaches it", () => {
+    const hera = rosterFixtureV2("roster-hera-v2.json");
+    const record = { ...newRecord(), last: { ref: WORK_SOL, at: NOW } };
+    const work = predict(heraContext({ roster: hera, scope: "work" }), record);
+    assert.ok(work.ok, JSON.stringify(work));
+    assert.deepEqual([work.choice.role, work.choice.ref, work.choice.code], ["work-high", WORK_SOL, "stick:last"]);
+    const personal = predict(heraContext({ roster: hera, scope: "personal" }), record);
+    assert.ok(personal.ok, JSON.stringify(personal));
+    assert.deepEqual([personal.choice.role, personal.choice.ref, personal.choice.code], ["medium", DEEPSEEK, "stick:default"]);
+  });
+
+  test("a direct request without a plan in personal scope routes to the medium level's first candidate", async (t) => {
+    const runtime = new FakeRuntime(new FakeCatalog([...heraModels(), codex("openai-codex-2/gpt-6.1-terra")]));
+    const loaded = await start({ dir: agentDir(t, { roster: fixture("roster-hera-v2.json") }), runtime });
+    assert.equal(routed(loaded.runtime.route("auto", request("direct"))), "openai-codex-2/gpt-6.1-terra");
+    assert.equal(lastHistory(loaded)?.code, "direct:default");
   });
 });

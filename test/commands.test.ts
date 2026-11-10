@@ -166,7 +166,9 @@ describe("status", () => {
     const lines = message.split("\n");
     assert.ok(lines.includes("Roles on this host, cheapest first:"), message);
     assert.ok(lines.includes("Accounts:"), message);
-    assert.ok(lines.some((line) => line.startsWith("  work-super: openai-codex-3/gpt-6-astra ")), message);
+    // The session is in personal scope, so auto reaches only the personal levels.
+    assert.ok(lines.includes(`  super: ${ASTRA} ok, ${KIMI} ok`), message);
+    assert.ok(lines.includes("  work-super (smart-router/auto never routes here): openai-codex-3/gpt-6-astra excluded"), message);
     assert.deepEqual(
       lines.filter((line) => line.startsWith("Routing:") || line.startsWith("Warning:")),
       [],

@@ -177,12 +177,23 @@ export function liftWorkAlias(roster: Pick<RosterV2, "accounts" | "roles" | "sco
 }
 
 /**
- * The roles `smart-router/auto` may route to. Version 1: routing targets and fallback targets; a
- * role that neither names, such as a local role kept for smart-router/local, is never routed by
- * auto. Version 2: the level roles of every scope.
+ * The exclusions that apply to a ref in a session's scope: the built-ins and the roster's own. A
+ * version 2 work-scope session lifts openai-codex-3/* from them for a work level's work-bound ref
+ * (liftWorkAlias); every other session, and version 1, keeps them all.
  */
-export function autoRoles(roster: Roster): ReadonlySet<string> {
-  if (roster.version === 2) return new Set(SCOPES.flatMap((scope) => levelRoles(scopeSection(roster, scope))));
+export function excludesFor(roster: Roster, scope: Scope, ref: string): readonly string[] {
+  const merged = [...BUILTIN_EXCLUDES, ...roster.exclude];
+  return roster.version === 2 && scope === "work" ? liftWorkAlias(roster, ref, merged) : merged;
+}
+
+/**
+ * The roles `smart-router/auto` may route to in a session's scope. Version 1 ignores the scope:
+ * routing targets and fallback targets; a role that neither names, such as a local role kept for
+ * smart-router/local, is never routed by auto. Version 2: the scope's four level roles, none when
+ * the roster has no section for that scope.
+ */
+export function autoRoles(roster: Roster, scope: Scope): ReadonlySet<string> {
+  if (roster.version === 2) return new Set(levelRoles(scopeSection(roster, scope)));
   const { routing } = roster;
   return new Set([routing.default, routing.trivial, routing.complex, routing.planning, ...routing.fallback.values()]);
 }
