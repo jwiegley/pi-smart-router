@@ -1004,6 +1004,28 @@ git commit -S -m "Add the four-level Jev design and its implementation plan"
 **Controller rulings (pre-flight, binding; they amend this task):**
 - When the latest level record is itself a correction, `/smart-router was` refers to the run that
   correction named (its `refers`), not to the correction.
+- (Rulings after Tasks 4, 5, 7 and 8, all binding)
+  - Records hold no prompt text and no digest. Never record `planDigest`, `PendingLevel.digest`,
+    `lastInput.digest` or the router's set of remembered digests. A resend that reuses a tagged
+    original's level carries `jev: undefined`; record it as the brief does for that case.
+  - `/smart-router scope status`, the work-to-personal confirmation and status all read the scope
+    through `scopeOf`, which knows the work directories. A `directory` source counts as work scope,
+    and the answer shows the source, for example `scope work (directory)`.
+  - Status shows when a latched process's roster has no work scope, and auto therefore refuses. The
+    spec asks for a notice, and status is where it is visible.
+  - Status's account lines (`src/commands.ts`, about `:183`) take the session's scope, so a
+    work-bound alias is not called a refused label in work scope. Correct the comments that
+    overstate the work-label exception: `src/accounts.ts:3-5` and `src/constants.ts:48-49`.
+  - `/smart-router scope personal` clears a work lock, after its confirmation. Under the latch it is
+    refused, as the brief says.
+  - In work scope, `/smart-router local off` switches the selection to `smart-router/auto` through
+    `guards.switchToAuto`. Its answer does not say that the next requests may go to cloud models;
+    it says they go to the work account.
+  - The lock lines of status and local status show only a lock the guards still honour: the lock of
+    the policy now in force, worded for that policy.
+  - In work scope, refusal texts don't suggest choosing a model with `/model`, because the work
+    guard reverts any choice outside the work account. Suggest `smart-router/auto` or the work
+    account instead.
 
 ### Task 10: Declared limits and the behaviour suite
 
