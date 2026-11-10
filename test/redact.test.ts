@@ -148,6 +148,18 @@ describe("redact", () => {
   test("ends an unclosed quote at the next whitespace", () => {
     const text = "Fix the bug: the token: 'it never refreshes and I want to investigate the retry loop";
     assert.equal(redact(text), `Fix the bug: the token: ${REDACTED} never refreshes and I want to investigate the retry loop`);
+    assert.equal(redact("--token 'abc def"), `--token ${REDACTED} def`);
+  });
+
+  test("ends a quoted value only at a quote that no word follows", () => {
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      ["masterkey: 'it is in the vault and the user's copy is stale", `masterkey: ${REDACTED} is in the vault and the user's copy is stale`],
+      ["authorization = 'it never works when the user's token expires, why", `authorization = ${REDACTED} never works when the user's token expires, why`],
+      ['the password: "it fails when I click "save" in the dialog', `the password: ${REDACTED} fails when I click "save" in the dialog`],
+      ["the --token 'refresh logic breaks when the user's session ends", `the --token ${REDACTED} logic breaks when the user's session ends`],
+      ['the --token "it fails when I click "save" in the dialog', `the --token ${REDACTED} fails when I click "save" in the dialog`],
+    ];
+    for (const [input, want] of cases) assert.equal(redact(input), want);
   });
 
   test("hides escaped quotes and an Authorization name", () => {
@@ -159,6 +171,22 @@ describe("redact", () => {
     for (const [input, secret] of cases) {
       const out = redact(input);
       assert.ok(out.includes(REDACTED) && !out.includes(secret), out);
+    }
+    assert.equal(redact('{\\"password\\": \\"hunter 2\\"}'), `{\\"password\\": ${REDACTED}}`);
+  });
+
+  test("hides the whole Authorization credential when it holds a JSON escape", () => {
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      ['{"Authorization":"Basic dXNlcjpw\\/YXNzd29yZA=="}', "YXNzd29yZA"],
+      ['{"headers":{"Authorization":"Bearer q8Zt1rLm\\/9XaQwE3rT"}}', "9XaQwE3rT"],
+      ['{"Authorization":"Basic dXNlcjpwYXNz\\u002Bd29yZA=="}', "d29yZA"],
+      ["Authorization: Basic dXNlcjpw\\/YXNzd29yZA==", "YXNzd29yZA"],
+      ['curl -H "Authorization: Bearer abc\\/def123XYZ"', "def123XYZ"],
+      ['{\\"Authorization\\": \\"Bearer q8Zt\\/1rLm9XaQ\\"}', "1rLm9XaQ"],
+    ];
+    for (const [input, tail] of cases) {
+      const out = redact(input);
+      assert.ok(out.includes(REDACTED) && !out.includes(tail), out);
     }
   });
 
@@ -208,7 +236,7 @@ describe("redact", () => {
       "-eyJ".repeat(50000),
       "eyJ-".repeat(50000),
       "-eyJa".repeat(40000),
-      "eyJa.-eyJ".repeat(25000),
+      `eyJa.${"-eyJ".repeat(50000)}`,
       '--a "'.repeat(30000),
       "--password '".repeat(20000),
       '\\"password\\": \\"'.repeat(10000),
@@ -217,6 +245,14 @@ describe("redact", () => {
       "key=".repeat(50000),
       "a\\".repeat(50000),
       `Authorization: \\"${"a".repeat(100000)}`,
+      "Authorization: \\".repeat(13000),
+      `Authorization: Basic ${"a\\/".repeat(66000)}`,
+      "key:'a'b ".repeat(22300),
+      'key:"a"b '.repeat(22300),
+      `token: '${"a ".repeat(100000)}'b`,
+      "--key 'a'b ".repeat(18200),
+      '--key "a"b '.repeat(18200),
+      `--token "${"a ".repeat(100000)}"b`,
     ];
     for (const input of inputs) {
       const start = performance.now();

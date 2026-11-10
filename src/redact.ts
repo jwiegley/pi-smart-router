@@ -4,8 +4,9 @@
 export const REDACTED = "[redacted]";
 
 const PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
-  // Header, in plain or JSON form: the whole value, whatever its scheme.
-  [/\bAuthorization\\?["']?[ \t]*:[ \t]*\\?["']?(?:[A-Za-z]+[ \t]+)?\\?["']?[^\s"';\\]+/gi, REDACTED],
+  // Header, in plain or JSON form: the whole value, whatever its scheme. The value runs to the next
+  // space, quote or semicolon, so a JSON escape inside it (\/, \u002B) never cuts it short.
+  [/\bAuthorization\\?["']?[ \t]*:[ \t]*\\?["']?(?:[A-Za-z]+[ \t]+)?\\?["']?[^\s"';]+/gi, REDACTED],
   [/(?<![\w-])eyJ[\w-]+\.[\w-]+\.[\w-]*/g, REDACTED],
   [/-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|$)/g, REDACTED],
   [/\b[rs]k[_-](?:live|test|proj)[_-][A-Za-z0-9_-]{8,}/g, REDACTED],
@@ -25,13 +26,14 @@ const PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
 // A name and its separator, never the value, so the value of a harmless key is scanned for more
 // names like any other text. Only a secret name takes the value after it (a sticky regex), and the
 // scan resumes behind it. The lookbehind starts one attempt per run of name characters, so the
-// scan stays linear. Quotes may be escaped (\"), and a quote with no closing quote on its line
-// ends at the next whitespace, as an unquoted value does.
+// scan stays linear. Quotes may be escaped (\"). A quoted value closes at the next quote on its
+// line only when no word character follows that quote, so the apostrophe in "the user's" closes
+// nothing; a value that does not close ends at the next whitespace, as an unquoted value does.
 const NAME_SEPARATOR = /(?<![\w-])([\w-]+)(?:\\?["'\]])*[ \t]*(?::=|=>|=|:)[ \t]*/g;
-const VALUE = /\\?"[^"\n]*"|\\?'[^'\n]*'|\\?["'][^\s]*|[^\s"',;]+/y;
+const VALUE = /\\?"[^"\n]*"(?!\w)|\\?'[^'\n]*'(?!\w)|\\?["'][^\s]*|[^\s"',;]+/y;
 // A flag that names a secret and takes its value after a space: --password hunter2.
 const FLAG_SPACE = /(?<![\w-])(--[\w-]+)[ \t]+/g;
-const FLAG_VALUE = /\\?"[^"\n]*"|\\?'[^'\n]*'|\\?["'][^\s]*|[^\s"'-][^\s"',;]*/y;
+const FLAG_VALUE = /\\?"[^"\n]*"(?!\w)|\\?'[^'\n]*'(?!\w)|\\?["'][^\s]*|[^\s"'-][^\s"',;]*/y;
 // Any name ending in key is secret, monkey and hotkey included; keyboard is not.
 const SECRET_NAME =
   /secret|password|passwd|passphrase|credential|authorization|token(?!s)|api[_-]?key|access[_-]?key|private[_-]?key|key$|(?:^|[_-])(?:pass|pwd)(?:$|[_-])/i;
