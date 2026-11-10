@@ -189,11 +189,14 @@ export interface SessionOptions {
   readonly file?: string;
   /** Whether the session manager has the fork's bounded readers. */
   readonly bounded?: boolean;
+  /** The session's working directory, as ctx.cwd gives it. */
+  readonly cwd?: string;
 }
 
 export class FakeSession {
   readonly runtime: FakeRuntime;
   readonly id: string;
+  readonly cwd: string;
   file: string | undefined;
   model: Model<Api> | undefined;
   controller: AbortController | undefined;
@@ -215,6 +218,7 @@ export class FakeSession {
   constructor(runtime: FakeRuntime, options: SessionOptions = {}) {
     this.runtime = runtime;
     this.id = options.id ?? "session-1";
+    this.cwd = options.cwd ?? "/nonexistent";
     this.file = options.file;
     const session = this;
     const live = (): void => {
@@ -276,7 +280,7 @@ export class FakeSession {
       },
       get cwd() {
         live();
-        return "/nonexistent";
+        return session.cwd;
       },
       get sessionManager() {
         live();

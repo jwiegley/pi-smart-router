@@ -80,3 +80,13 @@ export const ENV_PIN = "PI_SMART_ROUTER_LOCAL_ONLY";
 export const STATUS_KEY = "smart-router";
 export const SLOT_KEY = "jwiegley.pi-smart-router.v1";
 export const ROUTING_REGISTRY_KEY = "pi.routing.registry.v1";
+
+/**
+ * The scope's session entry and its environment switch, whose one value `work` puts every session
+ * of the process in work scope; the session entry that records each routed run's level, and the
+ * status item that shows it, which is never the pin's.
+ */
+export const SCOPE_ENTRY = "smart-router.scope";
+export const ENV_SCOPE = "PI_SMART_ROUTER_SCOPE";
+export const LEVEL_ENTRY = "smart-router.level";
+export const LEVEL_KEY = "smart-router-level";

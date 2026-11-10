@@ -2,13 +2,18 @@ import assert from "node:assert/strict";
 import { chmodSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test, { afterEach, beforeEach, describe } from "node:test";
+import { isDeepStrictEqual } from "node:util";
 
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import type { Api, Model } from "@earendil-works/pi-ai";
+import type { ModelRouteReason } from "@earendil-works/pi-coding-agent";
 
+import { planUserTurn } from "../src/decide.ts";
 import type { Choice } from "../src/decide.ts";
-import { policyFromRoster } from "../src/local.ts";
-import { assertSafe, newRecord, predict } from "../src/route.ts";
+import { EMPTY_POLICY, policyFromRoster } from "../src/local.ts";
+import type { ResolveContext } from "../src/resolve.ts";
+import { assertSafe, newRecord, predict, routeOther, routeOwned } from "../src/route.ts";
+import type { RouteInput, SessionRecord } from "../src/route.ts";
 import {
   ASTRA,
   CHATGPT,
@@ -369,10 +374,16 @@ describe("session state", () => {
     await loaded.host.emit("session_start", { reason: "resume" });
     assert.equal(record(loaded)?.last?.ref, KIMI);
     assert.equal(record(loaded)?.last?.at, NOW - 60_000);
-    const [seedRead, ...pinReads] = loaded.session.boundedReads;
-    assert.deepEqual(seedRead, { type: "message", messageRole: "assistant", limit: 16 });
-    assert.ok(pinReads.length > 0, "session_start reads the pin");
-    for (const read of pinReads) assert.deepEqual(read, { customType: "smart-router.pin", scope: "all" }, "every other read is the pin's, over the whole session");
+    const SEED = { type: "message", messageRole: "assistant", limit: 16 };
+    const PIN = { customType: "smart-router.pin", scope: "all" };
+    const SCOPE = { customType: "smart-router.scope", scope: "all" };
+    const reads = loaded.session.boundedReads;
+    assert.equal(reads.filter((read) => isDeepStrictEqual(read, SEED)).length, 1, "one read of the branch: the seed's");
+    assert.ok(reads.some((read) => isDeepStrictEqual(read, PIN)), "session_start reads the pin");
+    assert.ok(reads.some((read) => isDeepStrictEqual(read, SCOPE)), "and the scope");
+    for (const read of reads) {
+      assert.ok([SEED, PIN, SCOPE].some((allowed) => isDeepStrictEqual(read, allowed)), `${JSON.stringify(read)}: every other read is the pin's or the scope's, over the whole session`);
+    }
     assert.equal(loaded.session.wholeHistoryReads, 0);
   });
 
@@ -461,13 +472,70 @@ describe("the final assertions", () => {
     refuses(() => assertSafe("local", heraContext({ virtualId: "local" }), safe), /which is not in the local role; this is a bug in pi-smart-router/);
   });
 
-  test("a version 1 roster ignores the scope", () => {
+  test("a version 1 roster is unchanged in personal scope, and in work scope passes only a local-only pick", () => {
+    const personal = heraContext();
     const work = heraContext({ scope: "work" });
     const deepseek = work.catalog.find("openrouter", "deepseek/deepseek-v4.1-flash-1017");
     assert.ok(deepseek !== undefined);
-    assertSafe("auto", work, { role: "worker", ref: DEEPSEEK, model: deepseek, code: "t" });
-    assertSafe("auto", work, { role: "engineer", ref: SOL, model: model(SOL), code: "t" });
-    refuses(() => assertSafe("auto", work, { role: "engineer", ref: WORK_SOL, model: model(WORK_SOL), code: "t" }), /openai-codex-3\/gpt-6\.1-sol, which is excluded/);
+    const worker = { role: "worker", ref: DEEPSEEK, model: deepseek, code: "t" };
+    const engineer = { role: "engineer", ref: SOL, model: model(SOL), code: "t" };
+    const alias = { role: "engineer", ref: WORK_SOL, model: model(WORK_SOL), code: "t" };
+    assertSafe("auto", personal, worker);
+    assertSafe("auto", personal, engineer);
+    refuses(() => assertSafe("auto", personal, alias), /openai-codex-3\/gpt-6\.1-sol, which is excluded/);
+    refuses(
+      () => assertSafe("auto", work, worker),
+      /^smart-router\/auto: the router picked openrouter\/deepseek\/deepseek-v4\.1-flash-1017, which is outside this session's work scope, which a version 1 roster does not serve; this is a bug in pi-smart-router\./,
+    );
+    refuses(() => assertSafe("auto", work, engineer), /openai-codex-2\/gpt-6\.1-sol, which is outside this session's work scope, which a version 1 roster does not serve;/);
+    refuses(() => assertSafe("auto", work, alias), /openai-codex-3\/gpt-6\.1-sol, which is excluded/);
+    // A local-only request keeps the pin's rules: a local model, which carries no account.
+    const local = heraContext({ scope: "work", virtualId: "local" });
+    assertSafe("local", local, { role: "local", ref: GLM, model: model(GLM, { baseUrl: HERA_LAN }), code: "t" });
+    refuses(() => assertSafe("local", local, engineer), /openai-codex-2\/gpt-6\.1-sol, which is outside this session's work scope/);
+  });
+});
+
+describe("a version 1 roster in work scope, past prepare()'s own refusal", () => {
+  const VIRTUAL = model("smart-router/auto", { api: "pi-virtual", baseUrl: "" });
+  const OUTSIDE = /which is outside this session's work scope, which a version 1 roster does not serve; this is a bug in pi-smart-router\./;
+  const input = (rc: ResolveContext, reason: ModelRouteReason, record: SessionRecord = newRecord()): RouteInput => ({
+    id: rc.virtualId,
+    request: { ...request(reason), model: VIRTUAL },
+    rc,
+    pin: { on: false, policy: EMPTY_POLICY },
+    record,
+  });
+
+  test("smart-router/auto refuses on every path that can reach a model, and nothing is sent or recorded", () => {
+    const rc = heraContext({ scope: "work" });
+    const planned = newRecord();
+    planned.plan = planUserTurn({ rc, text: PLANNING, last: undefined, now: NOW, reserve: 0 });
+    assert.ok(planned.plan.decision.ok && planned.plan.decision.choice.ref === ASTRA, "the prompt planned astra");
+    const paths: Array<[string, SessionRecord, (record: SessionRecord) => unknown]> = [
+      ["the owned run", planned, (record) => routeOwned(input(rc, "user", record))],
+      ["an owned continuation", newRecord(), (record) => routeOwned(input(rc, "continuation", record))],
+      ["a direct request without a plan", newRecord(), (record) => routeOther(input(rc, "direct", record))],
+      ["a foreign request", newRecord(), (record) => routeOther(input(rc, "continuation", record))],
+    ];
+    for (const [name, record, call] of paths) {
+      refuses(() => call(record), OUTSIDE, name);
+      assert.deepEqual([record.runPick, record.history], [undefined, []], name);
+    }
+  });
+
+  test("smart-router/local still routes to the LAN model: a local-only request carries no account", () => {
+    const record = newRecord();
+    const local = heraContext({ scope: "work", virtualId: "local" });
+    assert.equal(routed(routeOther(input(local, "direct", record))), GLM);
+    assert.equal(routed(routeOwned(input(local, "user", record))), GLM);
+    assert.deepEqual(
+      record.history.map((entry) => [entry.ref, entry.code]),
+      [
+        [GLM, "direct:default"],
+        [GLM, "stick:default"],
+      ],
+    );
   });
 });
 

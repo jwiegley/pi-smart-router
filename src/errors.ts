@@ -13,6 +13,7 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { PROVIDER, VIRTUAL_API } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import type { Attempt } from "./decide.ts";
+import type { Scope } from "./roster.ts";
 
 /** An error route() throws. Pi turns it into an error response attributed to the virtual model. */
 export class RouterError extends Error {}
@@ -114,6 +115,41 @@ export function carriedNotice(): string {
 /** Shown when the pin of the session a fork or /new came from could not be recorded in the new one. */
 export function carryFailedNotice(reason: string): string {
   return `pi-smart-router: the session this one came from was pinned to local models, but its pin could not be recorded here (${reason}). Run /smart-router local on before you send anything.`;
+}
+
+/** smart-router/auto refuses a session whose scope cannot be read. */
+export function scopeUnreadable(id: VirtualId, reason: string): RouterError {
+  return refusal(
+    id,
+    `this session's scope cannot be read (${reason})`,
+    "Record it again with /smart-router scope work or /smart-router scope personal, or choose a model with /model.",
+  );
+}
+
+/** smart-router/auto refuses a session whose scope the roster does not serve: work under a version 1 roster, or a scope a version 2 roster has no section for. */
+export function scopeUnserved(id: VirtualId, scope: Scope, version: 1 | 2): RouterError {
+  const roster = version === 1 ? "a version 1 roster" : "the roster";
+  return refusal(id, `this session is in ${scope} scope, which ${roster} does not serve`, `Give the roster a ${scope} scope${version === 1 ? " (version 2)" : ""}, or choose a model with /model.`);
+}
+
+/** Shown when the roster's work directories put a session in work scope. */
+export function directoryNotice(cwd: string, directory: string): string {
+  return `pi-smart-router: this session is in work scope because ${cwd} is under ${directory}.`;
+}
+
+/** Shown when the work scope the work directories call for could not be recorded. */
+export function directoryFailedNotice(cwd: string, directory: string, reason: string): string {
+  return `pi-smart-router: this session belongs in work scope because ${cwd} is under ${directory}, but its scope could not be recorded (${reason}). Run /smart-router scope work before you send anything.`;
+}
+
+/** Shown when a fork or /new carried the scope over. */
+export function scopeCarriedNotice(scope: Scope): string {
+  return `pi-smart-router: this session is in ${scope} scope, as the session it came from was.`;
+}
+
+/** Shown when the scope of the session a fork or /new came from could not be recorded in the new one. */
+export function scopeCarryFailedNotice(scope: Scope, reason: string): string {
+  return `pi-smart-router: the session this one came from was in ${scope} scope, but its scope could not be recorded here (${reason}). Run /smart-router scope ${scope} before you send anything.`;
 }
 
 /** What one role's candidates said, as a refusal lists it. */

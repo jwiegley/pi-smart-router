@@ -15,9 +15,11 @@
 //   4. otherwise the router refuses with its own non-retryable error.
 //
 // The slot holds only process-wide state: the owners, the catalog objects their registrations
-// produced, the environment latch, pin handoffs and the pi-cache-optimizer adapter's registration.
-// Per-session records live in each router instance. Every load of this module, /reload included,
-// shares the slot, so it holds plain data and is checked by shape, never by class identity.
+// produced, the environment latches, pin and scope handoffs and the pi-cache-optimizer adapter's
+// registration. Per-session records live in each router instance. Every load of this module,
+// /reload included, shares the slot, so it holds plain data and is checked by shape, never by class
+// identity. The scope's fields came later: they are optional and made on first use, so a slot an
+// earlier load made still has the shape.
 import { createHash } from "node:crypto";
 
 import type { ExtensionContext, ModelRoute, ModelRouteRequest } from "@earendil-works/pi-coding-agent";
@@ -27,6 +29,7 @@ import { SLOT_KEY } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { isRecord } from "./files.ts";
 import type { LocalPolicy } from "./local.ts";
+import type { Scope } from "./roster.ts";
 
 /** What the slot asks of a router instance. Instances of every load of this module answer it. */
 export interface OwnerRouter {
@@ -54,6 +57,8 @@ export interface EnvLatch {
   on: boolean;
   /** The local policy the switch pins to when a session has no pin entry of its own. */
   policy: LocalPolicy | undefined;
+  /** True for the life of the process once any instance saw PI_SMART_ROUTER_SCOPE=work; set only then. */
+  work?: boolean;
 }
 
 export interface Slot {
@@ -64,6 +69,8 @@ export interface Slot {
   readonly env: EnvLatch;
   /** Pins handed to the session a fork or /new creates, keyed by its session file. */
   readonly handoffs: Map<string, unknown>;
+  /** Scopes handed to the session a fork or /new creates, keyed by its session file; made on first use. */
+  scopeHandoffs?: Map<string, unknown>;
   /** The pi-cache-optimizer adapter and its registration, while any owner is live. */
   adapter: { readonly adapter: object; readonly unregister: () => void } | undefined;
 }
@@ -78,8 +85,10 @@ function isSlot(value: unknown): value is Slot {
     value.owners instanceof Set &&
     value.registered instanceof WeakMap &&
     value.handoffs instanceof Map &&
+    (value.scopeHandoffs === undefined || value.scopeHandoffs instanceof Map) &&
     isRecord(env) &&
-    typeof env.on === "boolean"
+    typeof env.on === "boolean" &&
+    (env.work === undefined || typeof env.work === "boolean")
   );
 }
 
@@ -114,6 +123,34 @@ export function envSwitchOn(value: string | undefined): boolean {
 export function latchEnvPin(slot: Slot, value: string | undefined): boolean {
   if (envSwitchOn(value)) slot.env.on = true;
   return slot.env.on;
+}
+
+/**
+ * Latch the scope switch: PI_SMART_ROUTER_SCOPE=work, exactly, puts every session of the process in
+ * work scope for the life of the process. Any other value, set or not, leaves the latch as it is.
+ */
+export function latchEnvScope(slot: Slot, value: string | undefined): void {
+  if (value === "work") slot.env.work = true;
+}
+
+export function scopeLatched(slot: Slot): boolean {
+  return slot.env.work === true;
+}
+
+/** At session_shutdown: the scope handed to the session a fork or /new creates, under its file. Never in slot.handoffs, which holds pins. */
+export function leaveScopeHandoff(slot: Slot, file: string, scope: Scope): void {
+  if (file === "") return;
+  slot.scopeHandoffs ??= new Map();
+  slot.scopeHandoffs.set(file, scope);
+}
+
+/** At session_start: the scope left for this session's file, taken out of the slot. A value of another shape is no scope. */
+export function takeScopeHandoff(slot: Slot, file: string): Scope | undefined {
+  const handoffs = slot.scopeHandoffs;
+  if (handoffs === undefined || !handoffs.has(file)) return undefined;
+  const value = handoffs.get(file);
+  handoffs.delete(file);
+  return value === "personal" || value === "work" ? value : undefined;
 }
 
 export function sessionHash(sessionId: string): string {

@@ -184,17 +184,20 @@ function fromPlan(rc: ResolveContext, plan: Plan): Decision {
 }
 
 /**
- * How a pick's provider breaks a version 2 session's scope, if it does. A personal session never
- * sends to a work-bound account. A work session sends only to the work-bound Codex account, except
- * that a local-only request keeps the pin's rules, checked after this one: a local model, which
- * has no account.
+ * How a pick's provider breaks the session's scope, if it does. A personal session never sends to a
+ * work-bound account. A work session sends only to the work-bound Codex account, which only a
+ * version 2 roster binds: under a version 1 roster, which serves no work scope, it sends nothing.
+ * In both, a local-only request keeps the pin's rules, checked after this one: a local model, which
+ * has no account. prepare() already refuses smart-router/auto for a scope the roster does not
+ * serve; this check holds even if that refusal is bypassed.
  */
 function outsideScope(rc: ResolveContext, provider: string): string | undefined {
   const { roster } = rc;
-  if (roster.version !== 2) return undefined;
+  const local = rc.localOnly && subscriptionKind(provider) === undefined;
+  if (roster.version === 1) return rc.scope === "work" && !local ? "is outside this session's work scope, which a version 1 roster does not serve" : undefined;
   const workBound = isWorkBound(roster, provider);
   if (rc.scope === "personal") return workBound ? "is on a work-bound account, and this session is in personal scope" : undefined;
-  if ((workBound && isCodexProvider(provider)) || (rc.localOnly && subscriptionKind(provider) === undefined)) return undefined;
+  if ((workBound && isCodexProvider(provider)) || local) return undefined;
   return "is not on a work-bound Codex account, and this session is in work scope";
 }
 

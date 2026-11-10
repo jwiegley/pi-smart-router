@@ -1,7 +1,7 @@
 // One instance of the router: the session whose extension runtime loaded it, the two files it
 // reads, its per-session records and cooldowns, the limits both models declare, the pin's guards
-// and handoffs, the /smart-router command, what it tells pi-cache-optimizer, and the handlers
-// wire() registers.
+// and handoffs, the session's scope with its handoffs and work directories, the /smart-router
+// command, what it tells pi-cache-optimizer, and the handlers wire() registers.
 //
 // createRouter only builds closures. It makes no pi.on, registration or command call, so a throw
 // while it is built leaves only the two refusing models index.ts registered, and wire() makes
@@ -24,17 +24,32 @@ import { registerAdapter, unregisterAdapter } from "./cache-optimizer.ts";
 import type { ActiveRoute } from "./cache-optimizer.ts";
 import { smartRouterCommand } from "./commands.ts";
 import type { CommandHost, Files } from "./commands.ts";
-import { COMMAND, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, PIN_ENTRY, PROVIDER, VIRTUAL_API, VIRTUAL_IDS } from "./constants.ts";
+import { COMMAND, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, PIN_ENTRY, PROVIDER, SCOPE_ENTRY, VIRTUAL_API, VIRTUAL_IDS } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { pickInRole, planUserTurn, reserveFor } from "./decide.ts";
 import type { Decision, LastResponder } from "./decide.ts";
-import { carriedNotice, carryFailedNotice, firstLine, historyNotice, resumeNotice, rosterNotice, rosterRefusal, stale } from "./errors.ts";
+import {
+  carriedNotice,
+  carryFailedNotice,
+  directoryFailedNotice,
+  directoryNotice,
+  firstLine,
+  historyNotice,
+  resumeNotice,
+  rosterNotice,
+  rosterRefusal,
+  scopeCarriedNotice,
+  scopeCarryFailedNotice,
+  scopeUnreadable,
+  scopeUnserved,
+  stale,
+} from "./errors.ts";
 import { isRecord } from "./files.ts";
 import type { FileSystem, Loaded } from "./files.ts";
 import { createGuards, newGuardState } from "./guards.ts";
 import type { GuardState } from "./guards.ts";
 import { EMPTY_POLICY, policyFromRoster } from "./local.ts";
-import { healDisplaced, isLive, isLiveOwner, join, leave, ownerBySignal, sessionHash } from "./owners.ts";
+import { healDisplaced, isLive, isLiveOwner, join, leave, leaveScopeHandoff, ownerBySignal, scopeLatched, sessionHash, takeScopeHandoff } from "./owners.ts";
 import type { Owner, OwnerRouter, Slot } from "./owners.ts";
 import { latchEnvPolicy, leaveHandoff, pinOn, readPin, takeHandoff } from "./pin.ts";
 import type { PinReading } from "./pin.ts";
@@ -42,8 +57,10 @@ import { coolFrom, Cooldowns, resolveContext } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
 import { boundedHistory, newRecord, predict, requireBoundedHistory, routeOther, routeOwned } from "./route.ts";
 import type { BoundedHistory, Pin, RouteInput, SessionRecord } from "./route.ts";
-import { autoRoles, parseRef, rosterFile } from "./roster.ts";
+import { autoRoles, parseRef, rosterFile, scopeSection } from "./roster.ts";
 import type { Roster } from "./roster.ts";
+import { readScope, scopeEntry, underDirectory } from "./scope.ts";
+import type { ScopeEntryData, ScopeState } from "./scope.ts";
 
 export interface Limits {
   readonly contextWindow: number;
@@ -131,21 +148,26 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     return record;
   };
 
-  /** A session's pin, read fail closed. A context whose session cannot be read counts as pinned. */
-  const pinOf = (ctx: ExtensionContext): PinReading => {
-    let manager: unknown;
+  /** A context's session manager, or undefined when the context is stale. */
+  const managerOf = (ctx: ExtensionContext): unknown => {
     try {
-      manager = ctx.sessionManager;
+      return ctx.sessionManager;
     } catch {
-      manager = undefined;
+      return undefined;
     }
-    return readPin(manager, slot.env);
   };
+
+  /** A session's pin, read fail closed. A context whose session cannot be read counts as pinned. */
+  const pinOf = (ctx: ExtensionContext): PinReading => readPin(managerOf(ctx), slot.env);
+
+  /** A session's scope, read fail closed. A context whose session cannot be read has an unreadable scope. */
+  const scopeOf = (ctx: ExtensionContext): ScopeState => readScope(managerOf(ctx), scopeLatched(slot));
 
   const guards = createGuards({ pi, now, pinOf, stateOf: (ctx) => recordOf(ctx.sessionManager.getSessionId()).guard });
 
-  const contextFor = (ctx: ExtensionContext, value: Roster, id: VirtualId, pin: Pin): ResolveContext =>
-    resolveContext({
+  const contextFor = (ctx: ExtensionContext, value: Roster, id: VirtualId, pin: Pin): ResolveContext => {
+    const scope = scopeOf(ctx);
+    return resolveContext({
       roster: value,
       catalog: ctx.modelRegistry,
       labels: needsLabels(value) ? labels.current() : undefined,
@@ -155,9 +177,11 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       localOnly: id === "local" || pin.on,
       policy: pin.on ? pin.policy : policyFromRoster(value),
       pinned: pin.on,
-      // Sessions carry no scope of their own yet, so every one resolves in personal scope.
-      scope: "personal",
+      // A scope that cannot be read resolves in work scope, the narrower one, and prepare() refuses
+      // smart-router/auto for it.
+      scope: scope.kind === "ok" ? scope.scope : "work",
     });
+  };
 
   /** Every roster load passes here, so the environment switch latches the first valid one's local policy. */
   const loaded = (state: Loaded<Roster>): Loaded<Roster> => {
@@ -172,11 +196,24 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     return state;
   };
 
+  /**
+   * smart-router/auto refuses a session whose scope cannot be read, a work-scope session under a
+   * version 1 roster, and a session whose scope a version 2 roster has no section for. Local-only
+   * requests carry no account, so smart-router/local is never refused for its scope.
+   */
+  const requireScope = (value: Roster, ctx: ExtensionContext): void => {
+    const scope = scopeOf(ctx);
+    if (scope.kind === "unreadable") throw scopeUnreadable("auto", scope.reason);
+    const served = value.version === 1 ? scope.scope === "personal" : scopeSection(value, scope.scope) !== undefined;
+    if (!served) throw scopeUnserved("auto", scope.scope, value.version);
+  };
+
   const prepare = (id: VirtualId, request: ModelRouteRequest, ctx: ExtensionContext): RouteInput => {
     const { sessionManager } = ctx;
     requireBoundedHistory(id, sessionManager);
     const state = loaded(roster.current());
     if (state.kind !== "ok") throw rosterRefusal(id, state);
+    if (id === "auto") requireScope(state.value, ctx);
     const pin = pinOf(ctx);
     return { id, request, rc: contextFor(ctx, state.value, id, pin), pin, record: recordOf(sessionManager.getSessionId()) };
   };
@@ -288,10 +325,48 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     }
   };
 
+  /** Append a scope entry, and say whether it was recorded. */
+  const recordScope = (ctx: ExtensionContext, data: ScopeEntryData, recorded: string, failed: (reason: string) => string): void => {
+    let failure: string | undefined;
+    try {
+      pi.appendEntry(SCOPE_ENTRY, data);
+    } catch (error) {
+      failure = firstLine(error);
+    }
+    if (failure === undefined) notify(ctx, recorded, "info");
+    else notify(ctx, failed(failure), "error");
+  };
+
+  /** A fork or /new records the scope it carries. */
+  const carryScope = (ctx: ExtensionContext): void => {
+    const file = ctx.sessionManager.getSessionFile();
+    const scope = typeof file === "string" ? takeScopeHandoff(slot, file) : undefined;
+    if (scope !== undefined) recordScope(ctx, scopeEntry(scope, "carried", now()), scopeCarriedNotice(scope), (reason) => scopeCarryFailedNotice(scope, reason));
+  };
+
+  /**
+   * At every session start, resumed sessions included: a session in the default scope whose working
+   * directory lies under one of a version 2 roster's work directories moves to work scope and
+   * records it. Otherwise a session begun before its directory was listed would keep sending work
+   * to personal accounts.
+   */
+  const applyDirectories = (ctx: ExtensionContext, value: Roster): void => {
+    const directories = scopeSection(value, "work")?.directories ?? [];
+    if (directories.length === 0) return;
+    const scope = scopeOf(ctx);
+    if (scope.kind !== "ok" || scope.source !== "default") return;
+    const { cwd } = ctx;
+    const directory = directories.find((entry) => underDirectory(cwd, [entry]));
+    if (directory === undefined) return;
+    recordScope(ctx, scopeEntry("work", "directory", now()), directoryNotice(cwd, directory), (reason) => directoryFailedNotice(cwd, directory, reason));
+  };
+
   // The pin's steps come first and last, and nothing between them can skip them: a fork or /new
   // records the pin it carries before any other step runs, and the pin is enforced on the restored
-  // selection, with its status item, whatever failed in between. Each of the other steps reports
-  // its own failure and lets the rest run.
+  // selection, with its status item, whatever failed in between. The scope a fork or /new carries
+  // is recorded next, and the work directories apply as soon as the roster is read, before the
+  // limits are computed in the session's scope. Each of the other steps reports its own failure
+  // and lets the rest run.
   const start = async (ctx: ExtensionContext): Promise<void> => {
     try {
       const { sessionManager } = ctx;
@@ -301,8 +376,10 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       join(slot, self);
       carry(ctx);
       const step = <T>(run: () => T): T | undefined => guarded("session_start", ctx, run);
+      step(() => carryScope(ctx));
       step(() => registerAdapter(slot));
       const state = step(refreshFiles);
+      if (state?.kind === "ok") step(() => applyDirectories(ctx, state.value));
       if (state !== undefined) {
         step(() => {
           limits = state.kind === "ok" ? computeLimits(ctx, state.value) : BOTH_DEFAULT;
@@ -345,10 +422,23 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     recordOf(ctx.sessionManager.getSessionId()).last = { ref: `${message.provider}/${message.model}`, at: now(), usage: message.usage };
   };
 
+  /**
+   * A fork or /new carries the scope an entry or the latch set. A default scope is not carried, so
+   * the new session decides its own, and neither is an unreadable one, whose value is unknown.
+   */
+  const leaveScope = (event: SessionShutdownEvent, ctx: ExtensionContext): void => {
+    const { reason, targetSessionFile: target } = event;
+    if ((reason !== "new" && reason !== "fork") || typeof target !== "string" || target === "") return;
+    const scope = scopeOf(ctx);
+    if (scope.kind === "ok" && scope.source !== "default") leaveScopeHandoff(slot, target, scope.scope);
+  };
+
   const shutdown = (event: SessionShutdownEvent, ctx: ExtensionContext): void => {
     try {
-      // The pin goes with a fork or /new into the session it creates, keyed by that session's file.
+      // The pin and the scope go with a fork or /new into the session it creates, keyed by that
+      // session's file, each in its own map.
       leaveHandoff(slot, event.reason, event.targetSessionFile, pinOf(ctx));
+      leaveScope(event, ctx);
     } finally {
       records.clear();
       // pi-cache-optimizer's adapter serves every owner in the process; the last one to leave removes it.
