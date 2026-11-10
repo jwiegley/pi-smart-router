@@ -211,17 +211,23 @@ describe("the last valid roster", () => {
     const slot = processSlot();
     assert.equal("lastRoster" in slot, false, "nothing is kept until a roster loads");
     assert.equal(rememberedRoster(slot), undefined);
-    const accounts = new Map([["openai-codex-3", { scope: "work" as const }]]);
+    const binding = { kind: "multi-pass", label: "Positron work", scope: "work" } as const;
+    const accounts = new Map([["openai-codex-3", binding]]);
     rememberRoster(slot, { directories: ["/x/work"], accounts });
     assert.deepEqual(rememberedRoster(slot), { directories: ["/x/work"], accounts });
+    const bound = (value: unknown) => ({ directories: [], accounts: new Map([["openai-codex-3", value]]) });
     const others: Array<[string, unknown]> = [
       ["not an object", "x"],
       ["directories as text", { directories: "/x/work", accounts }],
       ["a directory that is not text", { directories: [1], accounts }],
-      ["accounts in a plain object", { directories: [], accounts: { "openai-codex-3": { scope: "work" } } }],
-      ["a scope that is neither", { directories: [], accounts: new Map([["openai-codex-3", { scope: "team" }]]) }],
-      ["a binding that is not an object", { directories: [], accounts: new Map([["openai-codex-3", "work"]]) }],
-      ["a provider that is not text", { directories: [], accounts: new Map([[3, { scope: "work" }]]) }],
+      ["accounts in a plain object", { directories: [], accounts: { "openai-codex-3": binding } }],
+      ["a scope that is neither", bound({ ...binding, scope: "team" })],
+      ["no scope", bound({ kind: "multi-pass", label: "Positron work" })],
+      ["a kind that is neither", bound({ ...binding, kind: "alias" })],
+      ["no label", bound({ kind: "multi-pass", scope: "work" })],
+      ["a label that is not text", bound({ ...binding, label: 3 })],
+      ["a binding that is not an object", bound("work")],
+      ["a provider that is not text", { directories: [], accounts: new Map([[3, binding]]) }],
     ];
     for (const [name, other] of others) {
       slot.lastRoster = other;

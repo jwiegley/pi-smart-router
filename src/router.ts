@@ -24,8 +24,7 @@ import type {
   SessionShutdownEvent,
 } from "@earendil-works/pi-coding-agent";
 
-import { labelsFile, needsLabels } from "./accounts.ts";
-import type { ScopedAccounts } from "./accounts.ts";
+import { checkAccount, isWorkCodex, labelsFile, needsLabels } from "./accounts.ts";
 import { registerAdapter, unregisterAdapter } from "./cache-optimizer.ts";
 import type { ActiveRoute } from "./cache-optimizer.ts";
 import { smartRouterCommand } from "./commands.ts";
@@ -71,7 +70,7 @@ import type { ResolveContext } from "./resolve.ts";
 import { boundedHistory, newRecord, planApplies, predict, requireBoundedHistory, routeOther, routeOwned } from "./route.ts";
 import type { BoundedHistory, LastInput, Pin, RouteInput, SessionRecord } from "./route.ts";
 import { autoRoles, parseRef, rosterFile, scopeSection } from "./roster.ts";
-import type { Roster, RosterV2 } from "./roster.ts";
+import type { Roster, RosterV2, ScopedBinding } from "./roster.ts";
 import { readScope, scopeEntry, workDirectoryOf } from "./scope.ts";
 import type { ScopeEntryData, ScopeState, WorkDirectories } from "./scope.ts";
 import { parseTag } from "./tags.ts";
@@ -164,10 +163,10 @@ function smallest(decisions: readonly Decision[]): Limits {
 const sameLimits = (a: Readonly<Record<VirtualId, Limits>>, b: Readonly<Record<VirtualId, Limits>>): boolean =>
   VIRTUAL_IDS.every((id) => a[id].contextWindow === b[id].contextWindow && a[id].maxTokens === b[id].maxTokens);
 
-/** No account bindings: a version 1 roster's, as work scope reads them, and those known before any roster has loaded. */
-const NO_ACCOUNTS: ScopedAccounts = new Map();
+/** No account bindings: a version 1 roster's, as work scope reads them. */
+const NO_ACCOUNTS: ReadonlyMap<string, ScopedBinding> = new Map();
 
-/** What the scope and the work guard read of a valid roster: its work directories, and its accounts' scopes. */
+/** What the scope and the work guard read of a valid roster: its work directories, and its account bindings. */
 const memoryOf = (value: Roster): RosterMemory => ({
   directories: scopeSection(value, "work")?.directories ?? [],
   accounts: value.version === 2 ? value.accounts : NO_ACCOUNTS,
@@ -254,10 +253,25 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
    */
   const scopeOf = (ctx: ExtensionContext): ScopeState => readScope(managerOf(ctx), scopeLatched(slot), workOf(ctx));
 
-  /** The account bindings that work scope's guard reads, as rosterFacts gives them; none before any roster has loaded. */
-  const accountsOf = (): ScopedAccounts => rosterFacts()?.accounts ?? NO_ACCOUNTS;
+  /**
+   * Whether a provider is the work account, by routing's own verdict: a work-bound Codex provider
+   * whose binding passes checkAccount in work scope, so a Multi-Pass alias needs the label its binding
+   * names. It reads the bindings rosterFacts gives, so while the roster fails to load, the last valid
+   * roster's, against Multi-Pass's labels as last read. Before any roster has loaded there is no work
+   * account. Never throws: a check that cannot be made says no.
+   */
+  const workAccount = (provider: string): boolean => {
+    try {
+      const accounts = rosterFacts()?.accounts;
+      if (accounts === undefined || !isWorkCodex(accounts, provider)) return false;
+      const read = accounts.get(provider)?.kind === "multi-pass" ? labels.current() : undefined;
+      return checkAccount(provider, { version: 2, accounts }, read, "work").ok;
+    } catch {
+      return false;
+    }
+  };
 
-  const guards = createGuards({ pi, now, pinOf, scopeOf, accountsOf, stateOf: (ctx) => recordOf(ctx.sessionManager.getSessionId()).guard });
+  const guards = createGuards({ pi, now, pinOf, scopeOf, workAccount, stateOf: (ctx) => recordOf(ctx.sessionManager.getSessionId()).guard });
 
   const contextFor = (ctx: ExtensionContext, value: Roster, id: VirtualId, pin: Pin): ResolveContext => {
     const scope = scopeOf(ctx);

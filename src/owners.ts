@@ -24,13 +24,12 @@ import { createHash } from "node:crypto";
 
 import type { ExtensionContext, ModelRoute, ModelRouteRequest } from "@earendil-works/pi-coding-agent";
 
-import type { ScopedAccounts } from "./accounts.ts";
 import type { ActiveRoute } from "./cache-optimizer.ts";
 import { SLOT_KEY } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { isRecord } from "./files.ts";
 import type { LocalPolicy } from "./local.ts";
-import type { Scope } from "./roster.ts";
+import type { Scope, ScopedBinding } from "./roster.ts";
 
 /** What the slot asks of a router instance. Instances of every load of this module answer it. */
 export interface OwnerRouter {
@@ -164,8 +163,8 @@ export function takeScopeHandoff(slot: Slot, file: string): Scope | undefined {
 export interface RosterMemory {
   /** The work scope's directories; none for a roster without a work scope. */
   readonly directories: readonly string[];
-  /** The scope each provider is bound to; none for a version 1 roster. */
-  readonly accounts: ScopedAccounts;
+  /** The account bindings, with the kind, label and scope of each, which an account check reads; none for a version 1 roster. */
+  readonly accounts: ReadonlyMap<string, ScopedBinding>;
 }
 
 /** Keep what the scope and the work guard read of a roster that loaded. */
@@ -180,7 +179,9 @@ export function rememberedRoster(slot: Slot): RosterMemory | undefined {
   const { directories, accounts } = memory;
   if (!Array.isArray(directories) || !directories.every((directory) => typeof directory === "string") || !(accounts instanceof Map)) return undefined;
   for (const [provider, binding] of accounts) {
-    if (typeof provider !== "string" || !isRecord(binding) || (binding.scope !== "personal" && binding.scope !== "work")) return undefined;
+    if (typeof provider !== "string" || !isRecord(binding)) return undefined;
+    const { kind, label, scope } = binding;
+    if ((kind !== "multi-pass" && kind !== "native") || typeof label !== "string" || (scope !== "personal" && scope !== "work")) return undefined;
   }
   return { directories, accounts };
 }

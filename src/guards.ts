@@ -5,9 +5,9 @@
 //
 //   the pin     smart-router/local, or a physical model whose provider and catalog host are in the
 //               pin's policy. smart-router/auto is not allowed, although its route obeys the pin.
-//   work scope  smart-router/auto, or a physical model of a work-bound Codex account (isWorkCodex),
-//               by the bindings of the roster as it is now or, while it fails to load, of the last
-//               valid roster loaded in the process. A scope that cannot be read is work scope, the
+//   work scope  smart-router/auto, or a physical model of the work account: a work-bound Codex
+//               provider whose binding passes routing's own account check, Multi-Pass's label
+//               included (the router's workAccount). A scope that cannot be read is work scope, the
 //               narrower one, as routing resolves it.
 //
 // Each policy has a model of the router's own that it switches to: smart-router/local under the
@@ -50,8 +50,6 @@ import type {
   SessionBeforeTreeResult,
 } from "@earendil-works/pi-coding-agent";
 
-import { isWorkCodex } from "./accounts.ts";
-import type { ScopedAccounts } from "./accounts.ts";
 import { PROVIDER, STATUS_KEY, VIRTUAL_API } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { firstLine } from "./errors.ts";
@@ -116,15 +114,15 @@ export function requestAllowed(model: Selection | undefined, pin: Pin): boolean 
   return model.api !== VIRTUAL_API && checkLocal(model, pin.policy, false).ok;
 }
 
-/** The policy that guards a session: the pin's while pinned, else work scope's with the account bindings it reads. */
-type Policy = { readonly kind: "pin"; readonly pin: Pin } | { readonly kind: "work"; readonly accounts: ScopedAccounts };
+/** The policy that guards a session: the pin's while pinned, else work scope's, which asks the router whether a provider is the work account. */
+type Policy = { readonly kind: "pin"; readonly pin: Pin } | { readonly kind: "work"; readonly workAccount: (provider: string) => boolean };
 
-/** Whether a selection may stay under a policy: the pin's rule, or work scope's: smart-router/auto, or a physical model of a work-bound Codex account. */
+/** Whether a selection may stay under a policy: the pin's rule, or work scope's: smart-router/auto, or a physical model of the work account. */
 function allows(policy: Policy, model: Selection | undefined): boolean {
   if (policy.kind === "pin") return selectionAllowed(model, policy.pin);
   if (model === undefined) return false;
   if (isRouterModel(model)) return model.id === "auto";
-  return model.api !== VIRTUAL_API && isWorkCodex(policy.accounts, model.provider);
+  return model.api !== VIRTUAL_API && policy.workAccount(model.provider);
 }
 
 /**
@@ -137,7 +135,7 @@ function trusts(policy: Policy, model: Selection | undefined): boolean {
   if (policy.kind === "pin") return requestAllowed(model, policy.pin);
   if (model === undefined) return false;
   if (isRouterModel(model)) return true;
-  return model.api !== VIRTUAL_API && isWorkCodex(policy.accounts, model.provider);
+  return model.api !== VIRTUAL_API && policy.workAccount(model.provider);
 }
 
 export interface GuardOptions {
@@ -147,8 +145,8 @@ export interface GuardOptions {
   readonly pinOf: (ctx: ExtensionContext) => PinReading;
   /** The session's scope, read fail closed. Never throws. */
   readonly scopeOf: (ctx: ExtensionContext) => ScopeState;
-  /** The account bindings work scope's policy reads: the roster's as it is now, else the last valid roster's in the process, else none. Never throws. */
-  readonly accountsOf: () => ScopedAccounts;
+  /** Whether a provider is the work account, by routing's own account check. Never throws. */
+  readonly workAccount: (provider: string) => boolean;
   readonly stateOf: (ctx: ExtensionContext) => GuardState;
 }
 
@@ -214,7 +212,7 @@ function workLockNotice(lock: Lock): string {
 }
 
 export function createGuards(options: GuardOptions): Guards {
-  const { pi, now, pinOf, scopeOf, accountsOf, stateOf } = options;
+  const { pi, now, pinOf, scopeOf, workAccount, stateOf } = options;
 
   const notify = (ctx: ExtensionContext, text: string, type: "info" | "warning" | "error"): void => {
     try {
@@ -246,7 +244,7 @@ export function createGuards(options: GuardOptions): Guards {
     const pin = pinOf(ctx);
     if (pin.on) return { kind: "pin", pin };
     const scope = scopeOf(ctx);
-    return scope.kind === "ok" && scope.scope === "personal" ? undefined : { kind: "work", accounts: accountsOf() };
+    return scope.kind === "ok" && scope.scope === "personal" ? undefined : { kind: "work", workAccount };
   };
 
   /** Run a guard under the session's policy. Unguarded, it allows; on an internal error it denies. */

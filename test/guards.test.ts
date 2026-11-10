@@ -15,9 +15,9 @@ import { readPin } from "../src/pin.ts";
 import type { PinReading } from "../src/pin.ts";
 import { readScope, scopeEntry } from "../src/scope.ts";
 import type { ScopeState } from "../src/scope.ts";
-import { FakeCatalog, GLM, heraModels, KIMI, model, NATIVE_SOL, NOW, rosterFixture, rosterFixtureV2, SOL, WORK_SOL } from "./support/catalog.ts";
+import { CHATGPT, FakeCatalog, GLM, heraModels, KIMI, model, NATIVE_SOL, NOW, rosterFixture, rosterFixtureV2, SOL, WORK_SOL } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
-import { agentDir, FakeRuntime, load, request, resetSlot, start } from "./support/pi.ts";
+import { agentDir, FakeRuntime, load, request, resetSlot, routed, start } from "./support/pi.ts";
 import type { FakeHost, FakeSession, Loaded, LoadOptions } from "./support/pi.ts";
 
 const POLICY = policyFromRoster(rosterFixture("roster-hera.json"));
@@ -35,6 +35,16 @@ const ACME_APP = `${ACME}/app`;
 /** The work guard's way out of a lock, as its lock notices end. */
 const WORK_WAY_OUT =
   "To get out: /new (the work scope carries over), a branch before any native Codex compaction checkpoint, smart-router/auto or a work Codex model chosen with /model, or /smart-router scope personal.";
+/** Hera's catalog with the work account's medium model, so that routing in work scope reaches the account check. */
+const workCatalog = (): FakeCatalog =>
+  new FakeCatalog([...heraModels(), model("openai-codex-3/gpt-6.1-terra", { api: "openai-codex-responses", baseUrl: CHATGPT, contextWindow: 272_000, maxTokens: 128_000 })]);
+/** Multi-Pass's labels with Hera's two aliases swapped: #3, the roster's work alias, labelled personal. */
+const SWAPPED = JSON.stringify({
+  subscriptions: [
+    { provider: "openai-codex", index: 2, label: "Positron work" },
+    { provider: "openai-codex", index: 3, label: "personal" },
+  ],
+});
 
 beforeEach(resetSlot);
 afterEach(resetSlot);
@@ -74,11 +84,14 @@ async function pinned(t: Parameters<typeof agentDir>[0], options: Partial<LoadOp
 /** Record work scope in a session, as /smart-router scope work does. */
 const workEntry = (session: FakeSession): void => session.appendCustom(SCOPE_ENTRY, scopeEntry("work", "command", NOW - 60_000));
 
-/** A session in work scope by its entry, on Hera's version 2 roster (or `roster`) and smart-router/auto, with a controllable clock. */
-async function working(t: Parameters<typeof agentDir>[0], options: Partial<LoadOptions> & { readonly select?: string; readonly roster?: string } = {}): Promise<Clocked> {
+/** A session in work scope by its entry, on Hera's version 2 roster (or `roster`), Hera's Multi-Pass labels (or `multiPass`) and smart-router/auto, with a controllable clock. */
+async function working(
+  t: Parameters<typeof agentDir>[0],
+  options: Partial<LoadOptions> & { readonly select?: string; readonly roster?: string; readonly multiPass?: string } = {},
+): Promise<Clocked> {
   let clock = NOW;
-  const { roster = HERA_V2, ...rest } = options;
-  const loaded = await start({ dir: agentDir(t, { roster }), setup: workEntry, now: () => clock, ...rest });
+  const { roster = HERA_V2, multiPass, ...rest } = options;
+  const loaded = await start({ dir: agentDir(t, { roster, ...(multiPass === undefined ? {} : { multiPass }) }), setup: workEntry, now: () => clock, ...rest });
   return Object.assign(loaded, {
     advance(ms: number) {
       clock += ms;
@@ -483,6 +496,46 @@ describe("work guard", () => {
     assert.equal(loaded.session.statuses.get("smart-router"), undefined, "the work guard shows no status item");
   });
 
+  test("a work alias whose Multi-Pass label is not its binding's is refused by hand too, as routing refuses it; with the binding's label it is kept", async (t) => {
+    const swapped = await working(t, { id: "swapped", multiPass: SWAPPED, runtime: new FakeRuntime(workCatalog()) });
+    assert.throws(() => swapped.runtime.route("auto", request("direct")), /Multi-Pass labels openai-codex-3 "personal", not "Positron work"/, "routing refuses the alias");
+    await swapped.host.choose(WORK_SOL);
+    assert.deepEqual([selection(swapped), lastNotice(swapped)?.message], [AUTO, reverted(WORK_SOL)]);
+    swapped.session.force(WORK_SOL);
+    const signal = swapped.session.startRun();
+    await swapped.host.emit("turn_start", { turnIndex: 0, timestamp: NOW });
+    assert.deepEqual([selection(swapped), signal.aborted], [AUTO, false], "turn_start switches it");
+    swapped.session.force(WORK_SOL);
+    assert.deepEqual(await swapped.host.emit("before_provider_request", { payload: { input: "work text" } }), [null]);
+    assert.equal(lastNotice(swapped)?.message, "pi-smart-router: this session is in work scope, and a request to openai-codex-3/gpt-6.1-sol would go outside it, so the request was emptied and the run stopped.");
+    assert.deepEqual(await swapped.host.emit("cache_warming_decision", { action: "warm" }), [{ action: "stop" }]);
+    // The control: with Hera's labels, the same pick is the work account's, and it is kept.
+    const labelled = await working(t, { id: "labelled", runtime: new FakeRuntime(workCatalog()) });
+    assert.equal(routed(labelled.runtime.route("auto", request("direct"))), "openai-codex-3/gpt-6.1-terra", "routing takes the alias too");
+    await labelled.host.choose(WORK_SOL);
+    assert.deepEqual([selection(labelled), messages(labelled)], [WORK_SOL, []]);
+    const sent = labelled.session.startRun();
+    assert.deepEqual(await labelled.host.emit("before_provider_request", { payload: {} }), [undefined]);
+    assert.equal(sent.aborted, false);
+  });
+
+  test("a work-bound account that is not Codex is no work account: picked by hand, it is refused", async (t) => {
+    const roster = JSON.parse(HERA_V2);
+    roster.accounts["anthropic-2"] = { multiPassLabel: "Positron work", scope: "work" };
+    const multiPass = JSON.stringify({
+      subscriptions: [
+        { provider: "openai-codex", index: 2, label: "personal" },
+        { provider: "openai-codex", index: 3, label: "Positron work" },
+        { provider: "anthropic", index: 2, label: "Positron work" },
+      ],
+    });
+    const claude = "anthropic-2/claude-opus";
+    const loaded = await working(t, { roster: JSON.stringify(roster), multiPass, runtime: new FakeRuntime(new FakeCatalog([...heraModels(), model(claude)])) });
+    assert.deepEqual(messages(loaded), [], "the roster is valid");
+    await loaded.host.choose(claude);
+    assert.deepEqual([selection(loaded), lastNotice(loaded)?.message], [AUTO, reverted(claude)]);
+  });
+
   test("a pinned work session follows the pin's rules: smart-router/local is allowed, and smart-router/auto and a work Codex model are refused", async (t) => {
     const loaded = await working(t, {
       select: KIMI,
@@ -856,6 +909,16 @@ describe("work guard", () => {
       assert.deepEqual([selection(newer), lastNotice(newer)?.message], [AUTO, reverted(KIMI)], "the directory the last roster loaded lists");
     });
 
+    test("the remembered bindings still meet Multi-Pass's labels: a work alias labelled otherwise stays refused", async (t) => {
+      const dir = agentDir(t, { roster: HERA_V2, multiPass: SWAPPED });
+      const loaded = await start({ dir, setup: workEntry, now: () => NOW });
+      writeFileSync(join(dir, "smart-router.json"), "{ nope");
+      await loaded.host.command("smart-router", "reload");
+      assert.match(lastNotice(loaded)?.message ?? "", /smart-router\.json: invalid \(JSON syntax error/);
+      await loaded.host.choose(WORK_SOL);
+      assert.deepEqual([selection(loaded), lastNotice(loaded)?.message], [AUTO, reverted(WORK_SOL)], "the remembered binding names Positron work, and Multi-Pass labels the alias personal");
+    });
+
     test("before any roster has loaded in the process, a work-scope session allows only smart-router/auto, which refuses", async (t) => {
       const loaded = await working(t, { roster: "{ nope" });
       await loaded.host.choose(WORK_SOL);
@@ -871,7 +934,7 @@ describe("work guard", () => {
   });
 
   describe("switchToAuto", () => {
-    /** A second set of guards over a started session, reading its pin and its scope, with Hera's version 2 bindings. */
+    /** A second set of guards over a started session, reading its pin and its scope, with Hera's work account. */
     function guardsOver(loaded: Loaded, overrides: Partial<GuardOptions> = {}) {
       const state = newGuardState();
       return createGuards({
@@ -879,7 +942,7 @@ describe("work guard", () => {
         now: () => NOW,
         pinOf: (ctx) => readPin(ctx.sessionManager, processSlot().env),
         scopeOf: (ctx) => readScope(ctx.sessionManager, false, undefined),
-        accountsOf: () => rosterFixtureV2("roster-hera-v2.json").accounts,
+        workAccount: (provider) => provider === "openai-codex-3",
         stateOf: () => state,
         ...overrides,
       });

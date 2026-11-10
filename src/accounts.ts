@@ -10,7 +10,7 @@
 import { MULTI_PASS_FILE, MULTI_PASS_MAX_BYTES, REFUSED_LABEL, SUBSCRIPTION_ALIAS, SUBSCRIPTION_PROVIDERS } from "./constants.ts";
 import { agentFile, isRecord, message, own } from "./files.ts";
 import type { AgentFile, FileSystem, Loaded, Parsed } from "./files.ts";
-import type { Roster, Scope } from "./roster.ts";
+import type { Roster, RosterV1, RosterV2, Scope } from "./roster.ts";
 
 export type SubscriptionKind = "native" | "alias";
 
@@ -96,6 +96,9 @@ export type AccountCheck =
   | { readonly ok: true; readonly kind: "native" | "multi-pass"; readonly label: string; readonly verified: boolean }
   | { readonly ok: false; readonly reason: string };
 
+/** What checkAccount reads of a roster: its version and its account bindings. */
+export type RosterBindings = Pick<RosterV1, "version" | "accounts"> | Pick<RosterV2, "version" | "accounts">;
+
 /**
  * Whether the roster's binding lets the router use a provider. Not a subscription provider:
  * nothing to check. A native login: John's acknowledgement, reported as unverified. A Multi-Pass
@@ -105,7 +108,7 @@ export type AccountCheck =
  * session refuses a work binding, and a work session takes only a work binding, whose label must
  * name work or Positron. Without a scope, and for version 1, a work or Positron label is refused.
  */
-export function checkAccount(provider: string, roster: Roster, labels: Loaded<Labels> | undefined, scope?: Scope): AccountCheck {
+export function checkAccount(provider: string, roster: RosterBindings, labels: Loaded<Labels> | undefined, scope?: Scope): AccountCheck {
   const kind = subscriptionKind(provider);
   if (kind === undefined) return { ok: true, kind: "none" };
   const binding = roster.accounts.get(provider);
