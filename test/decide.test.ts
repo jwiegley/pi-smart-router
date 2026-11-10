@@ -15,7 +15,7 @@ import { baseUrlHost, checkLocal, isLocalHost, policyFromRoster } from "../src/l
 import type { LocalPolicy } from "../src/local.ts";
 import { Cooldowns, refOf, resolveCandidate, resolveContext } from "../src/resolve.ts";
 import type { ResolveContext } from "../src/resolve.ts";
-import { autoRoles, excludedBy, roleOf } from "../src/roster.ts";
+import { autoRoles, excludedBy, roleOf, SCOPES } from "../src/roster.ts";
 import type { AccountBinding, Role, Roster } from "../src/roster.ts";
 import { tierRank, TIERS } from "../src/tiers.ts";
 import type { Tier } from "../src/tiers.ts";
@@ -812,18 +812,19 @@ describe("v2 levels", () => {
     assert.deepEqual(planUserTurn({ rc: heraContext(), text: PLANNING, last: undefined, now: NOW, reserve: 16_384, level: { tag: "low", jev: answer("low") } }), planned);
   });
 
-  test("200 random work-scope runs never pick a provider other than openai-codex-3", (t) => {
+  test("200 random runs in each scope pick only that scope's accounts, each the first candidate of its role that resolves", (t) => {
     // A fixed seed. Each case has its own generator, seeded SEED + case, so a failure names a case
-    // that replays alone.
+    // that replays alone. Each case is planned in both scopes.
     const SEED = 20_261_109;
     const CASES = 200;
     // Words and whole phrases, so that risky operations, planning and trivial work all come up.
     const WORDS = ["force push", "git reset --hard", "rm -rf node_modules/", "unstage", "clean up the repo", "accidentally added secrets.env", "the", "branch", "plan", "migration", "rename", "foo", "to", "bar", "fix", "build", "debug", "deadlock", "design", "format", "this", "file", "what", "is", "capital", "of", "France?", "PLAN.org", "review", "tests", "go", "ahead"];
     const WORK_REFS = [WORK_LUNA, WORK_TERRA, WORK_SOL, WORK_ASTRA];
     const REFS = [LUNA, NYX_QWEN, HERA_QWEN, TERRA, DEEPSEEK, SOL, GLM_CLOUD, ASTRA, KIMI, ...WORK_REFS, GLM, NATIVE_SOL, "openrouter/someone/else"];
-    const work = V2.scopes.work;
-    assert.ok(work !== undefined);
-    const seen: Record<string, number> = { picked: 0, refused: 0, oversized: 0, "step-up": 0, tag: 0, jev: 0, keyword: 0, floor: 0, "hold:sticky": 0, "hold:fit": 0, "reopen:idle": 0 };
+    const seen: Record<string, number> = {};
+    const count = (name: string): void => {
+      seen[name] = (seen[name] ?? 0) + 1;
+    };
     for (let index = 1; index <= CASES; index += 1) {
       const seed = SEED + index;
       const rand = prng(seed);
@@ -840,45 +841,64 @@ describe("v2 levels", () => {
               ? { jev: { kind: "failure", model: JEV, failure: one(["timeout", "error", "malformed"] as const), ms: 1000 } }
               : {};
       const catalog = v2Catalog();
-      for (const ref of WORK_REFS) catalog.add(codex(ref, { contextWindow: one([32_000, 128_000, 272_000]) }));
+      for (const ref of [LUNA, TERRA, SOL, ASTRA, ...WORK_REFS]) catalog.add(codex(ref, { contextWindow: one([32_000, 128_000, 272_000]) }));
       for (const ref of REFS) if (chance(0.15)) catalog.unavailable.add(ref);
       const cooldowns = new Cooldowns();
-      for (const ref of REFS) if (chance(0.1)) cooldowns.cool(ref, index, NOW, 30);
-      // Most latest responses are the work account's, and they span the idle window, so that the
-      // hold rules come up.
+      const cooled: string[] = [];
+      const cool = (ref: string): void => {
+        cooldowns.cool(ref, cooled.length, NOW, 30);
+        cooled.push(ref);
+      };
+      for (const ref of REFS) if (chance(0.1)) cool(ref);
+      // The latest responses come from both accounts and span the idle window, so that the hold
+      // rules come up, and a third of them cool after answering, as a usage limit does.
       const latest = chance(0.85)
-        ? { ref: chance(0.7) ? one(WORK_REFS) : one(REFS), at: NOW - Math.floor(rand() * 10 * MINUTE), ...(chance(0.6) ? { usage: usage(Math.floor(rand() * 300_000)) } : {}) }
+        ? { ref: one(chance(0.5) ? WORK_REFS : REFS), at: NOW - Math.floor(rand() * 10 * MINUTE), ...(chance(0.6) ? { usage: usage(Math.floor(rand() * 300_000)) } : {}) }
         : undefined;
+      if (latest !== undefined && chance(0.35)) cool(latest.ref);
       const roster: Roster = { ...V2, stickyIdleMinutes: Math.floor(rand() * 10) };
-      const rc = v2(catalog, { roster, scope: "work", cooldowns });
-      const result = planUserTurn({ rc, text, last: latest, now: NOW, reserve: 16_384, level });
-      const where = `seed ${seed} (case ${index} of ${CASES}): ${JSON.stringify({ text, level, last: latest, unavailable: [...catalog.unavailable], stickyIdleMinutes: roster.stickyIdleMinutes })}`;
-      const planned = result.level;
-      assert.ok(planned !== undefined && planned.scope === "work", where);
-      assert.equal(planned.steppedUp, tierRank(planned.tier) > tierRank(planned.start), where);
-      // Whether a tier has an available candidate, and the tiers above a tier.
-      const available = (tier: Tier): boolean => pickInRole(rc, work.levels[tier].role, { fallback: false, code: "t" }).ok;
-      const from = (tier: Tier): readonly Tier[] => TIERS.slice(tierRank(tier));
-      if (result.decision.ok) {
-        const { choice } = result.decision;
-        assert.equal(choice.model.provider, "openai-codex-3", where);
-        assert.equal(choice.role, work.levels[planned.tier].role, where);
-        assert.equal(planned.steppedUp, choice.code === "step-up", where);
-        // A pick too small for the conversation is the highest tier with an available candidate.
-        if (!fits({ last: latest, text, now: NOW, reserve: 16_384 }, choice.model)) {
-          assert.ok(from(planned.tier).slice(1).every((tier) => !available(tier)), `${where}: a tier above the oversized pick has an available candidate`);
-          seen.oversized = (seen.oversized ?? 0) + 1;
+      const shown = JSON.stringify({ text, level, last: latest, unavailable: [...catalog.unavailable], cooled, stickyIdleMinutes: roster.stickyIdleMinutes });
+      for (const scope of SCOPES) {
+        const section = V2.scopes[scope];
+        assert.ok(section !== undefined);
+        const rc = v2(catalog, { roster, scope, cooldowns });
+        const result = planUserTurn({ rc, text, last: latest, now: NOW, reserve: 16_384, level });
+        const where = `seed ${seed} (case ${index} of ${CASES}, ${scope} scope): ${shown}`;
+        const planned = result.level;
+        assert.ok(planned !== undefined && planned.scope === scope, where);
+        // The run's own tier, which a hold may raise but nothing lowers: the one it asked for, or the floor.
+        const own: Tier = planned.source === "floor" ? "high" : planned.asked;
+        const available = (tier: Tier): boolean => pickInRole(rc, section.levels[tier].role, { fallback: false, code: "t" }).ok;
+        const from = (tier: Tier): readonly Tier[] => TIERS.slice(tierRank(tier));
+        if (result.decision.ok) {
+          const { choice } = result.decision;
+          // Only the scope's own account: the work alias in work scope, and never in personal scope.
+          if (scope === "work") assert.equal(choice.model.provider, "openai-codex-3", where);
+          else assert.notEqual(choice.model.provider, "openai-codex-3", where);
+          // The role of a tier no lower than the run's own, and that role's first candidate that resolves.
+          assert.equal(choice.role, section.levels[planned.tier].role, where);
+          assert.ok(tierRank(planned.tier) >= tierRank(own), `${where}: picked below its own tier, ${own}`);
+          const models = rc.roster.roles.find((role) => role.name === choice.role)?.models ?? [];
+          assert.equal(models.find((ref) => resolveCandidate(ref, rc).ok), choice.ref, `${where}: not the first candidate of ${choice.role} that resolves`);
+          // A pick too small for the conversation is the highest tier with an available candidate.
+          if (!fits({ last: latest, text, now: NOW, reserve: 16_384 }, choice.model)) {
+            assert.ok(from(planned.tier).slice(1).every((tier) => !available(tier)), `${where}: a tier above the oversized pick has an available candidate`);
+            count("oversized");
+          }
+          count(`${scope} picked`);
+        } else {
+          // Refused only when neither the run's own tier nor any tier above it has an available candidate.
+          assert.ok(from(own).every((tier) => !available(tier)), `${where}: refused, though ${own} or a tier above it has an available candidate`);
+          count(`${scope} refused`);
         }
-        seen.picked = (seen.picked ?? 0) + 1;
-      } else {
-        // A refusal means no tier from the start has an available candidate.
-        assert.ok(from(planned.start).every((tier) => !available(tier)), `${where}: refused, though a tier from the start has an available candidate`);
-        seen.refused = (seen.refused ?? 0) + 1;
+        count(result.code);
       }
-      seen[result.code] = (seen[result.code] ?? 0) + 1;
     }
-    // The run is not vacuous: every source, hold and step-up happened, and so did oversized picks and refusals.
+    // The run is not vacuous: both scopes picked and refused, and every source, hold, step-up and
+    // oversized pick happened.
     t.diagnostic(JSON.stringify(seen));
-    for (const [name, count] of Object.entries(seen)) assert.ok(count > 0, `no ${name} in ${CASES} cases from seed ${SEED}: ${JSON.stringify(seen)}`);
+    for (const name of ["personal picked", "personal refused", "work picked", "work refused", "oversized", "step-up", "tag", "jev", "keyword", "floor", "hold:sticky", "hold:fit", "reopen:idle"]) {
+      assert.ok((seen[name] ?? 0) > 0, `no ${name} in ${CASES} cases from seed ${SEED}: ${JSON.stringify(seen)}`);
+    }
   });
 });
