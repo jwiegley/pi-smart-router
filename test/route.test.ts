@@ -625,3 +625,71 @@ describe("a version 2 roster's default role", () => {
     assert.equal(lastHistory(loaded)?.code, "direct:default");
   });
 });
+
+describe("a version 2 run's plan", () => {
+  const FRANCE = "What is the capital of France?";
+  const TERRA = "openai-codex-2/gpt-6.1-terra";
+  const WORK_TERRA = "openai-codex-3/gpt-6.1-terra";
+  const HERA_V2 = rosterFixtureV2("roster-hera-v2.json");
+  const VIRTUAL = model("smart-router/auto", { api: "pi-virtual", baseUrl: "" });
+  const KEYWORD_MEDIUM = { tier: "medium", asked: "medium", source: "keyword", steppedUp: false, returnedToFirst: false } as const;
+  const v2Catalog = (): FakeCatalog => new FakeCatalog([...heraModels(), codex(TERRA), codex(WORK_TERRA)]);
+  const owned = (rc: ResolveContext, record: SessionRecord): RouteInput => ({
+    id: rc.virtualId,
+    request: { ...request("user"), model: VIRTUAL },
+    rc,
+    pin: { on: false, policy: EMPTY_POLICY },
+    record,
+  });
+
+  test("puts its level in the run's history entry", async (t) => {
+    const loaded = await start({ dir: agentDir(t, { roster: fixture("roster-hera-v2.json") }), runtime: new FakeRuntime(v2Catalog()), now: () => NOW });
+    const signal = await prompt(loaded, FRANCE);
+    assert.equal(routed(loaded.runtime.route("auto", request("user", { signal }))), TERRA);
+    assert.deepEqual(lastHistory(loaded), {
+      at: NOW,
+      virtual: "auto",
+      reason: "user",
+      signal: "default",
+      trigger: "triage:no_fast_path",
+      role: "medium",
+      ref: TERRA,
+      code: "keyword",
+      foreign: false,
+      level: { scope: "personal", ...KEYWORD_MEDIUM },
+    });
+  });
+
+  test("is used only in the scope it was made in", () => {
+    const personal = heraContext({ roster: HERA_V2, catalog: v2Catalog() });
+    const work = heraContext({ roster: HERA_V2, catalog: v2Catalog(), scope: "work" });
+    const record = newRecord();
+    record.plan = planUserTurn({ rc: personal, text: FRANCE, last: undefined, now: NOW, reserve: 0 });
+    assert.ok(record.plan.decision.ok && record.plan.decision.choice.ref === TERRA, "the prompt planned terra in personal scope");
+    // By the run's first request the session is in work scope: the plan is dropped, and the run sticks there.
+    assert.equal(routed(routeOwned(owned(work, record))), WORK_TERRA);
+    assert.deepEqual(record.history.at(-1), {
+      at: NOW,
+      virtual: "auto",
+      reason: "user",
+      signal: undefined,
+      trigger: undefined,
+      role: "work-medium",
+      ref: WORK_TERRA,
+      code: "stick:default",
+      foreign: false,
+    });
+    record.plan = planUserTurn({ rc: work, text: FRANCE, last: undefined, now: NOW, reserve: 0 });
+    assert.equal(routed(routeOwned(owned(work, record))), WORK_TERRA);
+    assert.deepEqual([record.history.at(-1)?.code, record.history.at(-1)?.level], ["keyword", { scope: "work", ...KEYWORD_MEDIUM }]);
+  });
+
+  test("a local-only plan, which has no level, is used as before", () => {
+    const local = heraContext({ roster: HERA_V2, virtualId: "local" });
+    const record = newRecord();
+    record.plan = planUserTurn({ rc: local, text: FRANCE, last: undefined, now: NOW, reserve: 0 });
+    assert.equal(record.plan.level, undefined);
+    assert.equal(routed(routeOwned(owned(local, record))), GLM);
+    assert.deepEqual([record.history.at(-1)?.code, "level" in (record.history.at(-1) ?? {})], ["local", false]);
+  });
+});

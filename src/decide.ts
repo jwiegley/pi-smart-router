@@ -6,18 +6,27 @@
 // model through a stretch of work: a run that classifies lower keeps the latest response's role
 // until the session has been idle for stickyIdleMinutes, and longer still when the conversation
 // would not fit the lower role's window. A run that classifies higher moves up at once.
+//
+// Version 2 plans a tier in the session's scope instead: a trailing tag's, else Jev's, else the
+// keywords'. An untagged run rises to at least high when it names a risky operation, and keeps the
+// hold rules above, comparing tiers; a tagged run does neither. The tier's role takes its first
+// available candidate, not the latest response's. A tier with no available candidate, or whose
+// first available candidate is too small for the conversation, passes the run up to the next tier.
 import type { Api, Model, Usage } from "@earendil-works/pi-ai";
 import { calculateContextTokens, DEFAULT_COMPACTION_SETTINGS, estimateTokens } from "@earendil-works/pi-coding-agent";
 
-import { classify } from "./classify.ts";
-import type { Signal } from "./classify.ts";
+import { classify, riskyTrigger } from "./classify.ts";
+import type { RiskyTrigger, Signal } from "./classify.ts";
 import { PROVIDER } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { isRecord, own } from "./files.ts";
+import type { JevOutcome } from "./jev.ts";
 import { resolveCandidate } from "./resolve.ts";
 import type { Resolution, ResolveContext } from "./resolve.ts";
-import { autoRoles, rankOf, roleOf } from "./roster.ts";
-import type { Scope } from "./roster.ts";
+import { autoRoles, rankOf, roleOf, scopeSection } from "./roster.ts";
+import type { Scope, ScopeSection } from "./roster.ts";
+import { keywordTier, tierAbove, tierRank, TIERS } from "./tiers.ts";
+import type { Tier } from "./tiers.ts";
 
 /** The latest successful physical response of a session. */
 export interface LastResponder {
@@ -97,6 +106,33 @@ export function pickInRole(rc: ResolveContext, roleName: string, options: PickOp
   return { ok: false, attempts };
 }
 
+/** What a version 2 run's input says about its tier: a trailing tag's, and Jev's outcome. */
+export interface LevelInput {
+  readonly tag?: Tier;
+  readonly jev?: JevOutcome;
+}
+
+/** What decided a version 2 run's tier: a tag, Jev, the keywords, or the risky-operations floor. */
+export type LevelSource = "tag" | "jev" | "keyword" | "floor";
+
+/** Why a version 2 run on auto went to its tier. Never prompt text. */
+export interface PlanLevel {
+  readonly scope: Scope;
+  /** The tier whose role the plan picked in; when it picked none, the tier it started from. */
+  readonly tier: Tier;
+  /** The tier the tag, Jev or the keywords asked for, before the floor, the hold rules and any step-up. */
+  readonly asked: Tier;
+  readonly source: LevelSource;
+  /** The risky operation that raised the run to the floor. */
+  readonly trigger?: RiskyTrigger;
+  /** Whether the pick moved up from the tier it started from, which could not take the run. */
+  readonly steppedUp: boolean;
+  /** Whether the pick is another candidate of the role that holds the model that answered last. */
+  readonly returnedToFirst: boolean;
+  /** The outcome an untagged run waited for. */
+  readonly jev?: JevOutcome;
+}
+
 /** A run's decision, made when its prompt arrives and consumed by its first request. */
 export interface Plan {
   readonly virtualId: VirtualId;
@@ -107,12 +143,16 @@ export interface Plan {
   /** The role decided, before any fallback; undefined when there is none to decide. */
   readonly role: string | undefined;
   /**
-   * The history code of the decision: `signal:*`, `hold:sticky`, `hold:fit`, `reopen:idle`, `local`,
-   * or `v2-unplanned` for a version 2 roster's run on auto, which this planner refuses.
+   * The history code of the decision: `signal:*`, `hold:sticky`, `hold:fit`, `reopen:idle` or
+   * `local`. A version 2 run on auto has its level's source (`tag`, `jev`, `keyword` or `floor`) or
+   * a hold code, `step-up` when its pick moved up a tier, or `no-scope` when the roster does not
+   * serve the session's scope.
    */
   readonly code: string;
   /** The model the decision picked when it was made, or why there was none. */
   readonly decision: Decision;
+  /** A version 2 run's level on auto, in a scope the roster serves. */
+  readonly level?: PlanLevel;
 }
 
 export interface PlanInput {
@@ -123,6 +163,8 @@ export interface PlanInput {
   readonly now: number;
   /** The compaction reserve Pi applies under the selection (see `reserveFor`). */
   readonly reserve: number;
+  /** A version 2 run's tag and Jev outcome; version 1 and local-only runs ignore it. */
+  readonly level?: LevelInput;
 }
 
 /** The role of a ref that may take this request: the local role when local-only, else for auto a role auto can reach. */
@@ -141,11 +183,78 @@ export function noScopeSection(scope: Scope): string {
   return `the roster has no ${scope} scope`;
 }
 
-const V2_UNPLANNED = "version 2 planning is not built yet";
+/** The tier an untagged run that names a risky operation rises to, at least. */
+const FLOOR: Tier = "high";
+const STEP_UP = "step-up";
+const NO_SCOPE = "no-scope";
+const DOES_NOT_FIT = "the conversation would not fit its context window";
+
+/** The tier of a scope whose role holds a ref. */
+function tierOf(rc: ResolveContext, section: ScopeSection, ref: string): Tier | undefined {
+  const role = roleOf(rc.roster, ref)?.name;
+  return role === undefined ? undefined : TIERS.find((tier) => section.levels[tier].role === role);
+}
+
+/**
+ * From `start` upward, the first tier whose role's first available candidate fits the conversation.
+ * The start tier's pick carries `code`, a higher tier's `step-up`. When no tier can take the run,
+ * every tier's reasons, and the start tier.
+ */
+function climb(p: PlanInput, section: ScopeSection, start: Tier, code: string): { readonly tier: Tier; readonly decision: Decision } {
+  const attempts: Attempt[] = [];
+  for (let tier: Tier | undefined = start; tier !== undefined; tier = tierAbove(tier)) {
+    const role = section.levels[tier].role;
+    const decision = pickInRole(p.rc, role, { fallback: false, code: tier === start ? code : STEP_UP });
+    if (!decision.ok) attempts.push(...decision.attempts);
+    else if (fits(p, decision.choice.model)) return { tier, decision };
+    else attempts.push({ role, exists: true, candidates: [{ ok: false, ref: decision.choice.ref, reason: "does-not-fit", detail: DOES_NOT_FIT }] });
+  }
+  return { tier: start, decision: { ok: false, attempts } };
+}
+
+/** A version 2 run on auto, in a scope the roster serves. A refusal keeps no role, so the run's request does not pick in one again. */
+function planLevel(p: PlanInput, section: ScopeSection, signal: Signal): Pick<Plan, "role" | "code" | "decision"> & { readonly level: PlanLevel } {
+  const { rc, last } = p;
+  const tag = p.level?.tag;
+  const jev = p.level?.jev;
+  const [asked, given]: readonly [Tier, LevelSource] =
+    tag !== undefined ? [tag, "tag"] : jev?.kind === "answer" ? [jev.tier, "jev"] : [keywordTier(signal), "keyword"];
+  const risky = tag === undefined ? riskyTrigger(p.text) : undefined;
+  const trigger = risky !== undefined && tierRank(asked) < tierRank(FLOOR) ? risky : undefined;
+  const source: LevelSource = trigger === undefined ? given : "floor";
+  let start = trigger === undefined ? asked : FLOOR;
+  let code: string = source;
+  const sticky = tag === undefined && last !== undefined ? tierOf(rc, section, last.ref) : undefined;
+  if (last !== undefined && sticky !== undefined && tierRank(start) < tierRank(sticky)) {
+    const idle = p.now - last.at >= rc.roster.stickyIdleMinutes * 60_000;
+    if (!idle) {
+      start = sticky;
+      code = "hold:sticky";
+    } else {
+      const down = pickInRole(rc, section.levels[start].role, { fallback: false, code: "reopen:idle" });
+      const held = down.ok && !fits(p, down.choice.model);
+      if (held) start = sticky;
+      code = held ? "hold:fit" : "reopen:idle";
+    }
+  }
+  const { tier, decision } = climb(p, section, start, code);
+  const choice = decision.ok ? decision.choice : undefined;
+  const level: PlanLevel = {
+    scope: rc.scope,
+    tier,
+    asked,
+    source,
+    ...(trigger === undefined ? {} : { trigger }),
+    steppedUp: tier !== start,
+    returnedToFirst: choice !== undefined && last !== undefined && last.ref !== choice.ref && roleOf(rc.roster, last.ref)?.name === choice.role,
+    ...(tag !== undefined || jev === undefined ? {} : { jev }),
+  };
+  return { role: choice?.role, code: choice?.code ?? code, decision, level };
+}
 
 export function planUserTurn(p: PlanInput): Plan {
   const { rc } = p;
-  const plan = (signal: Plan["signal"], reason: string, role: string | undefined, code: string, decision: Decision): Plan => ({
+  const plan = (signal: Plan["signal"], reason: string, role: string | undefined, code: string, decision: Decision, level?: PlanLevel): Plan => ({
     virtualId: rc.virtualId,
     localOnly: rc.localOnly,
     signal,
@@ -153,6 +262,7 @@ export function planUserTurn(p: PlanInput): Plan {
     role,
     code,
     decision,
+    ...(level === undefined ? {} : { level }),
   });
   if (rc.localOnly) {
     const role = rc.roster.local?.role;
@@ -160,7 +270,12 @@ export function planUserTurn(p: PlanInput): Plan {
     return plan("local", "local-only", role, "local", pickInRole(rc, role, { fallback: false, code: "local" }));
   }
   const { signal, reason } = classify(p.text);
-  if (rc.roster.version === 2) return plan(signal, reason, undefined, "v2-unplanned", { ok: false, attempts: [], problem: V2_UNPLANNED });
+  if (rc.roster.version === 2) {
+    const section = scopeSection(rc.roster, rc.scope);
+    if (section === undefined) return plan(signal, reason, undefined, NO_SCOPE, { ok: false, attempts: [], problem: noScopeSection(rc.scope) });
+    const { role, code, decision, level } = planLevel(p, section, signal);
+    return plan(signal, reason, role, code, decision, level);
+  }
   const target = rc.roster.routing[signal];
   const sticky = p.last === undefined ? undefined : eligibleRole(rc, p.last.ref);
   let role = target;

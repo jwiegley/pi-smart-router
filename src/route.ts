@@ -7,7 +7,8 @@
 // request (a session that shares the runtime but has no instance of its own, such as goal-x's
 // default auditor) route without changing any of them.
 //
-//   owner user          the run's plan, else as a continuation (steering, follow-ups)
+//   owner user          the run's plan (a version 2 plan on auto only in the scope it was made
+//                       in), else as a continuation (steering, follow-ups)
 //   owner continuation  previous, else the run's pick, else the last responder: that model if it
 //                       resolves, else its role, else the role's fallback; with no base, the
 //                       default role (the local role when local-only) and its fallback
@@ -26,7 +27,7 @@ import { isCodexProvider, subscriptionKind } from "./accounts.ts";
 import { VIRTUAL_API } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { eligibleRole, NO_LOCAL_SECTION, noScopeSection, pickInRole } from "./decide.ts";
-import type { Choice, Decision, LastResponder, Plan } from "./decide.ts";
+import type { Choice, Decision, LastResponder, Plan, PlanLevel } from "./decide.ts";
 import { invariant, noBoundedHistory, unroutable } from "./errors.ts";
 import { checkLocal } from "./local.ts";
 import type { LocalPolicy } from "./local.ts";
@@ -60,6 +61,8 @@ export interface HistoryEntry {
   readonly code: string;
   /** A foreign request's decision: kept for /smart-router history, never published. */
   readonly foreign: boolean;
+  /** A version 2 run's level, on the request that consumed its plan. Version 1 entries have none. */
+  readonly level?: PlanLevel;
 }
 
 export const HISTORY_LIMIT = 50;
@@ -166,11 +169,15 @@ function retry(rc: ResolveContext, request: ModelRouteRequest, record: SessionRe
   return stick(rc, previousRef(request), record);
 }
 
-/** The run's plan, consumed: it is never used twice, and never for another selection. */
-function takePlan(record: SessionRecord, id: VirtualId, localOnly: boolean): Plan | undefined {
+/**
+ * The run's plan, consumed: it is never used twice, and never for another selection. A version 2
+ * plan on auto is used only in the scope it was made in; a local-only plan carries no account.
+ */
+function takePlan(record: SessionRecord, id: VirtualId, rc: ResolveContext): Plan | undefined {
   const { plan } = record;
   record.plan = undefined;
-  return plan !== undefined && plan.virtualId === id && plan.localOnly === localOnly ? plan : undefined;
+  if (plan === undefined || plan.virtualId !== id || plan.localOnly !== rc.localOnly) return undefined;
+  return rc.localOnly || rc.roster.version === 1 || plan.level?.scope === rc.scope ? plan : undefined;
 }
 
 /** The planned model if it still resolves, else the planned role, then its fallback. */
@@ -249,7 +256,7 @@ export function routeOwned(input: RouteInput): ModelRoute {
   let decision: Decision;
   let plan: Plan | undefined;
   if (request.reason === "user") {
-    plan = takePlan(record, id, rc.localOnly);
+    plan = takePlan(record, id, rc);
     decision = plan === undefined ? stick(rc, previousRef(request), record) : fromPlan(rc, plan);
   } else if (request.reason === "retry") {
     decision = retry(rc, request, record);
@@ -268,6 +275,7 @@ export function routeOwned(input: RouteInput): ModelRoute {
     ref: choice.ref,
     code: choice.code,
     foreign: false,
+    ...(plan?.level === undefined ? {} : { level: plan.level }),
   });
   return { model: choice.model, thinkingLevel: levelFor(rc, choice.role, request.thinkingLevel) };
 }
