@@ -549,6 +549,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
    *   with the same text;
    * - a stray message whose own prompt a later handler also expands or changes matches no text, so it
    *   can still take the plan of the one idle message counted;
+   * - a message held while REMEMBERED newer messages pass is forgotten, so its run, too, can take
+   *   the plan of the one idle message counted;
    * - a counted message that never starts its own run (one a later extension handles, an idle RPC
    *   steer or follow_up, a prompt() that throws) leaves the next expanded or changed run unplanned.
    *   A run that drops a tagged plan, a prompt's or a custom message's, says so (unmatchedTagNotice);
