@@ -98,7 +98,7 @@ const LONG_BASE64 = /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40,}(?![A-Za-z0-9+/])/g;
 //   'it'\''s; here' are text. Inside single quotes a backslash is text, and the next single quote
 //   closes. This pass is the last of the basic stage, on what the other passes left, so what it
 //   hides takes no command word or name from them. The two readings differ only where a backslash
-//   stands before a quote, so it runs only on text that holds one.
+//   stands before a quote, so it runs only on text that holds one; other text is read once.
 // Neither reading follows a quoted argument past its line: a quote that never closes ends at the
 // line's end, with the command, unless a backslash continues the line. Flags are read inside a
 // quoted argument as outside one. A reading can still end a command too early, where the text's

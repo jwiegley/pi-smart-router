@@ -297,6 +297,7 @@ describe("redact", () => {
     ["curl's -u after a single-quoted body with an escaped quote between its pieces", "curl -d 'it'\\''s; here' -u admin:Hunter2pw https://h", `curl -d 'it'\\''s; here' -u admin:${REDACTED} https://h`],
     ["curl's -u in a command that a JSON string holds, with escaped quotes around a semicolon", "{\"command\": \"curl -H \\\"x; y\\\" -u admin:Hunter2pw https://h\"}", `{"command": "curl -H \\"x; y\\" -u admin:${REDACTED} https://h"}`],
     ["a mysql password glued behind a curl password that only the shell's reading finds", "curl -d \"{\\\"a\\\": \\\"b; c\\\"}\" -u admin:Hunter2pw|mysql -uroot -pHunter3pw", `curl -d "{\\"a\\": \\"b; c\\"}" -u admin:${REDACTED} -uroot -p${REDACTED}`],
+    ["a netrc password that ends a curl command with no escaped quote, which is read once", "curl -s https://h login bob password a;b; date -u +%H:%M:%S", `curl -s https://h login bob password ${REDACTED} date -u +%H:%M:%S`],
     ["curl's -u and -U in one command", "curl -u a:Hunter2pw -U b:Hunter3pw https://h", `curl -u a:${REDACTED} -U b:${REDACTED} https://h`],
     ["wget's --proxy-user, which no curl word precedes", "wget --proxy-user bob:Hunter2pw https://h", `wget --proxy-user bob:${REDACTED} https://h`],
     ["a --proxy-user= outside curl", "wget --proxy-user=bob:Hunter2pw https://h", `wget --proxy-user=bob:${REDACTED} https://h`],
