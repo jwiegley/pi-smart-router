@@ -120,6 +120,13 @@ const XML_ELEMENT = /(<([A-Za-z_][\w.:-]*)(?:\s[^<>]*)?>)[^<]+(?=<\/\2\s*>)/g;
 // element goes when it is a string that is not empty; a name (password) is no secret of its own.
 const AUTH_PAIR = /((?:(?<![\w-])auth["']?[ \t]*[=:][ \t]*\(|(?<!\w)\w*(?:Basic|Digest)Auth\()[ \t]*(?:(["'])[^"'\n]*\2|[\w.]+)[ \t]*,[ \t]*)(["'])[^"'\n]+\3/g;
 
+// A Set-Cookie header sets one cookie, whose value goes; its name and attributes (Path, Expires)
+// stay. A Cookie header, plain or in JSON, sends several: each value goes and each name stays. The
+// lookbehind keeps Set-Cookie's attributes out of the Cookie pass.
+const SET_COOKIE = /(set-cookie\\?["']?[ \t]*:[ \t]*\\?["']?[^=;\s"'\\]*=)[^;\s"'\\]+/gi;
+const COOKIE_HEADER = /(?<![\w-])(cookie\\?["']?[ \t]*:[ \t]*\\?["']?)([^\n"']*)/gi;
+const COOKIE_VALUE = /=[^;\s\\]+/g;
+
 /** Basic credentials in command-line and config forms, each password replaced with REDACTED. */
 function redactBasic(text: string): string {
   let out = text.replace(USER_FLAG, (_flag, flag: string, quote: string | undefined, quotedUser: string | undefined, user: string | undefined) =>
@@ -128,7 +135,9 @@ function redactBasic(text: string): string {
   out = redactMysqlPasswords(out);
   out = out.replace(NETRC_CANDIDATE, (line) => (NETRC_LINE.test(line) ? line.replace(NETRC_PASSWORD, `$1${REDACTED}`) : line));
   out = out.replace(XML_ELEMENT, (element, open: string, name: string) => (isSecretName(name) ? open + REDACTED : element));
-  return out.replace(AUTH_PAIR, `$1${REDACTED}`);
+  out = out.replace(AUTH_PAIR, `$1${REDACTED}`);
+  out = out.replace(SET_COOKIE, `$1${REDACTED}`);
+  return out.replace(COOKIE_HEADER, (_header, head: string, value: string) => head + value.replace(COOKIE_VALUE, `=${REDACTED}`));
 }
 
 function mixedCase(run: string): boolean {

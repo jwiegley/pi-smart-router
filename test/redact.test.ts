@@ -301,6 +301,18 @@ describe("redact", () => {
     ["requests' HTTPBasicAuth", "auth=HTTPBasicAuth('bob', 'Hunter2pw')", `auth=HTTPBasicAuth('bob', ${REDACTED})`],
     ["requests' HTTPDigestAuth", "HTTPDigestAuth('bob', 'Hunter2pw')", `HTTPDigestAuth('bob', ${REDACTED})`],
     ["aiohttp's BasicAuth", "aiohttp.BasicAuth('bob', 'Hunter2pw')", `aiohttp.BasicAuth('bob', ${REDACTED})`],
+    ["a Cookie header", "Cookie: session=Hunter2pwSessionTok", `Cookie: session=${REDACTED}`],
+    ["a Cookie header with two cookies", "Cookie: a=Hunter2pw; b=Hunter3pw", `Cookie: a=${REDACTED}; b=${REDACTED}`],
+    ["a lowercase cookie header", "cookie: session=Hunter2pw", `cookie: session=${REDACTED}`],
+    ["a JSON Cookie header", '{"Cookie": "session=Hunter2pw"}', `{"Cookie": "session=${REDACTED}"}`],
+    ["an escaped JSON Cookie header", '{\\"Cookie\\": \\"session=Hunter2pw\\"}', `{\\"Cookie\\": \\"session=${REDACTED}\\"}`],
+    ["a Cookie header among other headers", "Cookie: session=Hunter2pw\nX-Mode: debug=on", `Cookie: session=${REDACTED}\nX-Mode: debug=on`],
+    ["a Cookie header after an escaped CRLF", "Host: x\\r\\nCookie: session=Hunter2pw", `Host: x  Cookie: session=${REDACTED}`],
+    ["a Set-Cookie header, whose attributes stay", "Set-Cookie: sid=Hunter2pw; Path=/; HttpOnly", `Set-Cookie: sid=${REDACTED}; Path=/; HttpOnly`],
+    ["a lowercase set-cookie header", "set-cookie: sid=Hunter2pw", `set-cookie: sid=${REDACTED}`],
+    ["a JSON Set-Cookie header", '{"Set-Cookie": "sid=Hunter2pw"}', `{"Set-Cookie": "sid=${REDACTED}"}`],
+    ["a single-quoted Set-Cookie header", "{'Set-Cookie': 'sid=Hunter2pw'}", `{'Set-Cookie': 'sid=${REDACTED}'}`],
+    ["an escaped JSON Set-Cookie header", '{\\"Set-Cookie\\": \\"sid=Hunter2pw\\"}', `{\\"Set-Cookie\\": \\"sid=${REDACTED}\\"}`],
   ];
 
   for (const [name, input, want] of basicCredentials) {
@@ -444,6 +456,11 @@ describe("redact", () => {
       "BasicAuth(".repeat(20000),
       `${"x_".repeat(100000)}BasicAuth(`,
       "auth=(a, 'x".repeat(20000),
+      "Cookie: ".repeat(25000),
+      "Cookie: a=b; ".repeat(15000),
+      "Set-Cookie: ".repeat(16000),
+      "Set-Cookie: a;".repeat(14000),
+      "cookie:a=".repeat(22000),
     ];
     for (const input of inputs) {
       const start = performance.now();
