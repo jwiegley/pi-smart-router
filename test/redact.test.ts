@@ -389,6 +389,7 @@ describe("redact", () => {
     "curl -H 'x; y https://h\ndate -u +%H:%M:%S",
     "curl -H 'x https://h\ncurl https://h; date -u +%H:%M:%S",
     'curl -H "it\'s" https://h; date -u +%H:%M:%S',
+    "Run `curl -s https://h`; date -u +%H:%M:%S",
     "curl -s https://h \\ \ndate -u +%H:%M:%S",
     "curl -s https://h; date -u +%H:%M:%S",
     "see libcurl and date -u +%H:%M:%S",
