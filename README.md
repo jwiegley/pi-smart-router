@@ -390,7 +390,10 @@ These are version 1's rules. Version 2 keeps them, comparing levels rather than 
     64 newer ones pass can do the same;
   - after a counted message that never starts its own run (one a later extension handles, an idle
     RPC steer or follow-up, a `prompt()` that throws), the next expanded or rewritten run goes
-    unplanned and stays on the model the session used last.
+    unplanned and stays on the model the session used last;
+  - a message that a later extension rewrites into the text of a message still held goes unplanned,
+    but its run makes the router forget the held one, whose own run can then take the plan of the
+    one idle message counted.
 - **Stickiness.** A run that classifies higher than the latest response's role moves up at once. One
   that classifies lower stays until the session has been idle for `stickyIdleMinutes`, and longer
   still while the conversation would not fit the lower role's context window less Pi's compaction

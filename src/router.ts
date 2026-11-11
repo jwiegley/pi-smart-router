@@ -674,7 +674,9 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
    *   A run that drops a tagged plan, a prompt's or a custom message's, says so (unmatchedTagNotice);
    *   under version 1, which has no tags, it goes unplanned without a notice;
    * - a message a later extension rewrites into the text of a steer the router still remembers goes
-   *   unplanned, which is the safe direction.
+   *   unplanned, which is the safe direction, but its run forgets one message of that text, the
+   *   steer's: the steer's own run, when it starts, can then take the plan of the one idle message
+   *   counted.
    */
   const ownsRun = (record: Session, digest: string | undefined, prompt: string): boolean =>
     digest !== undefined && (digest === prompt || (!record.remembered.has(prompt) && record.inputsSinceRun === 1));
