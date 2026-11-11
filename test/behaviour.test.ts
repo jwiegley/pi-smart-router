@@ -23,6 +23,7 @@ import type { TestContext } from "node:test";
 
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 
 import type { RoutingRegistry } from "../src/cache-optimizer.ts";
@@ -1622,6 +1623,54 @@ test("L9 a version 1 roster keeps its history and status text byte-identical", T
   assert.deepEqual(entriesOf(pi, SCOPE_ENTRY), []);
   assert.equal(pi.ui.statusLog.some((item) => item.key === "smart-router-level"), false);
   assert.deepEqual(world.jev.calls, []);
+});
+
+test("L10 where a session's scope reaches: the default goal-x auditor, a command-line fork, and pi-subagents children", TIMEOUT, async (t) => {
+  await t.test("a scope an entry set: the default auditor routes in it, and pi --fork keeps it", async (t) => {
+    const world = levelsWorld(t);
+    const parent = await world.start({ persisted: true, select: "smart-router/auto" });
+    await parent.command("scope work");
+    await parent.prompt(PROMPTS.plain);
+    assert.equal(answered(parent), WORK.medium);
+    // goal-x's default auditor shares the parent's runtime, so its requests go through the parent's
+    // route, with the parent's context and so its scope, as they obey its pin.
+    const auditor = await auditorSession(world, parent, "smart-router/auto");
+    t.after(() => auditor.dispose());
+    await auditor.prompt(PROMPTS.plain);
+    await auditor.waitForIdle();
+    const audit = auditor.messages.filter((message): message is AssistantMessage => message.role === "assistant").at(-1);
+    assert.equal(`${audit?.provider}/${audit?.model}`, WORK.medium);
+    // pi --fork is SessionManager.forkFrom, which copies every entry of the session, the scope's too.
+    const file = parent.session.sessionFile;
+    assert.ok(file !== undefined);
+    const forked = await world.start({ sessionManager: SessionManager.forkFrom(file, world.cwd, world.sessionDir), select: "smart-router/auto" });
+    assert.deepEqual(scopeEntries(forked), [["work", "command"]]);
+    await forked.prompt(PROMPTS.plain);
+    assert.equal(answered(forked), WORK.medium);
+    assert.equal(world.faux("openrouter").callCount, 0);
+  });
+
+  await t.test("a pi-subagents child starts with no entries, so a scope its parent's entry set does not reach it", async (t) => {
+    const world = levelsWorld(t);
+    const parent = await world.start({ select: "smart-router/auto" });
+    await parent.command("scope work");
+    const child = await world.start({ select: "openrouter/z-ai/glm-5.3" });
+    await child.prompt(PROMPTS.plain);
+    assert.equal(answered(child), "openrouter/z-ai/glm-5.3");
+  });
+
+  await t.test("under the latch, a child that loads the router is held in work scope, and one that does not keeps its model", async (t) => {
+    const world = levelsWorld(t);
+    process.env[ENV_SCOPE] = "work";
+    const held = await world.start({ select: "openrouter/z-ai/glm-5.3" });
+    assert.equal(held.selection(), "smart-router/auto");
+    await held.prompt(PROMPTS.plain);
+    assert.equal(answered(held), WORK.medium);
+    const bare = await world.start({ router: false, probe: false, select: "openrouter/z-ai/glm-5.3" });
+    await bare.prompt(PROMPTS.plain);
+    assert.equal(answered(bare), "openrouter/z-ai/glm-5.3");
+    assert.equal(world.faux("openrouter").callCount, 1, "only the child without the router reached OpenRouter");
+  });
 });
 
 test("1. under a version 2 roster, both models declare limits from every level of both scopes and the local role, whichever scope a session starts in", TIMEOUT, async (t) => {

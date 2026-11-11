@@ -97,11 +97,12 @@ sends nothing unless pinned.
   off the machine.
 - The router keeps no prompt text: it binds plans by HMAC-SHA-256 digests under a key each instance
   draws at random, and records hold neither text nor digest.
-- No OpenRouter model answers a work session, routed or picked by hand; Jev's request is the one
-  OpenRouter use in work scope. Subagent children, goal-x auditors and forks made from the command
-  line do not inherit a scope that only an entry set (see "Limits and rollout" in the README).
-  `smart-router/auto` never routes a personal session to a work-bound account. In personal scope,
-  outside the pin, a model picked by hand is sent as it is.
+- No OpenRouter model answers the requests that go through a work session's route, routed or picked
+  by hand, the default goal-x auditor's included; Jev's request is the one OpenRouter use in work
+  scope. A `pi --fork` copies a scope that an entry set; pi-subagents children start without it,
+  and extensions with models of their own are outside work scope (see "What work scope does not
+  cover" in the README). `smart-router/auto` never routes a personal session to a work-bound
+  account. In personal scope, outside the pin, a model picked by hand is sent as it is.
 - Scope reads fail closed: an unreadable or malformed scope entry makes `smart-router/auto` refuse,
   the work guard holds the session as work scope, and a fork or `/new` from it starts in work scope.
   A work session under a version 1 roster is refused twice, when its request is prepared and by

@@ -26,9 +26,10 @@ answered, and Pi's footer shows it.
 - **Levels and scopes.** With a version 2 roster, `smart-router/auto` sends each run to one of four
   levels, LOW, MEDIUM, HIGH or SUPER, in the session's scope, personal or work. A trailing tag such
   as `#high` sets the level; otherwise Jev, TypeSafe AI's decision model, classifies the message
-  through Pi; otherwise the keywords do. A work session reaches only the work Codex account, apart
-  from Jev and, while pinned, local models. See [Levels](#levels), [Jev](#jev) and
-  [Scope](#scope-personal-or-work).
+  through Pi; otherwise the keywords do. The router sends a work session's requests only to the
+  work Codex account, apart from Jev and, while pinned, local models; extensions with models of
+  their own are outside it ([What work scope does not cover](#what-work-scope-does-not-cover)).
+  See [Levels](#levels), [Jev](#jev) and [Scope](#scope-personal-or-work).
 - **`smart-router/local`** routes only to the roster's local role, and never falls back to anything
   else. If no local model can take the request, it is refused.
 - **The local-only pin** (`/smart-router local on`) keeps a whole session on local models, whatever
@@ -608,11 +609,30 @@ switching away.
   is no work account, so only `smart-router/auto` is allowed, and it refuses.
 - **The way out** is `/smart-router scope personal`, which asks first and which the latch refuses.
 
+### What work scope does not cover
+
+Work scope governs the requests the router sees: those of a session that loads the router, and
+those that go through such a session's route, as the default goal-x auditor's do. It blocks no
+tools. Still able to send a work session's content elsewhere, the latch included:
+
+- **Extensions with their own models:** pi-warden's judge (it sends redacted context to its backend
+  while enabled), a goal-x auditor configured with its own model, and pi-btw.
+- **Workflow tiers and subagent agents with explicit models**, in a child that does not load the
+  router. A child that loads it is held by the latch and the work directories as any session is,
+  but starts in personal scope when only its parent's entry set work scope.
+- **Tools** that send data themselves: web fetch and web search tools, which send URLs and queries;
+  browser tools; and whatever the bash tool can read and send.
+- **Pi's own `/share`, `/export` and `/bug`**, which run before any extension hook, and extension
+  commands, which run before the router sees the input.
+- **Turns sent before the session was in work scope**, and processes outside Pi.
+
 ### Limits and rollout
 
-- A scope set by an entry is not inherited by subagent children (pi-subagents, goal-x auditors), or
-  by forks made from the command line that skip `session_shutdown`. Run work in a work directory or
-  in a latched process.
+- A scope set by an entry reaches what goes through its session: the default goal-x auditor routes
+  in it, as it obeys the session's pin, and a fork made from the command line (`pi --fork`) copies
+  the entry with the rest of the session. pi-subagents children start with no entries, so it does
+  not reach them. Run work in a work directory or in a latched process, which reach a child that
+  loads the router as they reach any session.
 - **Rollout order.** Write the version 2 work roster before setting `PI_SMART_ROUTER_SCOPE=work`: a
   latched process with a version 1 roster, or with no roster loaded, sends nothing unless pinned.
 
@@ -771,12 +791,15 @@ router itself never reads other sessions and never writes the roster.
 - **goal-x**: continuations route like any run that starts without a prompt, and get cooldowns and
   fallbacks. The default auditor routes through the session and obeys its pin; a configured auditor
   bypasses the router and the pin, so leave it unset in private work. Leave `auditorProjectResources`
-  and `projectResources` off: each loads a second router into every audit. An auditor does not
-  inherit a scope that an entry set ([Limits and rollout](#limits-and-rollout)).
+  and `projectResources` off: each loads a second router into every audit. The default auditor
+  routes in the session's scope too, one an entry set included; a configured auditor bypasses work
+  scope as it bypasses the pin
+  ([What work scope does not cover](#what-work-scope-does-not-cover)).
 - **pi-subagents**: foreground children inherit the selection but load the router only when it is
   registered for children, as nix-config's integration is meant to do; otherwise a child on
   `smart-router/*` fails with "model not found". Give children explicit models where that
-  registration is absent. Children do not inherit a scope that an entry set either.
+  registration is absent. Children start with no entries, so a scope that only an entry set does not
+  reach them; the latch and the work directories do, in a child that loads the router.
 - **Multi-Pass**: its subscription-pool failover keys on the selected provider, so routed requests
   lose it; a role's next candidates and version 1's `routing.fallback` replace it. In a project
   whose `.pi/multi-pass.json` sets `allowedSubs`, list `smart-router` there, or Multi-Pass switches
