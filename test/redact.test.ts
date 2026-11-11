@@ -363,6 +363,22 @@ describe("redact", () => {
     });
   }
 
+  // A basic credential beside a secret that its name gives away. The names are read first, so a
+  // basic value that runs on (through an unclosed quote, or glued to the next name) cannot take the
+  // name of the next secret with it. The quote that mysql's -p leaves open ends its value at the
+  // next whitespace, as one after a name does, so the words behind that value stay.
+  const besideNames: ReadonlyArray<readonly [string, string, string]> = [
+    ["mysql's -p with an unclosed quote, before a quoted token", "mysql -p'Hunter 3pw fails, so I set token='Hunter 2pw'", `mysql -p${REDACTED} 3pw fails, so I set token=${REDACTED}`],
+    ["curl's -u with an unclosed quote, before a quoted secret", "I typed curl -u 'admin:Hunter 3pw then secret=\"Hunter2pw\" by mistake", `I typed curl -u 'admin:${REDACTED}`],
+    ["a netrc password glued to the name of an API key", "login bob password Hunter3pw,api_key: abcdef12345", `login bob password ${REDACTED} ${REDACTED}`],
+  ];
+
+  for (const [name, input, want] of besideNames) {
+    test(`hides the secret a name gives away after ${name}`, () => {
+      assert.equal(redact(input), want);
+    });
+  }
+
   test("redacts every part of a private key block and a vendor token that the backstops would miss", () => {
     const block = `-----BEGIN PGP PRIVATE KEY BLOCK-----\n\n${pgpBody}\nshort/Tail+9\n-----END PGP PRIVATE KEY BLOCK-----`;
     assert.equal(redact(`${block}`), REDACTED);

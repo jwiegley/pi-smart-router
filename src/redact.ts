@@ -3,8 +3,10 @@
 // Then it turns each escaped line break or tab (\n, \r or \t, as JSON and a repr write them) into
 // a space, so that it ends a value and starts a name as the whitespace it stands for does; the
 // classifier needs only the words, so the space costs it nothing. Then come the fixed shapes
-// (headers, JWTs, private keys, keys with a known prefix), the basic credentials of command lines
-// and config files, the values after secret names and flags, and the long-run backstops. The input
+// (headers, JWTs, private keys, keys with a known prefix), the values after secret names and flags,
+// the basic credentials of command lines and config files, and the long-run backstops. The names
+// are read before the basic credentials: a basic value can run on, through an unclosed quote or a
+// word glued to the next name, and would take that name away from the secret after it. The input
 // is untrusted and unbounded, so every pattern is linear: a start anchored by a lookbehind or a fixed
 // literal, character classes with no overlapping adjacent quantifiers, and lazy scans that consume
 // to their end; where a quantifier overlaps what follows it, an anchor (a line's or a word's start)
@@ -151,9 +153,9 @@ function mixedCase(run: string): boolean {
 export function redact(text: string): string {
   let out = text.replace(URL_PASSWORD, `$1${REDACTED}`).replace(ESCAPED_BREAK, " ");
   for (const [pattern, replacement] of PATTERNS) out = out.replace(pattern, replacement);
-  out = redactBasic(out);
   out = redactValues(out, NAME_SEPARATOR, VALUE, (m) => m[1]!);
   out = redactValues(out, FLAG_SPACE, FLAG_VALUE, (m) => m[1]!.slice(2));
+  out = redactBasic(out);
   out = out.replace(LONG_BASE64, (run) => (mixedCase(run) && /\d/.test(run) && /[+/]/.test(run) ? REDACTED : run));
   return out.replace(LONG_ALNUM, (run) => (mixedCase(run) ? REDACTED : run));
 }
