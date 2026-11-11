@@ -522,8 +522,10 @@ labelled choices and returns one, with a probability for each. Under a version 2
   which is `curl` or a path that ends in `/curl`, to the next `|`, `;`, `&&` or line break; a
   line break behind a backslash continues the command, and so does a `|`, `;` or `&&` inside a
   quoted argument, which ends at its closing quote or at its line's end. The quotes are read two
-  ways, and a password that either reading finds is hidden: as the shell reads them, where a
-  backslash escapes a quote, and with every quote counted, as they pair in a JSON string), while
+  ways: first with every quote counted, as they pair in a JSON string, and then, in a last pass
+  over what the other passes left, as the shell reads them, where a backslash escapes a quote.
+  Inside a flag's own value neither reading takes an escaped quote for text: it ends the value,
+  so the rest of that password can stay, and a later flag of the command can stay unread), while
   `date -u +%H:%M:%S` and `docker run -u 1000:1000` stay; the password of
   `--proxy-user` in any command; the text glued to `-p` in a command that a mysql-family program
   starts (`mysql`, `mysqldump`, `mariadb` and the like), while `cp -pr` and
@@ -537,7 +539,18 @@ labelled choices and returns one, with a probability for each. Under a version 2
     `}' -u admin:pw`);
   - a `-u` value in JSON-escaped quotes (`-u \"admin:pw\"`);
   - a command inside a JSON string whose own argument holds escaped quotes, which are then
-    escaped twice (`{"command": "curl -d \"{\\\"a\\\": \\\"b; c\\\"}\" -u admin:pw"}`);
+    escaped twice, and a `|`, `;` or `&&` between them
+    (`{"command": "curl -d \"{\\\"a\\\": \\\"b; c\\\"}\" -u admin:pw"}`); with no separator in
+    the argument the password is hidden;
+  - a password that holds an escaped quote, whose rest stays (`-u "admin:pw\"x"` keeps `x`); a
+    user name that holds one, whose password stays (`-u "ad\"min:pw"`); and a flag behind such a
+    value;
+  - a `$'…'` string that holds a separator, before the flag
+    (`curl -d $'it\'s; here' -u admin:pw`);
+  - a command substitution with quotes of its own, before the flag
+    (`curl -d "$(jq -c ".a; .b" f)" -u admin:pw`);
+  - a backslash before a separator outside quotes, before the flag
+    (`curl https://h/a\;b -u admin:pw`);
   - a line continuation between the flag and its value;
   - combined short flags (`-sSu admin:pw`);
   - a quoted password after the colon (`-u admin:"pw with space"`);

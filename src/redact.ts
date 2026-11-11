@@ -88,17 +88,25 @@ const LONG_BASE64 = /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40,}(?![A-Za-z0-9+/])/g;
 // ; or && inside a quoted argument: it is the argument's own
 // (-H 'Content-Type: application/json; charset=utf-8').
 //
-// The quotes of a curl command are read in two ways, each by a pass of its own, and a password
-// that either pass finds is hidden:
+// The quotes of a curl command are read in two ways, each by a pass of its own, and each pass
+// hides the passwords it finds:
 // - counting every quote, escaped or not: a quote opens an argument and the same quote closes it.
 //   That is also how the quotes pair when the command sits in a JSON string and all of them are
 //   escaped (-H \"x; y\"). This pass is the first of the basic stage.
-// - as the shell reads them: a backslash escapes the character behind it outside a quoted argument
-//   and inside a double-quoted one, so the quotes of -d "{\"a\": \"b; c\"}" and the middle one of
+// - as the shell reads them: a backslash escapes a quote behind it outside a quoted argument and
+//   inside a double-quoted one, so the quotes of -d "{\"a\": \"b; c\"}" and the middle one of
 //   'it'\''s; here' are text. Inside single quotes a backslash is text, and the next single quote
-//   closes. This pass is the last of the basic stage, on what the other passes left, so what it
-//   hides takes no command word or name from them. The two readings differ only where a backslash
-//   stands before a quote, so it runs only on text that holds one; other text is read once.
+//   closes. A backslash escapes nothing but a quote here: one before a |, ; or && does not keep
+//   the command open. This pass is the last of the basic stage, on what the other passes left, so
+//   what it hides takes no command word or name from them. The two readings differ only where a
+//   backslash stands before a quote, so it runs only on text that holds one; other text is read
+//   once.
+// Inside a flag's own value neither pass takes an escaped quote for text. The value ends at any
+// quote (USER_VALUE): a user name that holds one is no value, the rest of a password behind one
+// stays, and the quote that ended it is taken for the value's closing quote, so the quotes behind
+// it pair one off, which can end the command before a later flag. The first pass replaces a
+// password up to that quote, the backslash before it included, so the last pass finds no escaped
+// quote there.
 // Neither reading follows a quoted argument past its line: a quote that never closes ends at the
 // line's end, with the command, unless a backslash continues the line. Flags are read inside a
 // quoted argument as outside one. A reading can still end a command too early, where the text's
