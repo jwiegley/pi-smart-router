@@ -384,7 +384,7 @@ describe("an untagged message", () => {
     // The message's text is held as a digest, the same one the last input holds.
     assert.match(pending?.digest ?? "", /^[A-Za-z0-9+/]{43}=$/);
     assert.equal(recordOf(loaded)?.lastInput?.digest, pending?.digest);
-    assert.deepEqual(pending && { ...pending, token: 0, digest: "" }, { token: 0, digest: "", level, keyword: { signal: "trivial", reason: "triage:keyword_economical" }, at: NOW, jev });
+    assert.deepEqual(pending && { ...pending, token: 0, digest: "" }, { token: 0, digest: "", level, keyword: { signal: "trivial", reason: "triage:keyword_economical" }, at: NOW, jev, started: false });
     assert.equal(firstRequest(loaded), LUNA);
     assert.deepEqual(recordOf(loaded)?.history.at(-1)?.level, level);
   });

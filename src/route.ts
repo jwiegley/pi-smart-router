@@ -92,6 +92,13 @@ export interface PendingLevel {
    * the original's opinion. Undefined when Jev was not asked for the level.
    */
   jev: JevOutcome | "pending" | undefined;
+  /**
+   * Whether the level's run has started: set when a prompt's run takes its own message's level. The
+   * mark goes with the level, when that run's record is written at agent_settled or the level is
+   * dropped. /smart-router was corrects that run until then, whatever Pi says of the session's
+   * idleness meanwhile, and never a level that no run took.
+   */
+  started: boolean;
 }
 
 /** The latest planned input: the router's keyed digest of its text without the tag, and the level input it planned with. */

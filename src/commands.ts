@@ -56,13 +56,8 @@ export interface CommandHost {
   pinOf(ctx: ExtensionContext): PinReading;
   /** The session's scope, as routing and the guards read it: the latch, the session's entry, then the work directories. */
   scopeOf(ctx: ExtensionContext): ScopeState;
-  /**
-   * The session's records: its decisions, its guard state, the level of the run planned or in
-   * flight, and whether that level is a started run's, whose record is not yet written.
-   */
-  session(ctx: ExtensionContext):
-    | { readonly history: readonly HistoryEntry[]; readonly guard: GuardState; readonly pendingLevel: PendingLevel | undefined; readonly levelRun: boolean }
-    | undefined;
+  /** The session's records: its decisions, its guard state, and the level of the run planned or in flight, marked once that run starts. */
+  session(ctx: ExtensionContext): { readonly history: readonly HistoryEntry[]; readonly guard: GuardState; readonly pendingLevel: PendingLevel | undefined } | undefined;
   /** A resolver context for one of the two models, built as routing builds it: in the session's scope, or in `scope`. */
   resolver(ctx: ExtensionContext, roster: Roster, id: VirtualId, pin: Pin, scope?: Scope): ResolveContext;
 }
@@ -521,8 +516,8 @@ async function scopeCommand(host: CommandHost, ctx: ExtensionContext, option: st
  * run corrected.
  */
 function was(host: CommandHost, ctx: ExtensionContext, tier: Tier): Answer {
-  const session = host.session(ctx);
-  const inFlight = session?.levelRun === true ? session.pendingLevel : undefined;
+  const pending = host.session(ctx)?.pendingLevel;
+  const inFlight = pending?.started === true ? pending : undefined;
   let previous: LevelRecord | undefined;
   if (inFlight !== undefined) {
     previous = levelRecord(inFlight, undefined, false);
