@@ -253,6 +253,40 @@ describe("redact", () => {
     }
   });
 
+  // Basic credentials in command-line and config forms. Each secret goes, and what tells the
+  // classifier what the text is about (the command, the user, the names) stays.
+  const basicCredentials: ReadonlyArray<readonly [string, string, string]> = [
+    ["curl's -u", "curl -u admin:Hunter2pw https://api.example.com", `curl -u admin:${REDACTED} https://api.example.com`],
+    ["curl's --user", "curl --user admin:Hunter2pw https://api.example.com", `curl --user admin:${REDACTED} https://api.example.com`],
+    ["curl's --user=", "curl --user=admin:Hunter2pw https://api.example.com", `curl --user=admin:${REDACTED} https://api.example.com`],
+    ["curl's --proxy-user", "curl -x proxy:3128 --proxy-user bob:Hunter2pw https://x", `curl -x proxy:3128 --proxy-user bob:${REDACTED} https://x`],
+    ["curl's -U", "curl -U bob:Hunter2pw https://x", `curl -U bob:${REDACTED} https://x`],
+    ["a quoted -u value with a space in the password", "curl -u 'admin:Hunter 2pw' https://x", `curl -u 'admin:${REDACTED}' https://x`],
+    ["a password with a colon in it", "curl -u admin:Hunter2:pw https://x", `curl -u admin:${REDACTED} https://x`],
+    ["a -u glued to its value", "curl -uadmin:Hunter2pw https://x", `curl -uadmin:${REDACTED} https://x`],
+  ];
+
+  for (const [name, input, want] of basicCredentials) {
+    test(`hides the basic credential in ${name}`, () => {
+      assert.equal(redact(input), want);
+    });
+  }
+
+  // Flags, ports and prose that only look like credentials.
+  const notCredentials: readonly string[] = [
+    "curl -u",
+    "curl -u\nhttps://api.example.com",
+    "curl -u admin: https://api.example.com",
+    "git push -u origin main",
+    "menu-u a:b",
+  ];
+
+  for (const text of notCredentials) {
+    test(`leaves ${JSON.stringify(text)} as it is`, () => {
+      assert.equal(redact(text), text);
+    });
+  }
+
   test("redacts every part of a private key block and a vendor token that the backstops would miss", () => {
     const block = `-----BEGIN PGP PRIVATE KEY BLOCK-----\n\n${pgpBody}\nshort/Tail+9\n-----END PGP PRIVATE KEY BLOCK-----`;
     assert.equal(redact(`${block}`), REDACTED);
@@ -322,6 +356,11 @@ describe("redact", () => {
       "Authorization: Bearer abc\\npassword: x".repeat(5300),
       "password: a\\napi_key: b\\n".repeat(8400),
       "--password a\\t--api-key b\\t".repeat(7500),
+      "-u ".repeat(50000),
+      "--user=".repeat(30000),
+      "-u a:b ".repeat(30000),
+      "-u 'a".repeat(40000),
+      `-u ${"x_".repeat(100000)}`,
     ];
     for (const input of inputs) {
       const start = performance.now();

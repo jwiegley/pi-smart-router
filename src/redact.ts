@@ -73,6 +73,20 @@ function redactValues(text: string, names: RegExp, value: RegExp, nameGroup: (ma
 const LONG_ALNUM = /(?<![A-Za-z0-9])[A-Za-z0-9]{40,}(?![A-Za-z0-9])/g;
 const LONG_BASE64 = /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40,}(?![A-Za-z0-9+/])/g;
 
+// ─── Basic credentials in command-line and config forms ───
+
+// curl's -u and --user, and -U and --proxy-user, take user:password, quoted or not. The text after
+// the first colon goes and the user stays. The user stops at whitespace, a quote or =, so that an
+// attempt never scans past the token it starts on.
+const USER_FLAG = /(?<![\w-])(-[uU][ \t]*|--(?:proxy-)?user(?:[ \t]+|=))(?:(["'])([^\s"':=]*:)[^"'\n]+|([^\s"':=]*:)[^\s"']+)/g;
+
+/** Basic credentials in command-line and config forms, each password replaced with REDACTED. */
+function redactBasic(text: string): string {
+  return text.replace(USER_FLAG, (_flag, flag: string, quote: string | undefined, quotedUser: string | undefined, user: string | undefined) =>
+    quote === undefined ? `${flag}${user}${REDACTED}` : `${flag}${quote}${quotedUser}${REDACTED}`,
+  );
+}
+
 function mixedCase(run: string): boolean {
   return /[a-z]/.test(run) && /[A-Z]/.test(run);
 }
@@ -81,6 +95,7 @@ function mixedCase(run: string): boolean {
 export function redact(text: string): string {
   let out = text.replace(URL_PASSWORD, `$1${REDACTED}`).replace(ESCAPED_BREAK, " ");
   for (const [pattern, replacement] of PATTERNS) out = out.replace(pattern, replacement);
+  out = redactBasic(out);
   out = redactValues(out, NAME_SEPARATOR, VALUE, (m) => m[1]!);
   out = redactValues(out, FLAG_SPACE, FLAG_VALUE, (m) => m[1]!.slice(2));
   out = out.replace(LONG_BASE64, (run) => (mixedCase(run) && /\d/.test(run) && /[+/]/.test(run) ? REDACTED : run));
