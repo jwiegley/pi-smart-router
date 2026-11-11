@@ -80,10 +80,35 @@ const LONG_BASE64 = /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40,}(?![A-Za-z0-9+/])/g;
 
 // ─── Basic credentials in command-line and config forms ───
 
-// curl's -u and --user, and -U and --proxy-user, take user:password, quoted or not. The text after
-// the first colon goes and the user stays. The user stops at whitespace, a quote or =, so that an
-// attempt never scans past the token it starts on.
-const USER_FLAG = /(?<![\w-])(-[uU][ \t]*|--(?:proxy-)?user(?:[ \t]+|=))(?:(["'])([^\s"':=]*:)[^"'\n]+|([^\s"':=]*:)[^\s"']+)/g;
+// curl's -u, --user and -U take user:password, quoted or not: the text after the first colon goes
+// and the user stays. Other programs give those flags other meanings (date -u +%H:%M:%S, docker
+// run -u 1000:1000, pip install -U git+https://…), so they are read only in a curl command: after
+// a curl word (curl, or a path that ends in /curl) and before the next |, ;, && or line break.
+// --proxy-user means the same everywhere, and is read in any command. One scan finds the curl
+// words, the breaks and the flags in order. A flag starts only after whitespace, and its user
+// stops at whitespace, a quote, a colon or =, so a value is read once, within the token it starts.
+const USER_SCAN = /(?<![\w-])(curl)(?=[ \t])|(\||;|&&|\n)|(?<!\S)(?:(-[uU][ \t]*|--user(?:[ \t]+|=))|--proxy-user(?:[ \t]+|=))/g;
+const USER_VALUE = /(["'])([^\s"':=]*:)[^"'\n]+|([^\s"':=]*:)[^\s"']+/y;
+
+function redactUserPasswords(text: string): string {
+  let out = "";
+  let last = 0;
+  let curl = false;
+  USER_SCAN.lastIndex = 0;
+  for (let match = USER_SCAN.exec(text); match !== null; match = USER_SCAN.exec(text)) {
+    if (match[1] !== undefined) curl = true;
+    else if (match[2] !== undefined) curl = false;
+    else if (curl || match[3] === undefined) {
+      USER_VALUE.lastIndex = USER_SCAN.lastIndex;
+      const value = USER_VALUE.exec(text);
+      if (value === null) continue;
+      out += text.slice(last, USER_SCAN.lastIndex) + (value[1] === undefined ? value[3] : value[1] + value[2]) + REDACTED;
+      last = USER_VALUE.lastIndex;
+      USER_SCAN.lastIndex = last;
+    }
+  }
+  return out + text.slice(last);
+}
 
 // MySQL's clients take the password glued to -p (-pHunter2), and a lone -p before a space prompts
 // for it. Elsewhere, text glued to -p is a flag cluster (cp -pr) or a port (docker run -p8080:80),
@@ -136,9 +161,7 @@ const COOKIE_VALUE = /=[^;\s\\]+/g;
 
 /** Basic credentials in command-line and config forms, each password replaced with REDACTED. */
 function redactBasic(text: string): string {
-  let out = text.replace(USER_FLAG, (_flag, flag: string, quote: string | undefined, quotedUser: string | undefined, user: string | undefined) =>
-    quote === undefined ? `${flag}${user}${REDACTED}` : `${flag}${quote}${quotedUser}${REDACTED}`,
-  );
+  let out = redactUserPasswords(text);
   out = redactMysqlPasswords(out);
   out = out.replace(NETRC_CANDIDATE, (line) => (NETRC_LINE.test(line) ? line.replace(NETRC_PASSWORD, `$1${REDACTED}`) : line));
   out = out.replace(XML_ELEMENT, (element, open: string, name: string) => (isSecretName(name) ? open + REDACTED : element));
