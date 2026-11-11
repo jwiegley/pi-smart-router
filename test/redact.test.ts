@@ -325,6 +325,7 @@ describe("redact", () => {
     ["a JSON Set-Cookie header", '{"Set-Cookie": "sid=Hunter2pw"}', `{"Set-Cookie": "sid=${REDACTED}"}`],
     ["a single-quoted Set-Cookie header", "{'Set-Cookie': 'sid=Hunter2pw'}", `{'Set-Cookie': 'sid=${REDACTED}'}`],
     ["an escaped JSON Set-Cookie header", '{\\"Set-Cookie\\": \\"sid=Hunter2pw\\"}', `{\\"Set-Cookie\\": \\"sid=${REDACTED}\\"}`],
+    ["a Set-Cookie header behind a prefix and a hyphen", "X-Set-Cookie: sid=Hunter2pw; Path=/", `X-Set-Cookie: sid=${REDACTED}; Path=/`],
   ];
 
   for (const [name, input, want] of basicCredentials) {
