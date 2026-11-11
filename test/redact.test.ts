@@ -282,6 +282,17 @@ describe("redact", () => {
     ["a netrc line among other lines", "first line\nmachine x login bob password Hunter2pw\nlast line", `first line\nmachine x login bob password ${REDACTED}\nlast line`],
     ["a password = value on a netrc line, which the name pass takes", "machine x login bob password = Hunter2pw", `machine x login bob password = ${REDACTED}`],
     ["a password : value on a netrc line, which the name pass takes", "machine x login bob password : Hunter2pw", `machine x login bob password : ${REDACTED}`],
+    ["an XML password element", "<password>Hunter2pw</password>", `<password>${REDACTED}</password>`],
+    [
+      "Maven's settings.xml",
+      "<server><id>x</id><username>bob</username><password>Hunter2pw</password></server>",
+      `<server><id>x</id><username>bob</username><password>${REDACTED}</password></server>`,
+    ],
+    ["an XML private key", "<privateKey>Hunter2pw</privateKey>", `<privateKey>${REDACTED}</privateKey>`],
+    ["an XML element with attributes", '<password type="plain">Hunter2pw</password>', `<password type="plain">${REDACTED}</password>`],
+    ["a namespaced XML element", "<ns:secret>Hunter2pw</ns:secret>", `<ns:secret>${REDACTED}</ns:secret>`],
+    ["an XML element over several lines", "<passphrase>\n  Hunter2pw\n</passphrase>", `<passphrase>${REDACTED}</passphrase>`],
+    ["an XML element whose closing tag has a space", "<password>Hunter2pw</password >", `<password>${REDACTED}</password >`],
   ];
 
   for (const [name, input, want] of basicCredentials) {
@@ -318,6 +329,9 @@ describe("redact", () => {
     "loginForm has a password field",
     "relogin with a password reset",
     "login bob with nopassword set",
+    "<username>bob</username>",
+    "<password></password>",
+    "Press <Key>Enter</kbd> to continue",
   ];
 
   for (const text of notCredentials) {
@@ -409,6 +423,11 @@ describe("redact", () => {
       "password x\n".repeat(18000),
       "login password ".repeat(13000),
       "\n".repeat(200000),
+      "<password>".repeat(30000),
+      "<a ".repeat(60000),
+      "<password>x</passwor".repeat(10000),
+      "<password>x</password>".repeat(8000),
+      `<password>${"a ".repeat(100000)}`,
     ];
     for (const input of inputs) {
       const start = performance.now();

@@ -110,13 +110,19 @@ const NETRC_CANDIDATE = /^[^\n]*password[^\n]*$/gm;
 const NETRC_LINE = /(?<![\w-])(?:machine|login)(?![\w-])/;
 const NETRC_PASSWORD = /(?<![\w-])(password[ \t]+)(?:"[^"\n]*"|"?[^\s"=:]\S*)/g;
 
+// The text of an XML element whose name SECRET_NAME matches, as in Maven's settings.xml:
+// <password>hunter2</password>. The tags stay. The text runs to the next <, and only the element's
+// own closing tag ends it, so an attempt scans no further than the next tag.
+const XML_ELEMENT = /(<([A-Za-z_][\w.:-]*)(?:\s[^<>]*)?>)[^<]+(?=<\/\2\s*>)/g;
+
 /** Basic credentials in command-line and config forms, each password replaced with REDACTED. */
 function redactBasic(text: string): string {
   let out = text.replace(USER_FLAG, (_flag, flag: string, quote: string | undefined, quotedUser: string | undefined, user: string | undefined) =>
     quote === undefined ? `${flag}${user}${REDACTED}` : `${flag}${quote}${quotedUser}${REDACTED}`,
   );
   out = redactMysqlPasswords(out);
-  return out.replace(NETRC_CANDIDATE, (line) => (NETRC_LINE.test(line) ? line.replace(NETRC_PASSWORD, `$1${REDACTED}`) : line));
+  out = out.replace(NETRC_CANDIDATE, (line) => (NETRC_LINE.test(line) ? line.replace(NETRC_PASSWORD, `$1${REDACTED}`) : line));
+  return out.replace(XML_ELEMENT, (element, open: string, name: string) => (isSecretName(name) ? open + REDACTED : element));
 }
 
 function mixedCase(run: string): boolean {
