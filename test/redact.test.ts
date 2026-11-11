@@ -355,6 +355,7 @@ describe("redact", () => {
     "auth=(user, password)",
     "auth=('bob', '')",
     "oauth=('client', 'scope')",
+    "reset-cookie: when=logout",
   ];
 
   for (const text of notCredentials) {
@@ -477,6 +478,13 @@ describe("redact", () => {
       "Set-Cookie: ".repeat(16000),
       "Set-Cookie: a;".repeat(14000),
       "cookie:a=".repeat(22000),
+      // A Set-Cookie name that ran on through the next header's name, and through each character
+      // a name could hold, made every header rescan the rest of the text.
+      "Set-Cookie:".repeat(16000),
+      ...[..."!#$%&()*+,-./:<>?@[]^_`{|}~a0"].map((mark) => `Set-Cookie:${mark}`.repeat(16000)),
+      "xSet-Cookie:".repeat(16000),
+      "set-cookie:a,".repeat(15000),
+      ",set-cookie:aa".repeat(14000),
     ];
     for (const input of inputs) {
       const start = performance.now();

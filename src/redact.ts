@@ -126,9 +126,11 @@ const XML_ELEMENT = /(<([A-Za-z_][\w.:-]*)(?:\s[^<>]*)?>)[^<]+(?=<\/\2\s*>)/g;
 const AUTH_PAIR = /((?:(?<![\w-])auth["']?[ \t]*[=:][ \t]*\(|(?<!\w)\w*(?:Basic|Digest)Auth\()[ \t]*(?:(["'])[^"'\n]*\2|[\w.]+)[ \t]*,[ \t]*)(["'])[^"'\n]+\3/g;
 
 // A Set-Cookie header sets one cookie, whose value goes; its name and attributes (Path, Expires)
-// stay. A Cookie header, plain or in JSON, sends several: each value goes and each name stays. The
-// lookbehind keeps Set-Cookie's attributes out of the Cookie pass.
-const SET_COOKIE = /(set-cookie\\?["']?[ \t]*:[ \t]*\\?["']?[^=;\s"'\\]*=)[^;\s"'\\]+/gi;
+// stay. The header's name starts where a word starts, and the cookie's name holds no colon, so an
+// attempt reads no further than the next header's colon. A Cookie header, plain or in JSON,
+// sends several: each value goes and each name stays. Its lookbehind keeps Set-Cookie's attributes
+// out of the Cookie pass.
+const SET_COOKIE = /(?<![\w-])(set-cookie\\?["']?[ \t]*:[ \t]*\\?["']?[^=;:\s"'\\]*=)[^;\s"'\\]+/gi;
 const COOKIE_HEADER = /(?<![\w-])(cookie\\?["']?[ \t]*:[ \t]*\\?["']?)([^\n"']*)/gi;
 const COOKIE_VALUE = /=[^;\s\\]+/g;
 
