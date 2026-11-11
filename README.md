@@ -738,8 +738,11 @@ For strictly private work, keep using a dedicated session on a local model with 
 
 Each version 2 run on `smart-router/auto` that a prompt planned leaves one `smart-router.level`
 entry in its session when it settles, however it ended. A run whose plan no longer applies at its
-first request, because the selection, the pin, the scope or the roster's version changed after its
-message was planned, did not go to that level and records nothing. Its fields:
+first request to the router, because the selection moved to `smart-router/local`, or the pin, the
+scope or the roster's version changed after its message was planned, did not go to that level and
+records nothing. A model picked by hand after the message was planned is different: its requests
+never reach the router, so nothing drops the plan, and the entry keeps the planned level, with the
+hand-picked model as its `ref`. The entry's fields:
 
 - `v`; `at`, when the run was planned; and `scope`;
 - `source`, what decided the level: `tag`, `jev`, `keyword` or `floor`;
