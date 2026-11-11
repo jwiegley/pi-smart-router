@@ -144,8 +144,10 @@ function redactMysqlPasswords(text: string): string {
 // A netrc line, machine example.com login bob password hunter2: the word after password goes, but
 // only on a line that also says machine or login, so that prose such as "the password field is
 // empty" stays. Only lines that hold password are read, each once: the candidate is anchored at a
-// line's start. A value that starts with = or : belongs to the name pass (password = hunter2).
-const NETRC_CANDIDATE = /^[^\n]*password[^\n]*$/gm;
+// line's start and ends where a line does. A line starts behind a line feed, a carriage return,
+// U+2028 or U+2029, and the dot stops at each of them, so no line reads into the next. A value that
+// starts with = or : belongs to the name pass (password = hunter2).
+const NETRC_CANDIDATE = /^.*password.*$/gm;
 const NETRC_LINE = /(?<![\w-])(?:machine|login)(?![\w-])/;
 const NETRC_PASSWORD = /(?<![\w-])(password[ \t]+)(?:"[^"\n]*"|"?[^\s"=:]\S*)/g;
 
