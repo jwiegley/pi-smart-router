@@ -80,11 +80,34 @@ const LONG_BASE64 = /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40,}(?![A-Za-z0-9+/])/g;
 // attempt never scans past the token it starts on.
 const USER_FLAG = /(?<![\w-])(-[uU][ \t]*|--(?:proxy-)?user(?:[ \t]+|=))(?:(["'])([^\s"':=]*:)[^"'\n]+|([^\s"':=]*:)[^\s"']+)/g;
 
+// MySQL's clients take the password glued to -p (-pHunter2), and a lone -p before a space prompts
+// for it. Elsewhere, text glued to -p is a flag cluster (cp -pr) or a port (docker run -p8080:80),
+// so the text glued to a lone -p is hidden only in a command that a mysql-family word starts
+// (mysql, mysqldump, mysqladmin, mariadb, mariadb-dump and the like, with a path or not), up to the
+// next |, ;, & or line break. One scan finds the words, the breaks and the flags in order.
+const MYSQL_SCAN = /(?<![^\s/("'`|;&])(mysql\w*|mariadb[\w-]*)(?=[ \t])|([|;&\n])|(?<!\S)-p("[^"\n]*"|'[^'\n]*'|[^\s|;&]+)/g;
+
+function redactMysqlPasswords(text: string): string {
+  let out = "";
+  let last = 0;
+  let command = false;
+  for (const match of text.matchAll(MYSQL_SCAN)) {
+    if (match[1] !== undefined) command = true;
+    else if (match[2] !== undefined) command = false;
+    else if (command) {
+      out += text.slice(last, match.index + 2) + REDACTED;
+      last = match.index + match[0].length;
+    }
+  }
+  return out + text.slice(last);
+}
+
 /** Basic credentials in command-line and config forms, each password replaced with REDACTED. */
 function redactBasic(text: string): string {
-  return text.replace(USER_FLAG, (_flag, flag: string, quote: string | undefined, quotedUser: string | undefined, user: string | undefined) =>
+  const out = text.replace(USER_FLAG, (_flag, flag: string, quote: string | undefined, quotedUser: string | undefined, user: string | undefined) =>
     quote === undefined ? `${flag}${user}${REDACTED}` : `${flag}${quote}${quotedUser}${REDACTED}`,
   );
+  return redactMysqlPasswords(out);
 }
 
 function mixedCase(run: string): boolean {

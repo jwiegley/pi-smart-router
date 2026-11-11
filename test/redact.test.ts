@@ -264,6 +264,15 @@ describe("redact", () => {
     ["a quoted -u value with a space in the password", "curl -u 'admin:Hunter 2pw' https://x", `curl -u 'admin:${REDACTED}' https://x`],
     ["a password with a colon in it", "curl -u admin:Hunter2:pw https://x", `curl -u admin:${REDACTED} https://x`],
     ["a -u glued to its value", "curl -uadmin:Hunter2pw https://x", `curl -uadmin:${REDACTED} https://x`],
+    ["mysql's -p", "mysql -pHunter2pw", `mysql -p${REDACTED}`],
+    ["mysqldump's -p after -u root", "mysqldump -u root -pHunter2pw db", `mysqldump -u root -p${REDACTED} db`],
+    ["mysql's -p after a glued -u", "mysql -uroot -pHunter2pw", `mysql -uroot -p${REDACTED}`],
+    ["mariadb-dump's -p", "mariadb-dump -pHunter2pw db", `mariadb-dump -p${REDACTED} db`],
+    ["mysql's -p by its path", "/usr/local/bin/mysql -h db -pHunter2pw", `/usr/local/bin/mysql -h db -p${REDACTED}`],
+    ["mysql's -p inside docker exec", "docker exec -it db mysql -uroot -pHunter2pw", `docker exec -it db mysql -uroot -p${REDACTED}`],
+    ["mysql's quoted -p", "mysql -p'Hunter 2pw' db", `mysql -p${REDACTED} db`],
+    ["mysql's double-quoted -p", 'mysql -p"Hunter 2pw" db', `mysql -p${REDACTED} db`],
+    ["mysql's -p before a semicolon, which ends the command", "mysql -pHunter2pw;cp -pr src dst", `mysql -p${REDACTED};cp -pr src dst`],
   ];
 
   for (const [name, input, want] of basicCredentials) {
@@ -279,6 +288,21 @@ describe("redact", () => {
     "curl -u admin: https://api.example.com",
     "git push -u origin main",
     "menu-u a:b",
+    "mkdir -p build",
+    "cp -pr src dst",
+    "ssh -p 2222 host",
+    "git log -p",
+    "docker run -p 8080:80 img",
+    "docker run -p8080:80 img",
+    "mysql -p",
+    "mysql -p mydb",
+    "mysql --skip-pager db",
+    "mysql db | cp -pr src dst",
+    "mysql db; cp -pr src dst",
+    "mysql db && cp -pr src dst",
+    "mysql db\ncp -pr src dst",
+    "edit mysql.cnf, then cp -pr src dst",
+    "see pymysql and cp -pr src dst",
   ];
 
   for (const text of notCredentials) {
@@ -361,6 +385,11 @@ describe("redact", () => {
       "-u a:b ".repeat(30000),
       "-u 'a".repeat(40000),
       `-u ${"x_".repeat(100000)}`,
+      "mysql ".repeat(40000),
+      "mysql -pX ".repeat(25000),
+      ' -p"'.repeat(60000),
+      `mysql -p'${"a b ".repeat(60000)}`,
+      "mysql_".repeat(40000),
     ];
     for (const input of inputs) {
       const start = performance.now();
