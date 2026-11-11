@@ -84,29 +84,36 @@ const LONG_BASE64 = /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40,}(?![A-Za-z0-9+/])/g;
 // and the user stays. Other programs give those flags other meanings (date -u +%H:%M:%S, docker
 // run -u 1000:1000, pip install -U git+https://…), so they are read only in a curl command: after
 // a curl word (curl, or a path that ends in /curl) and before the next |, ;, && or line break.
-// --proxy-user means the same everywhere, and is read in any command. One scan finds the curl
-// words, the breaks and the flags in order. A flag starts only after whitespace or a quote, and its
-// user stops at whitespace, a quote or a colon, so a value is read once, within the token it starts.
-const USER_SCAN = /(?<![\w-])(curl)(?=[ \t])|(\||;|&&|\n)|(?<![^\s"'])(?:(-[uU][ \t]*|--user(?:[ \t]+|=))|--proxy-user(?:[ \t]+|=))/g;
+// --proxy-user means the same everywhere, and is read in any command. The scan steps from one
+// thing that counts to the next: outside a curl command, a curl word or a --proxy-user; inside
+// one, its end or a flag. A flag starts only after whitespace or a quote, and its user stops at
+// whitespace, a quote or a colon, so a value is read once, within the token it starts.
+const OUTSIDE_CURL = /(?<![\w-])(curl)(?=[ \t])|(?<![^\s"'])--proxy-user(?:[ \t]+|=)/g;
+const INSIDE_CURL = /(\||;|&&|\n)|(?<![^\s"'])(?:-[uU][ \t]*|--(?:proxy-)?user(?:[ \t]+|=))/g;
 const USER_VALUE = /(["'])([^\s"':]*:)[^"'\n]+|([^\s"':]*:)[^\s"']+/y;
 
 function redactUserPasswords(text: string): string {
   let out = "";
   let last = 0;
+  let at = 0;
   let curl = false;
-  for (const match of text.matchAll(USER_SCAN)) {
-    // What the scan finds inside a value that is already replaced is part of that value.
-    if (match.index < last) continue;
-    if (match[1] !== undefined) curl = true;
-    else if (match[2] !== undefined) curl = false;
-    else if (curl || match[3] === undefined) {
-      const start = match.index + match[0].length;
-      USER_VALUE.lastIndex = start;
-      const value = USER_VALUE.exec(text);
-      if (value === null) continue;
-      out += text.slice(last, start) + (value[1] === undefined ? value[3] : value[1] + value[2]) + REDACTED;
-      last = USER_VALUE.lastIndex;
+  for (;;) {
+    const scan = curl ? INSIDE_CURL : OUTSIDE_CURL;
+    scan.lastIndex = at;
+    const match = scan.exec(text);
+    if (match === null) break;
+    at = scan.lastIndex;
+    if (match[1] !== undefined) {
+      // A curl word starts a curl command, and a break ends it.
+      curl = !curl;
+      continue;
     }
+    USER_VALUE.lastIndex = at;
+    const value = USER_VALUE.exec(text);
+    if (value === null) continue;
+    out += text.slice(last, at) + (value[1] === undefined ? value[3] : value[1] + value[2]) + REDACTED;
+    at = USER_VALUE.lastIndex;
+    last = at;
   }
   return out + text.slice(last);
 }
