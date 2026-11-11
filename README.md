@@ -531,11 +531,13 @@ labelled choices and returns one, with a probability for each. Under a version 2
   `machine` or `login`; the text of an XML element with a secret name, such as Maven's
   `<password>`; the password of a Python `auth=('user', 'password')` pair or `HTTPBasicAuth`; and
   the cookie values of `Cookie` and `Set-Cookie` headers. Every pattern is linear in the text, so
-  a huge paste cannot stall Pi. It is pattern matching: it catches the shapes it knows. Among the
-  curl commands it is known to miss, whose password still reaches Jev:
+  a huge paste cannot stall Pi. It is pattern matching: it catches the shapes it knows. Its known
+  gaps include these curl commands, whose password still reaches Jev:
   - a quoted argument that runs over several lines, before the flag (`-d '{`, the body's lines,
     `}' -u admin:pw`);
   - a `-u` value in JSON-escaped quotes (`-u \"admin:pw\"`);
+  - a command inside a JSON string whose own argument holds escaped quotes, which are then
+    escaped twice (`{"command": "curl -d \"{\\\"a\\\": \\\"b; c\\\"}\" -u admin:pw"}`);
   - a line continuation between the flag and its value;
   - combined short flags (`-sSu admin:pw`);
   - a quoted password after the colon (`-u admin:"pw with space"`);
