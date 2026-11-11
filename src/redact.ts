@@ -102,12 +102,21 @@ function redactMysqlPasswords(text: string): string {
   return out + text.slice(last);
 }
 
+// A netrc line, machine example.com login bob password hunter2: the word after password goes, but
+// only on a line that also says machine or login, so that prose such as "the password field is
+// empty" stays. Only lines that hold password are read, each once: the candidate is anchored at a
+// line's start. A value that starts with = or : belongs to the name pass (password = hunter2).
+const NETRC_CANDIDATE = /^[^\n]*password[^\n]*$/gm;
+const NETRC_LINE = /(?<![\w-])(?:machine|login)(?![\w-])/;
+const NETRC_PASSWORD = /(?<![\w-])(password[ \t]+)(?:"[^"\n]*"|"?[^\s"=:]\S*)/g;
+
 /** Basic credentials in command-line and config forms, each password replaced with REDACTED. */
 function redactBasic(text: string): string {
-  const out = text.replace(USER_FLAG, (_flag, flag: string, quote: string | undefined, quotedUser: string | undefined, user: string | undefined) =>
+  let out = text.replace(USER_FLAG, (_flag, flag: string, quote: string | undefined, quotedUser: string | undefined, user: string | undefined) =>
     quote === undefined ? `${flag}${user}${REDACTED}` : `${flag}${quote}${quotedUser}${REDACTED}`,
   );
-  return redactMysqlPasswords(out);
+  out = redactMysqlPasswords(out);
+  return out.replace(NETRC_CANDIDATE, (line) => (NETRC_LINE.test(line) ? line.replace(NETRC_PASSWORD, `$1${REDACTED}`) : line));
 }
 
 function mixedCase(run: string): boolean {

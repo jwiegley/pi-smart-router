@@ -273,6 +273,15 @@ describe("redact", () => {
     ["mysql's quoted -p", "mysql -p'Hunter 2pw' db", `mysql -p${REDACTED} db`],
     ["mysql's double-quoted -p", 'mysql -p"Hunter 2pw" db', `mysql -p${REDACTED} db`],
     ["mysql's -p before a semicolon, which ends the command", "mysql -pHunter2pw;cp -pr src dst", `mysql -p${REDACTED};cp -pr src dst`],
+    ["a netrc line", "machine example.com login bob password Hunter2pw", `machine example.com login bob password ${REDACTED}`],
+    ["a netrc line with login only", "login bob password Hunter2pw", `login bob password ${REDACTED}`],
+    ["a netrc line with machine only", "machine example.com password Hunter2pw", `machine example.com password ${REDACTED}`],
+    ["a netrc password before its machine", "password Hunter2pw machine example.com", `password ${REDACTED} machine example.com`],
+    ["a quoted netrc password", 'machine x login bob password "Hunter 2pw"', `machine x login bob password ${REDACTED}`],
+    ["a netrc password with an unclosed quote", 'machine x login bob password "Hunter2pw', `machine x login bob password ${REDACTED}`],
+    ["a netrc line among other lines", "first line\nmachine x login bob password Hunter2pw\nlast line", `first line\nmachine x login bob password ${REDACTED}\nlast line`],
+    ["a password = value on a netrc line, which the name pass takes", "machine x login bob password = Hunter2pw", `machine x login bob password = ${REDACTED}`],
+    ["a password : value on a netrc line, which the name pass takes", "machine x login bob password : Hunter2pw", `machine x login bob password : ${REDACTED}`],
   ];
 
   for (const [name, input, want] of basicCredentials) {
@@ -303,6 +312,12 @@ describe("redact", () => {
     "mysql db\ncp -pr src dst",
     "edit mysql.cnf, then cp -pr src dst",
     "see pymysql and cp -pr src dst",
+    "Click password reset to continue.",
+    "the password field is empty",
+    "the password field is empty\nlogin bob",
+    "loginForm has a password field",
+    "relogin with a password reset",
+    "login bob with nopassword set",
   ];
 
   for (const text of notCredentials) {
@@ -390,6 +405,10 @@ describe("redact", () => {
       ' -p"'.repeat(60000),
       `mysql -p'${"a b ".repeat(60000)}`,
       "mysql_".repeat(40000),
+      `${"password x ".repeat(18000)}login`,
+      "password x\n".repeat(18000),
+      "login password ".repeat(13000),
+      "\n".repeat(200000),
     ];
     for (const input of inputs) {
       const start = performance.now();
