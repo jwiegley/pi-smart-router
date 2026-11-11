@@ -83,14 +83,15 @@ const LONG_BASE64 = /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40,}(?![A-Za-z0-9+/])/g;
 // curl's -u, --user and -U take user:password, quoted or not: the text after the first colon goes
 // and the user stays. Other programs give those flags other meanings (date -u +%H:%M:%S, docker
 // run -u 1000:1000, pip install -U git+https://…), so they are read only in a curl command: after
-// a curl word (curl, or a path that ends in /curl) and before the next |, ;, && or line break.
+// a curl word (curl, or a path that ends in /curl) and before the next |, ;, && or line break. A
+// line break right behind a backslash continues the command, as the shell reads it.
 // --proxy-user means the same everywhere, and is read in any command. The scan steps from one
 // thing that counts to the next: outside a curl command, a curl word or a --proxy-user; inside
 // one, its end or a flag. A flag starts only after whitespace, a quote or a backtick (inline code).
 // A quoted user stops at whitespace, a quote or a colon, and an unquoted one at a backtick too, so
 // a value is read once, within the token it starts.
 const OUTSIDE_CURL = /(?<![\w-])(curl)(?=[ \t])|(?<![^\s"'`])--proxy-user(?:[ \t]+|=)/g;
-const INSIDE_CURL = /(\||;|&&|\n)|(?<![^\s"'`])(?:-[uU][ \t]*|--(?:proxy-)?user(?:[ \t]+|=))/g;
+const INSIDE_CURL = /(\||;|&&|(?<!\\\r?)\n)|(?<![^\s"'`])(?:-[uU][ \t]*|--(?:proxy-)?user(?:[ \t]+|=))/g;
 const USER_VALUE = /(["'])([^\s"':]*:)[^"'\n]+|([^\s"'`:]*:)[^\s"']+/y;
 
 function redactUserPasswords(text: string): string {
