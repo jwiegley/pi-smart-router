@@ -86,10 +86,9 @@ const LONG_BASE64 = /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40,}(?![A-Za-z0-9+/])/g;
 // a curl word (curl, or a path that ends in /curl) and before the next |, ;, && or line break.
 // --proxy-user means the same everywhere, and is read in any command. One scan finds the curl
 // words, the breaks and the flags in order. A flag starts only after whitespace or a quote, and its
-// user stops at whitespace, a quote, a colon or =, so a value is read once, within the token it
-// starts.
+// user stops at whitespace, a quote or a colon, so a value is read once, within the token it starts.
 const USER_SCAN = /(?<![\w-])(curl)(?=[ \t])|(\||;|&&|\n)|(?<![^\s"'])(?:(-[uU][ \t]*|--user(?:[ \t]+|=))|--proxy-user(?:[ \t]+|=))/g;
-const USER_VALUE = /(["'])([^\s"':=]*:)[^"'\n]+|([^\s"':=]*:)[^\s"']+/y;
+const USER_VALUE = /(["'])([^\s"':]*:)[^"'\n]+|([^\s"':]*:)[^\s"']+/y;
 
 function redactUserPasswords(text: string): string {
   let out = "";

@@ -270,6 +270,8 @@ describe("redact", () => {
     ["curl's -u inside a command substitution", "body=$(curl -u admin:Hunter2pw https://h)", `body=$(curl -u admin:${REDACTED} https://h)`],
     ["curl's -u after a URL with an ampersand, which ends no command", "curl https://h/x?a=1&b=2 -u admin:Hunter2pw", `curl https://h/x?a=1&b=2 -u admin:${REDACTED}`],
     ["curl's -u in the command after a semicolon", "cd /tmp; curl -u admin:Hunter2pw https://h", `cd /tmp; curl -u admin:${REDACTED} https://h`],
+    ["curl's -u with an LDAP name, which holds equals signs", 'curl -u "uid=bob,ou=people,dc=example,dc=com:Hunter2pw" ldap://h/', `curl -u "uid=bob,ou=people,dc=example,dc=com:${REDACTED}" ldap://h/`],
+    ["curl's -u with an unquoted name that holds an equals sign", "curl -u team=ops:Hunter2pw https://h", `curl -u team=ops:${REDACTED} https://h`],
     ["curl's -u and -U in one command", "curl -u a:Hunter2pw -U b:Hunter3pw https://h", `curl -u a:${REDACTED} -U b:${REDACTED} https://h`],
     ["wget's --proxy-user, which no curl word precedes", "wget --proxy-user bob:Hunter2pw https://h", `wget --proxy-user bob:${REDACTED} https://h`],
     ["a --proxy-user= outside curl", "wget --proxy-user=bob:Hunter2pw https://h", `wget --proxy-user=bob:${REDACTED} https://h`],
