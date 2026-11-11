@@ -84,14 +84,18 @@ const LONG_BASE64 = /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40,}(?![A-Za-z0-9+/])/g;
 // and the user stays. Other programs give those flags other meanings (date -u +%H:%M:%S, docker
 // run -u 1000:1000, pip install -U git+https://…), so they are read only in a curl command: after
 // a curl word (curl, or a path that ends in /curl) and before the next |, ;, && or line break. A
-// line break right behind a backslash continues the command, as the shell reads it.
+// line break right behind a backslash continues the command, as the shell reads it. So does a |,
+// ; or && inside a quoted argument, from a quote to the same quote again: it is the argument's
+// own (-H 'Content-Type: application/json; charset=utf-8'). A quote that never closes ends at its
+// line's end. Flags are read inside a quoted argument as outside one, so a quote that pairs with
+// the wrong quote can keep a command open, and never hides a flag from the scan.
 // --proxy-user means the same everywhere, and is read in any command. The scan steps from one
 // thing that counts to the next: outside a curl command, a curl word or a --proxy-user; inside
-// one, its end or a flag. A flag starts only after whitespace, a quote or a backtick (inline code).
-// A quoted user stops at whitespace, a quote or a colon, and an unquoted one at a backtick too, so
-// a value is read once, within the token it starts.
+// one, a break, a quote or a flag. A flag starts only after whitespace, a quote or a backtick
+// (inline code). A quoted user stops at whitespace, a quote or a colon, and an unquoted one at a
+// backtick too, so a value is read once, within the token it starts.
 const OUTSIDE_CURL = /(?<![\w-])(curl)(?=[ \t])|(?<![^\s"'`])--proxy-user(?:[ \t]+|=)/g;
-const INSIDE_CURL = /(\||;|&&|(?<!\\\r?)\n)|(?<![^\s"'`])(?:-[uU][ \t]*|--(?:proxy-)?user(?:[ \t]+|=))/g;
+const INSIDE_CURL = /(\||;|&&)|((?<!\\\r?)\n)|(["'])|(?<![^\s"'`])(?:-[uU][ \t]*|--(?:proxy-)?user(?:[ \t]+|=))/g;
 const USER_VALUE = /(["'])([^\s"':]*:)[^"'\n]+|([^\s"'`:]*:)[^\s"']+/y;
 
 function redactUserPasswords(text: string): string {
@@ -99,23 +103,41 @@ function redactUserPasswords(text: string): string {
   let last = 0;
   let at = 0;
   let curl = false;
+  // In a curl command, the quote that opened the quoted argument the scan is in.
+  let quote = "";
   for (;;) {
     const scan = curl ? INSIDE_CURL : OUTSIDE_CURL;
     scan.lastIndex = at;
     const match = scan.exec(text);
     if (match === null) break;
     at = scan.lastIndex;
-    if (match[1] !== undefined) {
-      // A curl word starts a curl command, and a break ends it.
-      curl = !curl;
+    if (!curl) {
+      if (match[1] !== undefined) {
+        curl = true;
+        continue;
+      }
+    } else if (match[1] !== undefined) {
+      // |, ; or && ends the command, unless a quoted argument holds it.
+      if (quote === "") curl = false;
+      continue;
+    } else if (match[2] !== undefined) {
+      // A line break ends the command, and with it a quote that never closed.
+      curl = false;
+      quote = "";
+      continue;
+    } else if (match[3] !== undefined) {
+      // A quote opens a quoted argument, and the same quote closes it; the other quote is its text.
+      if (quote === "") quote = match[3];
+      else if (quote === match[3]) quote = "";
       continue;
     }
     USER_VALUE.lastIndex = at;
     const value = USER_VALUE.exec(text);
     if (value === null) continue;
     out += text.slice(last, at) + (value[1] === undefined ? value[3] : value[1] + value[2]) + REDACTED;
-    at = USER_VALUE.lastIndex;
-    last = at;
+    last = USER_VALUE.lastIndex;
+    // The closing quote of a quoted value is the value's own, and opens no quoted argument.
+    at = value[1] !== undefined && text[last] === value[1] ? last + 1 : last;
   }
   return out + text.slice(last);
 }
