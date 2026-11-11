@@ -94,17 +94,18 @@ function redactUserPasswords(text: string): string {
   let out = "";
   let last = 0;
   let curl = false;
-  USER_SCAN.lastIndex = 0;
-  for (let match = USER_SCAN.exec(text); match !== null; match = USER_SCAN.exec(text)) {
+  for (const match of text.matchAll(USER_SCAN)) {
+    // What the scan finds inside a value that is already replaced is part of that value.
+    if (match.index < last) continue;
     if (match[1] !== undefined) curl = true;
     else if (match[2] !== undefined) curl = false;
     else if (curl || match[3] === undefined) {
-      USER_VALUE.lastIndex = USER_SCAN.lastIndex;
+      const start = match.index + match[0].length;
+      USER_VALUE.lastIndex = start;
       const value = USER_VALUE.exec(text);
       if (value === null) continue;
-      out += text.slice(last, USER_SCAN.lastIndex) + (value[1] === undefined ? value[3] : value[1] + value[2]) + REDACTED;
+      out += text.slice(last, start) + (value[1] === undefined ? value[3] : value[1] + value[2]) + REDACTED;
       last = USER_VALUE.lastIndex;
-      USER_SCAN.lastIndex = last;
     }
   }
   return out + text.slice(last);
