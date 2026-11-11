@@ -470,6 +470,33 @@ describe("redact", () => {
     });
   }
 
+  // A quote behind a run of backslashes in a double-quoted curl argument, for runs of one to eight.
+  // Behind an odd run the quote is escaped: the argument goes on over the semicolon, and the -u
+  // behind it is read. Behind an even run the quote closes the argument, and the semicolon behind
+  // it ends the command, so the next command's -u stays.
+  const backslashRuns: ReadonlyArray<readonly [number, "escaped" | "closes"]> = [
+    [1, "escaped"],
+    [2, "closes"],
+    [3, "escaped"],
+    [4, "closes"],
+    [5, "escaped"],
+    [6, "closes"],
+    [7, "escaped"],
+    [8, "closes"],
+  ];
+
+  for (const [run, quote] of backslashRuns) {
+    const backslashes = "\\".repeat(run);
+    test(`reads a quote behind ${run} backslashes in a double-quoted curl argument: it ${quote === "escaped" ? "is text" : "closes the argument"}`, () => {
+      if (quote === "escaped") {
+        assert.equal(redact(`curl -d "a${backslashes}"b; c" -u admin:Hunter2pw https://h`), `curl -d "a${backslashes}"b; c" -u admin:${REDACTED} https://h`);
+      } else {
+        const text = `curl -d "a${backslashes}" https://h; date -u +%H:%M:%S`;
+        assert.equal(redact(text), text);
+      }
+    });
+  }
+
   test("redacts every part of a private key block and a vendor token that the backstops would miss", () => {
     const block = `-----BEGIN PGP PRIVATE KEY BLOCK-----\n\n${pgpBody}\nshort/Tail+9\n-----END PGP PRIVATE KEY BLOCK-----`;
     assert.equal(redact(`${block}`), REDACTED);
