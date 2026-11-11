@@ -809,14 +809,15 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
 
   /**
    * A fork or /new carries the scope the latch, an entry or the work directories set. A default
-   * scope is not carried, so the new session decides its own, and neither is an unreadable one,
-   * whose value is unknown.
+   * scope is not carried, so the new session decides its own. An unreadable one is carried as work,
+   * the scope routing and the work guard hold that session in, as a malformed pin is carried as a pin.
    */
   const leaveScope = (event: SessionShutdownEvent, ctx: ExtensionContext): void => {
     const { reason, targetSessionFile: target } = event;
     if ((reason !== "new" && reason !== "fork") || typeof target !== "string" || target === "") return;
     const scope = scopeOf(ctx);
-    if (scope.kind === "ok" && scope.source !== "default") leaveScopeHandoff(slot, target, scope.scope);
+    if (scope.kind !== "ok") leaveScopeHandoff(slot, target, "work");
+    else if (scope.source !== "default") leaveScopeHandoff(slot, target, scope.scope);
   };
 
   const shutdown = (event: SessionShutdownEvent, ctx: ExtensionContext): void => {

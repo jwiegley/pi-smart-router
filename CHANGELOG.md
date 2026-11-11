@@ -100,8 +100,9 @@ sends nothing unless pinned.
   `smart-router/auto` never routes a personal session to a work-bound account. In personal scope,
   outside the pin, a model picked by hand is sent as it is.
 - Scope reads fail closed: an unreadable or malformed scope entry makes `smart-router/auto` refuse,
-  and the work guard holds the session as work scope. A work session under a version 1 roster is
-  refused twice, when its request is prepared and by the check every pick passes.
+  the work guard holds the session as work scope, and a fork or `/new` from it starts in work scope.
+  A work session under a version 1 roster is refused twice, when its request is prepared and by
+  the check every pick passes.
 - Work directories are compared as text on whole path segments; nothing is resolved or opened.
 
 ## [1.3.0-jw.1] - 2026-11-08

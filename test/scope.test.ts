@@ -278,18 +278,13 @@ describe("handoffs", () => {
     });
   });
 
-  test("a personal default, an unreadable scope, quitting, reloading, resuming and an in-memory session leave no scope handoff", async (t) => {
+  test("a personal default, quitting, reloading, resuming and an in-memory session leave no scope handoff", async (t) => {
     const dir = agentDir(t);
     const plain = await begin({ dir, id: "plain", file: "/sessions/plain.jsonl" });
     await plain.host.emit("session_shutdown", { reason: "new", targetSessionFile: "/sessions/plain-new.jsonl" });
     assert.equal(processSlot().scopeHandoffs?.size ?? 0, 0, "a personal default");
     const child = await begin({ dir, id: "plain-new", file: "/sessions/plain-new.jsonl", runtime: new FakeRuntime() }, "new");
     assert.deepEqual([scopeEntries(child), scopeOf(child), messages(child)], [[], DEFAULT, []]);
-    // A scope that cannot be read is not carried: its value is unknown, and work scope would send the
-    // new session's text to the work account. A fork keeps the entries of its branch anyway.
-    const malformed = await begin({ dir, id: "malformed", file: "/sessions/m.jsonl", runtime: new FakeRuntime(), setup: (session) => session.appendCustom(SCOPE_ENTRY, { v: 9 }) });
-    assert.equal(scopeOf(malformed).kind, "unreadable");
-    await malformed.host.emit("session_shutdown", { reason: "fork", targetSessionFile: "/sessions/m-fork.jsonl" });
     for (const reason of ["quit", "reload", "resume"]) {
       const loaded = await begin({ dir, id: reason, file: `/sessions/${reason}.jsonl`, runtime: new FakeRuntime(), setup: recorded("work") });
       await loaded.host.emit("session_shutdown", { reason, targetSessionFile: `/sessions/${reason}-next.jsonl` });
@@ -299,6 +294,22 @@ describe("handoffs", () => {
     await memory.host.emit("session_shutdown", { reason: "fork", targetSessionFile: "" });
     assert.equal(processSlot().scopeHandoffs?.size ?? 0, 0);
   });
+
+  // A scope that cannot be read holds its session as work scope (the work guard and routing), so the
+  // session a fork or /new makes from it starts there too, as a malformed pin is carried as a pin.
+  for (const reason of ["new", "fork"] as const) {
+    test(`an unreadable scope is carried into a ${reason === "new" ? "/new" : "fork"} as work scope`, async (t) => {
+      const dir = agentDir(t);
+      const parent = await begin({ dir, id: "malformed", file: "/sessions/m.jsonl", runtime: new FakeRuntime(), setup: (session) => session.appendCustom(SCOPE_ENTRY, { v: 9 }) });
+      assert.equal(scopeOf(parent).kind, "unreadable");
+      await parent.host.emit("session_shutdown", { reason, targetSessionFile: `/sessions/m-${reason}.jsonl` });
+      assert.equal(processSlot().scopeHandoffs?.get(`/sessions/m-${reason}.jsonl`), "work");
+      const child = await begin({ dir, id: "child", file: `/sessions/m-${reason}.jsonl`, runtime: new FakeRuntime() }, reason);
+      assert.deepEqual(scopeEntries(child), [{ v: 1, scope: "work", by: "carried", at: NOW }]);
+      assert.deepEqual(scopeOf(child), OK_WORK_ENTRY);
+      assert.deepEqual(child.session.notices, [{ type: "info", message: scopeCarriedNotice("work") }]);
+    });
+  }
 
   test("a pinned work session hands on its pin and its scope, each in its own map", async (t) => {
     const dir = agentDir(t);

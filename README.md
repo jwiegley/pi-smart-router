@@ -564,7 +564,8 @@ account bindings. The first rule that applies decides it:
 
 A fork or `/new` carries the scope that the latch, an entry or the work directories gave into the
 session it creates, which records it as an entry of its own, with a notice. The personal default is
-not carried, so the new session decides its own, and neither is a scope that cannot be read.
+not carried, so the new session decides its own. A scope that cannot be read is carried as work
+scope, the scope the router holds that session in.
 
 **It fails closed.** A malformed `smart-router.scope` entry, a custom message of that type, or a
 session whose entries cannot be read has an unreadable scope: `smart-router/auto` refuses until

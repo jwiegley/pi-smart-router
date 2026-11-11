@@ -20,9 +20,9 @@
 // entries cannot be read has an unreadable scope: routing resolves in work scope, the narrower one,
 // and smart-router/auto refuses until a scope is recorded again.
 //
-// A fork or /new carries a scope that an entry or the latch set: at session_shutdown the old
-// session leaves it in the slot under the new session's file (src/owners.ts), and the new session's
-// session_start records it as a carried entry.
+// A fork or /new carries a scope that an entry, the latch or the work directories set, and an
+// unreadable one as work: at session_shutdown the old session leaves it in the slot under the new
+// session's file (src/owners.ts), and the new session's session_start records it as a carried entry.
 import { SCOPE_ENTRY } from "./constants.ts";
 import { firstLine } from "./errors.ts";
 import { isRecord, own } from "./files.ts";
