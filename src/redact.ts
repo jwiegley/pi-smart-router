@@ -85,20 +85,38 @@ const LONG_BASE64 = /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40,}(?![A-Za-z0-9+/])/g;
 // run -u 1000:1000, pip install -U git+https://…), so they are read only in a curl command: after
 // a curl word (curl, or a path that ends in /curl) and before the next |, ;, && or line break. A
 // line break right behind a backslash continues the command, as the shell reads it. So does a |,
-// ; or && inside a quoted argument, from a quote to the same quote again: it is the argument's
-// own (-H 'Content-Type: application/json; charset=utf-8'). A quote that never closes ends at its
-// line's end. Flags are read inside a quoted argument as outside one, so a quote that pairs with
-// the wrong quote can keep a command open, and never hides a flag from the scan.
-// --proxy-user means the same everywhere, and is read in any command. The scan steps from one
-// thing that counts to the next: outside a curl command, a curl word or a --proxy-user; inside
-// one, a break, a quote or a flag. A flag starts only after whitespace, a quote or a backtick
-// (inline code). A quoted user stops at whitespace, a quote or a colon, and an unquoted one at a
-// backtick too, so a value is read once, within the token it starts.
+// ; or && inside a quoted argument: it is the argument's own
+// (-H 'Content-Type: application/json; charset=utf-8').
+//
+// The quotes of a curl command are read in two ways, each by a pass of its own, and a password
+// that either pass finds is hidden:
+// - counting every quote, escaped or not: a quote opens an argument and the same quote closes it.
+//   That is also how the quotes pair when the command sits in a JSON string and all of them are
+//   escaped (-H \"x; y\"). This pass is the first of the basic stage.
+// - as the shell reads them: a backslash escapes the character behind it outside a quoted argument
+//   and inside a double-quoted one, so the quotes of -d "{\"a\": \"b; c\"}" and the middle one of
+//   'it'\''s; here' are text. Inside single quotes a backslash is text, and the next single quote
+//   closes. This pass is the last of the basic stage, on what the other passes left, so what it
+//   hides takes no command word or name from them. The two readings differ only where a backslash
+//   stands before a quote, so it runs only on text that holds one.
+// Neither reading follows a quoted argument past its line: a quote that never closes ends at the
+// line's end, with the command, unless a backslash continues the line. Flags are read inside a
+// quoted argument as outside one. A reading can still end a command too early, where the text's
+// quotes pair in neither way.
+//
+// --proxy-user means the same everywhere, and is read in any command. A pass steps from one thing
+// that counts to the next: outside a curl command, a curl word or a --proxy-user; inside one, a
+// break, a quote or a flag. A flag starts only after whitespace, a quote or a backtick (inline
+// code). A quoted user stops at whitespace, a quote or a colon, and an unquoted one at a backtick
+// too, so a value is read once, within the token it starts. The backslashes before a quote are
+// counted back from it, once for each quote.
 const OUTSIDE_CURL = /(?<![\w-])(curl)(?=[ \t])|(?<![^\s"'`])--proxy-user(?:[ \t]+|=)/g;
 const INSIDE_CURL = /(\||;|&&)|((?<!\\\r?)\n)|(["'])|(?<![^\s"'`])(?:-[uU][ \t]*|--(?:proxy-)?user(?:[ \t]+|=))/g;
 const USER_VALUE = /(["'])([^\s"':]*:)[^"'\n]+|([^\s"'`:]*:)[^\s"']+/y;
+const ESCAPED_QUOTE = /\\["']/;
 
-function redactUserPasswords(text: string): string {
+/** The passwords of the user flags, replaced: with every quote counted, or with quotes read as the shell reads them. */
+function redactUserPasswords(text: string, shell: boolean): string {
   let out = "";
   let last = 0;
   let at = 0;
@@ -126,6 +144,11 @@ function redactUserPasswords(text: string): string {
       quote = "";
       continue;
     } else if (match[3] !== undefined) {
+      // To the shell, an odd run of backslashes before a quote escapes it, except inside single
+      // quotes, and an escaped quote is text.
+      let backslashes = 0;
+      if (shell && quote !== "'") while (text[match.index - 1 - backslashes] === "\\") backslashes += 1;
+      if (backslashes % 2 === 1) continue;
       // A quote opens a quoted argument, and the same quote closes it; the other quote is its text.
       if (quote === "") quote = match[3];
       else if (quote === match[3]) quote = "";
@@ -195,13 +218,14 @@ const COOKIE_VALUE = /=[^;\s\\]+/g;
 
 /** Basic credentials in command-line and config forms, each password replaced with REDACTED. */
 function redactBasic(text: string): string {
-  let out = redactUserPasswords(text);
+  let out = redactUserPasswords(text, false);
   out = redactMysqlPasswords(out);
   out = out.replace(NETRC_CANDIDATE, (line) => (NETRC_LINE.test(line) ? line.replace(NETRC_PASSWORD, `$1${REDACTED}`) : line));
   out = out.replace(XML_ELEMENT, (element, open: string, name: string) => (isSecretName(name) ? open + REDACTED : element));
   out = out.replace(AUTH_PAIR, `$1${REDACTED}`);
   out = out.replace(SET_COOKIE, `$1${REDACTED}`);
-  return out.replace(COOKIE_HEADER, (_header, head: string, value: string) => head + value.replace(COOKIE_VALUE, `=${REDACTED}`));
+  out = out.replace(COOKIE_HEADER, (_header, head: string, value: string) => head + value.replace(COOKIE_VALUE, `=${REDACTED}`));
+  return ESCAPED_QUOTE.test(out) ? redactUserPasswords(out, true) : out;
 }
 
 function mixedCase(run: string): boolean {
