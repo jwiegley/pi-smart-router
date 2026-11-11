@@ -539,15 +539,18 @@ labelled choices and returns one, with a probability for each. Under a version 2
     `}' -u admin:pw`);
   - a `-u` value in JSON-escaped quotes (`-u \"admin:pw\"`);
   - a command inside a JSON string whose own argument holds escaped quotes, which are then
-    escaped twice, and a `|`, `;` or `&&` between them
-    (`{"command": "curl -d \"{\\\"a\\\": \\\"b; c\\\"}\" -u admin:pw"}`); with no separator in
-    the argument the password is hidden;
-  - a password that holds an escaped quote, whose rest stays (`-u "admin:pw\"x"` keeps `x`); a
-    user name that holds one, whose password stays (`-u "ad\"min:pw"`); and a flag behind such a
-    value;
-  - a `$'…'` string that holds a separator, before the flag
+    escaped twice, and a `|`, `;` or `&&` inside one of the inner strings
+    (`{"command": "curl -d \"{\\\"a\\\": \\\"b; c\\\"}\" -u admin:pw"}`); with no separator
+    there the password is hidden;
+  - a password that holds an escaped quote, whose rest stays (`-u "admin:pw\"x"` keeps `x`), and
+    with it a later flag of the command when a quoted argument that holds a `|`, `;` or `&&`
+    stands between the two (`-u "admin:pw\"x" -H "Accept: text/html; q=0.9" -U proxy:pw2` keeps
+    `pw2`); with no such argument between them the later flag is read;
+  - a user name that holds an escaped quote, whose password stays (`-u "ad\"min:pw"`); a later
+    flag of the command is still read;
+  - a `$'…'` string in which a `|`, `;` or `&&` stands behind an escaped quote, before the flag
     (`curl -d $'it\'s; here' -u admin:pw`);
-  - a command substitution with quotes of its own, before the flag
+  - a command substitution whose own quotes hold a `|`, `;` or `&&`, before the flag
     (`curl -d "$(jq -c ".a; .b" f)" -u admin:pw`);
   - a backslash before a separator outside quotes, before the flag
     (`curl https://h/a\;b -u admin:pw`);
