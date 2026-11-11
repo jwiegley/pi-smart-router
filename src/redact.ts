@@ -115,6 +115,11 @@ const NETRC_PASSWORD = /(?<![\w-])(password[ \t]+)(?:"[^"\n]*"|"?[^\s"=:]\S*)/g;
 // own closing tag ends it, so an attempt scans no further than the next tag.
 const XML_ELEMENT = /(<([A-Za-z_][\w.:-]*)(?:\s[^<>]*)?>)[^<]+(?=<\/\2\s*>)/g;
 
+// A user and password pair in Python: the requests auth=('bob', 'hunter2') tuple, plain or in a
+// dict, and the BasicAuth and DigestAuth classes (HTTPBasicAuth('bob', 'hunter2')). The second
+// element goes when it is a string that is not empty; a name (password) is no secret of its own.
+const AUTH_PAIR = /((?:(?<![\w-])auth["']?[ \t]*[=:][ \t]*\(|(?<!\w)\w*(?:Basic|Digest)Auth\()[ \t]*(?:(["'])[^"'\n]*\2|[\w.]+)[ \t]*,[ \t]*)(["'])[^"'\n]+\3/g;
+
 /** Basic credentials in command-line and config forms, each password replaced with REDACTED. */
 function redactBasic(text: string): string {
   let out = text.replace(USER_FLAG, (_flag, flag: string, quote: string | undefined, quotedUser: string | undefined, user: string | undefined) =>
@@ -122,7 +127,8 @@ function redactBasic(text: string): string {
   );
   out = redactMysqlPasswords(out);
   out = out.replace(NETRC_CANDIDATE, (line) => (NETRC_LINE.test(line) ? line.replace(NETRC_PASSWORD, `$1${REDACTED}`) : line));
-  return out.replace(XML_ELEMENT, (element, open: string, name: string) => (isSecretName(name) ? open + REDACTED : element));
+  out = out.replace(XML_ELEMENT, (element, open: string, name: string) => (isSecretName(name) ? open + REDACTED : element));
+  return out.replace(AUTH_PAIR, `$1${REDACTED}`);
 }
 
 function mixedCase(run: string): boolean {

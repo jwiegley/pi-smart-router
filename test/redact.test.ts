@@ -293,6 +293,14 @@ describe("redact", () => {
     ["a namespaced XML element", "<ns:secret>Hunter2pw</ns:secret>", `<ns:secret>${REDACTED}</ns:secret>`],
     ["an XML element over several lines", "<passphrase>\n  Hunter2pw\n</passphrase>", `<passphrase>${REDACTED}</passphrase>`],
     ["an XML element whose closing tag has a space", "<password>Hunter2pw</password >", `<password>${REDACTED}</password >`],
+    ["requests' auth tuple", "requests.get(url, auth=('bob', 'Hunter2pw'))", `requests.get(url, auth=('bob', ${REDACTED}))`],
+    ["an auth tuple without spaces", "auth=('bob','Hunter2pw')", `auth=('bob',${REDACTED})`],
+    ["a double-quoted auth tuple", 'auth = ("bob", "Hunter2pw")', `auth = ("bob", ${REDACTED})`],
+    ["an auth tuple whose user is a name", "session.auth = (user, 'Hunter2pw')", `session.auth = (user, ${REDACTED})`],
+    ["an auth tuple in a dict", "{'auth': ('bob', 'Hunter2pw')}", `{'auth': ('bob', ${REDACTED})}`],
+    ["requests' HTTPBasicAuth", "auth=HTTPBasicAuth('bob', 'Hunter2pw')", `auth=HTTPBasicAuth('bob', ${REDACTED})`],
+    ["requests' HTTPDigestAuth", "HTTPDigestAuth('bob', 'Hunter2pw')", `HTTPDigestAuth('bob', ${REDACTED})`],
+    ["aiohttp's BasicAuth", "aiohttp.BasicAuth('bob', 'Hunter2pw')", `aiohttp.BasicAuth('bob', ${REDACTED})`],
   ];
 
   for (const [name, input, want] of basicCredentials) {
@@ -332,6 +340,9 @@ describe("redact", () => {
     "<username>bob</username>",
     "<password></password>",
     "Press <Key>Enter</kbd> to continue",
+    "auth=(user, password)",
+    "auth=('bob', '')",
+    "oauth=('client', 'scope')",
   ];
 
   for (const text of notCredentials) {
@@ -428,6 +439,11 @@ describe("redact", () => {
       "<password>x</passwor".repeat(10000),
       "<password>x</password>".repeat(8000),
       `<password>${"a ".repeat(100000)}`,
+      "auth=('".repeat(30000),
+      "auth=('a',".repeat(20000),
+      "BasicAuth(".repeat(20000),
+      `${"x_".repeat(100000)}BasicAuth(`,
+      "auth=(a, 'x".repeat(20000),
     ];
     for (const input of inputs) {
       const start = performance.now();
