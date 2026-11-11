@@ -272,6 +272,10 @@ describe("redact", () => {
     ["curl's -u in the command after a semicolon", "cd /tmp; curl -u admin:Hunter2pw https://h", `cd /tmp; curl -u admin:${REDACTED} https://h`],
     ["curl's -u with an LDAP name, which holds equals signs", 'curl -u "uid=bob,ou=people,dc=example,dc=com:Hunter2pw" ldap://h/', `curl -u "uid=bob,ou=people,dc=example,dc=com:${REDACTED}" ldap://h/`],
     ["curl's -u with an unquoted name that holds an equals sign", "curl -u team=ops:Hunter2pw https://h", `curl -u team=ops:${REDACTED} https://h`],
+    ["a quoted -u value whose password holds a colon", "curl -u 'admin:Hunter2:pw' https://h", `curl -u 'admin:${REDACTED}' https://h`],
+    ["a quoted -u value that holds a flag", "curl -u 'admin:Hunter 2pw -U x:y' https://h", `curl -u 'admin:${REDACTED}' https://h`],
+    ["a quoted -u value that holds a semicolon, and the -U after it", "curl -u 'admin:Hunter;2pw' -U b:Hunter3pw https://h", `curl -u 'admin:${REDACTED}' -U b:${REDACTED} https://h`],
+    ["a quoted -u value that its line ends", "curl -u 'admin:Hunter2pw\nsecond line 'quoted'", `curl -u 'admin:${REDACTED}\nsecond line 'quoted'`],
     ["curl's -u and -U in one command", "curl -u a:Hunter2pw -U b:Hunter3pw https://h", `curl -u a:${REDACTED} -U b:${REDACTED} https://h`],
     ["wget's --proxy-user, which no curl word precedes", "wget --proxy-user bob:Hunter2pw https://h", `wget --proxy-user bob:${REDACTED} https://h`],
     ["a --proxy-user= outside curl", "wget --proxy-user=bob:Hunter2pw https://h", `wget --proxy-user=bob:${REDACTED} https://h`],
@@ -341,6 +345,7 @@ describe("redact", () => {
     "curl -u",
     "curl -u\nhttps://api.example.com",
     "curl -u admin: https://api.example.com",
+    "curl -u 'admin:' https://h",
     "git push -u origin main",
     "menu-u a:b",
     "pip install -U git+https://github.com/org/repo.git",
@@ -357,8 +362,9 @@ describe("redact", () => {
     "curl -s https://h && date -u +%H:%M:%S",
     "curl -s https://h || date -u +%H:%M:%S",
     "curl -s https://h\ndate -u +%H:%M:%S",
-    "see libcurl, then date -u +%H:%M:%S",
-    "see php-curl, then date -u +%H:%M:%S",
+    "curl -s https://h; date -u +%H:%M:%S",
+    "see libcurl and date -u +%H:%M:%S",
+    "see php-curl and date -u +%H:%M:%S",
     "edit curl.cfg, then date -u +%H:%M:%S",
     "curl https://api.example.com/items?sort=-updated:desc",
     "curl https://h/a,-U:b",
@@ -407,6 +413,7 @@ describe("redact", () => {
     ["mysql's -p with an unclosed quote, before a quoted token", "mysql -p'Hunter 3pw fails, so I set token='Hunter 2pw'", `mysql -p${REDACTED} 3pw fails, so I set token=${REDACTED}`],
     ["curl's -u with an unclosed quote, before a quoted secret", "I typed curl -u 'admin:Hunter 3pw then secret=\"Hunter2pw\" by mistake", `I typed curl -u 'admin:${REDACTED}`],
     ["a netrc password glued to the name of an API key", "login bob password Hunter3pw,api_key: abcdef12345", `login bob password ${REDACTED} ${REDACTED}`],
+    ["curl's -u with an unclosed quote, before a quoted --token flag", "curl -u 'admin:Hunter 3pw and --token 'Hunter 2pw'", `curl -u 'admin:${REDACTED}`],
   ];
 
   for (const [name, input, want] of besideNames) {
