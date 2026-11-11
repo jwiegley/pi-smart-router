@@ -4,6 +4,7 @@ import type { ClassifierApi, ClassifierContext, ClassifierModel, ClassifierResul
 
 import { capText } from "./classify.ts";
 import type { VirtualId } from "./constants.ts";
+import { isRecord } from "./files.ts";
 import { redact } from "./redact.ts";
 import type { BoundedHistory } from "./route.ts";
 import { parseRef, scopeSection } from "./roster.ts";
@@ -29,10 +30,6 @@ export interface JevSettings {
 export interface RecentMessage {
   readonly role: "user" | "assistant";
   readonly text: string;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function textOf(content: unknown): string {

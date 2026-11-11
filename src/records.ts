@@ -12,6 +12,7 @@ import type { LevelSource, PlanLevel } from "./decide.ts";
 import { isRecord, own } from "./files.ts";
 import type { JevFailure } from "./jev.ts";
 import type { PendingLevel } from "./route.ts";
+import { isScope } from "./roster.ts";
 import type { Scope } from "./roster.ts";
 import { isTier, tierLabel } from "./tiers.ts";
 import type { Tier } from "./tiers.ts";
@@ -100,7 +101,6 @@ export function correctionRecord(previous: LevelRecord, tier: Tier, at: number):
 const SOURCES: ReadonlySet<string> = new Set<LevelRecord["source"]>(["tag", "jev", "keyword", "floor", "correction"]);
 
 const isSource = (value: unknown): value is LevelRecord["source"] => typeof value === "string" && SOURCES.has(value);
-const isScope = (value: unknown): value is Scope => value === "personal" || value === "work";
 const isTime = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
 
 /**

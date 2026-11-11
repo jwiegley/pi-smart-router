@@ -27,6 +27,7 @@ import { SCOPE_ENTRY } from "./constants.ts";
 import { firstLine } from "./errors.ts";
 import { isRecord, own } from "./files.ts";
 import { boundedHistory } from "./route.ts";
+import { isScope } from "./roster.ts";
 import type { Scope } from "./roster.ts";
 
 export interface ScopeEntryData {
@@ -53,7 +54,6 @@ const LATCHED: ScopeState = Object.freeze({ kind: "ok", scope: "work", source: "
 const BY_DIRECTORY: ScopeState = Object.freeze({ kind: "ok", scope: "work", source: "directory" });
 const DEFAULT: ScopeState = Object.freeze({ kind: "ok", scope: "personal", source: "default" });
 
-const isScope = (value: unknown): value is Scope => value === "personal" || value === "work";
 const isRecorder = (value: unknown): value is ScopeEntryData["by"] => value === "command" || value === "directory" || value === "carried";
 
 /** One entry, exactly as the router writes it; undefined for anything else. */

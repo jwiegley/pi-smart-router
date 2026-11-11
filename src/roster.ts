@@ -60,6 +60,9 @@ export type Scope = "personal" | "work";
 
 export const SCOPES: readonly Scope[] = ["personal", "work"];
 
+/** Whether a value read from a roster, a session entry or a record names a scope. */
+export const isScope = (value: unknown): value is Scope => typeof value === "string" && (SCOPES as readonly string[]).includes(value);
+
 /** One level of a scope: the role it routes to, and the description Jev reads. */
 export interface TierEntry {
   readonly role: string;
@@ -495,8 +498,6 @@ interface LevelName {
 }
 
 const levelName = (level: LevelName): string => `the ${level.scope} scope's ${level.tier} level`;
-
-const isScope = (value: unknown): value is Scope => typeof value === "string" && (SCOPES as readonly string[]).includes(value);
 
 /** A work directory: absolute and written plainly, since a session's directory is compared with it as text. */
 function workDirectory(directory: string, where: string): void {
