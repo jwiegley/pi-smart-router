@@ -2,10 +2,13 @@
 // where a backslash before t, r or n can be a Windows DOMAIN\user name's (CORP\tom), not an escape.
 // Then it turns each escaped line break or tab (\n, \r or \t, as JSON and a repr write them) into
 // a space, so that it ends a value and starts a name as the whitespace it stands for does; the
-// classifier needs only the words, so the space costs it nothing. The input is untrusted and
-// unbounded, so every pattern is linear: a start anchored by a lookbehind or a fixed literal,
-// character classes with no overlapping adjacent quantifiers, and lazy scans that consume to their
-// end.
+// classifier needs only the words, so the space costs it nothing. Then come the fixed shapes
+// (headers, JWTs, private keys, keys with a known prefix), the basic credentials of command lines
+// and config files, the values after secret names and flags, and the long-run backstops. The input
+// is untrusted and unbounded, so every pattern is linear: a start anchored by a lookbehind or a fixed
+// literal, character classes with no overlapping adjacent quantifiers, and lazy scans that consume
+// to their end; where a quantifier overlaps what follows it, an anchor (a line's or a word's start)
+// or a delimiter it cannot cross bounds what each attempt reads.
 export const REDACTED = "[redacted]";
 
 // The user stays, the password goes; the user may be empty (redis://:pass@host).

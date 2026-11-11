@@ -90,8 +90,11 @@ sends nothing unless pinned.
 - What Jev reads is redacted before any cap, in both scopes: passwords in URLs are replaced in the
   text as written, so that a `DOMAIN\user` name's backslash is not read as an escape; then escaped
   line breaks and tabs become spaces, and then the other secret shapes are replaced, all by patterns
-  that are linear in the text. Status lists the classifier among what can still send data off the
-  machine.
+  that are linear in the text. Among them are basic credentials in command lines and config files:
+  curl's `-u`, `--user`, `-U` and `--proxy-user`, the password glued to `-p` in a mysql-family
+  command, a netrc line's password, the text of an XML element with a secret name, the password of
+  a Python auth pair, and cookie values. Status lists the classifier among what can still send data
+  off the machine.
 - The router keeps no prompt text: it binds plans by HMAC-SHA-256 digests under a key each instance
   draws at random, and records hold neither text nor digest.
 - No OpenRouter model answers a work session, routed or picked by hand; Jev's request is the one

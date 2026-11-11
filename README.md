@@ -514,10 +514,17 @@ labelled choices and returns one, with a probability for each. Under a version 2
   value as the whitespace they stand for does. Then the other secret shapes become `[redacted]`:
   `Authorization` headers in any scheme, JWTs, private-key blocks, keys and tokens with a known
   prefix (`sk-`, `sk_live_`, `ghp_`, `github_pat_`, `glpat-`, `hf_`, `npm_`, `xoxb-`, `AIza`, `AKIA`
-  and others), the value after a key or a flag whose name says secret, password, credential or
-  token, or ends in key (`api_key=…`, `--password …`), and long mixed-case strings of 40 or more
-  characters. Every pattern is linear in the text, so a huge paste cannot stall Pi. It is pattern
-  matching: it catches the shapes it knows.
+  and others), basic credentials in command lines and config files, the value after a key or a
+  flag whose name says secret, password, credential or token, or ends in key (`api_key=…`,
+  `--password …`), and long mixed-case strings of 40 or more characters. The basic credentials are
+  the password in curl's `-u user:password`, `--user`, `-U` and `--proxy-user`; the text glued to
+  `-p` in a command that a mysql-family program starts (`mysql`, `mysqldump`, `mariadb` and the
+  like), while `cp -pr` and `docker run -p8080:80` stay; the word after `password` on a netrc line,
+  one that also says `machine` or `login`; the text of an XML element with a secret name, such as
+  Maven's `<password>`; the password of a Python `auth=('user', 'password')` pair or
+  `HTTPBasicAuth`; and the cookie values of `Cookie` and `Set-Cookie` headers. Every pattern is
+  linear in the text, so a huge paste cannot stall Pi. It is pattern matching: it catches the shapes
+  it knows.
 - **Then the caps.** The message keeps its first 16 KiB and last 4 KiB, as the keywords see it, then
   its head and tail within `totalChars` (12000); each earlier message keeps its last `messageChars`
   (1500) characters; and earlier messages are kept, newest first, only while the whole stays within
