@@ -707,7 +707,9 @@ For strictly private work, keep using a dedicated session on a local model with 
 ## Records and training
 
 Each version 2 run on `smart-router/auto` that a prompt planned leaves one `smart-router.level`
-entry in its session when it settles, however it ended. Its fields:
+entry in its session when it settles, however it ended. A run whose plan no longer applies at its
+first request, because the selection, the pin, the scope or the roster's version changed after its
+message was planned, did not go to that level and records nothing. Its fields:
 
 - `v`; `at`, when the run was planned; and `scope`;
 - `source`, what decided the level: `tag`, `jev`, `keyword` or `floor`;

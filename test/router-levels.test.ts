@@ -1338,6 +1338,18 @@ describe("a run's record", () => {
     assert.equal(levelEntries(loaded).length, 1, "a settle without a pending level records nothing");
   });
 
+  test("is not written for a run whose plan no longer applies at its first request: the run took no level (P6)", async (t) => {
+    const loaded = await hera(t);
+    await say(loaded, "Rename the helper #low");
+    assert.deepEqual([recordOf(loaded)?.plan?.level?.scope, recordOf(loaded)?.pendingLevel?.level.tier], ["personal", "low"]);
+    // /smart-router scope work, typed before the run's first request: the plan was made for personal scope.
+    loaded.session.appendCustom(SCOPE_ENTRY, scopeEntry("work", "command", NOW));
+    assert.equal(await runPrompt(loaded, "Rename the helper"), WORK_TERRA, "work's medium level, where a run without a plan goes");
+    assert.equal(recordOf(loaded)?.pendingLevel, undefined, "the dropped plan took its level with it");
+    await finish(loaded, WORK_TERRA);
+    assert.deepEqual(levelEntries(loaded), [], "a run without a level of its own records nothing");
+  });
+
   test("names the model that answered, after a retry moved the run", async (t) => {
     const loaded = await hera(t);
     await say(loaded, "x #high");

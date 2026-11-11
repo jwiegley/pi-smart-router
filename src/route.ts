@@ -224,11 +224,17 @@ export function planApplies(plan: Plan, id: VirtualId, rc: ResolveContext): bool
   return rc.localOnly || (rc.roster.version === 1 ? plan.level === undefined : plan.level?.scope === rc.scope);
 }
 
-/** The run's plan, consumed: it is never used twice, and never where it does not apply. */
+/**
+ * The run's plan, consumed: it is never used twice, and never where it does not apply. A plan that
+ * no longer applies, because the selection, the pin, the scope or the roster's version changed after
+ * its message planned, takes its level with it: the run did not go to that level, so it records none.
+ */
 function takePlan(record: SessionRecord, id: VirtualId, rc: ResolveContext): Plan | undefined {
   const { plan } = record;
   record.plan = undefined;
-  return plan !== undefined && planApplies(plan, id, rc) ? plan : undefined;
+  if (plan === undefined || planApplies(plan, id, rc)) return plan;
+  record.pendingLevel = undefined;
+  return undefined;
 }
 
 /** The planned model if it still resolves, else the planned role, then its fallback. */

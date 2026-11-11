@@ -1,8 +1,9 @@
 // Each routed run's level, kept in the session: a version 2 run on smart-router/auto that an input
-// planned leaves one `smart-router.level` custom entry when it settles, and /smart-router was
-// appends a correction of the latest run, which is a label only: nothing is sent again. A record
-// holds no prompt text and no digest of it; the user message sits just before it in the same
-// session, which is where a training review reads both, on the host that made them.
+// planned leaves one `smart-router.level` custom entry when it settles, none when its plan no longer
+// applied at its first request (route.ts, takePlan), and /smart-router was appends a correction of
+// the latest run, which is a label only: nothing is sent again. A record holds no prompt text and
+// no digest of it; the user message sits just before it in the same session, which is where a
+// training review reads both, on the host that made them.
 //
 // Also the words the footer and history use for a run's level: its scope, its tier, and what
 // decided it.

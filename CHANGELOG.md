@@ -49,8 +49,9 @@ sends nothing unless pinned.
   at every hook the pin's guard uses, switches back to `smart-router/auto` with notices in work
   scope's words, and locks a session that something keeps switching away.
 - Records: one `smart-router.level` session entry per routed version 2 run, appended when the run
-  settles, with no prompt text and no digest; `/smart-router was low|medium|high|super` appends a
-  correction, and nothing is sent again.
+  settles, with no prompt text and no digest, and none for a run whose plan no longer applied at its
+  first request; `/smart-router was low|medium|high|super` appends a correction, and nothing is sent
+  again.
 - `/smart-router scope [work|personal|status]` and `/smart-router was`.
 - The footer's level item, under its own status key `smart-router-level`. History lines of a
   version 2 run gain its scope and level, and status shows the scope, each scope's levels and the
