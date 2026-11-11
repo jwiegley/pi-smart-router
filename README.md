@@ -520,15 +520,27 @@ labelled choices and returns one, with a probability for each. Under a version 2
   `--password …`), and long mixed-case strings of 40 or more characters. The basic credentials are
   the password of `-u user:password`, `--user` and `-U` in a curl command (from a `curl` word,
   which is `curl` or a path that ends in `/curl`, to the next `|`, `;`, `&&` or line break; a
-  line break behind a backslash, and a `|`, `;` or `&&` inside a quoted argument, continue the
-  command), while `date -u +%H:%M:%S` and `docker run -u 1000:1000` stay; the password of
+  line break behind a backslash continues the command, and so does a `|`, `;` or `&&` inside a
+  quoted argument, which ends at its closing quote or at its line's end. The quotes are read two
+  ways, and a password that either reading finds is hidden: as the shell reads them, where a
+  backslash escapes a quote, and with every quote counted, as they pair in a JSON string), while
+  `date -u +%H:%M:%S` and `docker run -u 1000:1000` stay; the password of
   `--proxy-user` in any command; the text glued to `-p` in a command that a mysql-family program
   starts (`mysql`, `mysqldump`, `mariadb` and the like), while `cp -pr` and
   `docker run -p8080:80` stay; the word after `password` on a netrc line, one that also says
   `machine` or `login`; the text of an XML element with a secret name, such as Maven's
   `<password>`; the password of a Python `auth=('user', 'password')` pair or `HTTPBasicAuth`; and
   the cookie values of `Cookie` and `Set-Cookie` headers. Every pattern is linear in the text, so
-  a huge paste cannot stall Pi. It is pattern matching: it catches the shapes it knows.
+  a huge paste cannot stall Pi. It is pattern matching: it catches the shapes it knows. Among the
+  curl commands it is known to miss, whose password still reaches Jev:
+  - a quoted argument that runs over several lines, before the flag (`-d '{`, the body's lines,
+    `}' -u admin:pw`);
+  - a `-u` value in JSON-escaped quotes (`-u \"admin:pw\"`);
+  - a line continuation between the flag and its value;
+  - combined short flags (`-sSu admin:pw`);
+  - a quoted password after the colon (`-u admin:"pw with space"`);
+  - an argument array (`["curl", "-u", "admin:pw"]`);
+  - `curl.exe`.
 - **Then the caps.** The message keeps its first 16 KiB and last 4 KiB, as the keywords see it, then
   its head and tail within `totalChars` (12000); each earlier message keeps its last `messageChars`
   (1500) characters; and earlier messages are kept, newest first, only while the whole stays within
