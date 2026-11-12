@@ -558,6 +558,37 @@ describe("redact", () => {
     assert.equal(redact(`${mixed40}_pad`), `${REDACTED}_pad`);
   });
 
+  // What each pattern reads, a piece at a time: a row for a branch, a flag, a lookaround, an anchor,
+  // a bound or a class member that no other test tells from its neighbour. A row with no third text
+  // stays as it is. Some rows pin a shape that is not read; one that shows a secret says that it
+  // is a known gap.
+  const patternRows: ReadonlyArray<readonly [string, string, string?]> = [
+    // URL passwords.
+    ["a URL whose scheme is in capitals", "HTTPS://bob:Hunter2pw@host", `HTTPS://bob:${REDACTED}@host`],
+    // Keys with a known prefix.
+    ["a Stripe key of eight characters", "sk_live_aB3dE5gH", REDACTED],
+    ["an sk- key of twenty characters", "sk-abcdefghij0123456789", REDACTED],
+    ["a GitHub refresh token", "ghr_abcdefghijklmnopqrstuvwxyz0123456789", REDACTED],
+    ["a Slack token of each kind", "xoxa-2-abc xoxb-2-abc xoxp-2-abc xoxr-2-abc xoxs-2-abc", `${REDACTED} ${REDACTED} ${REDACTED} ${REDACTED} ${REDACTED}`],
+    ["a Google API key that holds an underscore and a hyphen", "AIzaabcde_ghij-123456789abcdefghij01234", REDACTED],
+    // Flags and their values.
+    ["a flag before another flag", "mysql --password --verbose"],
+    // Secret names.
+    ["the name pass", "pass=hunter2", `pass=${REDACTED}`],
+    ["the name pwd", "pwd=hunter2", `pwd=${REDACTED}`],
+    ["a name that ends in _pass", "db_pass=hunter2", `db_pass=${REDACTED}`],
+    ["a name that ends in _PWD", "MYSQL_PWD=hunter2", `MYSQL_PWD=${REDACTED}`],
+    ["an access key name that ends in another word, with an underscore", "access_key_id=hunter2", `access_key_id=${REDACTED}`],
+    // Long runs.
+    ["a long mixed-case path with no digit", "src/Components/Header/NavigationBar/DropdownMenuItem/IndexPage"],
+  ];
+
+  for (const [what, input, want] of patternRows) {
+    test(want === undefined ? `leaves ${what} as it is` : `reads ${what}`, () => {
+      assert.equal(redact(input), want ?? input);
+    });
+  }
+
   test("runs in linear time on long hostile input", () => {
     const inputs = [
       "-----BEGIN PRIVATE KEY-----".repeat(5000),
