@@ -49,10 +49,10 @@ sends nothing unless pinned.
   at every hook the pin's guard uses, switches back to `smart-router/auto` with notices in work
   scope's words, and locks a session that something keeps switching away.
 - Records: a run that still holds a level when it settles leaves one `smart-router.level` session
-  entry, with no prompt text and no digest. The README's "Records and training" says which messages
-  get no level, when the router drops a level, so that it is not recorded, and which runs still
-  record the planned level after the selection or the scope changed.
-  `/smart-router was low|medium|high|super` appends a correction, and nothing is sent again.
+  entry, with no prompt text and no digest, and `/smart-router was low|medium|high|super` appends a
+  correction; nothing is sent again. The router can drop a level before its run settles, and a run
+  can record a level that another message planned, so a record is a label to check against its
+  session: see the README's "Records and training".
 - `/smart-router scope [work|personal|status]` and `/smart-router was`.
 - The footer's level item, under its own status key `smart-router-level`. History lines of a
   version 2 run gain its scope and level, and status shows the scope, each scope's levels and the

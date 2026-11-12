@@ -853,34 +853,18 @@ For strictly private work, keep using a dedicated session on a local model with 
 ## Records and training
 
 A run that still holds a level when it settles leaves one `smart-router.level` entry in its session,
-however it ended. An entry that cannot be appended is reported in a warning. A run gets its level
-from its message: the level is decided when the message arrives ([Levels](#levels)), and the
-message's run takes it when it starts, by the rule that binds a plan to its message's run
-([Routing in detail](#routing-in-detail)). A message that arrives on `smart-router/local`, under the
-pin, on a physical model or under a version 1 roster gets no level. A run without a level leaves no
-entry, and neither does a custom message's run. A level that the router drops is not recorded. It
-drops a message's level when:
+however it ended. A message that arrives on `smart-router/local`, under the pin, on a physical model
+or under a version 1 roster gets no level, and a run without a level leaves no entry.
 
-- a later message arrives, while the session is idle, after the level was planned. An extension's
-  resend of that message's text is planned from the same tag or the same answer of Jev's;
-- a run starts that is not the message's own by that rule: a custom message's run, or another
-  prompt's;
-- the session shuts down;
-- the router, at the first of the run's requests to reach it after a message of the user's, which is
-  normally the run's first request, finds that the run's plan no longer applies, because the
-  selection moved to `smart-router/local`, or the pin, the scope or the roster's version changed
-  after the message was planned: the run did not go to that level.
+The router can drop a level before its run settles, and a run can record a level that another
+message planned. These can happen when messages overlap, as when several wait for Jev together or a
+steer arrives while a run settles, and when the selection, the pin, the scope or the roster changes
+after a message was planned. A run that stays on a model picked by hand after its message was
+planned is different: its requests do not go through the router, so the plan is not compared, and
+the entry keeps the planned level, with the hand-picked model as its `ref` when that model answered.
+The tests under "a run's record" in `test/router-levels.test.ts` pin some of these cases, and the
+rest can vary. A record is a label, so check it against its session before training on it.
 
-A run that stays on a model picked by hand after its message was planned is different from the last
-case: its requests do not go through the router, so the plan is not compared, and the entry keeps
-the planned level, with the hand-picked model as its `ref` when that model answered. Two more kinds
-of run can still record the planned level after such a change: a run whose first request the router
-refuses before it looks at the plan, and a run whose plan another message's plan replaced before the
-run started. A run that `smart-router/auto` refuses because its session moved to a scope the roster
-does not serve leaves an entry with the planned level and no `ref`. The second kind arises when two
-messages wait for Jev together: the first plans its level, the selection moves to
-`smart-router/local`, and the second then plans without a level. The first message's run has no plan
-left at its first request, and its entry has the planned level with the local model as its `ref`.
 The entry's fields:
 
 - `v`; `at`, when the run was planned; and `scope`;
@@ -890,30 +874,30 @@ The entry's fields:
 - `trigger`, the risky operation that raised the run to the floor;
 - `keyword`, the keyword classifier's signal and reason;
 - `jev`: Jev's model, choice, probabilities, confidence and latency (`ms`), or its failure. A tagged
-  run whose answer had not come when it settled records `{ "late": true }`. An extension's resend of
-  an untagged message records that message's `jev` again, though Jev is not asked again. Otherwise
-  it is absent when Jev was not asked, as for a resend of a tagged message;
+  run whose answer had not come when it settled records `{ "late": true }`. The field can be absent,
+  as it is without a classifier, and an extension's resend can repeat the answer its message got
+  before;
 - `ref`, the model of the run's last assistant message that ended without an error, absent when no
   model answered;
 - `steppedUp`, `returnedToFirst` and `aborted`, when they apply.
 
-A record holds no prompt text and no digest of it. It pairs with its run's first user message,
-earlier in the same session; the run's steers and follow-ups can sit between them. That message
+A record holds no prompt text and no digest of it. It normally follows its run's first user message,
+earlier in the same session, and the run's steers and follow-ups can sit between them; that message
 lacks the tag, which the record keeps.
 
 `/smart-router was low|medium|high|super` labels a run with the level it should have had: the run in
 flight, when it holds a level, from its start until its record is written, and otherwise the run of
-the latest record on the active branch, never the level of a message whose run never started. It
+the latest record on the active branch, not the level of a message whose run has not started. It
 appends a record with source `correction`, that level, and `refers`, the `at` of the run it names; a
 correction of a correction names the same run. With no run to name, it says so and appends nothing.
 Nothing is sent again.
 
 **Training** is an agent review, when John asks for one. An agent session on the host reads that
 host's session files for these records and the user messages they pair with, reports per scope and
-per level where John's tags and corrections disagree with Jev, and proposes revised `describe`
-texts and a revised `closeCall` as a diff to that host's roster. Nothing changes until John
-approves it. Records stay on the host that made them, and work records are read only there. The
-router itself never reads other sessions and never writes the roster.
+per level where John's tags and corrections disagree with Jev, and proposes revised `describe` texts
+and a revised `closeCall` as a diff to that host's roster. Nothing changes until John approves it.
+Records stay on the host that made them, and work records are read only there. The router itself
+reads no other session and does not write the roster.
 
 ## Commands
 
