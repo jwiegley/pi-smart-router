@@ -7,11 +7,12 @@
 // the basic credentials of command lines and config files, and the long-run backstops. The names
 // are read before the basic credentials: a basic value can run on, through an unclosed quote or a
 // word glued to the next name, and would take that name away from the secret after it. The input
-// is untrusted and unbounded, so every pattern is linear: a start anchored by a lookbehind or a fixed
-// literal, or an attempt that reads a bounded count of characters (the long-run backstops),
-// character classes with no overlapping adjacent quantifiers, and lazy scans that consume to their
-// end; where a quantifier overlaps what follows it, an anchor (a line's or a word's start) or a
-// delimiter it cannot cross bounds what each attempt reads.
+// is untrusted and unbounded, so each pattern is written to read it in linear time, and the suite's
+// linear-time test holds redaction to that on its hostile inputs. The means: a start anchored by a
+// lookbehind or a fixed literal, or an attempt that reads a bounded count of characters (the
+// long-run backstops), character classes with no overlapping adjacent quantifiers, and lazy scans
+// that consume to their end; where a quantifier overlaps what follows it, an anchor (a line's or a
+// word's start) or a delimiter it cannot cross bounds what each attempt reads.
 export const REDACTED = "[redacted]";
 
 // The user stays, the password goes; the user may be empty (redis://:pass@host).
@@ -93,9 +94,11 @@ const LONG_BASE64 = /[A-Za-z0-9+/]{40,}/g;
 // curl's -u, --user and -U take user:password, quoted or not: the text after the first colon goes
 // and the user stays. Other programs give those flags other meanings (date -u +%H:%M:%S, docker
 // run -u 1000:1000, pip install -U git+https://…), so they are read only in a curl command: after
-// a curl word (curl, or a path that ends in /curl) and before the next |, ;, && or line break. A
-// line break right behind a backslash continues the command, as the shell reads it. So does a |,
-// ; or && inside a quoted argument: it is the argument's own
+// a curl word and before the next |, ;, && or line break. A curl word is curl before a space or a
+// tab and not behind a letter, a digit, _ or -: at the text's start, behind whitespace, or behind
+// / . ( = $ @, a quote, a backtick or another such mark (/usr/bin/curl, my.curl, $(curl). A line
+// break right behind a backslash continues the command, as the shell reads it. So does a |, ; or &&
+// inside a quoted argument: it is the argument's own
 // (-H 'Content-Type: application/json; charset=utf-8').
 //
 // The quotes of a curl command are read in two ways, each by a pass of its own, and each pass
