@@ -4,7 +4,7 @@ import test, { describe } from "node:test";
 import { isCodexProvider, isWorkCodex } from "../src/accounts.ts";
 import { BUILTIN_EXCLUDES } from "../src/constants.ts";
 import { autoRoles, excludedBy, excludesFor, isWorkBound, liftWorkAlias, parseRoster, SCOPES, scopeSection } from "../src/roster.ts";
-import type { RosterV2, ScopedBinding } from "../src/roster.ts";
+import type { Roster, RosterV2, ScopedBinding } from "../src/roster.ts";
 import { rosterFixture, rosterFixtureV2 } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
 
@@ -128,6 +128,17 @@ describe("John's version 2 rosters", () => {
 });
 
 describe("reading a roster's scopes and bindings", () => {
+  // The parser gives a version 1 roster no scopes and no scoped binding, so only an object built
+  // by hand can show that the two readers go by the version and not by what the object carries.
+  test("scopeSection and isWorkBound go by the version: a version 1 roster that carries scopes and a work binding has neither", () => {
+    const hera = rosterFixtureV2("roster-hera-v2.json");
+    assert.notEqual(scopeSection(hera, "work"), undefined, "the control: version 2 has the section");
+    assert.equal(isWorkBound(hera, "openai-codex-3"), true, "the control: version 2 has the work binding");
+    const labelled1 = { ...hera, version: 1 } as unknown as Roster;
+    for (const scope of SCOPES) assert.equal(scopeSection(labelled1, scope), undefined, scope);
+    assert.equal(isWorkBound(labelled1, "openai-codex-3"), false);
+  });
+
   test("scopeSection and isWorkBound read version 2 only", () => {
     assert.deepEqual(SCOPES, ["personal", "work"]);
     const v1 = rosterFixture("roster-hera.json");
