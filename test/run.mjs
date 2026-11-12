@@ -6,6 +6,12 @@
 // process loads test/setup.mjs, which refuses network and child-process use. The run fails when a
 // test fails, when the tripwire recorded anything, or when root/cwd or root/home gained a file.
 //
+// No suite file and no test may run longer than TEST_TIMEOUT_MS. Node's runner gives the limit to
+// each file it starts and to each test in it, fails the one that passes it ("test timed out") and
+// ends that file's process, so a test stuck in a loop that never returns fails the run instead of
+// hanging it. The limit is far above what a suite needs: the slowest file takes about 10 s, and
+// the linear-time test has taken 11 s on a heavily loaded machine.
+//
 // The behaviour suite (test/behaviour.test.ts) runs Pi's own runtime and its npm dependency
 // closure, and scrubbing the environment is not a sandbox, so it runs only sandboxed: in the
 // offline Nix build, where NIX_BUILD_TOP is set, or under sandbox-exec through test/sandbox.mjs,
@@ -24,6 +30,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const testDir = dirname(fileURLToPath(import.meta.url));
+const TEST_TIMEOUT_MS = 120_000;
 const BEHAVIOUR = join(testDir, "behaviour.test.ts");
 
 /** The root this run made, removed again when the run refuses to start. */
@@ -120,6 +127,7 @@ const result = spawnSync(
     "--import",
     pathToFileURL(join(testDir, "setup.mjs")).href,
     "--test",
+    `--test-timeout=${TEST_TIMEOUT_MS}`,
     "--test-reporter=spec",
     ...files,
   ],
