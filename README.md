@@ -853,12 +853,19 @@ For strictly private work, keep using a dedicated session on a local model with 
 ## Records and training
 
 Each version 2 run on `smart-router/auto` that a prompt planned leaves one `smart-router.level`
-entry in its session when it settles, however it ended. A run whose plan no longer applies at its
-first request to the router, because the selection moved to `smart-router/local`, or the pin, the
-scope or the roster's version changed after its message was planned, did not go to that level and
-records nothing. A model picked by hand after the message was planned is different: its requests
-never reach the router, so nothing drops the plan, and the entry keeps the planned level, with the
-hand-picked model as its `ref`. The entry's fields:
+entry in its session when it settles, however it ended. A run records no level when the router,
+routing the run's first request, finds that the run's plan no longer applies, because the selection
+moved to `smart-router/local`, or the pin, the scope or the roster's version changed after its
+message was planned: the run did not go to that level. A model picked by hand after the message was
+planned is different: its requests never reach the router, so nothing drops the plan, and the entry
+keeps the planned level, with the hand-picked model as its `ref`. Two more kinds of run can still
+record the planned level after such a change: a run whose first request the router refuses before it
+looks at the plan, and a run whose plan another message's plan replaced before the run started. A
+run that `smart-router/auto` refuses because its session moved to a scope the roster does not serve
+leaves an entry with the planned level and no `ref`. The second kind arises when two messages wait
+for Jev together: the first plans its level, the selection moves to `smart-router/local`, and the
+second then plans without a level. The first message's run has no plan left at its first request,
+and its entry has the planned level with the local model as its `ref`. The entry's fields:
 
 - `v`; `at`, when the run was planned; and `scope`;
 - `source`, what decided the level: `tag`, `jev`, `keyword` or `floor`;
