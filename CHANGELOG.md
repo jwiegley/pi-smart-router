@@ -5,7 +5,7 @@ All notable changes to this fork are recorded here, in the form of
 the base is the upstream release the fork started from, and `jw.<n>` counts the fork's releases.
 Releases are signed tags; nothing is published to npm.
 
-## [1.3.0-jw.2] - 2026-11-11
+## [1.3.0-jw.2] - 2026-11-12
 
 Four intelligence levels on `smart-router/auto`, classified by Jev through Pi's model registry, and
 a personal or work scope for every session. Version 1 rosters route personal sessions as before,
