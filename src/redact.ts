@@ -21,10 +21,12 @@ const URL_PASSWORD = /(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*:\/\/[^\s:/@]*:)[^\s@/]+
 const ESCAPED_BREAK = /\\[nrt]/g;
 
 const PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
-  // Header, in plain or JSON form: the whole value, whatever its scheme. The value runs to the next
-  // space, quote or semicolon, so a JSON escape inside it (\/, \u002B) never cuts it short; an
-  // escaped line break, a space by now, ends it. The pattern ignores case, so [a-z] is every
-  // letter of the scheme.
+  // Header, in plain or JSON form: a scheme, when letters and a space stand there, and the word
+  // after it. The word runs to the next space, quote or semicolon, so a JSON escape inside it
+  // (\/, \u002B) never cuts it short; an escaped line break, a space by now, ends it. The pattern
+  // ignores case, so [a-z] is every letter of the scheme. A scheme that holds a hyphen or a digit
+  // (Api-Key, OAuth2) is no scheme here: it is taken for the word, and the credential behind it
+  // stays.
   [/\bAuthorization\\?["']?[ \t]*:[ \t]*\\?["']?(?:[a-z]+[ \t]+)?\\?["']?[^\s"';]+/gi, REDACTED],
   [/(?<![\w-])eyJ[\w-]+\.[\w-]+\.[\w-]*/g, REDACTED],
   [/-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|$)/g, REDACTED],

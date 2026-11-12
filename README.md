@@ -509,19 +509,24 @@ labelled choices and returns one, with a probability for each. Under a version 2
   or thinking, read through the bounded `getRecentActiveEntries`; and the four `describe` texts of
   the session's scope, as the criteria of the choices. Its one question asks how much model
   intelligence the message needs for the work it asks for now.
-- **Redaction runs first**, in both scopes. Passwords in URLs become `[redacted]` first, in the text
-  as written, where the backslash of a `DOMAIN\user` name (`CORP\tom`) is no escape. Then escaped
-  line breaks and tabs (`\n`, `\r` and `\t`, as JSON writes them) become spaces, so that they end a
-  value as the whitespace they stand for does. Then the other secret shapes become `[redacted]`:
-  `Authorization` headers (the scheme, whichever it is, and the one word after it), JWTs,
-  private-key blocks, keys and tokens with a known prefix (`sk-`, `sk_live_`, `ghp_`, `github_pat_`,
-  `glpat-`, `hf_`, `npm_`, `xoxb-`, `AIza`, `AKIA` and others), basic credentials in command lines
-  and config files, the value after a key or a flag whose name says secret, password, credential or
-  token, or ends in key (`api_key=…`, `--password …`), and runs of 40 or more letters and digits in
-  mixed case, or of base64 characters in mixed case with a digit and a `+` or `/`. The basic
-  credentials are the password of `-u user:password`, `--user` and `-U` in a curl command (from a
-  `curl` word, which is `curl` or a path that ends in `/curl`, to the next `|`, `;`, `&&` or line
-  break; a line break behind a backslash continues the command, and so does a `|`, `;` or `&&`
+- **Redaction runs first**, in both scopes. The password of a URL written `scheme://user:password@`
+  becomes `[redacted]` first, in the text as written, where the backslash of a `DOMAIN\user` name
+  (`CORP\tom`) is no escape. Then escaped line breaks and tabs (`\n`, `\r` and `\t`, as JSON writes
+  them) become spaces, so that they end a value as the whitespace they stand for does. Then the
+  other secret shapes become `[redacted]`: `Authorization` headers (the first word behind the name
+  and, when that word is made of letters only, the word after it), JWTs that start a word,
+  private-key blocks, keys and tokens with a known prefix and the length that goes with it (`sk-`,
+  `sk_live_`, `ghp_`, `github_pat_`, `glpat-`, `hf_`, `npm_`, `xoxb-`, `AIza`, `AKIA` and others),
+  basic credentials in command lines and config files, the value on the same line after a key or a
+  flag whose name holds `secret`, `password`, `passwd`, `passphrase`, `credential` or
+  `authorization`, holds `token` with no `s` right behind it, holds `api`, `access` or `private`
+  right before `key` or with one `_` or `-` between them, ends in `key`, or has `pass` or `pwd` as a
+  whole part, set off by `_` or `-` (`api_key=…`, `--password …`, `db_pass=…`), and runs of 40 or
+  more letters and digits in mixed case, or of base64 characters in mixed case with a digit and a
+  `+` or `/`. The basic credentials are the password of `-u user:password`, `--user` and `-U` in a
+  curl command (from a `curl` word, which is `curl` before a space or a tab and behind no letter,
+  digit, underscore or hyphen, as in `/usr/bin/curl` and `my.curl`, to the next `|`, `;`, `&&` or
+  line break; a line break behind a backslash continues the command, and so does a `|`, `;` or `&&`
   inside a quoted argument, which ends at its closing quote or at its line's end. The quotes are
   read two ways: first with every quote counted, as they pair in a JSON string, and then, in a last
   pass over what the other passes left, as the shell reads them, where a backslash escapes a quote.
@@ -532,14 +537,16 @@ labelled choices and returns one, with a probability for each. Under a version 2
   the like) in the same command, while `cp -pr` and `docker run -p8080:80` stay; the word after
   `password` on a netrc line, one that also says `machine` or `login`; the text of an XML element
   with a secret name, such as Maven's `<password>`; the password of a Python
-  `auth=('user', 'password')` pair or `HTTPBasicAuth`; and the cookie values of `Cookie` and
-  `Set-Cookie` headers. Every pattern is linear in the text, so a huge paste cannot stall Pi. It is
-  pattern matching: it catches the shapes it knows. It also hides some text that is no secret: the
-  text of a plist's `<key>` element (`<key>CFBundleName</key>`), the port in
-  `docker run --name mysql -p8080:80 img`, on a line that names mysql, and the word after `password`
-  on a line that also says `login` (`enter your login and password carefully`). Its known gaps
-  include the shapes below; each entry gives an input whose secret, or the part of it the entry
-  names, stays in the text that Jev reads, and the list is not complete.
+  `auth=('user', 'password')` pair or `HTTPBasicAuth`; and the unquoted cookie values of `Cookie`
+  and `Set-Cookie` headers. The patterns are written to be linear in the text, and a test holds
+  redaction to under a second on each of its hostile inputs, of 90,000 characters and more, so that
+  a huge paste does not stall Pi. It is pattern matching: it catches the shapes it knows. It also
+  hides some text that is no secret: the text of a plist's `<key>` element
+  (`<key>CFBundleName</key>`), the port in `docker run --name mysql -p8080:80 img`, on a line that
+  names mysql, and the word after `password` on a line that also says `login`
+  (`enter your login and password carefully`). Its known gaps include the shapes below; each entry
+  gives an input whose secret, or the part of it the entry names, stays in the text that Jev reads,
+  and the list is not complete.
   - In a curl command (`pw` stands for a password):
     - a quoted argument that runs over several lines, before the flag (`curl -d '{`, then
       `"a": 1`, then `}' -u admin:pw https://h`, each on a line of its own);
@@ -578,11 +585,18 @@ labelled choices and returns one, with a probability for each. Under a version 2
       (`Authorization=Bearer q8Zt1rLm9XaQ`);
     - a header name glued behind an underscore, whose token stays
       (`HTTP_AUTHORIZATION: Bearer q8Zt1rLm9XaQ`);
+    - an `Authorization` scheme that holds a hyphen or a digit, whose credential stays
+      (`Authorization: Api-Key q8Zt1rLm9XaQ`, `{"Authorization": "OAuth2 q8Zt1rLm9XaQ"}`);
     - an `Authorization` credential of several words, whose words behind the first stay
       (`Authorization: Digest username="bob", response="6629fae49393a05397450978507c4ef1"` keeps
       the response);
     - a credential of letters only before an escaped line break and another header, whose key
       stays (`Authorization: abcdef\r\nX-Api-Key: Zz9y8x7w6v`);
+    - a name in which an `s` stands right behind `token` (`refresh_tokens: q8Zt1rLm9XaQ`,
+      `tokenString = q8Zt1rLm9XaQ`);
+    - PowerShell's `-Password` (`New-LocalUser -Name bob -Password hunter2`);
+    - a quoted cookie value (`Set-Cookie: sid="Hunter2pw"`);
+    - `mysql.exe` (`mysql.exe -pHunter2pw db`);
     - a comparison (`if (password === "pw") ok()`);
     - a string behind a prefix letter (`password=b"pw"`, `token = r'pw'`);
     - a value on the line after its name (`password:`, then `pw` on the next line);
@@ -590,7 +604,9 @@ labelled choices and returns one, with a probability for each. Under a version 2
     - a JWT glued behind an underscore (`x_eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl`);
     - a URL password that holds a slash (`https://bob:p/w@host`);
     - a Python auth pair whose password holds the other kind of quote
-      (`auth=("bob", "O'Brien1x")`).
+      (`auth=("bob", "O'Brien1x")`);
+    - a Python auth pair behind a name that only ends in `_auth`
+      (`http_auth=('bob', 'Hunter2pw')`).
 - **Then the caps.** The message keeps its first 16 KiB and last 4 KiB, as the keywords see it, then
   its head and tail within `totalChars` (12000); each earlier message keeps its last `messageChars`
   (1500) characters; and earlier messages are kept, newest first, only while the whole stays within

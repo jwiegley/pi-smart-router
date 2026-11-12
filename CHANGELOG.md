@@ -87,15 +87,15 @@ sends nothing unless pinned.
   a classifier, it asks Pi's model registry for one classifier request per routed run on
   smart-router/auto, with a per-attempt timeout and no retries. It never does so under the pin, on
   smart-router/local, for a steer or follow-up, or without a classifier.
-- What Jev reads is redacted before any cap, in both scopes: passwords in URLs are replaced in the
+- What Jev reads is redacted before any cap, in both scopes: a URL's password is replaced in the
   text as written, so that a `DOMAIN\user` name's backslash is not read as an escape; then escaped
-  line breaks and tabs become spaces, and then the other secret shapes are replaced, all by patterns
-  that are linear in the text. Among them are basic credentials in command lines and config files:
-  the password of `-u`, `--user` and `-U` in a curl command and of `--proxy-user` in any command,
-  the password glued to `-p` in a mysql-family command, a netrc line's password, the text of an XML
-  element with a secret name, the password of a Python auth pair, and cookie values. It is pattern
-  matching: the README lists shapes it is known to miss, and text it hides that is no secret. Status
-  lists the classifier among what can still send data off the machine.
+  line breaks and tabs become spaces, and then the other secret shapes are replaced, by patterns
+  written to be linear in the text. Among them are basic credentials in command lines and config
+  files: the password of `-u`, `--user` and `-U` in a curl command and of `--proxy-user` in any
+  command, the password glued to `-p` in a mysql-family command, a netrc line's password, the text
+  of an XML element with a secret name, the password of a Python auth pair, and unquoted cookie
+  values. It is pattern matching: the README lists shapes it is known to miss, and text it hides
+  that is no secret. Status lists the classifier among what can still send data off the machine.
 - The router keeps no prompt text: it binds plans by HMAC-SHA-256 digests under a key each instance
   draws at random, and records hold neither text nor digest.
 - No OpenRouter model answers the requests that go through a work session's route, routed or picked
