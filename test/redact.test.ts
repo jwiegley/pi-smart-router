@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test, { describe } from "node:test";
 
 import { redact, REDACTED, SCANS } from "../src/redact.ts";
@@ -936,61 +937,60 @@ describe("redact", () => {
     });
   }
 
-  // The claims of the README's redaction passage, and of the CHANGELOG's security entry, that name
-  // what is hidden or read, each as a probe. A row with no third text stays as it is. When a row
-  // fails, the sentence it probes needs the same change.
-  const readmeClaims: ReadonlyArray<readonly [string, string, string?]> = [
-    // URL passwords and escaped breaks.
-    ["the password of a URL written scheme://user:password@", "git clone https://bob:Hunter2pw@example.com/a/b", `git clone https://bob:${REDACTED}@example.com/a/b`],
-    ["a URL's password in the text as written, where the backslash of a DOMAIN\\user name is no escape", "http://CORP\\tom:Hunter2pw@proxy.corp:8080", `http://CORP om:${REDACTED}@proxy.corp:8080`],
-    ["escaped line breaks and tabs become spaces, and end a value", '{"log": "password: hunter2\\napi_key: Zz9y8x7w\\r\\ntoken: Aa1b2c3d\\tdone"}', `{"log": "password: ${REDACTED} api_key: ${REDACTED}  token: ${REDACTED} done"}`],
-    // The other secret shapes.
-    ["an Authorization header: a first word of letters only, and the word after it", "Authorization: Bearer q8Zt1rLm9XaQ", REDACTED],
-    ["an Authorization header: the first word alone, when no word of letters stands before it", "Authorization: q8Zt1rLm9XaQ and more", `${REDACTED} and more`],
-    ["a JWT that starts a word", "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl ok", `jwt ${REDACTED} ok`],
+  // The README's examples of what redaction hides, row for row: its first table under "What
+  // redaction hides". A row with no third text stays as it is.
+  const readmeExamples: ReadonlyArray<readonly [string, string, string?]> = [
+    // Passwords in URLs, and escaped breaks.
+    ["a URL's password", "git clone https://bob:Hunter2pw@example.com/a/b", `git clone https://bob:${REDACTED}@example.com/a/b`],
+    ["a URL's password behind a DOMAIN\\user name, whose \\t then reads as a space", "http://CORP\\tom:Hunter2pw@proxy.corp:8080", `http://CORP om:${REDACTED}@proxy.corp:8080`],
+    ["escaped line breaks and an escaped tab, which read as spaces and end a value", '{"log": "password: hunter2\\napi_key: Zz9y8x7w\\r\\ntoken: Aa1b2c3d\\tdone"}', `{"log": "password: ${REDACTED} api_key: ${REDACTED}  token: ${REDACTED} done"}`],
+    // Headers, tokens and keys.
+    ["an Authorization header with a scheme", "Authorization: Bearer q8Zt1rLm9XaQ", REDACTED],
+    ["an Authorization header with no scheme", "Authorization: q8Zt1rLm9XaQ and more", `${REDACTED} and more`],
+    ["a JWT", "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl ok", `jwt ${REDACTED} ok`],
     ["a private-key block", "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEA\n-----END OPENSSH PRIVATE KEY-----\nafter", `${REDACTED}\nafter`],
-    ["keys and tokens with each prefix the README names, at the length that goes with it", "sk-abcdefghij0123456789 sk_live_aB3dE5gH ghp_abcdefghijklmnopqrstuvwxyz0123456789 github_pat_x glpat-abcdefghij0123456789 hf_abcdefghij0123456789 npm_abcdefghij0123456789 xoxb-1 AIzaabcde_ghij-123456789abcdefghij01234 AKIA0ABCDEFGHIJKLMNO", `${REDACTED} ${REDACTED} ${REDACTED} ${REDACTED} ${REDACTED} ${REDACTED} ${REDACTED} ${REDACTED} ${REDACTED} ${REDACTED}`],
-    ["the value on the same line after a key of each kind of secret name", "client_secret=a1 password=a2 passwd=a3 passphrase=a4 credential=a5 authorization=a6 token=a7 api_key_id=a8 access_key_id=a9 private_key_id=b1 monkey=b2 db_pass=b3 pwd=b4", `client_secret=${REDACTED} password=${REDACTED} passwd=${REDACTED} passphrase=${REDACTED} credential=${REDACTED} authorization=${REDACTED} token=${REDACTED} api_key_id=${REDACTED} access_key_id=${REDACTED} private_key_id=${REDACTED} monkey=${REDACTED} db_pass=${REDACTED} pwd=${REDACTED}`],
-    ["the value after a flag with a secret name", "run --password a1 --api-key a2 --token a3 --db-pass a4", `run --password ${REDACTED} --api-key ${REDACTED} --token ${REDACTED} --db-pass ${REDACTED}`],
-    ["a run of 40 letters and digits in mixed case", "aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dE3fG5hJ7k", REDACTED],
-    ["a run of 40 base64 characters in mixed case with a digit and a slash", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", REDACTED],
-    // Basic credentials.
-    ["the password of -u, --user and -U in a curl command", "curl -u admin:Hunter2pw --user bob:Hunter3pw -U proxy:Hunter4pw https://h", `curl -u admin:${REDACTED} --user bob:${REDACTED} -U proxy:${REDACTED} https://h`],
-    ["a curl word behind a slash", "/usr/bin/curl -u admin:Hunter2pw https://h", `/usr/bin/curl -u admin:${REDACTED} https://h`],
+    ["keys and tokens with a vendor's prefix", "sk-abcdefghij0123456789 sk_live_aB3dE5gH ghp_abcdefghijklmnopqrstuvwxyz0123456789 github_pat_x glpat-abcdefghij0123456789 hf_abcdefghij0123456789 npm_abcdefghij0123456789 xoxb-1 AIzaabcde_ghij-123456789abcdefghij01234 AKIA0ABCDEFGHIJKLMNO", `${REDACTED} ${REDACTED} ${REDACTED} ${REDACTED} ${REDACTED} ${REDACTED} ${REDACTED} ${REDACTED} ${REDACTED} ${REDACTED}`],
+    ["values after keys whose names mark a secret", "client_secret=a1 password=a2 passwd=a3 passphrase=a4 credential=a5 authorization=a6 token=a7 api_key_id=a8 access_key_id=a9 private_key_id=b1 monkey=b2 db_pass=b3 pwd=b4", `client_secret=${REDACTED} password=${REDACTED} passwd=${REDACTED} passphrase=${REDACTED} credential=${REDACTED} authorization=${REDACTED} token=${REDACTED} api_key_id=${REDACTED} access_key_id=${REDACTED} private_key_id=${REDACTED} monkey=${REDACTED} db_pass=${REDACTED} pwd=${REDACTED}`],
+    ["values after flags whose names mark a secret", "run --password a1 --api-key a2 --token a3 --db-pass a4", `run --password ${REDACTED} --api-key ${REDACTED} --token ${REDACTED} --db-pass ${REDACTED}`],
+    ["a long mixed-case run of letters and digits", "aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dE3fG5hJ7k", REDACTED],
+    ["a long base64 run", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", REDACTED],
+    // curl's user flags and --proxy-user.
+    ["curl's -u, --user and -U", "curl -u admin:Hunter2pw --user bob:Hunter3pw -U proxy:Hunter4pw https://h", `curl -u admin:${REDACTED} --user bob:${REDACTED} -U proxy:${REDACTED} https://h`],
+    ["curl named by its path", "/usr/bin/curl -u admin:Hunter2pw https://h", `/usr/bin/curl -u admin:${REDACTED} https://h`],
     ["a curl word behind a dot", "my.curl -u admin:Hunter2pw https://h", `my.curl -u admin:${REDACTED} https://h`],
-    ["a curl word before a tab", "curl\t-u admin:Hunter2pw https://h", `curl\t-u admin:${REDACTED} https://h`],
-    ["a curl command that a pipe ends", "curl -s https://h | sort -u -t: -k1"],
-    ["a curl command that a semicolon ends", "curl -s https://h; date -u +%H:%M:%S"],
-    ["a curl command that && ends", "curl -s https://h && date -u +%H:%M:%S"],
-    ["a curl command that a line break ends", "curl -s https://h\ndate -u +%H:%M:%S"],
-    ["a curl command that a line break behind a backslash continues", "curl -s https://h \\\n  -u admin:Hunter2pw", `curl -s https://h \\\n  -u admin:${REDACTED}`],
-    ["a curl command that a semicolon inside a quoted argument does not end", "curl -H 'Accept: a; b' -u admin:Hunter2pw https://h", `curl -H 'Accept: a; b' -u admin:${REDACTED} https://h`],
-    ["a quoted argument that ends at its line's end, and the command with it", "curl -H 'Accept: a; b\ndate -u +%H:%M:%S"],
-    ["the quotes as they pair in a JSON string", '{"command": "curl -H \\"x; y\\" -u admin:Hunter2pw https://h"}', `{"command": "curl -H \\"x; y\\" -u admin:${REDACTED} https://h"}`],
-    ["the quotes as the shell reads them, where a backslash escapes a quote", 'curl -d "{\\"a\\": \\"b; c\\"}" -u admin:Hunter2pw https://h', `curl -d "{\\"a\\": \\"b; c\\"}" -u admin:${REDACTED} https://h`],
-    ["date -u and docker run -u, which stay", "date -u +%H:%M:%S; docker run -u 1000:1000 img"],
-    ["the password of --proxy-user behind wget, behind curl and behind no command", "wget --proxy-user bob:Hunter2pw https://h; curl --proxy-user amy:Hunter3pw https://h\npass --proxy-user=cat:Hunter4pw to it", `wget --proxy-user bob:${REDACTED} https://h; curl --proxy-user amy:${REDACTED} https://h\npass --proxy-user=cat:${REDACTED} to it`],
-    ["the text glued to -p behind mysql, mysqldump and mariadb", "mysql -uroot -pHunter2pw db; mysqldump -pHunter3pw db; mariadb -pHunter4pw db", `mysql -uroot -p${REDACTED} db; mysqldump -p${REDACTED} db; mariadb -p${REDACTED} db`],
-    ["cp -pr and docker run -p8080:80, which stay", "cp -pr src dst; docker run -p8080:80 img"],
-    ["the word after password on a netrc line that says machine", "machine example.com password Hunter2pw", `machine example.com password ${REDACTED}`],
-    ["the word after password on a netrc line that says login", "login bob password Hunter2pw", `login bob password ${REDACTED}`],
+    ["curl before a tab", "curl\t-u admin:Hunter2pw https://h", `curl\t-u admin:${REDACTED} https://h`],
+    ["sort -u behind the pipe that ends a curl command", "curl -s https://h | sort -u -t: -k1"],
+    ["date -u behind the semicolon that ends a curl command", "curl -s https://h; date -u +%H:%M:%S"],
+    ["date -u behind the && that ends a curl command", "curl -s https://h && date -u +%H:%M:%S"],
+    ["date -u on the line after a curl command", "curl -s https://h\ndate -u +%H:%M:%S"],
+    ["curl's -u on a line that a backslash continues", "curl -s https://h \\\n  -u admin:Hunter2pw", `curl -s https://h \\\n  -u admin:${REDACTED}`],
+    ["curl's -u behind a semicolon inside a quoted argument", "curl -H 'Accept: a; b' -u admin:Hunter2pw https://h", `curl -H 'Accept: a; b' -u admin:${REDACTED} https://h`],
+    ["date -u on the line after a curl argument whose quote never closes", "curl -H 'Accept: a; b\ndate -u +%H:%M:%S"],
+    ["curl's -u in a command inside a JSON string, behind escaped quotes", '{"command": "curl -H \\"x; y\\" -u admin:Hunter2pw https://h"}', `{"command": "curl -H \\"x; y\\" -u admin:${REDACTED} https://h"}`],
+    ["curl's -u behind a double-quoted argument that holds escaped quotes", 'curl -d "{\\"a\\": \\"b; c\\"}" -u admin:Hunter2pw https://h', `curl -d "{\\"a\\": \\"b; c\\"}" -u admin:${REDACTED} https://h`],
+    ["date -u and docker run -u, with no curl command", "date -u +%H:%M:%S; docker run -u 1000:1000 img"],
+    ["--proxy-user behind wget, behind curl and behind no command", "wget --proxy-user bob:Hunter2pw https://h; curl --proxy-user amy:Hunter3pw https://h\npass --proxy-user=cat:Hunter4pw to it", `wget --proxy-user bob:${REDACTED} https://h; curl --proxy-user amy:${REDACTED} https://h\npass --proxy-user=cat:${REDACTED} to it`],
+    // mysql, netrc, XML, Python and cookies.
+    ["-p glued to its password behind mysql, mysqldump and mariadb", "mysql -uroot -pHunter2pw db; mysqldump -pHunter3pw db; mariadb -pHunter4pw db", `mysql -uroot -p${REDACTED} db; mysqldump -p${REDACTED} db; mariadb -p${REDACTED} db`],
+    ["cp -pr and docker run -p8080:80", "cp -pr src dst; docker run -p8080:80 img"],
+    ["a netrc password on a line that says machine", "machine example.com password Hunter2pw", `machine example.com password ${REDACTED}`],
+    ["a netrc password on a line that says login", "login bob password Hunter2pw", `login bob password ${REDACTED}`],
     ["the word after password on a line that says neither", "the password Hunter2pw was typed twice"],
-    ["the text of an XML element with a secret name", "<server><username>bob</username><password>Hunter2pw</password></server>", `<server><username>bob</username><password>${REDACTED}</password></server>`],
-    ["the password of a Python auth pair", "requests.get(url, auth=('bob', 'Hunter2pw'))", `requests.get(url, auth=('bob', ${REDACTED}))`],
-    ["the password of HTTPBasicAuth", "HTTPBasicAuth('bob', 'Hunter2pw')", `HTTPBasicAuth('bob', ${REDACTED})`],
-    ["the unquoted cookie values of a Cookie header", "Cookie: a=Hunter2pw; b=Hunter3pw", `Cookie: a=${REDACTED}; b=${REDACTED}`],
-    ["the unquoted cookie value of a Set-Cookie header", "Set-Cookie: sid=Hunter2pw; Path=/; HttpOnly", `Set-Cookie: sid=${REDACTED}; Path=/; HttpOnly`],
+    ["an XML element whose name marks a secret", "<server><username>bob</username><password>Hunter2pw</password></server>", `<server><username>bob</username><password>${REDACTED}</password></server>`],
+    ["a Python auth pair", "requests.get(url, auth=('bob', 'Hunter2pw'))", `requests.get(url, auth=('bob', ${REDACTED}))`],
+    ["HTTPBasicAuth", "HTTPBasicAuth('bob', 'Hunter2pw')", `HTTPBasicAuth('bob', ${REDACTED})`],
+    ["the cookies of a Cookie header", "Cookie: a=Hunter2pw; b=Hunter3pw", `Cookie: a=${REDACTED}; b=${REDACTED}`],
+    ["the cookie of a Set-Cookie header", "Set-Cookie: sid=Hunter2pw; Path=/; HttpOnly", `Set-Cookie: sid=${REDACTED}; Path=/; HttpOnly`],
   ];
 
-  for (const [claim, input, want] of readmeClaims) {
-    test(`holds the README to its claim: ${claim}`, () => {
+  for (const [what, input, want] of readmeExamples) {
+    test(`reads the README's example: ${what}`, () => {
       assert.equal(redact(input), want ?? input);
     });
   }
 
-  // The README's known gaps, input for input: what redact returns for each example the list gives.
-  // A row with no third text reaches Jev as it is. When a row fails, the README's list needs the
-  // same change.
+  // The README's known gaps, row for row: its third table. A row with no third text reaches Jev as
+  // it is.
   const readmeGaps: ReadonlyArray<readonly [string, string, string?]> = [
     // In a curl command.
     ["a quoted argument that runs over several lines, before the flag", `curl -d '{\n"a": 1\n}' -u admin:pw https://h`],
@@ -999,6 +999,7 @@ describe("redact", () => {
     ["such a command with one quote escaped twice and the separator in a later quoted argument", '{"command": "curl -d \\"5\\\\\\" wide\\" -H \\"Accept: text/html; q=0.9\\" -u admin:pw https://h"}'],
     ["a password that holds an escaped quote, whose part behind that quote stays", 'curl -u "admin:pw\\"Xyz9" https://h', `curl -u "admin:${REDACTED}"Xyz9" https://h`],
     ["a user name that holds an escaped quote", 'curl -u "ad\\"min:pw" https://h'],
+    ["a quoted -u value whose user holds a space", 'curl -u "John Smith:Hunter2pw" https://h'],
     ["a flag behind a value that holds an escaped quote and a quoted separator", 'curl -u "admin:x\\"y" -H "Accept: a; b" -U proxy:pw https://h', `curl -u "admin:${REDACTED}"y" -H "Accept: a; b" -U proxy:pw https://h`],
     ["a quoted password that holds the other kind of quote, whose part from that quote on stays", `curl -u "admin:O'Brien1x" https://h`, `curl -u "admin:${REDACTED}'Brien1x" https://h`],
     ["a $'…' string that holds a separator, before the flag", "curl -d $'it\\'s; here' -u admin:pw"],
@@ -1024,6 +1025,12 @@ describe("redact", () => {
     ["PowerShell's -Password", "New-LocalUser -Name bob -Password hunter2"],
     ["a quoted cookie value", 'Set-Cookie: sid="Hunter2pw"'],
     ["mysql.exe", "mysql.exe -pHunter2pw db"],
+    ["mysql's -p on a line that a backslash continues", "mysql -h db.example.com -u root \\\n  -pHunter2pw mydb"],
+    ["an unquoted cookie value behind a quoted one", 'Cookie: a="x"; session=Hunter2pw'],
+    ["a value that holds an apostrophe, whose part from the apostrophe on stays", "password: O'Brien1x", `password: ${REDACTED}'Brien1x`],
+    ["a value that holds a comma, whose part from the comma on stays", "DB_PASSWORD=Hunter2,pw9", `DB_PASSWORD=${REDACTED},pw9`],
+    ["an XML element whose text is a CDATA section", "<password><![CDATA[Hunter2&pw]]></password>"],
+    ["a Python auth pair written over several lines", "requests.get(url, auth=(\n    'bob',\n    'Hunter2pw',\n))"],
     ["a comparison", 'if (password === "pw") ok()', `if (password =${REDACTED} "pw") ok()`],
     ["a bytes string", 'password=b"pw"', `password=${REDACTED}"pw"`],
     ["a raw string", "token = r'pw'", `token = ${REDACTED}'pw'`],
@@ -1031,6 +1038,7 @@ describe("redact", () => {
     ["JSON escaped twice", '{\\\\"password\\\\": \\\\"pw\\\\"}'],
     ["a JWT glued behind an underscore", "x_eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl"],
     ["a URL password that holds a slash", "https://bob:p/w@host"],
+    ["a URL password that holds an at sign, whose part from the at sign on stays", "postgres://bob:Hunt@er2pw@db.example.com/app", `postgres://bob:${REDACTED}@er2pw@db.example.com/app`],
     ["a Python auth pair whose password holds the other kind of quote", `auth=("bob", "O'Brien1x")`],
     ["a Python auth pair behind a name that only ends in _auth", "http_auth=('bob', 'Hunter2pw')"],
   ];
@@ -1041,7 +1049,7 @@ describe("redact", () => {
     });
   }
 
-  // The README's examples of text that is hidden though it is no secret.
+  // The README's examples of text that is hidden though it is no secret: its second table.
   const readmeHidden: ReadonlyArray<readonly [string, string, string]> = [
     ["the text of a plist's key element", "<key>CFBundleName</key>", `<key>${REDACTED}</key>`],
     ["the port of docker run on a line that names mysql", "docker run --name mysql -p8080:80 img", `docker run --name mysql -p${REDACTED} img`],
@@ -1053,6 +1061,45 @@ describe("redact", () => {
       assert.equal(redact(input), want);
     });
   }
+
+  // The README states what redaction hides by example alone, so its tables and the rows above must
+  // be the same rows: the same label, input and output, byte for byte and in the same order. In a
+  // cell a line break is written ⏎ and a tab ⇥; a pipe is written \\|, as a table needs; and a
+  // row whose input stays as it is says "unchanged".
+  test("the README's tables under \"What redaction hides\" are the suite's rows, byte for byte", () => {
+    const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+    const start = readme.indexOf("\n### What redaction hides\n");
+    assert.ok(start >= 0, "the README has the section");
+    const section = readme.slice(start + 1, readme.indexOf("\n## ", start + 1));
+    const decode = (cell: string, row: string): string => {
+      const code = /^`([^`]*)`$/.exec(cell);
+      assert.ok(code !== null, `one code span in ${JSON.stringify(cell)} of ${row}`);
+      return code[1]!.replaceAll("\\|", "|").replaceAll("⏎", "\n").replaceAll("⇥", "\t");
+    };
+    const tables: Array<Array<readonly [string, string, string]>> = [];
+    let table: Array<readonly [string, string, string]> | undefined;
+    for (const line of section.split("\n")) {
+      if (!line.startsWith("|")) {
+        table = undefined;
+        continue;
+      }
+      if (table === undefined) {
+        table = [];
+        tables.push(table);
+      }
+      const cells = line.slice(1, -1).split(/(?<!\\)\|/).map((cell) => cell.trim());
+      assert.equal(cells.length, 3, line);
+      if (cells[1] === "Input" || /^-+$/.test(cells[1]!)) continue;
+      const input = decode(cells[1]!, line);
+      table.push([cells[0]!, input, cells[2] === "unchanged" ? input : decode(cells[2]!, line)]);
+    }
+    const rows = (suite: ReadonlyArray<readonly [string, string, string?]>) => suite.map(([what, input, want]) => [what, input, want ?? input]);
+    assert.equal(tables.length, 3, "the examples, the text that is no secret, and the known gaps");
+    assert.deepEqual(tables[0], rows(readmeExamples));
+    assert.deepEqual(tables[1], rows(readmeHidden));
+    assert.deepEqual(tables[2], rows(readmeGaps));
+    for (const [what, input, want] of tables.flat()) assert.equal(redact(input), want, what);
+  });
 
   // What five scans read that no output of redact shows. Each is asked on a copy, so that no test
   // moves a scan's own position.

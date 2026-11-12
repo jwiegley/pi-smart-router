@@ -509,104 +509,9 @@ labelled choices and returns one, with a probability for each. Under a version 2
   or thinking, read through the bounded `getRecentActiveEntries`; and the four `describe` texts of
   the session's scope, as the criteria of the choices. Its one question asks how much model
   intelligence the message needs for the work it asks for now.
-- **Redaction runs first**, in both scopes. The password of a URL written `scheme://user:password@`
-  becomes `[redacted]` first, in the text as written, where the backslash of a `DOMAIN\user` name
-  (`CORP\tom`) is no escape. Then escaped line breaks and tabs (`\n`, `\r` and `\t`, as JSON writes
-  them) become spaces, so that they end a value as the whitespace they stand for does. Then the
-  other secret shapes become `[redacted]`: `Authorization` headers (the first word behind the name
-  and, when that word is made of letters only, the word after it), JWTs that start a word,
-  private-key blocks, keys and tokens with a known prefix and the length that goes with it (`sk-`,
-  `sk_live_`, `ghp_`, `github_pat_`, `glpat-`, `hf_`, `npm_`, `xoxb-`, `AIza`, `AKIA` and others),
-  basic credentials in command lines and config files, the value on the same line after a key or a
-  flag whose name holds `secret`, `password`, `passwd`, `passphrase`, `credential` or
-  `authorization`, holds `token` with no `s` right behind it, holds `api`, `access` or `private`
-  right before `key` or with one `_` or `-` between them, ends in `key`, or has `pass` or `pwd` as a
-  whole part, set off by `_` or `-` (`api_key=…`, `--password …`, `db_pass=…`), and runs of 40 or
-  more letters and digits in mixed case, or of base64 characters in mixed case with a digit and a
-  `+` or `/`. The basic credentials are the password of `-u user:password`, `--user` and `-U` in a
-  curl command (from a `curl` word, which is `curl` before a space or a tab and behind no letter,
-  digit, underscore or hyphen, as in `/usr/bin/curl` and `my.curl`, to the next `|`, `;`, `&&` or
-  line break; a line break behind a backslash continues the command, and so does a `|`, `;` or `&&`
-  inside a quoted argument, which ends at its closing quote or at its line's end. The quotes are
-  read two ways: first with every quote counted, as they pair in a JSON string, and then, in a last
-  pass over what the other passes left, as the shell reads them, where a backslash escapes a quote.
-  Inside a flag's own value neither reading takes an escaped quote for text: it ends the value, so
-  the rest of that password can stay, and a later flag of the command can stay unread), while
-  `date -u +%H:%M:%S` and `docker run -u 1000:1000` stay; the password of `--proxy-user` in any
-  command; the text glued to `-p` behind a mysql-family word (`mysql`, `mysqldump`, `mariadb` and
-  the like) in the same command, while `cp -pr` and `docker run -p8080:80` stay; the word after
-  `password` on a netrc line, one that also says `machine` or `login`; the text of an XML element
-  with a secret name, such as Maven's `<password>`; the password of a Python
-  `auth=('user', 'password')` pair or `HTTPBasicAuth`; and the unquoted cookie values of `Cookie`
-  and `Set-Cookie` headers. The patterns are written to be linear in the text, and a test holds
-  redaction to under a second on each of its hostile inputs, of 90,000 characters and more, so that
-  a huge paste does not stall Pi. It is pattern matching: it catches the shapes it knows. It also
-  hides some text that is no secret: the text of a plist's `<key>` element
-  (`<key>CFBundleName</key>`), the port in `docker run --name mysql -p8080:80 img`, on a line that
-  names mysql, and the word after `password` on a line that also says `login`
-  (`enter your login and password carefully`). Its known gaps include the shapes below; each entry
-  gives an input whose secret, or the part of it the entry names, stays in the text that Jev reads,
-  and the list is not complete.
-  - In a curl command (`pw` stands for a password):
-    - a quoted argument that runs over several lines, before the flag (`curl -d '{`, then
-      `"a": 1`, then `}' -u admin:pw https://h`, each on a line of its own);
-    - a `-u` value in JSON-escaped quotes (`curl -u \"admin:pw\" https://h`);
-    - a command inside a JSON string whose own argument holds quotes that are escaped twice, with
-      a `|`, `;` or `&&` between them
-      (`{"command": "curl -d \"{\\\"a\\\": \\\"b; c\\\"}\" -u admin:pw"}`);
-    - such a command with one quote escaped twice and the `|`, `;` or `&&` in a later quoted
-      argument
-      (`{"command": "curl -d \"5\\\" wide\" -H \"Accept: text/html; q=0.9\" -u admin:pw https://h"}`);
-    - a password that holds an escaped quote, whose part behind that quote stays
-      (`curl -u "admin:pw\"Xyz9" https://h` keeps `Xyz9`);
-    - a user name that holds an escaped quote (`curl -u "ad\"min:pw" https://h`);
-    - a flag behind a value that holds an escaped quote and a quoted `|`, `;` or `&&`
-      (`curl -u "admin:x\"y" -H "Accept: a; b" -U proxy:pw https://h` keeps `proxy:pw`);
-    - a quoted password that holds the other kind of quote, whose part from that quote on stays
-      (`curl -u "admin:O'Brien1x" https://h` keeps `'Brien1x`);
-    - a `$'…'` string that holds a separator, before the flag
-      (`curl -d $'it\'s; here' -u admin:pw`);
-    - a command substitution with quotes of its own, before the flag
-      (`curl -d "$(jq -c ".a; .b" f)" -u admin:pw`);
-    - a backslash before a separator outside quotes, before the flag
-      (`curl https://h/a\;b -u admin:pw`);
-    - a line continuation between the flag and its value (`curl -u \`, then `admin:pw https://h`
-      on the next line);
-    - combined short flags (`curl -sSu admin:pw https://h`);
-    - a quoted password after the colon (`curl -u admin:"pw with space" https://h`);
-    - an argument array (`["curl", "-u", "admin:pw"]`);
-    - `curl.exe` (`curl.exe -u admin:pw https://h`).
-  - Elsewhere:
-    - the user flags of other programs (`wget --user admin:pw https://h`,
-      `http -u admin:pw https://h`);
-    - a `.netrc` file written over several lines (`machine example.com`, then `login bob`, then
-      `password pw`, each on a line of its own);
-    - an `Authorization` name with an equals sign and no quotes, whose token stays
-      (`Authorization=Bearer q8Zt1rLm9XaQ`);
-    - a header name glued behind an underscore, whose token stays
-      (`HTTP_AUTHORIZATION: Bearer q8Zt1rLm9XaQ`);
-    - an `Authorization` scheme that holds a hyphen or a digit, whose credential stays
-      (`Authorization: Api-Key q8Zt1rLm9XaQ`, `{"Authorization": "OAuth2 q8Zt1rLm9XaQ"}`);
-    - an `Authorization` credential of several words, whose words behind the first stay
-      (`Authorization: Digest username="bob", response="6629fae49393a05397450978507c4ef1"` keeps
-      the response);
-    - a credential of letters only before an escaped line break and another header, whose key
-      stays (`Authorization: abcdef\r\nX-Api-Key: Zz9y8x7w6v`);
-    - a name in which an `s` stands right behind `token` (`refresh_tokens: q8Zt1rLm9XaQ`,
-      `tokenString = q8Zt1rLm9XaQ`);
-    - PowerShell's `-Password` (`New-LocalUser -Name bob -Password hunter2`);
-    - a quoted cookie value (`Set-Cookie: sid="Hunter2pw"`);
-    - `mysql.exe` (`mysql.exe -pHunter2pw db`);
-    - a comparison (`if (password === "pw") ok()`);
-    - a string behind a prefix letter (`password=b"pw"`, `token = r'pw'`);
-    - a value on the line after its name (`password:`, then `pw` on the next line);
-    - JSON escaped twice (`{\\"password\\": \\"pw\\"}`);
-    - a JWT glued behind an underscore (`x_eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl`);
-    - a URL password that holds a slash (`https://bob:p/w@host`);
-    - a Python auth pair whose password holds the other kind of quote
-      (`auth=("bob", "O'Brien1x")`);
-    - a Python auth pair behind a name that only ends in `_auth`
-      (`http_auth=('bob', 'Hunter2pw')`).
+- **Redaction runs first**, in both scopes: the message and the earlier messages go through
+  `src/redact.ts` before any cap. [What redaction hides](#what-redaction-hides) names the kinds of
+  secret it looks for, with tested examples and its known gaps.
 - **Then the caps.** The message keeps its first 16 KiB and last 4 KiB, as the keywords see it, then
   its head and tail within `totalChars` (12000); each earlier message keeps its last `messageChars`
   (1500) characters; and earlier messages are kept, newest first, only while the whole stays within
@@ -625,6 +530,140 @@ labelled choices and returns one, with a probability for each. Under a version 2
 - **Where the text goes:** to OpenRouter, then to TypeSafe in the US. TypeSafe does not train on
   inputs, but it states no retention period. `/smart-router status` lists the classifier among what
   can still send data off the machine.
+
+### What redaction hides
+
+Redaction looks for these kinds of secret, and writes `[redacted]` where it finds one:
+
+- passwords in URLs;
+- `Authorization` headers;
+- JWTs;
+- private-key blocks;
+- keys and tokens with a vendor's prefix (`sk-`, `sk_live_`, `ghp_`, `github_pat_`, `glpat-`,
+  `hf_`, `npm_`, `xoxb-`, `AIza`, `AKIA` and others);
+- values after a key or a flag whose name marks a secret (`password`, `token`, `api_key` and the
+  like);
+- passwords behind curl's `-u`, `--user` and `-U`, and behind `--proxy-user`;
+- passwords glued to `-p` in mysql and mariadb commands;
+- netrc passwords;
+- the text of XML elements whose name marks a secret;
+- passwords in Python auth pairs;
+- cookie values in `Cookie` and `Set-Cookie` headers;
+- long mixed-case runs of letters and digits, or of base64 characters.
+
+Redaction is pattern matching. It hides the shapes its tests pin, and other spellings of the same
+secret can stay: the list names what it looks for, not what it finds. Two things about it are
+decided and tested as rules:
+
+- `-u`, `--user` and `-U` are read only in a curl command, because other programs give those
+  flags other meanings (`date -u`, `docker run -u`); `--proxy-user` is read in any command.
+- Its time grows in proportion to the text: a test holds it to under a second on each of its
+  hostile inputs, of 90,000 characters and more.
+
+For example, with each row a test of the suite, which reads these tables and checks them against
+the code. In a cell `⏎` stands for a line break and `⇥` for a tab:
+
+| Example | Input | What Jev reads |
+|---|---|---|
+| a URL's password | `git clone https://bob:Hunter2pw@example.com/a/b` | `git clone https://bob:[redacted]@example.com/a/b` |
+| a URL's password behind a DOMAIN\user name, whose \t then reads as a space | `http://CORP\tom:Hunter2pw@proxy.corp:8080` | `http://CORP om:[redacted]@proxy.corp:8080` |
+| escaped line breaks and an escaped tab, which read as spaces and end a value | `{"log": "password: hunter2\napi_key: Zz9y8x7w\r\ntoken: Aa1b2c3d\tdone"}` | `{"log": "password: [redacted] api_key: [redacted]  token: [redacted] done"}` |
+| an Authorization header with a scheme | `Authorization: Bearer q8Zt1rLm9XaQ` | `[redacted]` |
+| an Authorization header with no scheme | `Authorization: q8Zt1rLm9XaQ and more` | `[redacted] and more` |
+| a JWT | `jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl ok` | `jwt [redacted] ok` |
+| a private-key block | `-----BEGIN OPENSSH PRIVATE KEY-----⏎b3BlbnNzaC1rZXktdjEA⏎-----END OPENSSH PRIVATE KEY-----⏎after` | `[redacted]⏎after` |
+| keys and tokens with a vendor's prefix | `sk-abcdefghij0123456789 sk_live_aB3dE5gH ghp_abcdefghijklmnopqrstuvwxyz0123456789 github_pat_x glpat-abcdefghij0123456789 hf_abcdefghij0123456789 npm_abcdefghij0123456789 xoxb-1 AIzaabcde_ghij-123456789abcdefghij01234 AKIA0ABCDEFGHIJKLMNO` | `[redacted] [redacted] [redacted] [redacted] [redacted] [redacted] [redacted] [redacted] [redacted] [redacted]` |
+| values after keys whose names mark a secret | `client_secret=a1 password=a2 passwd=a3 passphrase=a4 credential=a5 authorization=a6 token=a7 api_key_id=a8 access_key_id=a9 private_key_id=b1 monkey=b2 db_pass=b3 pwd=b4` | `client_secret=[redacted] password=[redacted] passwd=[redacted] passphrase=[redacted] credential=[redacted] authorization=[redacted] token=[redacted] api_key_id=[redacted] access_key_id=[redacted] private_key_id=[redacted] monkey=[redacted] db_pass=[redacted] pwd=[redacted]` |
+| values after flags whose names mark a secret | `run --password a1 --api-key a2 --token a3 --db-pass a4` | `run --password [redacted] --api-key [redacted] --token [redacted] --db-pass [redacted]` |
+| a long mixed-case run of letters and digits | `aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dE3fG5hJ7k` | `[redacted]` |
+| a long base64 run | `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` | `[redacted]` |
+| curl's -u, --user and -U | `curl -u admin:Hunter2pw --user bob:Hunter3pw -U proxy:Hunter4pw https://h` | `curl -u admin:[redacted] --user bob:[redacted] -U proxy:[redacted] https://h` |
+| curl named by its path | `/usr/bin/curl -u admin:Hunter2pw https://h` | `/usr/bin/curl -u admin:[redacted] https://h` |
+| a curl word behind a dot | `my.curl -u admin:Hunter2pw https://h` | `my.curl -u admin:[redacted] https://h` |
+| curl before a tab | `curl⇥-u admin:Hunter2pw https://h` | `curl⇥-u admin:[redacted] https://h` |
+| sort -u behind the pipe that ends a curl command | `curl -s https://h \| sort -u -t: -k1` | unchanged |
+| date -u behind the semicolon that ends a curl command | `curl -s https://h; date -u +%H:%M:%S` | unchanged |
+| date -u behind the && that ends a curl command | `curl -s https://h && date -u +%H:%M:%S` | unchanged |
+| date -u on the line after a curl command | `curl -s https://h⏎date -u +%H:%M:%S` | unchanged |
+| curl's -u on a line that a backslash continues | `curl -s https://h \⏎  -u admin:Hunter2pw` | `curl -s https://h \⏎  -u admin:[redacted]` |
+| curl's -u behind a semicolon inside a quoted argument | `curl -H 'Accept: a; b' -u admin:Hunter2pw https://h` | `curl -H 'Accept: a; b' -u admin:[redacted] https://h` |
+| date -u on the line after a curl argument whose quote never closes | `curl -H 'Accept: a; b⏎date -u +%H:%M:%S` | unchanged |
+| curl's -u in a command inside a JSON string, behind escaped quotes | `{"command": "curl -H \"x; y\" -u admin:Hunter2pw https://h"}` | `{"command": "curl -H \"x; y\" -u admin:[redacted] https://h"}` |
+| curl's -u behind a double-quoted argument that holds escaped quotes | `curl -d "{\"a\": \"b; c\"}" -u admin:Hunter2pw https://h` | `curl -d "{\"a\": \"b; c\"}" -u admin:[redacted] https://h` |
+| date -u and docker run -u, with no curl command | `date -u +%H:%M:%S; docker run -u 1000:1000 img` | unchanged |
+| --proxy-user behind wget, behind curl and behind no command | `wget --proxy-user bob:Hunter2pw https://h; curl --proxy-user amy:Hunter3pw https://h⏎pass --proxy-user=cat:Hunter4pw to it` | `wget --proxy-user bob:[redacted] https://h; curl --proxy-user amy:[redacted] https://h⏎pass --proxy-user=cat:[redacted] to it` |
+| -p glued to its password behind mysql, mysqldump and mariadb | `mysql -uroot -pHunter2pw db; mysqldump -pHunter3pw db; mariadb -pHunter4pw db` | `mysql -uroot -p[redacted] db; mysqldump -p[redacted] db; mariadb -p[redacted] db` |
+| cp -pr and docker run -p8080:80 | `cp -pr src dst; docker run -p8080:80 img` | unchanged |
+| a netrc password on a line that says machine | `machine example.com password Hunter2pw` | `machine example.com password [redacted]` |
+| a netrc password on a line that says login | `login bob password Hunter2pw` | `login bob password [redacted]` |
+| the word after password on a line that says neither | `the password Hunter2pw was typed twice` | unchanged |
+| an XML element whose name marks a secret | `<server><username>bob</username><password>Hunter2pw</password></server>` | `<server><username>bob</username><password>[redacted]</password></server>` |
+| a Python auth pair | `requests.get(url, auth=('bob', 'Hunter2pw'))` | `requests.get(url, auth=('bob', [redacted]))` |
+| HTTPBasicAuth | `HTTPBasicAuth('bob', 'Hunter2pw')` | `HTTPBasicAuth('bob', [redacted])` |
+| the cookies of a Cookie header | `Cookie: a=Hunter2pw; b=Hunter3pw` | `Cookie: a=[redacted]; b=[redacted]` |
+| the cookie of a Set-Cookie header | `Set-Cookie: sid=Hunter2pw; Path=/; HttpOnly` | `Set-Cookie: sid=[redacted]; Path=/; HttpOnly` |
+
+It also hides some text that is no secret. For example:
+
+| Text | Input | What Jev reads |
+|---|---|---|
+| the text of a plist's key element | `<key>CFBundleName</key>` | `<key>[redacted]</key>` |
+| the port of docker run on a line that names mysql | `docker run --name mysql -p8080:80 img` | `docker run --name mysql -p[redacted] img` |
+| the word after password on a line that also says login | `enter your login and password carefully` | `enter your login and password [redacted]` |
+
+Its known gaps include the shapes below; each entry gives an input whose secret, or the part of
+it the entry names, stays in the text that Jev reads, and the list is not complete. In the inputs
+`pw` stands for a password:
+
+| Shape | Input | What Jev reads |
+|---|---|---|
+| a quoted argument that runs over several lines, before the flag | `curl -d '{⏎"a": 1⏎}' -u admin:pw https://h` | unchanged |
+| a -u value in JSON-escaped quotes | `curl -u \"admin:pw\" https://h` | unchanged |
+| a command in a JSON string whose argument holds quotes escaped twice around a separator | `{"command": "curl -d \"{\\\"a\\\": \\\"b; c\\\"}\" -u admin:pw"}` | unchanged |
+| such a command with one quote escaped twice and the separator in a later quoted argument | `{"command": "curl -d \"5\\\" wide\" -H \"Accept: text/html; q=0.9\" -u admin:pw https://h"}` | unchanged |
+| a password that holds an escaped quote, whose part behind that quote stays | `curl -u "admin:pw\"Xyz9" https://h` | `curl -u "admin:[redacted]"Xyz9" https://h` |
+| a user name that holds an escaped quote | `curl -u "ad\"min:pw" https://h` | unchanged |
+| a quoted -u value whose user holds a space | `curl -u "John Smith:Hunter2pw" https://h` | unchanged |
+| a flag behind a value that holds an escaped quote and a quoted separator | `curl -u "admin:x\"y" -H "Accept: a; b" -U proxy:pw https://h` | `curl -u "admin:[redacted]"y" -H "Accept: a; b" -U proxy:pw https://h` |
+| a quoted password that holds the other kind of quote, whose part from that quote on stays | `curl -u "admin:O'Brien1x" https://h` | `curl -u "admin:[redacted]'Brien1x" https://h` |
+| a $'…' string that holds a separator, before the flag | `curl -d $'it\'s; here' -u admin:pw` | unchanged |
+| a command substitution with quotes of its own, before the flag | `curl -d "$(jq -c ".a; .b" f)" -u admin:pw` | unchanged |
+| a backslash before a separator outside quotes, before the flag | `curl https://h/a\;b -u admin:pw` | unchanged |
+| a line continuation between the flag and its value | `curl -u \⏎admin:pw https://h` | unchanged |
+| combined short flags | `curl -sSu admin:pw https://h` | unchanged |
+| a quoted password after the colon | `curl -u admin:"pw with space" https://h` | unchanged |
+| an argument array | `["curl", "-u", "admin:pw"]` | unchanged |
+| curl.exe | `curl.exe -u admin:pw https://h` | unchanged |
+| wget's --user | `wget --user admin:pw https://h` | unchanged |
+| http's -u | `http -u admin:pw https://h` | unchanged |
+| a .netrc file written over several lines | `machine example.com⏎login bob⏎password pw` | unchanged |
+| an Authorization name with an equals sign and no quotes, whose token stays | `Authorization=Bearer q8Zt1rLm9XaQ` | `Authorization=[redacted] q8Zt1rLm9XaQ` |
+| a header name glued behind an underscore, whose token stays | `HTTP_AUTHORIZATION: Bearer q8Zt1rLm9XaQ` | `HTTP_AUTHORIZATION: [redacted] q8Zt1rLm9XaQ` |
+| an Authorization scheme that holds a hyphen, whose credential stays | `Authorization: Api-Key q8Zt1rLm9XaQ` | `[redacted] q8Zt1rLm9XaQ` |
+| an Authorization scheme that holds a digit, whose credential stays | `{"Authorization": "OAuth2 q8Zt1rLm9XaQ"}` | `{"[redacted] q8Zt1rLm9XaQ"}` |
+| an Authorization credential of several words, whose words behind the first stay | `Authorization: Digest username="bob", response="6629fae49393a05397450978507c4ef1"` | `[redacted]"bob", response="6629fae49393a05397450978507c4ef1"` |
+| a credential of letters only before an escaped line break and another header, whose key stays | `Authorization: abcdef\r\nX-Api-Key: Zz9y8x7w6v` | `[redacted] Zz9y8x7w6v` |
+| a name that ends in tokens | `refresh_tokens: q8Zt1rLm9XaQ` | unchanged |
+| a name in which String stands behind token | `tokenString = q8Zt1rLm9XaQ` | unchanged |
+| PowerShell's -Password | `New-LocalUser -Name bob -Password hunter2` | unchanged |
+| a quoted cookie value | `Set-Cookie: sid="Hunter2pw"` | unchanged |
+| mysql.exe | `mysql.exe -pHunter2pw db` | unchanged |
+| mysql's -p on a line that a backslash continues | `mysql -h db.example.com -u root \⏎  -pHunter2pw mydb` | unchanged |
+| an unquoted cookie value behind a quoted one | `Cookie: a="x"; session=Hunter2pw` | unchanged |
+| a value that holds an apostrophe, whose part from the apostrophe on stays | `password: O'Brien1x` | `password: [redacted]'Brien1x` |
+| a value that holds a comma, whose part from the comma on stays | `DB_PASSWORD=Hunter2,pw9` | `DB_PASSWORD=[redacted],pw9` |
+| an XML element whose text is a CDATA section | `<password><![CDATA[Hunter2&pw]]></password>` | unchanged |
+| a Python auth pair written over several lines | `requests.get(url, auth=(⏎    'bob',⏎    'Hunter2pw',⏎))` | unchanged |
+| a comparison | `if (password === "pw") ok()` | `if (password =[redacted] "pw") ok()` |
+| a bytes string | `password=b"pw"` | `password=[redacted]"pw"` |
+| a raw string | `token = r'pw'` | `token = [redacted]'pw'` |
+| a value on the line after its name | `password:⏎pw` | unchanged |
+| JSON escaped twice | `{\\"password\\": \\"pw\\"}` | unchanged |
+| a JWT glued behind an underscore | `x_eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl` | unchanged |
+| a URL password that holds a slash | `https://bob:p/w@host` | unchanged |
+| a URL password that holds an at sign, whose part from the at sign on stays | `postgres://bob:Hunt@er2pw@db.example.com/app` | `postgres://bob:[redacted]@er2pw@db.example.com/app` |
+| a Python auth pair whose password holds the other kind of quote | `auth=("bob", "O'Brien1x")` | unchanged |
+| a Python auth pair behind a name that only ends in _auth | `http_auth=('bob', 'Hunter2pw')` | unchanged |
 
 ## Scope: personal or work
 
