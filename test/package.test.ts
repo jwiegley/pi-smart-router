@@ -36,7 +36,7 @@ const reviewedInstallScripts = new Set(["node_modules/@google/genai@2.21.0", "no
 
 test("package.json satisfies mkSourcePiExtension's assertions", () => {
   assert.equal(manifest.name, "pi-smart-router");
-  assert.equal(manifest.version, "1.3.0-jw.1");
+  assert.equal(manifest.version, "1.3.0-jw.2");
   assert.equal(manifest.type, "module");
   assert.equal(manifest.license, "MIT");
   assert.deepEqual(manifest.pi, { extensions: ["./index.ts"] });
@@ -103,7 +103,7 @@ test("the lock resolves every package from the registry with sha512 integrity", 
   const packages = record(lock.packages, "packages");
   const rootEntry = record(packages[""], "the root entry");
   assert.equal(rootEntry.name, "pi-smart-router");
-  assert.equal(rootEntry.version, "1.3.0-jw.1");
+  assert.equal(rootEntry.version, "1.3.0-jw.2");
   assert.deepEqual(rootEntry.devDependencies, devDependencies);
   assert.deepEqual(rootEntry.peerDependencies, peerDependencies);
   assert.equal(rootEntry.dependencies, undefined);

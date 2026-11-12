@@ -5,6 +5,112 @@ All notable changes to this fork are recorded here, in the form of
 the base is the upstream release the fork started from, and `jw.<n>` counts the fork's releases.
 Releases are signed tags; nothing is published to npm.
 
+## [1.3.0-jw.2] - 2026-11-12
+
+Four intelligence levels on `smart-router/auto`, classified by Jev through Pi's model registry, and
+a personal or work scope for every session. Version 1 rosters route personal sessions as before,
+with the keyword classifier alone, apart from the removal of tags and the binding of a plan to its
+message; they serve no work scope.
+
+Upgrading from 1.3.0-jw.1: nothing is required. To route by level, write a version 2 roster (see the
+README). On a work machine, write its version 2 work roster before setting
+`PI_SMART_ROUTER_SCOPE=work`: a latched process with a version 1 roster, or with no roster loaded,
+sends nothing unless pinned.
+
+### Added
+
+- Roster schema version 2: the four levels `low`, `medium`, `high` and `super` of each scope it
+  serves, personal, work or both, each with a role and the description Jev reads; account bindings
+  with a `scope`; the work scope's `directories`; and an optional `classifier` (model
+  `openrouter/typesafe/jev-1.14`, `timeoutMs` 1000, `closeCall` 0.15, and caps on what Jev reads).
+  Validation keeps work levels to work-bound Codex models and personal levels off work-bound
+  accounts, requires a work or Positron label on a work binding and refuses one on a personal
+  binding, and refuses a classifier model that an exclusion matches. The built-in `openai-codex-3/*`
+  exclusion is lifted only in work scope, for a work level's work-bound model.
+- Levels: a version 2 run on `smart-router/auto` goes to LOW, MEDIUM, HIGH or SUPER in the
+  session's scope. A trailing tag (`#super`, `#high`, `#medium`, `#low`, or `#s`, `#h`, `#m`, `#l`)
+  sets the level and always wins; otherwise Jev's answer, with a close call going to the higher
+  level; otherwise the keyword classifier's signal (planning SUPER, complex HIGH, default MEDIUM,
+  trivial LOW). An untagged run that names a risky operation goes to HIGH at least. Holds compare
+  levels and are a preference. A run takes its level's first available candidate, so that a level
+  returns to its first model, Codex on John's rosters, as soon as that model is available; a level
+  that cannot take the run, or is too small for it, passes it to the next one up, with a notice.
+- Jev: one classifier request per routed run, through `ctx.modelRegistry.findOfType` and
+  `ctx.modelRegistry.classify` with `{ timeoutMs, maxRetries: 0 }`. An untagged run waits for the
+  answer; a tagged run records it as an opinion and never waits. Jev reads the message and up to
+  `context.messages` earlier messages (six by default), text only, redacted and then capped. A
+  failure, timeout or malformed answer falls back to the keywords.
+- Scope: personal or work per session, from the latch `PI_SMART_ROUTER_SCOPE=work`, then the
+  session's `smart-router.scope` entry, then the roster's work directories, read on every read and
+  recorded once as an entry, then personal. A fork or `/new` carries it; work to personal asks for
+  confirmation, and the latch refuses it.
+- The work guard: in work scope, outside the pin, the selection stays on `smart-router/auto` or a
+  model of the work account, by routing's own account check, Multi-Pass's label included. It runs
+  at every hook the pin's guard uses, switches back to `smart-router/auto` with notices in work
+  scope's words, and locks a session that something keeps switching away.
+- Records: a run that still holds a level when it settles leaves one `smart-router.level` session
+  entry, with no prompt text and no digest, and `/smart-router was low|medium|high|super` appends a
+  correction; nothing is sent again. The router can drop a level before its run settles, and a run
+  can record a level that another message planned, so a record is a label to check against its
+  session: see the README's "Records and training".
+- `/smart-router scope [work|personal|status]` and `/smart-router was`.
+- The footer's level item, under its own status key `smart-router-level`. History lines of a
+  version 2 run gain its scope and level, and status shows the scope, each scope's levels and the
+  classifier.
+- Tests: units for tags, tiers, redaction, Jev's request and answer, version 2 validation, scope,
+  the work guard, plan binding and records, and behaviour scenarios that run them in Pi 1.5's own
+  runtime with a fake classifier registered through pi-ai's provider `classifiers` hook.
+
+### Changed
+
+- A trailing level tag is removed from every message before any model sees it, whatever the roster
+  or the selection; where it cannot set its run's level, as under a version 1 roster, a notice says
+  it has no effect. A message that is only a tag is not sent.
+- A run's plan is bound to the message that made it, under version 1 too: a run takes only its own
+  message's plan. The router matches a keyed digest of the message's text with the prompt the run
+  starts with, or, for a prompt that Pi expanded or an extension rewrote, gives the run the plan of
+  the one idle message since the latest prompt's run started; with two such messages, the run goes
+  unplanned. The README lists where a plan can still bind wrongly.
+- The guards serve two policies: the pin's first, then work scope's. Each lock records the policy
+  that set it.
+- `smart-router/auto` refuses a session in a scope the roster does not serve, as a work session is
+  under a version 1 roster, and a session whose scope cannot be read.
+- Under version 2, continuations and summaries with no model to stay on go to the scope's medium
+  level, no fallback is declared, and the declared limits come from every level of both scopes.
+- The process slot keeps the last valid roster's work directories and account bindings, for the
+  scope and the work guard while a reload fails.
+- The source scan also forbids `setImmediate` and `AbortSignal.timeout`.
+- The package version is `1.3.0-jw.2`.
+
+### Security
+
+- The router opens no network connection of its own and sets no timer. When a version 2 roster has
+  a classifier, it asks Pi's model registry for one classifier request per routed run on
+  smart-router/auto, with a per-attempt timeout and no retries. It never does so under the pin, on
+  smart-router/local, for a steer or follow-up, or without a classifier.
+- The message and the earlier messages go through redaction before any cap, in both scopes.
+  Redaction is pattern matching: it hides the shapes its tests pin, and other spellings of the same
+  secret can stay. It looks for passwords in URLs, `Authorization` headers, JWTs, private-key
+  blocks, keys with a vendor's prefix, values after secret names and flags, long mixed-case runs,
+  and basic credentials in command lines and config files: curl's `-u`, `--user` and `-U` and
+  `--proxy-user`, mysql's `-p`, netrc passwords, XML elements with a secret name, Python auth pairs
+  and cookie values. Its time grows in proportion to the text. The README's "What redaction hides"
+  gives a tested example of each kind, and lists known gaps and text that is hidden though it is no
+  secret. Status lists the classifier among what can still send data off the machine.
+- The router keeps no prompt text: it binds plans by HMAC-SHA-256 digests under a key each instance
+  draws at random, and records hold neither text nor digest.
+- No OpenRouter model answers the requests that go through a work session's route, routed or picked
+  by hand, the default goal-x auditor's included; Jev's request is the one OpenRouter use in work
+  scope. A `pi --fork` copies a scope that an entry set; pi-subagents children start without it,
+  and extensions with models of their own are outside work scope (see "What work scope does not
+  cover" in the README). `smart-router/auto` never routes a personal session to a work-bound
+  account. In personal scope, outside the pin, a model picked by hand is sent as it is.
+- Scope reads fail closed: an unreadable or malformed scope entry makes `smart-router/auto` refuse,
+  the work guard holds the session as work scope, and a fork or `/new` from it starts in work scope.
+  A work session under a version 1 roster is refused twice, when its request is prepared and by
+  the check every pick passes.
+- Work directories are compared as text on whole path segments; nothing is resolved or opened.
+
 ## [1.3.0-jw.1] - 2026-11-08
 
 The first release of the fork: beettlle/pi-smart-router v1.3.0 (`f31b2304`), rewritten for the
@@ -126,4 +232,5 @@ directories, its ONNX models and its SQLite database are not read, and can be de
 - Tests run offline in an isolated root with a network and process tripwire, and the behaviour
   suite runs only in a sandbox.
 
+[1.3.0-jw.2]: https://github.com/jwiegley/pi-smart-router/compare/v1.3.0-jw.1...v1.3.0-jw.2
 [1.3.0-jw.1]: https://github.com/jwiegley/pi-smart-router/compare/f31b2304...v1.3.0-jw.1

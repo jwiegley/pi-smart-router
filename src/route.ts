@@ -7,7 +7,9 @@
 // request (a session that shares the runtime but has no instance of its own, such as goal-x's
 // default auditor) route without changing any of them.
 //
-//   owner user          the run's plan, else as a continuation (steering, follow-ups)
+//   owner user          the run's plan (on auto, only under the roster version it was made for,
+//                       and under version 2 in its scope), else as a continuation (steering,
+//                       follow-ups)
 //   owner continuation  previous, else the run's pick, else the last responder: that model if it
 //                       resolves, else its role, else the role's fallback; with no base, the
 //                       default role (the local role when local-only) and its fallback
@@ -22,16 +24,19 @@
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { ModelRoute, ModelRouteReason, ModelRouteRequest } from "@earendil-works/pi-coding-agent";
 
-import { BUILTIN_EXCLUDES, VIRTUAL_API } from "./constants.ts";
+import { isWorkCodex, subscriptionKind } from "./accounts.ts";
+import type { Classification } from "./classify.ts";
+import { VIRTUAL_API } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
-import { eligibleRole, NO_LOCAL_SECTION, pickInRole } from "./decide.ts";
-import type { Choice, Decision, LastResponder, Plan } from "./decide.ts";
+import { eligibleRole, NO_LOCAL_SECTION, noScopeSection, pickInRole } from "./decide.ts";
+import type { Choice, Decision, LastResponder, LevelInput, Plan, PlanLevel } from "./decide.ts";
 import { invariant, noBoundedHistory, unroutable } from "./errors.ts";
+import type { JevOutcome } from "./jev.ts";
 import { checkLocal } from "./local.ts";
 import type { LocalPolicy } from "./local.ts";
 import { coolFrom, failureKind, refOf, resolveCandidate } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
-import { autoRoles, excludedBy, roleOf } from "./roster.ts";
+import { autoRoles, excludedBy, excludesFor, isWorkBound, roleOf, scopeSection } from "./roster.ts";
 
 /** A session's pin as routing sees it. */
 export interface Pin {
@@ -59,9 +64,48 @@ export interface HistoryEntry {
   readonly code: string;
   /** A foreign request's decision: kept for /smart-router history, never published. */
   readonly foreign: boolean;
+  /** A version 2 run's level, on the request that consumed its plan. Version 1 entries have none. */
+  readonly level?: PlanLevel;
 }
 
 export const HISTORY_LIMIT = 50;
+
+/** A version 2 run's level, kept from the input that planned it until the run's record is written. */
+export interface PendingLevel {
+  /** The input's token: a tagged run's opinion lands here only while the token is unchanged. */
+  readonly token: number;
+  /**
+   * The router's keyed digest of the text, without its tag, of the message that planned the level:
+   * the level belongs only to the run that message's prompt starts (src/router.ts). The router keeps
+   * no prompt text, and the digest is never recorded either.
+   */
+  readonly digest: string;
+  readonly level: PlanLevel;
+  /** The keyword classifier's signal and reason for the text. */
+  readonly keyword: Classification;
+  /** When the run was planned. */
+  readonly at: number;
+  /**
+   * Jev's outcome for the level: the one an untagged run waited for, or the original message's when
+   * an extension's resend reused that message's level and Jev was not asked again; for a tagged run,
+   * Jev's opinion, "pending" until it arrives. A resend of a tagged original carries undefined, not
+   * the original's opinion. Undefined when Jev was not asked for the level.
+   */
+  jev: JevOutcome | "pending" | undefined;
+  /**
+   * Whether the level's run has started: set when a prompt's run takes its own message's level. The
+   * mark goes with the level, when that run's record is written at agent_settled or the level is
+   * dropped. /smart-router was corrects that run until then, whatever Pi says of the session's
+   * idleness meanwhile, and never a level that no run took.
+   */
+  started: boolean;
+}
+
+/** The latest planned input: the router's keyed digest of its text without the tag, and the level input it planned with. */
+export interface LastInput {
+  readonly digest: string;
+  readonly level: LevelInput;
+}
 
 /** What a router instance keeps per session. */
 export interface SessionRecord {
@@ -69,10 +113,14 @@ export interface SessionRecord {
   runPick: RunPick | undefined;
   last: LastResponder | undefined;
   readonly history: HistoryEntry[];
+  /** The planned version 2 run's level, until its record is written. */
+  pendingLevel: PendingLevel | undefined;
+  /** What an extension's resend of the same text (pi-idle-check) plans with again. */
+  lastInput: LastInput | undefined;
 }
 
 export function newRecord(): SessionRecord {
-  return { plan: undefined, runPick: undefined, last: undefined, history: [] };
+  return { plan: undefined, runPick: undefined, last: undefined, history: [], pendingLevel: undefined, lastInput: undefined };
 }
 
 /** The fork's bounded session readers. Pi 1.5.0's npm types lack them, so they are detected. */
@@ -107,10 +155,14 @@ export interface RouteInput {
 const previousRef = (request: ModelRouteRequest): string | undefined =>
   request.previous === undefined ? undefined : refOf(request.previous.model);
 
-/** The default role, or the local role while local-only, and its fallback when not local-only. */
+/**
+ * The default role, or the local role while local-only, and its fallback when not local-only.
+ * Version 2's default is the medium level of the session's scope.
+ */
 function byDefault(rc: ResolveContext, code: string): Decision {
-  const role = rc.localOnly ? rc.roster.local?.role : rc.roster.routing.default;
-  if (role === undefined) return { ok: false, attempts: [], problem: NO_LOCAL_SECTION };
+  const { roster } = rc;
+  const role = rc.localOnly ? roster.local?.role : roster.version === 1 ? roster.routing.default : scopeSection(roster, rc.scope)?.levels.medium.role;
+  if (role === undefined) return { ok: false, attempts: [], problem: rc.localOnly ? NO_LOCAL_SECTION : noScopeSection(rc.scope) };
   return pickInRole(rc, role, { fallback: !rc.localOnly, code });
 }
 
@@ -161,11 +213,28 @@ function retry(rc: ResolveContext, request: ModelRouteRequest, record: SessionRe
   return stick(rc, previousRef(request), record);
 }
 
-/** The run's plan, consumed: it is never used twice, and never for another selection. */
-function takePlan(record: SessionRecord, id: VirtualId, localOnly: boolean): Plan | undefined {
+/**
+ * Whether a run's plan applies to a request as the session is now: the same model, local-only or
+ * not, and on auto, the roster version it was made for: a version 1 plan has no level, and a
+ * version 2 plan applies only in the scope it was made in. A local-only plan carries no account.
+ * The run's first request (takePlan) and what pi-cache-optimizer is told (activeRoute) both ask.
+ */
+export function planApplies(plan: Plan, id: VirtualId, rc: ResolveContext): boolean {
+  if (plan.virtualId !== id || plan.localOnly !== rc.localOnly) return false;
+  return rc.localOnly || (rc.roster.version === 1 ? plan.level === undefined : plan.level?.scope === rc.scope);
+}
+
+/**
+ * The run's plan, consumed: it is never used twice, and never where it does not apply. A plan that
+ * no longer applies, because the selection, the pin, the scope or the roster's version changed after
+ * its message planned, takes its level with it: the run did not go to that level, so it records none.
+ */
+function takePlan(record: SessionRecord, id: VirtualId, rc: ResolveContext): Plan | undefined {
   const { plan } = record;
   record.plan = undefined;
-  return plan !== undefined && plan.virtualId === id && plan.localOnly === localOnly ? plan : undefined;
+  if (plan === undefined || planApplies(plan, id, rc)) return plan;
+  record.pendingLevel = undefined;
+  return undefined;
 }
 
 /** The planned model if it still resolves, else the planned role, then its fallback. */
@@ -178,26 +247,52 @@ function fromPlan(rc: ResolveContext, plan: Plan): Decision {
   return pickInRole(rc, plan.role, { fallback: !rc.localOnly, code: plan.code });
 }
 
+/**
+ * How a pick's provider breaks the session's scope, if it does. A personal session never sends to a
+ * work-bound account. A work session sends only to the work-bound Codex account, which only a
+ * version 2 roster binds: under a version 1 roster, which serves no work scope, it sends nothing.
+ * In both, a local-only request keeps the pin's rules, checked after this one: a local model, which
+ * has no account. prepare() already refuses smart-router/auto for a scope the roster does not
+ * serve; this check holds even if that refusal is bypassed.
+ */
+function outsideScope(rc: ResolveContext, provider: string): string | undefined {
+  const { roster } = rc;
+  const local = rc.localOnly && subscriptionKind(provider) === undefined;
+  if (roster.version === 1) return rc.scope === "work" && !local ? "is outside this session's work scope, which a version 1 roster does not serve" : undefined;
+  if (rc.scope === "personal") return isWorkBound(roster, provider) ? "is on a work-bound account, and this session is in personal scope" : undefined;
+  if (isWorkCodex(roster.accounts, provider) || local) return undefined;
+  return "is not on a work-bound Codex account, and this session is in work scope";
+}
+
+/**
+ * Whether the work guard holds the request's session: work scope, or a scope that cannot be read,
+ * outside the pin. A refusal then offers only what that guard keeps (src/errors.ts).
+ */
+const workGuarded = (rc: ResolveContext): boolean => rc.pinned !== true && rc.scope === "work";
+
 /** The router's own invariants, checked on every pick before it is returned. */
 export function assertSafe(id: VirtualId, rc: ResolveContext, choice: Choice): void {
   const { roster } = rc;
+  const outside = outsideScope(rc, choice.model.provider);
   const problem =
-    excludedBy([...BUILTIN_EXCLUDES, ...roster.exclude], choice.ref) !== undefined
+    excludedBy(excludesFor(roster, rc.scope, choice.ref), choice.ref) !== undefined
       ? "is excluded"
       : choice.model.api === VIRTUAL_API
         ? "is a virtual model"
         : refOf(choice.model) !== choice.ref
           ? "is not the catalog entry of that name"
-          : roleOf(roster, choice.ref)?.name !== choice.role
-            ? `is not in the role ${choice.role}`
-            : rc.virtualId === "auto" && !autoRoles(roster).has(choice.role)
-              ? "is in a role smart-router/auto never routes to"
-              : rc.localOnly && choice.role !== roster.local?.role
-                ? "is not in the local role"
-                : rc.localOnly && !checkLocal(choice.model, rc.policy, true).ok
-                  ? "is outside the local policy"
-                  : undefined;
-  if (problem !== undefined) throw invariant(id, choice.ref, problem);
+          : outside !== undefined
+            ? outside
+            : roleOf(roster, choice.ref)?.name !== choice.role
+              ? `is not in the role ${choice.role}`
+              : rc.virtualId === "auto" && !autoRoles(roster, rc.scope).has(choice.role)
+                ? "is in a role smart-router/auto never routes to"
+                : rc.localOnly && choice.role !== roster.local?.role
+                  ? "is not in the local role"
+                  : rc.localOnly && !checkLocal(choice.model, rc.policy, true).ok
+                    ? "is outside the local policy"
+                    : undefined;
+  if (problem !== undefined) throw invariant(id, choice.ref, problem, workGuarded(rc));
 }
 
 /** The level a role sends: the selected one, or the role's fixed level. Pi clamps it to the model. */
@@ -207,7 +302,10 @@ export function levelFor(rc: ResolveContext, roleName: string, selected: ModelTh
 }
 
 function settle(input: RouteInput, decision: Decision): Choice {
-  if (!decision.ok) throw unroutable(input.id, decision, { localOnly: input.rc.localOnly, pinned: input.pin.on });
+  // A version 2 decision tries more than one role only when its run steps up a tier.
+  if (!decision.ok) {
+    throw unroutable(input.id, decision, { localOnly: input.rc.localOnly, pinned: input.pin.on, stepUps: input.rc.roster.version === 2, work: workGuarded(input.rc) });
+  }
   assertSafe(input.id, input.rc, decision.choice);
   return decision.choice;
 }
@@ -223,7 +321,7 @@ export function routeOwned(input: RouteInput): ModelRoute {
   let decision: Decision;
   let plan: Plan | undefined;
   if (request.reason === "user") {
-    plan = takePlan(record, id, rc.localOnly);
+    plan = takePlan(record, id, rc);
     decision = plan === undefined ? stick(rc, previousRef(request), record) : fromPlan(rc, plan);
   } else if (request.reason === "retry") {
     decision = retry(rc, request, record);
@@ -242,6 +340,7 @@ export function routeOwned(input: RouteInput): ModelRoute {
     ref: choice.ref,
     code: choice.code,
     foreign: false,
+    ...(plan?.level === undefined ? {} : { level: plan.level }),
   });
   return { model: choice.model, thinkingLevel: levelFor(rc, choice.role, request.thinkingLevel) };
 }

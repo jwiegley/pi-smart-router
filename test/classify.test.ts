@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test, { describe } from "node:test";
 
-import { capText, classify, HEAD_CHARS, TAIL_CHARS, withoutFileNames } from "../src/classify.ts";
+import { capText, classify, HEAD_CHARS, riskyTrigger, TAIL_CHARS, withoutFileNames } from "../src/classify.ts";
 import type { Judge } from "../src/classify.ts";
 
 describe("planning", () => {
@@ -128,5 +128,25 @@ describe("the text cap", () => {
     assert.equal(classify(`${filler}now plan the migration`).signal, "planning");
     assert.equal(classify(`plan the migration ${filler}`).signal, "planning");
     assert.equal(classify(`${filler} plan the migration ${filler}`).signal, "default");
+  });
+});
+
+describe("risky floor triggers", () => {
+  test("name the operation a run must not under-serve", () => {
+    for (const text of ["force push it", "git reset --hard HEAD~1", "rm -rf node_modules/", "please plan the force push"]) {
+      assert.equal(riskyTrigger(text), "destructive-git", text);
+    }
+    assert.equal(riskyTrigger("clean up the repo"), "repo-cleanup");
+    assert.equal(riskyTrigger("I accidentally added secrets.env"), "added-by-mistake");
+  });
+
+  test("ignore near misses", () => {
+    for (const text of ["clean up this function", "this is a destructive change", "rename foo"]) {
+      assert.equal(riskyTrigger(text), undefined, text);
+    }
+  });
+
+  test("scan on their own, because classify reports only its first reason", () => {
+    assert.equal(classify("please plan the force push").reason, "planning:plan-words");
   });
 });

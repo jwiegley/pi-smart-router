@@ -5,7 +5,7 @@ import test, { describe } from "node:test";
 
 import { BUILTIN_EXCLUDES, ROSTER_MAX_BYTES } from "../src/constants.ts";
 import { autoRoles, excludedBy, parseRef, parseRoster, rankOf, roleOf, rosterFile } from "../src/roster.ts";
-import type { Roster } from "../src/roster.ts";
+import type { Roster, RosterV1 } from "../src/roster.ts";
 import { expectKind, fixture, scratch, write } from "./support/fixtures.ts";
 
 const HERA = fixture("roster-hera.json");
@@ -25,10 +25,16 @@ function edited(edit: (roster: Json) => void, base: string = HERA): Json {
   return roster;
 }
 
-function valid(value: unknown): Roster {
+/** Every roster this file validates is version 1. */
+function v1(roster: Roster): RosterV1 {
+  assert.ok(roster.version === 1, "a version 1 roster");
+  return roster;
+}
+
+function valid(value: unknown): RosterV1 {
   const parsed = parseRoster(typeof value === "string" ? value : JSON.stringify(value));
   assert.ok(parsed.ok, parsed.ok ? "" : parsed.error);
-  return parsed.value;
+  return v1(parsed.value);
 }
 
 function invalid(value: unknown, expected: RegExp | string): void {
@@ -89,14 +95,14 @@ describe("John's rosters", () => {
     const roster = valid(HERA);
     assert.equal(roster.routing.fallback.get("engineer"), "coder");
     assert.ok(![roster.routing.default, roster.routing.trivial, roster.routing.complex, roster.routing.planning].includes("coder"));
-    assert.deepEqual([...autoRoles(roster)].sort(), ["architect", "coder", "engineer", "thinker", "worker"]);
+    assert.deepEqual([...autoRoles(roster, "personal")].sort(), ["architect", "coder", "engineer", "thinker", "worker"]);
     assert.ok(rankOf(roster, "coder") < rankOf(roster, "engineer"), "a session on the fallback climbs back to sol at once");
     assert.equal(rankOf(roster, "nope"), -1);
   });
 
   test("a role that neither routing nor any fallback names is not routable by auto", () => {
     const roster = valid(edited((r) => delete r.routing.fallback));
-    assert.deepEqual([...autoRoles(roster)].sort(), ["architect", "engineer", "worker"]);
+    assert.deepEqual([...autoRoles(roster, "personal")].sort(), ["architect", "engineer", "worker"]);
   });
 
   test("trivial, complex and planning default to routing.default", () => {
@@ -271,17 +277,17 @@ describe("keys", () => {
 });
 
 describe("structure", () => {
-  test("the version must be exactly 1", () => {
+  test("the version must be exactly 1 or 2", () => {
     invalid(
       edited((r) => delete r.version),
       "version: is required",
     );
-    for (const version of [0, 2, "1", null]) {
+    for (const version of [0, 3, "1", null]) {
       invalid(
         edited((r) => {
           r.version = version;
         }),
-        `version: must be 1, not ${JSON.stringify(version)}`,
+        `version: must be 1 or 2, not ${JSON.stringify(version)}`,
       );
     }
   });
@@ -597,7 +603,7 @@ describe("the roster file", () => {
     write(dir, "smart-router.json", HERA);
     const state = expectKind(rosterFile({ agentDir: () => dir }).current(), "ok");
     assert.equal(state.path, join(dir, "smart-router.json"));
-    assert.equal(state.value.routing.complex, "engineer");
+    assert.equal(v1(state.value).routing.complex, "engineer");
   });
 
   test("a missing, unparsable, oversized or unsafe file fails closed with its reason", (t) => {
@@ -632,10 +638,10 @@ describe("the roster file", () => {
     assert.equal(touched.length, OTHERS.length);
     write(dir, "smart-router.json", touched);
     utimesSync(path, new Date(2_000_000_000_000), new Date(2_000_000_000_000));
-    assert.equal(expectKind(file.refresh(), "ok").value.routing.default, "helper", "a same-size edit is seen through its mtime");
+    assert.equal(v1(expectKind(file.refresh(), "ok").value).routing.default, "helper", "a same-size edit is seen through its mtime");
 
-    write(dir, "smart-router.json", OTHERS.replace('"version": 1', '"version": 2'));
-    assert.equal(expectKind(file.refresh(), "invalid").error, "version: must be 1, not 2");
+    write(dir, "smart-router.json", OTHERS.replace('"version": 1', '"version": 3'));
+    assert.equal(expectKind(file.refresh(), "invalid").error, "version: must be 1 or 2, not 3");
     assert.equal(file.current().kind, "invalid", "no last-known-good copy");
 
     rmSync(path);

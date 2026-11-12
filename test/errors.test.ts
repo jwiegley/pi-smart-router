@@ -18,6 +18,8 @@ import {
   RouterError,
   rosterNotice,
   rosterRefusal,
+  scopeUnreadable,
+  scopeUnserved,
   stale,
   unroutable,
 } from "../src/errors.ts";
@@ -50,6 +52,18 @@ function templates(id: VirtualId, ref: string, reason: string): Array<readonly [
     ["unroutable problem", unroutable(id, { attempts: [], problem: `${ref} ${reason}` }, { localOnly: true, pinned: true })],
     ["stale", stale(id)],
     ["invariant", invariant(id, ref, reason)],
+    ["scope unreadable", scopeUnreadable(id, reason)],
+    ["scope unserved", scopeUnserved(id, "personal", 2)],
+    // In work scope, outside the pin, as the work guard holds the session.
+    ["roster missing in work scope", rosterRefusal(id, { kind: "missing", path: `/agent/${ref}/smart-router.json`, error: reason }, true)],
+    ["roster invalid in work scope", rosterRefusal(id, { kind: "invalid", path: "/agent/smart-router.json", error: `roles[0].models[0]: "${ref}" ${reason}` }, true)],
+    ["scope unreadable in work scope", scopeUnreadable(id, reason, true)],
+    ["scope unserved in work scope", scopeUnserved(id, "work", 1, true)],
+    ["scope unserved in work scope, outside the latch", scopeUnserved(id, "work", 2, true, true)],
+    ["unroutable in work scope", unroutable(id, { attempts: attempts(ref, reason) }, { localOnly: false, pinned: false, work: true })],
+    ["unroutable local in work scope", unroutable(id, { attempts: attempts(ref, reason) }, { localOnly: true, pinned: false, work: true })],
+    ["unroutable problem in work scope", unroutable(id, { attempts: [], problem: `${ref} ${reason}` }, { localOnly: false, pinned: false, work: true })],
+    ["invariant in work scope", invariant(id, ref, reason, true)],
   ];
 }
 
@@ -115,6 +129,72 @@ describe("every refusal", () => {
       local.message,
       "smart-router/local: no local model can take this request while this session is pinned to local models (local: omlx-hera/GLM-5.3-Flash-oQ4e-mtp: not in the catalog). Nothing was sent. Start the local model server and send the prompt again, or run /smart-router local off.",
     );
+  });
+});
+
+describe("in work scope, outside the pin", () => {
+  const MISSING = { kind: "missing", path: "/agent/smart-router.json", error: "" } as const;
+  const INVALID = { kind: "invalid", path: "/agent/smart-router.json", error: "JSON syntax error" } as const;
+  const ATTEMPTS: Attempt[] = [{ role: "work-medium", exists: true, candidates: [{ ok: false, ref: "openai-codex-3/gpt-6.1-terra", reason: "not-in-catalog", detail: "not in the catalog" }] }];
+
+  test("a refusal offers only what the work guard keeps: a work Codex model on smart-router/auto, and smart-router/auto too on smart-router/local", () => {
+    assert.deepEqual(
+      [
+        rosterRefusal("auto", MISSING, true),
+        rosterRefusal("local", INVALID, true),
+        scopeUnreadable("auto", "the latest smart-router.scope entry is not one the router wrote", true),
+        unroutable("auto", { attempts: ATTEMPTS }, { localOnly: false, pinned: false, stepUps: true, work: true }),
+        unroutable("auto", { attempts: [], problem: "the roster has no work scope" }, { localOnly: false, pinned: false, work: true }),
+        unroutable("local", { attempts: [], problem: "the roster has no local section" }, { localOnly: true, pinned: false, work: true }),
+        invariant("auto", "openrouter/z-ai/glm-5.3", "is outside this session's work scope", true),
+        invariant("local", "openrouter/z-ai/glm-5.3", "is not local", true),
+      ].map((error) => error.message),
+      [
+        "smart-router/auto: the roster /agent/smart-router.json does not exist. Nothing was sent. Create it as the README describes, or choose a work Codex model with /model.",
+        "smart-router/local: the roster /agent/smart-router.json is invalid (JSON syntax error). Nothing was sent. Fix it and send the prompt again, or choose smart-router/auto or a work Codex model with /model.",
+        "smart-router/auto: this session's scope cannot be read (the latest smart-router.scope entry is not one the router wrote). Nothing was sent. Record it again with /smart-router scope work or /smart-router scope personal, or choose a work Codex model with /model.",
+        "smart-router/auto: no model can take this request (work-medium: openai-codex-3/gpt-6.1-terra: not in the catalog). Nothing was sent. See /smart-router status, or choose a work Codex model with /model.",
+        "smart-router/auto: the roster has no work scope. Nothing was sent. Fix the roster and send the prompt again, or choose a work Codex model with /model.",
+        "smart-router/local: the roster has no local section. Nothing was sent. Fix the roster and send the prompt again, or choose smart-router/auto or a work Codex model with /model.",
+        "smart-router/auto: the router picked openrouter/z-ai/glm-5.3, which is outside this session's work scope; this is a bug in pi-smart-router. Nothing was sent. Choose a work Codex model with /model.",
+        "smart-router/local: the router picked openrouter/z-ai/glm-5.3, which is not local; this is a bug in pi-smart-router. Nothing was sent. Choose smart-router/auto or a work Codex model with /model.",
+      ],
+    );
+  });
+
+  test("a scope the roster does not serve: a version 1 roster binds no work account, so the roster is the only way out under the latch; a version 2 roster may bind one", () => {
+    assert.equal(
+      scopeUnserved("auto", "work", 1, true).message,
+      "smart-router/auto: this session is in work scope, which a version 1 roster does not serve. Nothing was sent. Give the roster a work scope (version 2).",
+    );
+    assert.equal(
+      scopeUnserved("auto", "work", 2, true).message,
+      "smart-router/auto: this session is in work scope, which the roster does not serve. Nothing was sent. Give the roster a work scope, or choose a work Codex model with /model.",
+    );
+  });
+
+  test("outside the latch, /smart-router scope personal is a way out of a scope the roster does not serve", () => {
+    assert.equal(
+      scopeUnserved("auto", "work", 1, true, true).message,
+      "smart-router/auto: this session is in work scope, which a version 1 roster does not serve. Nothing was sent. Give the roster a work scope (version 2), or run /smart-router scope personal.",
+    );
+    assert.equal(
+      scopeUnserved("auto", "work", 2, true, true).message,
+      "smart-router/auto: this session is in work scope, which the roster does not serve. Nothing was sent. Give the roster a work scope, run /smart-router scope personal, or choose a work Codex model with /model.",
+    );
+    // Under the pin, the pin's rules apply, and the words are as they were.
+    assert.equal(
+      scopeUnserved("auto", "work", 1, false, true).message,
+      "smart-router/auto: this session is in work scope, which a version 1 roster does not serve. Nothing was sent. Give the roster a work scope (version 2), or choose a model with /model.",
+    );
+  });
+
+  test("outside work scope, or under the pin, the texts are as they were", () => {
+    for (const error of [rosterRefusal("auto", MISSING), scopeUnreadable("auto", "x"), scopeUnserved("auto", "work", 1), unroutable("auto", { attempts: ATTEMPTS }, { localOnly: false, pinned: false }), invariant("auto", "a/b", "c")]) {
+      assert.doesNotMatch(error.message, /work Codex/, error.message);
+      assert.match(error.message, /[Cc]hoose a model with \/model\.$/, error.message);
+    }
+    assert.match(unroutable("local", { attempts: [], problem: "x" }, { localOnly: true, pinned: true, work: false }).message, /or run \/smart-router local off\.$/);
   });
 });
 

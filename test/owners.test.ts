@@ -5,11 +5,26 @@ import test, { afterEach, beforeEach, describe } from "node:test";
 import { writeFileSync } from "node:fs";
 import { join as joinPath } from "node:path";
 
-import { ENV_PIN, SLOT_KEY } from "../src/constants.ts";
-import { stale } from "../src/errors.ts";
+import { ENV_PIN, ENV_SCOPE, SCOPE_ENTRY, SLOT_KEY } from "../src/constants.ts";
+import { scopeUnserved, stale } from "../src/errors.ts";
 import { EMPTY_POLICY, policyFromRoster } from "../src/local.ts";
-import { envSwitchOn, isLive, join, latchEnvPin, ownerBySignal, processSlot, sessionHash } from "../src/owners.ts";
+import {
+  envSwitchOn,
+  isLive,
+  join,
+  latchEnvPin,
+  latchEnvScope,
+  leaveScopeHandoff,
+  ownerBySignal,
+  processSlot,
+  rememberedRoster,
+  rememberRoster,
+  scopeLatched,
+  sessionHash,
+  takeScopeHandoff,
+} from "../src/owners.ts";
 import { readPin } from "../src/pin.ts";
+import { readScope, scopeEntry } from "../src/scope.ts";
 import { ASTRA, DEEPSEEK, GLM, KIMI, NOW, rosterFixture, SOL } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
 import { agentDir, assistant, FakeRuntime, load, previous, request, resetSlot, routed, start } from "./support/pi.ts";
@@ -124,6 +139,129 @@ describe("the environment switch", () => {
     } finally {
       if (saved === undefined) delete process.env[ENV_PIN];
       else process.env[ENV_PIN] = saved;
+    }
+  });
+});
+
+describe("the scope switch", () => {
+  test("only PI_SMART_ROUTER_SCOPE=work latches it, and it stays on for the life of the process", () => {
+    const slot = processSlot();
+    for (const value of [undefined, "", "1", "Work", "WORK", " work", "work ", "on", "true", "personal"]) {
+      latchEnvScope(slot, value);
+      assert.equal(scopeLatched(slot), false, JSON.stringify(value));
+    }
+    assert.deepEqual(slot.env, { on: false, policy: undefined }, "a value that does not latch adds nothing to the slot");
+    latchEnvScope(slot, "work");
+    assert.equal(scopeLatched(slot), true);
+    latchEnvScope(slot, undefined);
+    assert.equal(scopeLatched(slot), true, "removing the variable leaves it on");
+    latchEnvScope(slot, "personal");
+    assert.equal(scopeLatched(slot), true);
+    assert.equal(slot.env.on, false, "the pin's switch is a separate latch");
+  });
+
+  test("the factory latches it, and from then on every session of the process is in work scope", async (t) => {
+    const saved = process.env[ENV_SCOPE];
+    try {
+      process.env[ENV_SCOPE] = "work";
+      await start({ dir: agentDir(t), id: "first" });
+      delete process.env[ENV_SCOPE];
+      const personal = (session: Loaded["session"]): void => session.appendCustom(SCOPE_ENTRY, scopeEntry("personal", "command", NOW));
+      const second = await start({ dir: agentDir(t), id: "second", runtime: new FakeRuntime(), setup: personal });
+      assert.equal(scopeLatched(processSlot()), true);
+      assert.deepEqual(readScope(second.session.ctx.sessionManager, scopeLatched(processSlot()), undefined), { kind: "ok", scope: "work", source: "latch" });
+      // Hera's roster is version 1, which serves no work scope: auto refuses, and local still routes.
+      assert.throws(() => second.runtime.route("auto", request("direct", { previous: previous(second.runtime, KIMI) })), { message: scopeUnserved("auto", "work", 1, true).message });
+      assert.equal(routed(second.runtime.route("local", request("direct"))), GLM);
+      assert.equal(processSlot().env.on, false, "the scope switch does not pin");
+    } finally {
+      if (saved === undefined) delete process.env[ENV_SCOPE];
+      else process.env[ENV_SCOPE] = saved;
+    }
+  });
+});
+
+describe("scope handoffs", () => {
+  test("live in their own map, made on first use, and each is taken once", () => {
+    const slot = processSlot();
+    assert.equal("scopeHandoffs" in slot, false, "nothing is made until a scope is handed on");
+    assert.equal(takeScopeHandoff(slot, "/sessions/x.jsonl"), undefined);
+    leaveScopeHandoff(slot, "/sessions/x.jsonl", "work");
+    leaveScopeHandoff(slot, "/sessions/y.jsonl", "personal");
+    leaveScopeHandoff(slot, "", "work");
+    assert.equal(slot.handoffs.size, 0, "never the pin's map");
+    assert.deepEqual(
+      [...(slot.scopeHandoffs ?? [])],
+      [
+        ["/sessions/x.jsonl", "work"],
+        ["/sessions/y.jsonl", "personal"],
+      ],
+    );
+    assert.equal(takeScopeHandoff(slot, "/sessions/x.jsonl"), "work");
+    assert.equal(takeScopeHandoff(slot, "/sessions/x.jsonl"), undefined);
+    assert.equal(takeScopeHandoff(slot, "/sessions/y.jsonl"), "personal");
+    slot.scopeHandoffs?.set("/sessions/z.jsonl", { scope: "work" });
+    assert.equal(takeScopeHandoff(slot, "/sessions/z.jsonl"), undefined, "a value of another shape is not a scope");
+    assert.equal(slot.scopeHandoffs?.size, 0);
+  });
+});
+
+describe("the last valid roster", () => {
+  test("is kept in the slot from the first load, and a memory of another shape reads as none without failing the slot", () => {
+    const slot = processSlot();
+    assert.equal("lastRoster" in slot, false, "nothing is kept until a roster loads");
+    assert.equal(rememberedRoster(slot), undefined);
+    const binding = { kind: "multi-pass", label: "Positron work", scope: "work" } as const;
+    const accounts = new Map([["openai-codex-3", binding]]);
+    rememberRoster(slot, { directories: ["/x/work"], accounts });
+    assert.deepEqual(rememberedRoster(slot), { directories: ["/x/work"], accounts });
+    const bound = (value: unknown) => ({ directories: [], accounts: new Map([["openai-codex-3", value]]) });
+    const others: Array<[string, unknown]> = [
+      ["not an object", "x"],
+      ["directories as text", { directories: "/x/work", accounts }],
+      ["a directory that is not text", { directories: [1], accounts }],
+      ["accounts in a plain object", { directories: [], accounts: { "openai-codex-3": binding } }],
+      ["a scope that is neither", bound({ ...binding, scope: "team" })],
+      ["no scope", bound({ kind: "multi-pass", label: "Positron work" })],
+      ["a kind that is neither", bound({ ...binding, kind: "alias" })],
+      ["no label", bound({ kind: "multi-pass", scope: "work" })],
+      ["a label that is not text", bound({ ...binding, label: 3 })],
+      ["a binding that is not an object", bound("work")],
+      ["a provider that is not text", { directories: [], accounts: new Map([[3, binding]]) }],
+    ];
+    for (const [name, other] of others) {
+      slot.lastRoster = other;
+      assert.equal(rememberedRoster(slot), undefined, name);
+      assert.equal(processSlot(), slot, `${name}: the slot keeps its shape`);
+    }
+  });
+});
+
+describe("a slot an earlier load made", () => {
+  const earlier = () => ({ version: 1, owners: new Set(), registered: new WeakMap(), env: { on: false, policy: undefined }, handoffs: new Map(), adapter: undefined });
+
+  test("without the scope's fields still has the shape, and gains them on first use", () => {
+    const made = earlier();
+    (globalThis as Record<symbol, unknown>)[Symbol.for(SLOT_KEY)] = made;
+    const slot = processSlot();
+    assert.equal(slot, made);
+    assert.deepEqual([scopeLatched(slot), takeScopeHandoff(slot, "/sessions/x.jsonl")], [false, undefined]);
+    latchEnvScope(slot, "work");
+    leaveScopeHandoff(slot, "/sessions/x.jsonl", "work");
+    assert.equal(processSlot(), made, "it still has the shape with them");
+    assert.deepEqual([scopeLatched(processSlot()), takeScopeHandoff(processSlot(), "/sessions/x.jsonl")], [true, "work"]);
+  });
+
+  test("with scope fields of another shape fails closed", () => {
+    const shapes: Array<[string, Record<string, unknown>]> = [
+      ["a latch that is not a boolean", { env: { on: false, policy: undefined, work: "yes" } }],
+      ["handoffs in a set", { scopeHandoffs: new Set() }],
+      ["handoffs in a plain object", { scopeHandoffs: {} }],
+    ];
+    for (const [name, shape] of shapes) {
+      (globalThis as Record<symbol, unknown>)[Symbol.for(SLOT_KEY)] = { ...earlier(), ...shape };
+      assert.throws(() => processSlot(), /holds an unknown shape/, name);
+      resetSlot();
     }
   });
 });

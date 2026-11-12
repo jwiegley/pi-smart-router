@@ -12,7 +12,7 @@ import { policyFromRoster } from "../../src/local.ts";
 import { Cooldowns, refOf, resolveContext } from "../../src/resolve.ts";
 import type { Catalog, ResolveContext } from "../../src/resolve.ts";
 import { parseRoster } from "../../src/roster.ts";
-import type { Roster } from "../../src/roster.ts";
+import type { Roster, RosterV1, RosterV2 } from "../../src/roster.ts";
 import { fixture } from "./fixtures.ts";
 
 export const HERA_LAN = "https://hera.lan:443/v1";
@@ -103,11 +103,24 @@ export function heraCatalog(): FakeCatalog {
   return new FakeCatalog(heraModels());
 }
 
-/** A roster from a fixture, validated. */
-export function rosterFixture(name: string): Roster {
+function parsedFixture(name: string): Roster {
   const parsed = parseRoster(fixture(name));
   assert.ok(parsed.ok, parsed.ok ? "" : parsed.error);
   return parsed.value;
+}
+
+/** A version 1 roster from a fixture, validated. */
+export function rosterFixture(name: string): RosterV1 {
+  const roster = parsedFixture(name);
+  assert.ok(roster.version === 1, `${name} is not a version 1 roster`);
+  return roster;
+}
+
+/** A version 2 roster from a fixture, validated. */
+export function rosterFixtureV2(name: string): RosterV2 {
+  const roster = parsedFixture(name);
+  assert.ok(roster.version === 2, `${name} is not a version 2 roster`);
+  return roster;
 }
 
 /** Labels as loaded from a Multi-Pass file with these subscriptions. */
@@ -125,7 +138,7 @@ export const HERA_LABELS = labelsOf([
 
 export const NOW = Date.UTC(2026, 10, 8, 14, 0, 0);
 
-/** A resolver context over Hera's roster and catalog, with any part replaced. */
+/** A resolver context over Hera's roster and catalog, in personal scope, with any part replaced. */
 export function heraContext(overrides: Partial<Omit<ResolveContext, "available">> = {}): ResolveContext {
   const roster = overrides.roster ?? rosterFixture("roster-hera.json");
   const virtualId: VirtualId = overrides.virtualId ?? "auto";
@@ -138,6 +151,7 @@ export function heraContext(overrides: Partial<Omit<ResolveContext, "available">
     virtualId,
     localOnly: virtualId === "local",
     policy: policyFromRoster(roster),
+    scope: "personal",
     ...overrides,
   });
 }

@@ -419,7 +419,7 @@ describe("/smart-router local off", () => {
     const loaded = await start({ dir: agentDir(t), select: "local", setup: (session) => session.pin(POLICY), now: () => NOW });
     const record = loaded.router?.record("session-1");
     assert.ok(record !== undefined);
-    record.guard.lock = { since: NOW, model: KIMI, cause: "conflict" };
+    record.guard.lock = { since: NOW, model: KIMI, cause: "conflict", policy: "pin" };
     loaded.session.dialogKeys = ["down", "enter"];
     await loaded.host.command("smart-router", "local off");
     assert.deepEqual(loaded.session.pinEntries().at(-1), { v: 1, on: false, at: AT });

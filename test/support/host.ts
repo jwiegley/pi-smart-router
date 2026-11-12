@@ -20,8 +20,14 @@
 // The faux providers answer in memory. Unlike Pi's stock faux provider, each one calls `onPayload`
 // with the payload it would send, as Pi's real chat APIs do, and records what it would have sent,
 // so the payload barrier can be observed; a provider marked `ignoresAbort` also streams on after
-// an abort, as Codex's reused WebSocket does. Every call is appended to the world's trace, next to
-// what a pi-cache-optimizer-shaped probe resolved through the routing registry at the same hooks.
+// an abort, as Codex's reused WebSocket does. A provider serves one model, or several, as a Codex
+// account does. Every call is appended to the world's trace, next to what a
+// pi-cache-optimizer-shaped probe resolved through the routing registry at the same hooks.
+//
+// Jev is faked too: a classifier provider, jev-fake, registered with every ModelRuntime after the
+// faux providers through pi-ai's provider `classifiers` hook, so the router reaches it as it reaches
+// OpenRouter's Jev, through Pi's model registry. It answers from memory, logs every call, and keeps
+// a call's deadline and abort signal as pi-ai does.
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -29,7 +35,22 @@ import type { TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { createFauxCore, createProvider, fauxAssistantMessage } from "@earendil-works/pi-ai";
-import type { Api, AssistantMessage, AssistantMessageEventStream, FauxResponseFactory, Model, Provider, SimpleStreamOptions, TranscriptContext } from "@earendil-works/pi-ai";
+import type {
+  Api,
+  AssistantMessage,
+  AssistantMessageEventStream,
+  ClassifierAnswer,
+  ClassifierApi,
+  ClassifierContext,
+  ClassifierModel,
+  ClassifierOptions,
+  ClassifierResult,
+  FauxResponseFactory,
+  Model,
+  Provider,
+  SimpleStreamOptions,
+  TranscriptContext,
+} from "@earendil-works/pi-ai";
 import {
   createAgentSession,
   createAgentSessionFromServices,
@@ -50,7 +71,7 @@ import type {
   SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 
-import { ENV_PIN, ROUTING_REGISTRY_KEY, SLOT_KEY } from "../../src/constants.ts";
+import { ENV_PIN, ENV_SCOPE, ROUTING_REGISTRY_KEY, SLOT_KEY, STATUS_KEY } from "../../src/constants.ts";
 import { ensureRoutingRegistry, resolveActiveRoute } from "./co.ts";
 import type { Snapshot } from "./co.ts";
 
@@ -125,10 +146,20 @@ installBoundedReaders();
 
 // ─── Faux providers ──────────────────────────────────────────────────────────
 
+/** A model of a faux provider that serves several: its id, and limits of its own. */
+export interface FauxModel {
+  readonly id: string;
+  /** The spec's limits unless given. */
+  readonly contextWindow?: number;
+  readonly maxTokens?: number;
+}
+
 export interface FauxSpec {
   readonly provider: string;
   /** The model id; "m" by default. */
   readonly id?: string;
+  /** The models it serves instead of the one `id` names, the first standing for the provider; each takes the spec's settings. */
+  readonly models?: ReadonlyArray<string | FauxModel>;
   readonly api?: string;
   /** Never contacted. Cloud providers default to https://<provider>.invalid/v1. */
   readonly baseUrl?: string;
@@ -145,6 +176,7 @@ export interface FauxSpec {
 /** One request a faux provider received. */
 export interface FauxCall {
   readonly provider: string;
+  /** The model it asked for, as provider/id. */
   readonly ref: string;
   readonly sessionId: string | undefined;
   readonly maxTokens: number | undefined;
@@ -173,8 +205,11 @@ function textOf(content: unknown): string {
 
 export class Faux {
   readonly spec: FauxSpec;
+  /** The provider's first model, which stands for it, and its ref. */
   readonly ref: string;
   readonly model: Model<Api>;
+  /** Every model it serves, by id. */
+  readonly models: ReadonlyMap<string, Model<Api>>;
   readonly provider: Provider;
   readonly calls: FauxCall[] = [];
   readonly #core: ReturnType<typeof createFauxCore>;
@@ -182,26 +217,28 @@ export class Faux {
 
   constructor(spec: FauxSpec, trace: TraceEntry[]) {
     this.spec = spec;
-    const id = spec.id ?? "m";
-    this.ref = `${spec.provider}/${id}`;
+    const served = (spec.models ?? [spec.id ?? "m"]).map((entry): FauxModel => (typeof entry === "string" ? { id: entry } : entry));
+    if (served.length === 0) throw new Error(`faux provider ${spec.provider} serves no model`);
     this.#core = createFauxCore({
       provider: spec.provider,
       api: spec.api ?? `faux-${spec.provider}`,
-      models: [
-        {
-          id,
-          reasoning: spec.reasoning ?? false,
-          contextWindow: spec.contextWindow ?? 128_000,
-          maxTokens: spec.maxTokens ?? 16_384,
-          ...(spec.cost === undefined ? {} : { cost: spec.cost }),
-        },
-      ],
+      models: served.map((entry) => ({
+        id: entry.id,
+        reasoning: spec.reasoning ?? false,
+        contextWindow: entry.contextWindow ?? spec.contextWindow ?? 128_000,
+        maxTokens: entry.maxTokens ?? spec.maxTokens ?? 16_384,
+        ...(spec.cost === undefined ? {} : { cost: spec.cost }),
+      })),
     });
-    const model = this.#core.models[0] as Model<Api>;
-    model.baseUrl = spec.baseUrl ?? `https://${spec.provider}.invalid/v1`;
-    if (spec.thinkingLevelMap !== undefined) model.thinkingLevelMap = spec.thinkingLevelMap;
-    if (spec.promptCache !== undefined) model.promptCache = spec.promptCache;
-    this.model = model;
+    const models = this.#core.models as Array<Model<Api>>;
+    for (const model of models) {
+      model.baseUrl = spec.baseUrl ?? `https://${spec.provider}.invalid/v1`;
+      if (spec.thinkingLevelMap !== undefined) model.thinkingLevelMap = spec.thinkingLevelMap;
+      if (spec.promptCache !== undefined) model.promptCache = spec.promptCache;
+    }
+    this.model = models[0] as Model<Api>;
+    this.ref = `${spec.provider}/${this.model.id}`;
+    this.models = new Map(models.map((model) => [model.id, model]));
     const stream = (requestModel: Model<Api>, context: TranscriptContext, options?: SimpleStreamOptions): AssistantMessageEventStream => {
       const messages = context.messages;
       const lastUser = [...messages].reverse().find((message) => message.role === "user");
@@ -211,7 +248,7 @@ export class Faux {
         .join("\n");
       const call: FauxCall = {
         provider: spec.provider,
-        ref: this.ref,
+        ref: `${spec.provider}/${requestModel.id}`,
         sessionId: options?.sessionId,
         maxTokens: options?.maxTokens,
         reasoning: options?.reasoning,
@@ -225,7 +262,7 @@ export class Faux {
       const { signal, ...rest } = options ?? {};
       const forwarded: SimpleStreamOptions = spec.ignoresAbort === true || signal === undefined ? rest : { ...rest, signal };
       this.#callOf.set(forwarded, call);
-      if (this.#core.getPendingResponseCount() === 0) this.respond(fauxAssistantMessage(`ok from ${this.ref}`));
+      if (this.#core.getPendingResponseCount() === 0) this.respond(fauxAssistantMessage(`ok from ${call.ref}`));
       return this.#core.stream(requestModel, context, forwarded);
     };
     this.provider = createProvider({
@@ -240,7 +277,7 @@ export class Faux {
     return this.#core.state.callCount;
   }
 
-  /** Queue scripted replies. Each sends its payload first; once they run out, the provider says "ok from <ref>". */
+  /** Queue scripted replies, which any of its models' requests take in turn. Each sends its payload first; once they run out, the provider says "ok from <ref>". */
   respond(...steps: FauxStep[]): void {
     this.#core.appendResponses(
       steps.map((step): FauxResponseFactory => async (context, options, _state, model) => {
@@ -287,6 +324,122 @@ export function gate(): { readonly started: Promise<void>; readonly step: FauxSt
   };
 }
 
+// ─── The fake classifier ─────────────────────────────────────────────────────
+
+/** One classification the fake classifier received. */
+export interface JevCall {
+  readonly context: ClassifierContext;
+  /** One attempt's deadline and the retries, as the request's options carried them to the provider. */
+  readonly timeoutMs: number | undefined;
+  readonly maxRetries: number | undefined;
+  /** What it answered; undefined while it waits. */
+  result: ClassifierResult | undefined;
+}
+
+/** A scripted classification: a result for the call's questions, or none at all. */
+type JevStep = ((context: ClassifierContext, model: ClassifierModel<ClassifierApi>) => ClassifierResult) | "hang";
+
+/**
+ * A fake Jev: the provider jev-fake, whose one classifier model, jev, answers from memory. Each call
+ * takes the next scripted step, and fails once they run out. Like pi-ai's own classifiers, a call
+ * gives up at its `timeoutMs`, one attempt's deadline, with pi-ai's "Request timed out after <ms>ms"
+ * error, and when its `signal` aborts, with an aborted result. Every call is logged in `calls`.
+ */
+export class FakeJev {
+  readonly model: ClassifierModel<ClassifierApi>;
+  readonly provider: Provider;
+  readonly calls: JevCall[] = [];
+  readonly #steps: JevStep[] = [];
+  readonly #timers = new Set<ReturnType<typeof setTimeout>>();
+
+  constructor() {
+    this.model = {
+      type: "classifier",
+      id: "jev",
+      name: "Jev (fake)",
+      api: "jev-fake-api",
+      provider: "jev-fake",
+      baseUrl: "https://jev-fake.invalid/v1",
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 262_144,
+    };
+    this.provider = createProvider({
+      id: "jev-fake",
+      auth: { apiKey: { name: "jev-fake", resolve: async () => ({ auth: {} }) } },
+      models: [this.model],
+      classifiers: { "jev-fake-api": { classify: (model, context, options) => this.#classify(model, context, options) } },
+    });
+  }
+
+  /** Answer the next call's every question with these probabilities, and the most probable label unless `choice` names another. */
+  answer(probabilities: Readonly<Record<string, number>>, choice?: string): void {
+    const chosen = choice ?? Object.keys(probabilities).sort((a, b) => (probabilities[b] ?? 0) - (probabilities[a] ?? 0))[0] ?? "";
+    this.#steps.push((context, model) => {
+      const answer: ClassifierAnswer = { type: "choice", choice: chosen, probabilities: { ...probabilities }, confidence: probabilities[chosen] ?? 0 };
+      return { ...classifierResult(model, "stop"), answers: Object.fromEntries(Object.keys(context.questions).map((id) => [id, answer])) };
+    });
+  }
+
+  /** Fail the next call, as pi-ai reports a service's error, OpenRouter's refusal included. */
+  fail(errorMessage: string): void {
+    this.#steps.push((_context, model) => classifierResult(model, "error", errorMessage));
+  }
+
+  /** Leave the next call unanswered: only its deadline or its signal ends it. */
+  hang(): void {
+    this.#steps.push("hang");
+  }
+
+  /** Clear the deadlines still running, when the world closes. */
+  dispose(): void {
+    for (const timer of this.#timers) clearTimeout(timer);
+    this.#timers.clear();
+  }
+
+  async #classify(model: ClassifierModel<ClassifierApi>, context: ClassifierContext, options?: ClassifierOptions): Promise<ClassifierResult> {
+    const call: JevCall = { context, timeoutMs: options?.timeoutMs, maxRetries: options?.maxRetries, result: undefined };
+    this.calls.push(call);
+    const step = this.#steps.shift() ?? ((_context, unscripted) => classifierResult(unscripted, "error", "jev-fake: no answer was scripted for this call"));
+    const ends: Array<Promise<ClassifierResult>> = [];
+    const signal = options?.signal;
+    let onAbort: (() => void) | undefined;
+    if (signal !== undefined) {
+      ends.push(
+        new Promise((resolve) => {
+          onAbort = () => resolve(classifierResult(model, "aborted", "Request aborted"));
+          if (signal.aborted) onAbort();
+          else signal.addEventListener("abort", onAbort, { once: true });
+        }),
+      );
+    }
+    const timeoutMs = options?.timeoutMs;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (timeoutMs !== undefined) {
+      ends.push(
+        new Promise((resolve) => {
+          timer = setTimeout(() => resolve(classifierResult(model, "error", `Request timed out after ${timeoutMs}ms`)), timeoutMs);
+          this.#timers.add(timer);
+        }),
+      );
+    }
+    if (step !== "hang") ends.push(Promise.resolve(step(context, model)));
+    const ended = await Promise.race(ends);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.#timers.delete(timer);
+    }
+    if (signal !== undefined && onAbort !== undefined) signal.removeEventListener("abort", onAbort);
+    call.result = ended;
+    return ended;
+  }
+}
+
+/** A classifier result without answers, as pi-ai builds one. */
+function classifierResult(model: ClassifierModel<ClassifierApi>, stopReason: ClassifierResult["stopReason"], errorMessage?: string): ClassifierResult {
+  return { api: model.api, provider: model.provider, model: model.id, answers: {}, stopReason, ...(errorMessage === undefined ? {} : { errorMessage }), timestamp: Date.now() };
+}
+
 // ─── The trace ───────────────────────────────────────────────────────────────
 
 /** Faux calls, and what the pi-cache-optimizer-shaped probe resolved, in the order they happened. */
@@ -321,17 +474,32 @@ function coProbe(trace: TraceEntry[]): InlineExtension {
 
 // ─── The UI ──────────────────────────────────────────────────────────────────
 
-/** A UI context that records notices and status items, and cancels every dialog, as Escape does. */
+/**
+ * A UI context that records notices, status items and select dialogs. A select dialog takes the
+ * next scripted answer, and with none left is cancelled, as Escape does; every other dialog is
+ * cancelled.
+ */
 export class FakeUI {
   readonly notices: Array<{ readonly message: string; readonly type: string }> = [];
   readonly statuses = new Map<string, string | undefined>();
+  /** Every status item set, oldest first. */
+  readonly statusLog: Array<{ readonly key: string; readonly text: string | undefined }> = [];
+  /** The answers the next select dialogs give, in order: one of the dialog's options, or undefined for Escape. */
+  readonly answers: Array<string | undefined> = [];
+  /** Every select dialog shown, oldest first. */
+  readonly dialogs: Array<{ readonly title: string; readonly options: readonly string[] }> = [];
   readonly context: ExtensionUIContext;
 
   constructor() {
     const ui = this;
     const none = (): void => undefined;
     this.context = {
-      select: async () => undefined,
+      select: async (title: string, options: string[]) => {
+        ui.dialogs.push({ title, options: [...options] });
+        const answer = ui.answers.shift();
+        if (answer !== undefined && !options.includes(answer)) throw new Error(`FakeUI: the scripted answer "${answer}" is not an option of "${title}"`);
+        return answer;
+      },
       confirm: async () => false,
       input: async () => undefined,
       notify: (message: string, type?: string) => {
@@ -340,6 +508,7 @@ export class FakeUI {
       onTerminalInput: () => none,
       setStatus: (key: string, text: string | undefined) => {
         ui.statuses.set(key, text);
+        ui.statusLog.push({ key, text });
       },
       setWorkingMessage: none,
       setWorkingVisible: none,
@@ -366,9 +535,9 @@ export class FakeUI {
     } as unknown as ExtensionUIContext;
   }
 
-  /** The router's status item. */
-  status(): string | undefined {
-    return this.statuses.get("smart-router");
+  /** A status item: the pin's by default, or the one under `key`. */
+  status(key: string = STATUS_KEY): string | undefined {
+    return this.statuses.get(key);
   }
 
   /** The notices whose text matches. */
@@ -397,20 +566,39 @@ const FLEET: readonly FauxSpec[] = [
   { provider: "openai-codex-2", id: "gpt-6.1-sol", api: "openai-codex-responses" },
 ];
 
-/** A roster as JSON, loose enough for a scenario to vary any field; the router validates it. */
-export interface RosterJson {
-  version: number;
+/** What both roster versions share, as JSON, loose enough for a scenario to vary any field; the router validates it. */
+interface RosterJsonBase {
   exclude?: string[];
   roles: Array<{ name: string; models: string[]; thinking?: string }>;
-  routing: { default: string; trivial?: string; complex?: string; planning?: string; fallback?: Record<string, string> };
-  accounts?: Record<string, { multiPassLabel?: string; native?: string }>;
+  /** A version 2 binding also names its scope, personal by default. */
+  accounts?: Record<string, { multiPassLabel?: string; native?: string; scope?: string }>;
   local?: { role: string; providers: string[]; hosts: string[] };
   stickyIdleMinutes?: number;
   cooldownMinutes?: number;
 }
 
+/** A version 1 roster: a routing table. */
+export interface RosterJsonV1 extends RosterJsonBase {
+  version: 1;
+  routing: { default: string; trivial?: string; complex?: string; planning?: string; fallback?: Record<string, string> };
+}
+
+/** A scope of a version 2 roster: a role and a description for each level. */
+export interface ScopeJson {
+  levels: Record<"low" | "medium" | "high" | "super", { role: string; describe: string }>;
+}
+
+/** A version 2 roster: the levels of each scope it serves, and the classifier. */
+export interface RosterJsonV2 extends RosterJsonBase {
+  version: 2;
+  scopes: { personal?: ScopeJson; work?: ScopeJson & { directories?: string[] } };
+  classifier?: { model?: string; timeoutMs?: number; closeCall?: number; context?: { messages?: number; messageChars?: number; totalChars?: number } };
+}
+
+export type RosterJson = RosterJsonV1 | RosterJsonV2;
+
 /** The roster of the behaviour tests, shaped like John's: the local role is reached only by smart-router/local, coder only as engineer's fallback. */
-export const ROSTER: RosterJson = {
+export const ROSTER: RosterJsonV1 = {
   version: 1,
   roles: [
     { name: "local", models: ["local-a/m"] },
@@ -459,12 +647,13 @@ export interface PiOptions {
   readonly tools?: readonly string[];
 }
 
-/** Forget the process slot, the routing registry and the environment switch: a fresh process. */
+/** Forget the process slot, the routing registry and both environment switches: a fresh process. */
 function resetProcess(): void {
   const store = globalThis as Record<symbol, unknown>;
   delete store[Symbol.for(SLOT_KEY)];
   delete store[Symbol.for(ROUTING_REGISTRY_KEY)];
   delete process.env[ENV_PIN];
+  delete process.env[ENV_SCOPE];
 }
 
 function writeOwned(dir: string, name: string, value: unknown): void {
@@ -479,6 +668,8 @@ export class World {
   readonly cwd: string;
   readonly sessionDir: string;
   readonly fleet = new Map<string, Faux>();
+  /** The classifier every Pi of the world registers after the fleet. */
+  readonly jev = new FakeJev();
   readonly trace: TraceEntry[] = [];
   settings: Settings;
   readonly #pis: Pi[] = [];
@@ -497,6 +688,7 @@ export class World {
     for (const spec of options.fleet ?? FLEET) this.fleet.set(spec.provider, new Faux(spec, this.trace));
     t.after(async () => {
       for (const pi of this.#pis.splice(0)) await pi.close();
+      this.jev.dispose();
       resetProcess();
       rmSync(this.root, { recursive: true, force: true });
     });
@@ -511,6 +703,15 @@ export class World {
   /** How many requests each provider received, for messages and for "no other provider" checks. */
   counts(): Record<string, number> {
     return Object.fromEntries([...this.fleet].map(([provider, faux]) => [provider, faux.callCount]));
+  }
+
+  /** How many requests each model received, by provider/id; models that received none are left out. */
+  refCounts(): Record<string, number> {
+    const counts: Record<string, number> = {};
+    for (const faux of this.fleet.values()) {
+      for (const call of faux.calls) counts[call.ref] = (counts[call.ref] ?? 0) + 1;
+    }
+    return counts;
   }
 
   writeRoster(value: unknown): void {
@@ -563,6 +764,7 @@ export class Pi {
     const factory: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
       const modelRuntime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: null, allowModelNetwork: false, refreshOnCreate: false });
       for (const faux of providers) modelRuntime.registerNativeProvider(faux.provider);
+      modelRuntime.registerNativeProvider(world.jev.provider);
       const services = await createAgentSessionServices({
         cwd,
         agentDir,
@@ -622,6 +824,12 @@ export class Pi {
   /** Type a prompt and wait until the session is idle again. */
   async prompt(text: string): Promise<void> {
     await this.session.prompt(text);
+    await this.session.waitForIdle();
+  }
+
+  /** Send a message as an extension does, such as pi-idle-check's resend (source "extension"), and wait until the session is idle again. */
+  async resend(text: string): Promise<void> {
+    await this.session.sendUserMessage(text);
     await this.session.waitForIdle();
   }
 
@@ -747,18 +955,20 @@ function userMessage(text: string, timestamp = Date.now()): { role: "user"; cont
   return { role: "user", content: [{ type: "text", text }], timestamp };
 }
 
-/** An assistant response from a faux provider, with a context of `tokens` input tokens. */
+/** An assistant response from a faux provider's first model, or its model `id`, with a context of `tokens` input tokens. */
 export function response(
   faux: Faux,
-  init: { readonly tokens?: number; readonly stopReason?: AssistantMessage["stopReason"]; readonly text?: string; readonly timestamp?: number } = {},
+  init: { readonly id?: string; readonly tokens?: number; readonly stopReason?: AssistantMessage["stopReason"]; readonly text?: string; readonly timestamp?: number } = {},
 ): AssistantMessage {
   const tokens = init.tokens ?? 100;
+  const model = init.id === undefined ? faux.model : faux.models.get(init.id);
+  if (model === undefined) throw new Error(`faux provider ${faux.spec.provider} serves no model ${init.id ?? ""}`);
   return {
     role: "assistant",
-    content: [{ type: "text", text: init.text ?? `earlier answer from ${faux.ref}` }],
-    api: faux.model.api,
-    provider: faux.model.provider,
-    model: faux.model.id,
+    content: [{ type: "text", text: init.text ?? `earlier answer from ${model.provider}/${model.id}` }],
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
     usage: { input: tokens, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: tokens, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
     stopReason: init.stopReason ?? "stop",
     timestamp: init.timestamp ?? Date.now(),

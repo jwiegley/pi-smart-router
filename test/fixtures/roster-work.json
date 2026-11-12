@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "$comment": "The shared-work machines: work scope only. Native openai-codex is the work ChatGPT login there; the binding is John's acknowledgement, which the router cannot verify.",
+  "roles": [
+    { "name": "work-low", "models": ["openai-codex/gpt-6-luna"] },
+    { "name": "work-medium", "models": ["openai-codex/gpt-6.1-terra"] },
+    { "name": "work-high", "models": ["openai-codex/gpt-6.1-sol"] },
+    { "name": "work-super", "models": ["openai-codex/gpt-6-astra"] }
+  ],
+  "scopes": {
+    "work": {
+      "levels": {
+        "low": { "role": "work-low", "describe": "Mechanical or trivial work that follows a clear specification" },
+        "medium": { "role": "work-medium", "describe": "Engineering, implementation and validation" },
+        "high": { "role": "work-high", "describe": "Deep thought, review, and the design of verification" },
+        "super": { "role": "work-super", "describe": "Deep thought, research, design and planning" }
+      }
+    }
+  },
+  "accounts": { "openai-codex": { "native": "Positron work", "scope": "work" } }
+}

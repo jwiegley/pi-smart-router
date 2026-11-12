@@ -5,13 +5,15 @@ import { checkAccount, labelsFile, needsLabels, parseMultiPass, subscriptionKind
 import type { AccountCheck, Labels } from "../src/accounts.ts";
 import { MULTI_PASS_MAX_BYTES } from "../src/constants.ts";
 import type { Loaded } from "../src/files.ts";
-import { parseRoster } from "../src/roster.ts";
-import type { AccountBinding, Roster } from "../src/roster.ts";
+import { parseRoster, SCOPES } from "../src/roster.ts";
+import type { AccountBinding, RosterV1, RosterV2, ScopedBinding } from "../src/roster.ts";
+import { rosterFixtureV2 } from "./support/catalog.ts";
 import { expectKind, fixture, scratch, write } from "./support/fixtures.ts";
 
-function roster(name: string): Roster {
+function roster(name: string): RosterV1 {
   const parsed = parseRoster(fixture(name));
   assert.ok(parsed.ok, parsed.ok ? "" : parsed.error);
+  assert.ok(parsed.value.version === 1, `${name} is not a version 1 roster`);
   return parsed.value;
 }
 
@@ -19,7 +21,7 @@ const HERA = roster("roster-hera.json");
 const OTHERS = roster("roster-other-hosts.json");
 
 /** A roster whose bindings are set directly, as if validation had been bypassed. */
-function bound(bindings: Array<[string, AccountBinding]>): Roster {
+function bound(bindings: Array<[string, AccountBinding]>): RosterV1 {
   return { ...HERA, accounts: new Map(bindings) };
 }
 
@@ -192,5 +194,65 @@ describe("account checks", () => {
     refused(checkAccount("anthropic-2", HERA, PERSONAL), /anthropic-2 has no account binding in the roster/);
     refused(checkAccount("openai-codex-2", bound([["openai-codex-2", { kind: "native", label: "personal" }]]), PERSONAL), /is a Multi-Pass alias, but the roster binds it as a native login/);
     refused(checkAccount("openai-codex", bound([["openai-codex", { kind: "multi-pass", label: "personal" }]]), PERSONAL), /is a native login, but the roster binds it to a Multi-Pass label/);
+  });
+});
+
+describe("account checks in a version 2 session's scope", () => {
+  const HERA_V2 = rosterFixtureV2("roster-hera-v2.json");
+  const WORK_ONLY = rosterFixtureV2("roster-work.json");
+  const BOTH = labels([
+    { provider: "openai-codex", index: 2, label: "personal" },
+    { provider: "openai-codex", index: 3, label: "Positron work" },
+  ]);
+
+  /** Hera's version 2 roster with one binding replaced, as if validation had been bypassed. */
+  function rebound(provider: string, binding: ScopedBinding): RosterV2 {
+    return { ...HERA_V2, accounts: new Map([...HERA_V2.accounts, [provider, binding]]) };
+  }
+
+  test("a work binding passes in work scope and is refused in personal scope", () => {
+    assert.deepEqual(checkAccount("openai-codex-3", HERA_V2, BOTH, "work"), { ok: true, kind: "multi-pass", label: "Positron work", verified: true });
+    refused(checkAccount("openai-codex-3", HERA_V2, BOTH, "personal"), /^the roster binds openai-codex-3 to the work scope, but this session is in the personal scope$/);
+    assert.deepEqual(checkAccount("openai-codex", WORK_ONLY, undefined, "work"), { ok: true, kind: "native", label: "Positron work", verified: false });
+    refused(checkAccount("openai-codex", WORK_ONLY, undefined, "personal"), /^the roster binds openai-codex to the work scope, but this session is in the personal scope$/);
+  });
+
+  test("a personal binding is refused in work scope", () => {
+    refused(checkAccount("openai-codex-2", HERA_V2, BOTH, "work"), /^the roster binds openai-codex-2 to the personal scope, but this session is in the work scope$/);
+    assert.deepEqual(checkAccount("openai-codex-2", HERA_V2, BOTH, "personal"), { ok: true, kind: "multi-pass", label: "personal", verified: true });
+  });
+
+  test("in work scope, Multi-Pass's label must still match the binding's, trimmed and case-insensitive", () => {
+    const padded = labels([{ provider: "openai-codex", index: 3, label: " positron WORK " }]);
+    assert.deepEqual(checkAccount("openai-codex-3", HERA_V2, padded, "work"), { ok: true, kind: "multi-pass", label: "positron WORK", verified: true });
+    refused(checkAccount("openai-codex-3", HERA_V2, labels([{ provider: "openai-codex", index: 3, label: "personal" }]), "work"), /^Multi-Pass labels openai-codex-3 "personal", not "Positron work"$/);
+    refused(checkAccount("openai-codex-3", HERA_V2, labels([{ provider: "openai-codex", index: 3, label: "Work" }]), "work"), /^Multi-Pass labels openai-codex-3 "Work", not "Positron work"$/);
+    refused(checkAccount("openai-codex-3", HERA_V2, labels([{ provider: "openai-codex", index: 2, label: "Positron work" }]), "work"), /^Multi-Pass lists no openai-codex-3$/);
+    refused(checkAccount("openai-codex-3", HERA_V2, undefined, "work"), /^Multi-Pass's labels were not read/);
+  });
+
+  test("in work scope, a work binding whose label names neither work nor Positron is refused", () => {
+    const spare = rebound("openai-codex-3", { kind: "multi-pass", label: "spare", scope: "work" });
+    refused(checkAccount("openai-codex-3", spare, labels([{ provider: "openai-codex", index: 3, label: "spare" }]), "work"), /^the roster binds openai-codex-3 to "spare", which names neither work nor Positron$/);
+  });
+
+  test("a provider that is not a subscription needs no binding in either scope", () => {
+    for (const scope of SCOPES) {
+      assert.deepEqual(checkAccount("openrouter", HERA_V2, BOTH, scope), { ok: true, kind: "none" }, scope);
+      assert.deepEqual(checkAccount("omlx-hera", HERA_V2, BOTH, scope), { ok: true, kind: "none" }, scope);
+    }
+  });
+
+  test("without a scope a version 2 binding takes today's path, and version 1 ignores the scope", () => {
+    refused(checkAccount("openai-codex-3", HERA_V2, BOTH), /^the roster binds openai-codex-3 to "Positron work", a refused label$/);
+    assert.deepEqual(checkAccount("openai-codex-2", HERA_V2, BOTH), { ok: true, kind: "multi-pass", label: "personal", verified: true });
+    for (const scope of SCOPES) {
+      assert.deepEqual(checkAccount("openai-codex-2", HERA, PERSONAL, scope), { ok: true, kind: "multi-pass", label: "personal", verified: true }, scope);
+      for (const label of ["Positron", "work", "Work laptop"]) {
+        refused(checkAccount("openai-codex-2", HERA, labels([{ provider: "openai-codex", index: 2, label }]), scope), new RegExp(`^Multi-Pass labels openai-codex-2 "${label}", a refused label$`));
+        refused(checkAccount("openai-codex-2", bound([["openai-codex-2", { kind: "multi-pass", label }]]), labels([{ provider: "openai-codex", index: 2, label }]), scope), /a refused label$/);
+        refused(checkAccount("openai-codex", bound([["openai-codex", { kind: "native", label }]]), undefined, scope), /a refused label$/);
+      }
+    }
   });
 });

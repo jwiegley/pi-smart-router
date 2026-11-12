@@ -1,7 +1,10 @@
 // Account bindings. Provider ids do not identify accounts, so every subscription provider in the
 // roster carries a binding. A Multi-Pass alias must carry the label Multi-Pass stores for it; a
 // native login carries John's acknowledgement, which the router cannot verify. A work or Positron
-// label is refused wherever it appears.
+// label is refused wherever it appears, except on a version 2 work binding, which must carry one.
+// Even that binding passes only a check made in work scope: routing and status check each binding
+// in the session's scope and the work guard in work scope, so a personal session refuses it for its
+// scope, and a check made without a scope refuses its label.
 //
 // Multi-Pass's labels come from its own global file, <agentDir>/multi-pass.json, read with the
 // same safe reader. Only subscriptions[].{provider, index, label} is used, and the file holds no
@@ -9,7 +12,7 @@
 import { MULTI_PASS_FILE, MULTI_PASS_MAX_BYTES, REFUSED_LABEL, SUBSCRIPTION_ALIAS, SUBSCRIPTION_PROVIDERS } from "./constants.ts";
 import { agentFile, isRecord, message, own } from "./files.ts";
 import type { AgentFile, FileSystem, Loaded, Parsed } from "./files.ts";
-import type { Roster } from "./roster.ts";
+import type { Roster, RosterV1, RosterV2, Scope } from "./roster.ts";
 
 export type SubscriptionKind = "native" | "alias";
 
@@ -18,6 +21,25 @@ export function subscriptionKind(provider: string): SubscriptionKind | undefined
   if (SUBSCRIPTION_PROVIDERS.includes(provider)) return "native";
   if (SUBSCRIPTION_ALIAS.test(provider)) return "alias";
   return undefined;
+}
+
+const CODEX_PROVIDER = /^openai-codex(?:-[0-9]+)?$/;
+
+/** Whether a provider is Codex: the native openai-codex login or a Multi-Pass alias of it. */
+export function isCodexProvider(provider: string): boolean {
+  return CODEX_PROVIDER.test(provider);
+}
+
+/** Account bindings as the scope rules read them: the scope each provider is bound to. Only a version 2 roster binds any. */
+export type ScopedAccounts = ReadonlyMap<string, { readonly scope: Scope }>;
+
+/**
+ * Whether a provider is a work-bound Codex provider: Codex, and bound to the work scope. It is the
+ * only kind of account a work level holds (roster validation), a work-scope pick goes to (assertSafe)
+ * and a work-scope session may select by hand (the work guard).
+ */
+export function isWorkCodex(accounts: ScopedAccounts, provider: string): boolean {
+  return isCodexProvider(provider) && accounts.get(provider)?.scope === "work";
 }
 
 /** Multi-Pass's labels, keyed by the provider each subscription registers (`openai-codex-2`). */
@@ -66,8 +88,8 @@ export function labelsFile(options: LabelsFileOptions): AgentFile<Labels> {
   return agentFile({ ...options, name: MULTI_PASS_FILE, maxBytes: MULTI_PASS_MAX_BYTES, parse: parseMultiPass });
 }
 
-/** Whether the roster binds any Multi-Pass alias, which is the only reason to read the labels. */
-export function needsLabels(roster: Roster): boolean {
+/** Whether bindings, a roster's or those remembered from one, hold any Multi-Pass alias, which is the only reason to read the labels. */
+export function needsLabels(roster: Pick<Roster, "accounts">): boolean {
   return [...roster.accounts.values()].some((binding) => binding.kind === "multi-pass");
 }
 
@@ -76,18 +98,30 @@ export type AccountCheck =
   | { readonly ok: true; readonly kind: "native" | "multi-pass"; readonly label: string; readonly verified: boolean }
   | { readonly ok: false; readonly reason: string };
 
+/** What checkAccount reads of a roster: its version and its account bindings. */
+export type RosterBindings = Pick<RosterV1, "version" | "accounts"> | Pick<RosterV2, "version" | "accounts">;
+
 /**
  * Whether the roster's binding lets the router use a provider. Not a subscription provider:
  * nothing to check. A native login: John's acknowledgement, reported as unverified. A Multi-Pass
  * alias: the label Multi-Pass stores must match the roster's, trimmed and case-insensitive.
+ *
+ * Checked in a session's scope, a version 2 binding serves only that scope's sessions: a personal
+ * session refuses a work binding, and a work session takes only a work binding, whose label must
+ * name work or Positron. Without a scope, and for version 1, a work or Positron label is refused.
  */
-export function checkAccount(provider: string, roster: Roster, labels: Loaded<Labels> | undefined): AccountCheck {
+export function checkAccount(provider: string, roster: RosterBindings, labels: Loaded<Labels> | undefined, scope?: Scope): AccountCheck {
   const kind = subscriptionKind(provider);
   if (kind === undefined) return { ok: true, kind: "none" };
   const binding = roster.accounts.get(provider);
   if (binding === undefined) return { ok: false, reason: `${provider} has no account binding in the roster` };
   const wanted = binding.label.trim();
-  if (REFUSED_LABEL.test(wanted)) return { ok: false, reason: `the roster binds ${provider} to "${wanted}", a refused label` };
+  // The scope a version 2 binding names, when the check is made in a session's scope.
+  const bound = roster.version === 2 && scope !== undefined ? roster.accounts.get(provider)?.scope : undefined;
+  if (bound !== undefined && bound !== scope) return { ok: false, reason: `the roster binds ${provider} to the ${bound} scope, but this session is in the ${scope} scope` };
+  const work = bound === "work";
+  if (work && !REFUSED_LABEL.test(wanted)) return { ok: false, reason: `the roster binds ${provider} to "${wanted}", which names neither work nor Positron` };
+  if (!work && REFUSED_LABEL.test(wanted)) return { ok: false, reason: `the roster binds ${provider} to "${wanted}", a refused label` };
   if (binding.kind === "native") {
     return kind === "native"
       ? { ok: true, kind: "native", label: wanted, verified: false }
@@ -99,7 +133,7 @@ export function checkAccount(provider: string, roster: Roster, labels: Loaded<La
   if (!labels.value.has(provider)) return { ok: false, reason: `Multi-Pass lists no ${provider}` };
   const found = labels.value.get(provider)?.trim() ?? "";
   if (found === "") return { ok: false, reason: `Multi-Pass has no label for ${provider}` };
-  if (REFUSED_LABEL.test(found)) return { ok: false, reason: `Multi-Pass labels ${provider} "${found}", a refused label` };
+  if (!work && REFUSED_LABEL.test(found)) return { ok: false, reason: `Multi-Pass labels ${provider} "${found}", a refused label` };
   if (found.toLowerCase() !== wanted.toLowerCase()) {
     return { ok: false, reason: `Multi-Pass labels ${provider} "${found}", not "${wanted}"` };
   }
