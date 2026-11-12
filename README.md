@@ -555,7 +555,7 @@ Redaction is pattern matching. It hides the shapes its tests pin, and other spel
 secret can stay: the list names what it looks for, not what it finds. Two things about it are
 decided and tested as rules:
 
-- `-u`, `--user` and `-U` are read only in a curl command, because other programs give those
+- `-u`, `--user` and `-U` are read only behind a `curl` word, because other programs give those
   flags other meanings (`date -u`, `docker run -u`); `--proxy-user` is read in any command.
 - Its time grows in proportion to the text: a test holds it to under a second on each of its
   hostile inputs, of 90,000 characters and more.
@@ -610,6 +610,7 @@ It also hides some text that is no secret. For example:
 | the text of a plist's key element | `<key>CFBundleName</key>` | `<key>[redacted]</key>` |
 | the port of docker run on a line that names mysql | `docker run --name mysql -p8080:80 img` | `docker run --name mysql -p[redacted] img` |
 | the word after password on a line that also says login | `enter your login and password carefully` | `enter your login and password [redacted]` |
+| the end of a time format behind a curl word and a single & | `curl -s https://h & date -u +%H:%M:%S` | `curl -s https://h & date -u +%H:[redacted]` |
 
 Its known gaps include the shapes below; each entry gives an input whose secret, or the part of
 it the entry names, stays in the text that Jev reads, and the list is not complete. In the inputs

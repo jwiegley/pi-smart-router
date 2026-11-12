@@ -1054,6 +1054,7 @@ describe("redact", () => {
     ["the text of a plist's key element", "<key>CFBundleName</key>", `<key>${REDACTED}</key>`],
     ["the port of docker run on a line that names mysql", "docker run --name mysql -p8080:80 img", `docker run --name mysql -p${REDACTED} img`],
     ["the word after password on a line that also says login", "enter your login and password carefully", `enter your login and password ${REDACTED}`],
+    ["the end of a time format behind a curl word and a single &", "curl -s https://h & date -u +%H:%M:%S", `curl -s https://h & date -u +%H:${REDACTED}`],
   ];
 
   for (const [what, input, want] of readmeHidden) {

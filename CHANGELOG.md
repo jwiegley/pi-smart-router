@@ -87,16 +87,16 @@ sends nothing unless pinned.
   a classifier, it asks Pi's model registry for one classifier request per routed run on
   smart-router/auto, with a per-attempt timeout and no retries. It never does so under the pin, on
   smart-router/local, for a steer or follow-up, or without a classifier.
-- What Jev reads goes through redaction before any cap, in both scopes. Redaction is pattern
-  matching: it hides the shapes its tests pin, and other spellings of the same secret can stay. It
-  looks for passwords in URLs, `Authorization` headers, JWTs, private-key blocks, keys with a
-  vendor's prefix, values after secret names and flags, long mixed-case runs, and basic credentials
-  in command lines and config files: curl's user flags and `--proxy-user`, mysql's `-p`, netrc
-  passwords, XML elements with a secret name, Python auth pairs and cookie values. `-u`, `--user`
-  and `-U` are read only in a curl command; `--proxy-user` is read in any command. Its time grows
-  in proportion to the text. The README's "What redaction hides" gives a tested example of each
-  kind, and lists known gaps and text that is hidden though it is no secret. Status lists the
-  classifier among what can still send data off the machine.
+- The message and the earlier messages go through redaction before any cap, in both scopes.
+  Redaction is pattern matching: it hides the shapes its tests pin, and other spellings of the same
+  secret can stay. It looks for passwords in URLs, `Authorization` headers, JWTs, private-key
+  blocks, keys with a vendor's prefix, values after secret names and flags, long mixed-case runs,
+  and basic credentials in command lines and config files: curl's user flags and `--proxy-user`,
+  mysql's `-p`, netrc passwords, XML elements with a secret name, Python auth pairs and cookie
+  values. `-u`, `--user` and `-U` are read only behind a `curl` word; `--proxy-user` is read in any
+  command. Its time grows in proportion to the text. The README's "What redaction hides" gives a
+  tested example of each kind, and lists known gaps and text that is hidden though it is no secret.
+  Status lists the classifier among what can still send data off the machine.
 - The router keeps no prompt text: it binds plans by HMAC-SHA-256 digests under a key each instance
   draws at random, and records hold neither text nor digest.
 - No OpenRouter model answers the requests that go through a work session's route, routed or picked
