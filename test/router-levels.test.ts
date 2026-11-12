@@ -1385,6 +1385,84 @@ describe("a run's record", () => {
     assert.deepEqual(levelEntries(loaded), [], "a run without a level of its own records nothing");
   });
 
+  test("is written with the planned level, and no model, for a run whose first request smart-router/auto refuses because the scope moved to one the roster does not serve", async (t) => {
+    const roster = JSON.parse(HERA_V2);
+    delete roster.scopes.work;
+    roster.roles = roster.roles.filter((role: { name: string }) => !role.name.startsWith("work-"));
+    delete roster.accounts["openai-codex-3"];
+    const loaded = await hera(t, { roster: JSON.stringify(roster) });
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    await say(loaded, "Rename the helper #low");
+    await settled();
+    assert.deepEqual([recordOf(loaded)?.plan?.level?.scope, recordOf(loaded)?.pendingLevel?.level.tier], ["personal", "low"]);
+    // /smart-router scope work, typed before the run's first request: the roster has no work scope.
+    loaded.session.appendCustom(SCOPE_ENTRY, scopeEntry("work", "command", NOW));
+    const signal = loaded.session.startRun();
+    await loaded.host.emit("before_agent_start", { messageType: "user", prompt: "Rename the helper" });
+    assert.throws(() => loaded.runtime.route("auto", request("user", { signal })), /this session is in work scope, which the roster does not serve/);
+    assert.deepEqual(
+      [recordOf(loaded)?.plan?.level?.scope, recordOf(loaded)?.pendingLevel?.level.tier, recordOf(loaded)?.history.length],
+      ["personal", "low", 0],
+      "the request was refused before its plan was looked at: the plan and its level are still there, and nothing was routed",
+    );
+    await finish(loaded, "smart-router/auto", { api: "pi-virtual", stopReason: "error", errorMessage: "refused" });
+    assert.deepEqual(levelEntries(loaded), [
+      {
+        v: 1,
+        at: NOW,
+        scope: "personal",
+        source: "tag",
+        tier: "low",
+        asked: "low",
+        tag: "low",
+        keyword: { signal: "trivial", reason: "triage:keyword_economical" },
+        jev: { model: JEV, choice: "low", probabilities: LOW, confidence: 0.8, ms: 0 },
+      },
+    ]);
+    assert.deepEqual([recordOf(loaded)?.plan, recordOf(loaded)?.pendingLevel], [undefined, undefined], "the settle dropped both");
+  });
+
+  test("is written with the planned level for a run whose plan a later message's plan without a level replaced before the run started", { timeout: 10_000 }, async (t) => {
+    const loaded = await hera(t);
+    // A later extension holds the first message after the router has planned it.
+    const { holds } = laterExtension(loaded);
+    const gate = deferred<void>();
+    holds.set("go ahead", gate.promise);
+    const { one, two, earlier, later } = await overlap(loaded, "go ahead", "rename foo to bar");
+    earlier.resolve(jevAnswer(LOW));
+    await settled();
+    const own = recordOf(loaded)?.pendingLevel;
+    assert.deepEqual([recordOf(loaded)?.plan?.level?.tier, own?.level.tier], ["low", "low"], "the first message planned LOW");
+    // /model smart-router/local, while the first message is held and the second waits for Jev.
+    assert.equal(await loaded.host.choose("smart-router/local"), true);
+    later.resolve(jevAnswer(HIGH));
+    assert.deepEqual(await two, [undefined, undefined]);
+    const replaced = recordOf(loaded)?.plan;
+    assert.deepEqual([replaced?.virtualId, replaced?.level, recordOf(loaded)?.pendingLevel === own], ["local", undefined, true], "the second message's plan has no level, and the pending level is still the first's");
+    gate.resolve();
+    assert.deepEqual(await one, [undefined, undefined]);
+    // The first message's run starts: the plan is the second message's, so it is dropped, and the level stays.
+    const signal = loaded.session.startRun();
+    await loaded.host.emit("before_agent_start", { messageType: "user", prompt: "go ahead" });
+    assert.deepEqual([recordOf(loaded)?.plan, recordOf(loaded)?.pendingLevel === own], [undefined, true]);
+    assert.equal(routed(loaded.runtime.route("local", request("user", { signal }))), GLM);
+    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level], ["stick:default", undefined], "the request routes unplanned, with no plan to find stale");
+    await finish(loaded, GLM);
+    assert.deepEqual(levelEntries(loaded), [
+      {
+        v: 1,
+        at: NOW,
+        scope: "personal",
+        source: "jev",
+        tier: "low",
+        asked: "low",
+        keyword: { signal: "default", reason: "triage:no_fast_path" },
+        jev: { model: JEV, choice: "low", probabilities: LOW, confidence: 0.8, ms: 0 },
+        ref: GLM,
+      },
+    ]);
+  });
+
   test("names the model that answered, after a retry moved the run", async (t) => {
     const loaded = await hera(t);
     await say(loaded, "x #high");
