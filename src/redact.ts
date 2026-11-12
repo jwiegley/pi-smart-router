@@ -46,7 +46,9 @@ const PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
 // nothing; a value that does not close ends at the next whitespace, as an unquoted value does.
 const NAME_SEPARATOR = /(?<![\w-])([\w-]+)(?:\\?["'\]])*[ \t]*(?::=|=>|=|:)[ \t]*/g;
 const VALUE = /\\?"[^"\n]*"(?!\w)|\\?'[^'\n]*'(?!\w)|\\?["'][^\s]*|[^\s"',;]+/y;
-// A flag that names a secret and takes its value after a space: --password hunter2.
+// A flag that names a secret and takes its value after a space: --password hunter2. Its name is
+// tested with its hyphens on: only the pass and pwd rule of SECRET_NAME reads where a name starts,
+// and it takes a hyphen there as it takes the start.
 const FLAG_SPACE = /(?<![\w-])(--[\w-]+)[ \t]+/g;
 const FLAG_VALUE = /\\?"[^"\n]*"(?!\w)|\\?'[^'\n]*'(?!\w)|\\?["'][^\s]*|[^\s"'-][^\s"',;]*/y;
 // Any name ending in key is secret, monkey and hotkey included; keyboard is not.
@@ -57,13 +59,13 @@ function isSecretName(name: string): boolean {
   return SECRET_NAME.test(name);
 }
 
-/** Replaces the value after each secret name that `names` finds with REDACTED. */
-function redactValues(text: string, names: RegExp, value: RegExp, nameGroup: (match: RegExpExecArray) => string): string {
+/** Replaces the value after each secret name that `names` finds, in its first group, with REDACTED. */
+function redactValues(text: string, names: RegExp, value: RegExp): string {
   let out = "";
   let last = 0;
   names.lastIndex = 0;
   for (let m = names.exec(text); m !== null; m = names.exec(text)) {
-    if (!isSecretName(nameGroup(m))) continue;
+    if (!isSecretName(m[1]!)) continue;
     value.lastIndex = names.lastIndex;
     if (value.exec(text) === null) continue;
     out += text.slice(last, names.lastIndex) + REDACTED;
@@ -249,8 +251,8 @@ function mixedCase(run: string): boolean {
 export function redact(text: string): string {
   let out = text.replace(URL_PASSWORD, `$1${REDACTED}`).replace(ESCAPED_BREAK, " ");
   for (const [pattern, replacement] of PATTERNS) out = out.replace(pattern, replacement);
-  out = redactValues(out, NAME_SEPARATOR, VALUE, (m) => m[1]!);
-  out = redactValues(out, FLAG_SPACE, FLAG_VALUE, (m) => m[1]!.slice(2));
+  out = redactValues(out, NAME_SEPARATOR, VALUE);
+  out = redactValues(out, FLAG_SPACE, FLAG_VALUE);
   out = redactBasic(out);
   out = out.replace(LONG_BASE64, (run) => (mixedCase(run) && /\d/.test(run) && /[+/]/.test(run) ? REDACTED : run));
   return out.replace(LONG_ALNUM, (run) => (mixedCase(run) ? REDACTED : run));

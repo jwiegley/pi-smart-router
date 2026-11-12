@@ -147,6 +147,17 @@ describe("redact", () => {
     }
   });
 
+  test("reads a flag's name with its hyphens on, where pass and pwd count as they do at a name's start", () => {
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      ["mysql --pass hunter2 db", `mysql --pass ${REDACTED} db`],
+      ["mysql --pwd hunter2 db", `mysql --pwd ${REDACTED} db`],
+      ["mysql --db-pass hunter2 db", `mysql --db-pass ${REDACTED} db`],
+      ["mysql --pass-file hunter2 db", `mysql --pass-file ${REDACTED} db`],
+    ];
+    for (const [input, want] of cases) assert.equal(redact(input), want);
+    for (const spared of ["ship --compass north", "run --bypass yes", "run --passes 3"]) assert.equal(redact(spared), spared);
+  });
+
   test("ends an unclosed quote at the next whitespace", () => {
     const text = "Fix the bug: the token: 'it never refreshes and I want to investigate the retry loop";
     assert.equal(redact(text), `Fix the bug: the token: ${REDACTED} never refreshes and I want to investigate the retry loop`);
