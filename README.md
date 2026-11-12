@@ -513,49 +513,84 @@ labelled choices and returns one, with a probability for each. Under a version 2
   as written, where the backslash of a `DOMAIN\user` name (`CORP\tom`) is no escape. Then escaped
   line breaks and tabs (`\n`, `\r` and `\t`, as JSON writes them) become spaces, so that they end a
   value as the whitespace they stand for does. Then the other secret shapes become `[redacted]`:
-  `Authorization` headers in any scheme, JWTs, private-key blocks, keys and tokens with a known
-  prefix (`sk-`, `sk_live_`, `ghp_`, `github_pat_`, `glpat-`, `hf_`, `npm_`, `xoxb-`, `AIza`, `AKIA`
-  and others), basic credentials in command lines and config files, the value after a key or a
-  flag whose name says secret, password, credential or token, or ends in key (`api_key=…`,
-  `--password …`), and long mixed-case strings of 40 or more characters. The basic credentials are
-  the password of `-u user:password`, `--user` and `-U` in a curl command (from a `curl` word,
-  which is `curl` or a path that ends in `/curl`, to the next `|`, `;`, `&&` or line break; a
-  line break behind a backslash continues the command, and so does a `|`, `;` or `&&` inside a
-  quoted argument, which ends at its closing quote or at its line's end. The quotes are read two
-  ways: first with every quote counted, as they pair in a JSON string, and then, in a last pass
-  over what the other passes left, as the shell reads them, where a backslash escapes a quote.
-  Inside a flag's own value neither reading takes an escaped quote for text: it ends the value,
-  so the rest of that password can stay, and a later flag of the command can stay unread), while
-  `date -u +%H:%M:%S` and `docker run -u 1000:1000` stay; the password of
-  `--proxy-user` in any command; the text glued to `-p` in a command that a mysql-family program
-  starts (`mysql`, `mysqldump`, `mariadb` and the like), while `cp -pr` and
-  `docker run -p8080:80` stay; the word after `password` on a netrc line, one that also says
-  `machine` or `login`; the text of an XML element with a secret name, such as Maven's
-  `<password>`; the password of a Python `auth=('user', 'password')` pair or `HTTPBasicAuth`; and
-  the cookie values of `Cookie` and `Set-Cookie` headers. Every pattern is linear in the text, so
-  a huge paste cannot stall Pi. It is pattern matching: it catches the shapes it knows. Its known
-  gaps include these curl commands, whose password still reaches Jev:
-  - a quoted argument that runs over several lines, before the flag (`-d '{`, the body's lines,
-    `}' -u admin:pw`);
-  - a `-u` value in JSON-escaped quotes (`-u \"admin:pw\"`);
-  - a command inside a JSON string whose own argument holds escaped quotes, which are then
-    escaped twice, and a `|`, `;` or `&&` between them
-    (`{"command": "curl -d \"{\\\"a\\\": \\\"b; c\\\"}\" -u admin:pw"}`); with no separator in
-    the argument the password is hidden;
-  - a password that holds an escaped quote, whose rest stays (`-u "admin:pw\"x"` keeps `x`); a
-    user name that holds one, whose password stays (`-u "ad\"min:pw"`); and a flag behind such a
-    value;
-  - a `$'…'` string that holds a separator, before the flag
-    (`curl -d $'it\'s; here' -u admin:pw`);
-  - a command substitution with quotes of its own, before the flag
-    (`curl -d "$(jq -c ".a; .b" f)" -u admin:pw`);
-  - a backslash before a separator outside quotes, before the flag
-    (`curl https://h/a\;b -u admin:pw`);
-  - a line continuation between the flag and its value;
-  - combined short flags (`-sSu admin:pw`);
-  - a quoted password after the colon (`-u admin:"pw with space"`);
-  - an argument array (`["curl", "-u", "admin:pw"]`);
-  - `curl.exe`.
+  `Authorization` headers (the scheme, whichever it is, and the one word after it), JWTs,
+  private-key blocks, keys and tokens with a known prefix (`sk-`, `sk_live_`, `ghp_`, `github_pat_`,
+  `glpat-`, `hf_`, `npm_`, `xoxb-`, `AIza`, `AKIA` and others), basic credentials in command lines
+  and config files, the value after a key or a flag whose name says secret, password, credential or
+  token, or ends in key (`api_key=…`, `--password …`), and runs of 40 or more letters and digits in
+  mixed case, or of base64 characters in mixed case with a digit and a `+` or `/`. The basic
+  credentials are the password of `-u user:password`, `--user` and `-U` in a curl command (from a
+  `curl` word, which is `curl` or a path that ends in `/curl`, to the next `|`, `;`, `&&` or line
+  break; a line break behind a backslash continues the command, and so does a `|`, `;` or `&&`
+  inside a quoted argument, which ends at its closing quote or at its line's end. The quotes are
+  read two ways: first with every quote counted, as they pair in a JSON string, and then, in a last
+  pass over what the other passes left, as the shell reads them, where a backslash escapes a quote.
+  Inside a flag's own value neither reading takes an escaped quote for text: it ends the value, so
+  the rest of that password can stay, and a later flag of the command can stay unread), while
+  `date -u +%H:%M:%S` and `docker run -u 1000:1000` stay; the password of `--proxy-user` in any
+  command; the text glued to `-p` behind a mysql-family word (`mysql`, `mysqldump`, `mariadb` and
+  the like) in the same command, while `cp -pr` and `docker run -p8080:80` stay; the word after
+  `password` on a netrc line, one that also says `machine` or `login`; the text of an XML element
+  with a secret name, such as Maven's `<password>`; the password of a Python
+  `auth=('user', 'password')` pair or `HTTPBasicAuth`; and the cookie values of `Cookie` and
+  `Set-Cookie` headers. Every pattern is linear in the text, so a huge paste cannot stall Pi. It is
+  pattern matching: it catches the shapes it knows. It also hides some text that is no secret: the
+  text of a plist's `<key>` element (`<key>CFBundleName</key>`), the port in
+  `docker run --name mysql -p8080:80 img`, on a line that names mysql, and the word after `password`
+  on a line that also says `login` (`enter your login and password carefully`). Its known gaps
+  include the shapes below; each entry gives an input whose secret, or the part of it the entry
+  names, stays in the text that Jev reads, and the list is not complete.
+  - In a curl command (`pw` stands for a password):
+    - a quoted argument that runs over several lines, before the flag (`curl -d '{`, then
+      `"a": 1`, then `}' -u admin:pw https://h`, each on a line of its own);
+    - a `-u` value in JSON-escaped quotes (`curl -u \"admin:pw\" https://h`);
+    - a command inside a JSON string whose own argument holds quotes that are escaped twice, with
+      a `|`, `;` or `&&` between them
+      (`{"command": "curl -d \"{\\\"a\\\": \\\"b; c\\\"}\" -u admin:pw"}`);
+    - such a command with one quote escaped twice and the `|`, `;` or `&&` in a later quoted
+      argument
+      (`{"command": "curl -d \"5\\\" wide\" -H \"Accept: text/html; q=0.9\" -u admin:pw https://h"}`);
+    - a password that holds an escaped quote, whose part behind that quote stays
+      (`curl -u "admin:pw\"Xyz9" https://h` keeps `Xyz9`);
+    - a user name that holds an escaped quote (`curl -u "ad\"min:pw" https://h`);
+    - a flag behind a value that holds an escaped quote and a quoted `|`, `;` or `&&`
+      (`curl -u "admin:x\"y" -H "Accept: a; b" -U proxy:pw https://h` keeps `proxy:pw`);
+    - a quoted password that holds the other kind of quote, whose part from that quote on stays
+      (`curl -u "admin:O'Brien1x" https://h` keeps `'Brien1x`);
+    - a `$'…'` string that holds a separator, before the flag
+      (`curl -d $'it\'s; here' -u admin:pw`);
+    - a command substitution with quotes of its own, before the flag
+      (`curl -d "$(jq -c ".a; .b" f)" -u admin:pw`);
+    - a backslash before a separator outside quotes, before the flag
+      (`curl https://h/a\;b -u admin:pw`);
+    - a line continuation between the flag and its value (`curl -u \`, then `admin:pw https://h`
+      on the next line);
+    - combined short flags (`curl -sSu admin:pw https://h`);
+    - a quoted password after the colon (`curl -u admin:"pw with space" https://h`);
+    - an argument array (`["curl", "-u", "admin:pw"]`);
+    - `curl.exe` (`curl.exe -u admin:pw https://h`).
+  - Elsewhere:
+    - the user flags of other programs (`wget --user admin:pw https://h`,
+      `http -u admin:pw https://h`);
+    - a `.netrc` file written over several lines (`machine example.com`, then `login bob`, then
+      `password pw`, each on a line of its own);
+    - an `Authorization` name with an equals sign and no quotes, whose token stays
+      (`Authorization=Bearer q8Zt1rLm9XaQ`);
+    - a header name glued behind an underscore, whose token stays
+      (`HTTP_AUTHORIZATION: Bearer q8Zt1rLm9XaQ`);
+    - an `Authorization` credential of several words, whose words behind the first stay
+      (`Authorization: Digest username="bob", response="6629fae49393a05397450978507c4ef1"` keeps
+      the response);
+    - a credential of letters only before an escaped line break and another header, whose key
+      stays (`Authorization: abcdef\r\nX-Api-Key: Zz9y8x7w6v`);
+    - a comparison (`if (password === "pw") ok()`);
+    - a string behind a prefix letter (`password=b"pw"`, `token = r'pw'`);
+    - a value on the line after its name (`password:`, then `pw` on the next line);
+    - JSON escaped twice (`{\\"password\\": \\"pw\\"}`);
+    - a JWT glued behind an underscore (`x_eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl`);
+    - a URL password that holds a slash (`https://bob:p/w@host`);
+    - a Python auth pair whose password holds the other kind of quote
+      (`auth=("bob", "O'Brien1x")`).
 - **Then the caps.** The message keeps its first 16 KiB and last 4 KiB, as the keywords see it, then
   its head and tail within `totalChars` (12000); each earlier message keeps its last `messageChars`
   (1500) characters; and earlier messages are kept, newest first, only while the whole stays within

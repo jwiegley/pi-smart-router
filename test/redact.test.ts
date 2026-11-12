@@ -878,6 +878,64 @@ describe("redact", () => {
     });
   }
 
+  // The README's known gaps, input for input: what redact returns for each example the list gives.
+  // A row with no third text reaches Jev as it is. When a row fails, the README's list needs the
+  // same change.
+  const readmeGaps: ReadonlyArray<readonly [string, string, string?]> = [
+    // In a curl command.
+    ["a quoted argument that runs over several lines, before the flag", `curl -d '{\n"a": 1\n}' -u admin:pw https://h`],
+    ["a -u value in JSON-escaped quotes", 'curl -u \\"admin:pw\\" https://h'],
+    ["a command in a JSON string whose argument holds quotes escaped twice around a separator", '{"command": "curl -d \\"{\\\\\\"a\\\\\\": \\\\\\"b; c\\\\\\"}\\" -u admin:pw"}'],
+    ["such a command with one quote escaped twice and the separator in a later quoted argument", '{"command": "curl -d \\"5\\\\\\" wide\\" -H \\"Accept: text/html; q=0.9\\" -u admin:pw https://h"}'],
+    ["a password that holds an escaped quote, whose part behind that quote stays", 'curl -u "admin:pw\\"Xyz9" https://h', `curl -u "admin:${REDACTED}"Xyz9" https://h`],
+    ["a user name that holds an escaped quote", 'curl -u "ad\\"min:pw" https://h'],
+    ["a flag behind a value that holds an escaped quote and a quoted separator", 'curl -u "admin:x\\"y" -H "Accept: a; b" -U proxy:pw https://h', `curl -u "admin:${REDACTED}"y" -H "Accept: a; b" -U proxy:pw https://h`],
+    ["a quoted password that holds the other kind of quote, whose part from that quote on stays", `curl -u "admin:O'Brien1x" https://h`, `curl -u "admin:${REDACTED}'Brien1x" https://h`],
+    ["a $'…' string that holds a separator, before the flag", "curl -d $'it\\'s; here' -u admin:pw"],
+    ["a command substitution with quotes of its own, before the flag", 'curl -d "$(jq -c ".a; .b" f)" -u admin:pw'],
+    ["a backslash before a separator outside quotes, before the flag", "curl https://h/a\\;b -u admin:pw"],
+    ["a line continuation between the flag and its value", "curl -u \\\nadmin:pw https://h"],
+    ["combined short flags", "curl -sSu admin:pw https://h"],
+    ["a quoted password after the colon", 'curl -u admin:"pw with space" https://h'],
+    ["an argument array", '["curl", "-u", "admin:pw"]'],
+    ["curl.exe", "curl.exe -u admin:pw https://h"],
+    // Elsewhere.
+    ["wget's --user", "wget --user admin:pw https://h"],
+    ["http's -u", "http -u admin:pw https://h"],
+    ["a .netrc file written over several lines", "machine example.com\nlogin bob\npassword pw"],
+    ["an Authorization name with an equals sign and no quotes, whose token stays", "Authorization=Bearer q8Zt1rLm9XaQ", `Authorization=${REDACTED} q8Zt1rLm9XaQ`],
+    ["a header name glued behind an underscore, whose token stays", "HTTP_AUTHORIZATION: Bearer q8Zt1rLm9XaQ", `HTTP_AUTHORIZATION: ${REDACTED} q8Zt1rLm9XaQ`],
+    ["an Authorization credential of several words, whose words behind the first stay", 'Authorization: Digest username="bob", response="6629fae49393a05397450978507c4ef1"', `${REDACTED}"bob", response="6629fae49393a05397450978507c4ef1"`],
+    ["a credential of letters only before an escaped line break and another header, whose key stays", "Authorization: abcdef\\r\\nX-Api-Key: Zz9y8x7w6v", `${REDACTED} Zz9y8x7w6v`],
+    ["a comparison", 'if (password === "pw") ok()', `if (password =${REDACTED} "pw") ok()`],
+    ["a bytes string", 'password=b"pw"', `password=${REDACTED}"pw"`],
+    ["a raw string", "token = r'pw'", `token = ${REDACTED}'pw'`],
+    ["a value on the line after its name", "password:\npw"],
+    ["JSON escaped twice", '{\\\\"password\\\\": \\\\"pw\\\\"}'],
+    ["a JWT glued behind an underscore", "x_eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl"],
+    ["a URL password that holds a slash", "https://bob:p/w@host"],
+    ["a Python auth pair whose password holds the other kind of quote", `auth=("bob", "O'Brien1x")`],
+  ];
+
+  for (const [what, input, want] of readmeGaps) {
+    test(`keeps the README's known gap: ${what}`, () => {
+      assert.equal(redact(input), want ?? input);
+    });
+  }
+
+  // The README's examples of text that is hidden though it is no secret.
+  const readmeHidden: ReadonlyArray<readonly [string, string, string]> = [
+    ["the text of a plist's key element", "<key>CFBundleName</key>", `<key>${REDACTED}</key>`],
+    ["the port of docker run on a line that names mysql", "docker run --name mysql -p8080:80 img", `docker run --name mysql -p${REDACTED} img`],
+    ["the word after password on a line that also says login", "enter your login and password carefully", `enter your login and password ${REDACTED}`],
+  ];
+
+  for (const [what, input, want] of readmeHidden) {
+    test(`hides, as the README says, ${what}`, () => {
+      assert.equal(redact(input), want);
+    });
+  }
+
   // What five scans read that no output of redact shows. Each is asked on a copy, so that no test
   // moves a scan's own position.
   const scan = (pattern: RegExp, text: string): RegExpExecArray | null => new RegExp(pattern.source, pattern.flags).exec(text);

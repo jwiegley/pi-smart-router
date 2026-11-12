@@ -93,8 +93,9 @@ sends nothing unless pinned.
   that are linear in the text. Among them are basic credentials in command lines and config files:
   the password of `-u`, `--user` and `-U` in a curl command and of `--proxy-user` in any command,
   the password glued to `-p` in a mysql-family command, a netrc line's password, the text of an XML
-  element with a secret name, the password of a Python auth pair, and cookie values. Status lists
-  the classifier among what can still send data off the machine.
+  element with a secret name, the password of a Python auth pair, and cookie values. It is pattern
+  matching: the README lists shapes it is known to miss, and text it hides that is no secret. Status
+  lists the classifier among what can still send data off the machine.
 - The router keeps no prompt text: it binds plans by HMAC-SHA-256 digests under a key each instance
   draws at random, and records hold neither text nor digest.
 - No OpenRouter model answers the requests that go through a work session's route, routed or picked
