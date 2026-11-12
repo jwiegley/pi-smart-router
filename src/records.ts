@@ -1,9 +1,10 @@
-// Each routed run's level, kept in the session: a version 2 run on smart-router/auto that an input
-// planned leaves one `smart-router.level` custom entry when it settles, none when its plan no longer
-// applied at its first request (route.ts, takePlan), and /smart-router was appends a correction of
-// the latest run, which is a label only: nothing is sent again. A record holds no prompt text and
-// no digest of it; the user message sits just before it in the same session, which is where a
-// training review reads both, on the host that made them.
+// A run's level, kept in the session: a run that still holds a level when it settles leaves one
+// `smart-router.level` custom entry, and a level the router dropped before then is not recorded
+// (router.ts, settle; route.ts, takePlan). /smart-router was appends a correction of the run in
+// flight, when that run holds a level, or else of the run of the latest record, which is a label
+// only: nothing is sent again. A record holds no prompt text and no digest of it; its run's first
+// user message sits earlier in the same session, which is where a training review reads both, on
+// the host that made them.
 //
 // Also the words the footer and history use for a run's level: its scope, its tier, and what
 // decided it.
@@ -38,7 +39,7 @@ export interface LevelRecord {
   readonly at: number;
   readonly scope: Scope;
   readonly source: LevelSource | "correction";
-  /** The tier the run went to, or the one a correction says it should have gone to. */
+  /** The tier planned for the run, or the one a correction says it should have gone to. */
   readonly tier: Tier;
   /** The tier the tag, Jev or the keywords asked for, before the floor, the hold rules and any step-up. */
   readonly asked?: Tier;
