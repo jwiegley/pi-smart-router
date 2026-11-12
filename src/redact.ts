@@ -95,10 +95,10 @@ const LONG_BASE64 = /[A-Za-z0-9+/]{40,}/g;
 // and the user stays. Other programs give those flags other meanings (date -u +%H:%M:%S, docker
 // run -u 1000:1000, pip install -U git+https://…), so they are read only in a curl command: after
 // a curl word and before the next |, ;, && or line break. A curl word is curl before a space or a
-// tab and not behind a letter, a digit, _ or -: at the text's start, behind whitespace, or behind
-// / . ( = $ @, a quote, a backtick or another such mark (/usr/bin/curl, my.curl, $(curl). A line
-// break right behind a backslash continues the command, as the shell reads it. So does a |, ; or &&
-// inside a quoted argument: it is the argument's own
+// tab and not behind an ASCII letter or digit, _ or -: at the text's start, behind whitespace, or
+// behind / . ( = $ @, a quote, a backtick or another such mark (/usr/bin/curl, my.curl, $(curl). A
+// line break right behind a backslash continues the command, as the shell reads it. So does a |, ;
+// or && inside a quoted argument: it is the argument's own
 // (-H 'Content-Type: application/json; charset=utf-8').
 //
 // The quotes of a curl command are read in two ways, each by a pass of its own, and each pass
