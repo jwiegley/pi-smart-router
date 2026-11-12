@@ -8,9 +8,10 @@
 // are read before the basic credentials: a basic value can run on, through an unclosed quote or a
 // word glued to the next name, and would take that name away from the secret after it. The input
 // is untrusted and unbounded, so every pattern is linear: a start anchored by a lookbehind or a fixed
-// literal, character classes with no overlapping adjacent quantifiers, and lazy scans that consume
-// to their end; where a quantifier overlaps what follows it, an anchor (a line's or a word's start)
-// or a delimiter it cannot cross bounds what each attempt reads.
+// literal, or an attempt that reads a bounded count of characters (the long-run backstops),
+// character classes with no overlapping adjacent quantifiers, and lazy scans that consume to their
+// end; where a quantifier overlaps what follows it, an anchor (a line's or a word's start) or a
+// delimiter it cannot cross bounds what each attempt reads.
 export const REDACTED = "[redacted]";
 
 // The user stays, the password goes; the user may be empty (redis://:pass@host).
@@ -22,8 +23,9 @@ const ESCAPED_BREAK = /\\[nrt]/g;
 const PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   // Header, in plain or JSON form: the whole value, whatever its scheme. The value runs to the next
   // space, quote or semicolon, so a JSON escape inside it (\/, \u002B) never cuts it short; an
-  // escaped line break, a space by now, ends it.
-  [/\bAuthorization\\?["']?[ \t]*:[ \t]*\\?["']?(?:[A-Za-z]+[ \t]+)?\\?["']?[^\s"';]+/gi, REDACTED],
+  // escaped line break, a space by now, ends it. The pattern ignores case, so [a-z] is every
+  // letter of the scheme.
+  [/\bAuthorization\\?["']?[ \t]*:[ \t]*\\?["']?(?:[a-z]+[ \t]+)?\\?["']?[^\s"';]+/gi, REDACTED],
   [/(?<![\w-])eyJ[\w-]+\.[\w-]+\.[\w-]*/g, REDACTED],
   [/-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|$)/g, REDACTED],
   [/\b[rs]k[_-](?:live|test|proj)[_-][A-Za-z0-9_-]{8,}/g, REDACTED],
@@ -49,8 +51,10 @@ const VALUE = /\\?"[^"\n]*"(?!\w)|\\?'[^'\n]*'(?!\w)|\\?["'][^\s]*|[^\s"',;]+/y;
 // A flag that names a secret and takes its value after a space: --password hunter2. Its name is
 // tested with its hyphens on: only the pass and pwd rule of SECRET_NAME reads where a name starts,
 // and it takes a hyphen there as it takes the start.
+// A bare value starts with no hyphen, which starts the next flag. A quote never reaches the bare
+// form: the form before it takes every value that starts with one.
 const FLAG_SPACE = /(?<![\w-])(--[\w-]+)[ \t]+/g;
-const FLAG_VALUE = /\\?"[^"\n]*"(?!\w)|\\?'[^'\n]*'(?!\w)|\\?["'][^\s]*|[^\s"'-][^\s"',;]*/y;
+const FLAG_VALUE = /\\?"[^"\n]*"(?!\w)|\\?'[^'\n]*'(?!\w)|\\?["'][^\s]*|[^\s-][^\s"',;]*/y;
 // Any name ending in key is secret, monkey and hotkey included; keyboard is not.
 const SECRET_NAME =
   /secret|password|passwd|passphrase|credential|authorization|token(?!s)|api[_-]?key|access[_-]?key|private[_-]?key|key$|(?:^|[_-])(?:pass|pwd)(?:$|[_-])/i;
@@ -76,9 +80,11 @@ function redactValues(text: string, names: RegExp, value: RegExp): string {
 }
 
 // Backstops for keys that carry no prefix: 40 or more characters, mixed case. The base64 form
-// must also hold a digit and a `+` or `/`, which a lowercase path or a digest never does.
-const LONG_ALNUM = /(?<![A-Za-z0-9])[A-Za-z0-9]{40,}(?![A-Za-z0-9])/g;
-const LONG_BASE64 = /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40,}(?![A-Za-z0-9+/])/g;
+// must also hold a digit and a `+` or `/`, which a lowercase path or a digest never does. A run is
+// read whole: the scan finds it at its first character, and the quantifier takes it to its last.
+// An attempt inside a shorter run reads fewer than 40 characters, so the scan stays linear.
+const LONG_ALNUM = /[A-Za-z0-9]{40,}/g;
+const LONG_BASE64 = /[A-Za-z0-9+/]{40,}/g;
 
 // ─── Basic credentials in command-line and config forms ───
 
@@ -206,11 +212,12 @@ function redactMysqlPasswords(text: string): string {
 // only on a line that also says machine or login, so that prose such as "the password field is
 // empty" stays. Only lines that hold password are read, each once: the candidate is anchored at a
 // line's start and ends where a line does. A line starts behind a line feed, a carriage return,
-// U+2028 or U+2029, and the dot stops at each of them, so no line reads into the next. A value that
-// starts with = or : belongs to the name pass (password = hunter2).
-const NETRC_CANDIDATE = /^.*password.*$/gm;
+// U+2028 or U+2029, and the dot stops at each of them, so no line reads into the next, and a quoted
+// password, read within its line, meets no line feed. A value that starts with = or : belongs to
+// the name pass (password = hunter2).
+const NETRC_CANDIDATE = /^.*password.*/gm;
 const NETRC_LINE = /(?<![\w-])(?:machine|login)(?![\w-])/;
-const NETRC_PASSWORD = /(?<![\w-])(password[ \t]+)(?:"[^"\n]*"|"?[^\s"=:]\S*)/g;
+const NETRC_PASSWORD = /(?<![\w-])(password[ \t]+)(?:"[^"]*"|"?[^\s"=:]\S*)/g;
 
 // The text of an XML element whose name SECRET_NAME matches, as in Maven's settings.xml:
 // <password>hunter2</password>. The tags stay. The text runs to the next <, and only the element's
