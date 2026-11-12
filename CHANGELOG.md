@@ -48,12 +48,11 @@ sends nothing unless pinned.
   model of the work account, by routing's own account check, Multi-Pass's label included. It runs
   at every hook the pin's guard uses, switches back to `smart-router/auto` with notices in work
   scope's words, and locks a session that something keeps switching away.
-- Records: one `smart-router.level` session entry per routed version 2 run, appended when the run
-  settles, with no prompt text and no digest. A run records no level when the router, routing its
-  first request, finds that its plan no longer applies; a run whose first request is refused before
-  the router looks at its plan, and a run whose plan another message's plan replaced, can still
-  record the planned level. `/smart-router was low|medium|high|super` appends a correction, and
-  nothing is sent again.
+- Records: a run that still holds a level when it settles leaves one `smart-router.level` session
+  entry, with no prompt text and no digest. The README's "Records and training" says which messages
+  get no level, when the router drops a level, so that it is not recorded, and which runs still
+  record the planned level after the selection or the scope changed.
+  `/smart-router was low|medium|high|super` appends a correction, and nothing is sent again.
 - `/smart-router scope [work|personal|status]` and `/smart-router was`.
 - The footer's level item, under its own status key `smart-router-level`. History lines of a
   version 2 run gain its scope and level, and status shows the scope, each scope's levels and the
