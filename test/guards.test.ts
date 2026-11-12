@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test, { afterEach, beforeEach, describe } from "node:test";
 
@@ -1011,13 +1011,23 @@ describe("work guard", () => {
       assert.deepEqual([selection(loaded), lastNotice(loaded)?.message], [AUTO, reverted(WORK_SOL)], "the remembered binding names Positron work, and Multi-Pass labels the alias personal");
     });
 
+    /**
+     * Rewrite a file in place as a write made later. The swapped labels have the size of the ones they replace, and the router
+     * notices a change by size and modification time, so a rewrite in the same clock tick as the file's creation would look unchanged.
+     */
+    const rewriteLater = (path: string, text: string): void => {
+      writeFileSync(path, text);
+      const later = new Date(statSync(path).mtimeMs + 2_000);
+      utimesSync(path, later, later);
+    };
+
     /** What happens to Multi-Pass's labels together with the roster breaking: each leaves openai-codex-3 without its label. */
     const LABEL_CHANGES: ReadonlyArray<readonly [string, (path: string) => void]> = [
       ["deleted", (path) => rmSync(path)],
       ["made unsafe", (path) => chmodSync(path, 0o666)],
       ["made unreadable", (path) => chmodSync(path, 0o000)],
       ["made malformed", (path) => writeFileSync(path, "{ nope")],
-      ["swapped", (path) => writeFileSync(path, SWAPPED)],
+      ["swapped", (path) => rewriteLater(path, SWAPPED)],
     ];
 
     /** A session in work scope whose labels read fine, and the work alias picked by hand, kept. */
