@@ -586,6 +586,27 @@ describe("exclusions in version 2", () => {
     invalid(workOnAlias(["openai-codex-3/*"]), 'roles[0].models[0]: "openai-codex-3/gpt-6-luna" is excluded by openai-codex-3/*');
   });
 
+  test("the roster's own openai-codex-3/* applies with the roles, before the accounts, the scopes and the levels are read", () => {
+    const own = 'roles[5].models[0]: "openai-codex-3/gpt-6-luna" is excluded by openai-codex-3/*';
+    // Each of these defects is the first one reported once the roster's own exclusion is left out.
+    const later: ReadonlyArray<readonly [string, (r: Json) => void]> = [
+      ['accounts.openai-codex-3.scope: must be "personal" or "work"', (r) => (r.accounts["openai-codex-3"].scope = "team")],
+      ['roles[5].models[0]: "openai-codex-3/gpt-6-luna" uses the subscription provider openai-codex-3, which needs a binding in accounts', (r) => delete r.accounts["openai-codex-3"]],
+      ['scopes.personal.levels.low.role: "nobody" is not a role', (r) => (r.scopes.personal.levels.low.role = "nobody")],
+      ["roles[5].models[1]: \"openrouter/qwen/qwen-9-max\" is in the work scope's low level, which takes only work-bound Codex models", (r) => r.roles[5].models.push("openrouter/qwen/qwen-9-max")],
+    ];
+    for (const [defect, edit] of later) {
+      invalid(edited(edit), defect);
+      invalid(
+        edited((r) => {
+          r.exclude = ["openai-codex/*", "openai-codex-3/*"];
+          edit(r);
+        }),
+        own,
+      );
+    }
+  });
+
   test("openai-codex-3/* is lifted only in a work level's role", () => {
     invalid(
       edited((r) => r.roles.push({ name: "spare", models: ["openai-codex-3/gpt-6-nova"] })),
