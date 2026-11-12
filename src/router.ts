@@ -596,10 +596,11 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   };
 
   /**
-   * Jev's answer about a message, asked with what jevAsk gave. Jev reads the text without its tag,
-   * the conversation before it (the message is not in the session yet) and the scope's
-   * descriptions, redacted, then cut to the classifier's caps. Never rejects: a request that cannot
-   * be built, such as for text too long to redact, fails as an error before anything is sent.
+   * Jev's answer about a message, asked with what jevAsk gave. Jev reads the text without its tag
+   * and the conversation before it (the message is not in the session yet), both redacted and then
+   * cut to the classifier's caps, and the scope's descriptions as the roster gives them. Never
+   * rejects: a request that cannot be built, such as for text too long to redact, fails as an error
+   * before anything is sent.
    */
   const askFor = (ctx: ExtensionContext, ask: JevAsk, text: string): Promise<JevOutcome> => {
     const { settings, section, history } = ask;

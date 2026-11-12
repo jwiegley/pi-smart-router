@@ -21,8 +21,8 @@ beettlle/pi-smart-router to the virtual models of Pi 1.5. `CLAUDE.md` is a link 
   the machine is the classifier's, made by Pi: `ctx.modelRegistry.findOfType` and
   `ctx.modelRegistry.classify` with `{ timeoutMs, maxRetries: 0 }`, once per routed run on
   `smart-router/auto` when a version 2 roster has a classifier, and never under the pin, on
-  `smart-router/local`, for a steer or follow-up, or without a classifier. What it sends is
-  redacted first (`src/redact.ts`).
+  `smart-router/local`, for a steer or follow-up, or without a classifier. The message and the
+  earlier messages it sends go through redaction first (`src/redact.ts`).
 - Runtime code keeps no prompt text: a plan is bound to its message by a keyed digest, and no entry
   the router writes holds text or a digest.
 - Runtime code never reads a session's whole history: no `getEntries()` or `getBranch()`. It uses
