@@ -1463,6 +1463,94 @@ describe("a run's record", () => {
     ]);
   });
 
+  test("is not written for a level a custom message's run dropped: neither that run nor the message's own run, started after it, leaves an entry", async (t) => {
+    const loaded = await hera(t);
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    const later = laterExtension(loaded);
+    const hold = deferred<void>();
+    later.holds.set("design the new storage layer", hold.promise);
+    const held = say(loaded, "design the new storage layer #super");
+    await settled();
+    assert.deepEqual([recordOf(loaded)?.plan?.level?.tier, recordOf(loaded)?.pendingLevel?.level.tier], ["super", "super"], "the message planned SUPER");
+    // A goal-x continuation starts a run while the message is held: the run is not the message's.
+    await loaded.host.emit("before_agent_start", { messageType: "custom", message: GOAL_X });
+    assert.equal(recordOf(loaded)?.pendingLevel, undefined, "the custom message's run dropped the level");
+    loaded.session.startRun();
+    await finish(loaded, KIMI);
+    assert.deepEqual(levelEntries(loaded), [], "a custom message's run has no level of its own");
+    hold.resolve();
+    await held;
+    assert.equal(await runPrompt(loaded, "design the new storage layer"), KIMI, "the message's own run goes unplanned, on smart-router/auto");
+    await finish(loaded, KIMI);
+    assert.deepEqual(levelEntries(loaded), [], "and the dropped level is not recorded");
+  });
+
+  test("is not written for a level a newer idle message replaced: the held message's own run, started after the newer one's, leaves no entry", async (t) => {
+    const loaded = await hera(t);
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    const later = laterExtension(loaded);
+    const hold = deferred<void>();
+    later.holds.set("design the new storage layer", hold.promise);
+    const held = say(loaded, "design the new storage layer #super");
+    await settled();
+    const first = recordOf(loaded)?.pendingLevel;
+    assert.equal(first?.level.tier, "super", "the held message planned SUPER");
+    // A second message arrives while the session is still idle, and is planned in the first one's place.
+    await say(loaded, "rename foo to bar #low");
+    const second = recordOf(loaded)?.pendingLevel;
+    assert.deepEqual([second === first, second?.level.tier], [false, "low"], "the pending level is the newer message's");
+    assert.equal(await runPrompt(loaded, "rename foo to bar"), LUNA);
+    await finish(loaded, LUNA);
+    hold.resolve();
+    await held;
+    assert.equal(await runPrompt(loaded, "design the new storage layer"), LUNA, "the held message's own run goes unplanned, on smart-router/auto");
+    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel], [undefined, undefined]);
+    await finish(loaded, LUNA);
+    assert.deepEqual(
+      levelEntries(loaded).map((record) => [record.source, record.tier, record.ref]),
+      [["tag", "low", LUNA]],
+      "one entry, the newer message's run's: the held message's SUPER is not recorded",
+    );
+  });
+
+  test("keeps the planned level for a run that stays on a model picked by hand after its message was planned, and loses it when the selection moves on to smart-router/local", async (t) => {
+    // The run stays on the hand-picked model: none of its requests reach the router.
+    const stays = await hera(t, { id: "stays" });
+    await say(stays, "x #high");
+    assert.equal(await stays.host.choose(KIMI), true);
+    stays.session.startRun();
+    await stays.host.emit("before_agent_start", { messageType: "user", prompt: "x" });
+    await finish(stays, KIMI);
+    // The same, and the hand-picked model ends on an error: no model answered.
+    assert.equal(await stays.host.choose("smart-router/auto"), true);
+    await say(stays, "y #low");
+    assert.equal(await stays.host.choose(KIMI), true);
+    stays.session.startRun();
+    await stays.host.emit("before_agent_start", { messageType: "user", prompt: "y" });
+    await finish(stays, KIMI, { stopReason: "error", errorMessage: "terminated" });
+    assert.deepEqual(
+      levelEntries(stays).map((record) => [record.source, record.tier, "ref" in record ? record.ref : "no ref"]),
+      [
+        ["tag", "high", KIMI],
+        ["tag", "low", "no ref"],
+      ],
+    );
+    // The run starts on the hand-picked model, the selection moves to smart-router/local, and a
+    // steer's request is the run's first to reach the router: the plan was made for smart-router/auto.
+    const moves = await hera(t, { id: "moves" });
+    await say(moves, "x #high");
+    assert.equal(await moves.host.choose(KIMI), true);
+    const signal = moves.session.startRun();
+    await moves.host.emit("before_agent_start", { messageType: "user", prompt: "x" });
+    await moves.host.emit("message_end", { message: assistant(KIMI, { stopReason: "toolUse" }) });
+    assert.equal(recordOf(moves)?.pendingLevel?.level.tier, "high", "the run holds its level on the hand-picked model");
+    assert.equal(await moves.host.choose("smart-router/local"), true);
+    assert.equal(routed(moves.runtime.route("local", request("user", { signal }))), GLM);
+    assert.equal(recordOf(moves)?.pendingLevel, undefined, "the plan no longer applies, and takes the level with it");
+    await finish(moves, GLM);
+    assert.deepEqual(levelEntries(moves), []);
+  });
+
   test("names the model that answered, after a retry moved the run", async (t) => {
     const loaded = await hera(t);
     await say(loaded, "x #high");
@@ -1632,6 +1720,27 @@ describe("a run's record", () => {
     );
     assert.deepEqual(records[0]?.jev, { model: JEV, choice: "low", probabilities: LOW, confidence: 0.8, ms: 0 });
     assert.equal(records[1] !== undefined && "jev" in records[1], false, "the resend asked Jev nothing");
+  });
+
+  test("a resend that reused an untagged message's level records that message's answer from Jev again, and Jev is not asked again", async (t) => {
+    const loaded = await hera(t);
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    await say(loaded, "go ahead");
+    assert.equal(await runPrompt(loaded, "go ahead"), LUNA);
+    await finish(loaded, LUNA);
+    // pi-idle-check sends the text again.
+    await say(loaded, "go ahead", { source: "extension" });
+    assert.equal(await runPrompt(loaded, "go ahead"), LUNA);
+    await finish(loaded, LUNA);
+    const answer = { model: JEV, choice: "low", probabilities: LOW, confidence: 0.8, ms: 0 };
+    assert.deepEqual(
+      levelEntries(loaded).map((record) => [record.source, record.tier, record.jev]),
+      [
+        ["jev", "low", answer],
+        ["jev", "low", answer],
+      ],
+    );
+    assert.equal(calls(loaded), 1, "one question, for the first message");
   });
 
   test("a run without a level records nothing: a physical selection, smart-router/local, a pinned session and a version 1 roster", async (t) => {

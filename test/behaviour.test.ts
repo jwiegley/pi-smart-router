@@ -1492,6 +1492,14 @@ test("L7 one smart-router.level record per run; /smart-router was appends a corr
   const b = runRecords(pi)[1];
   const tagged = { scope: "personal", source: "tag", tag: "high", tier: "high", ref: PERSONAL.high };
   assert.deepEqual(fields(b, tagged), tagged);
+  // Each record sits after its run's user message, which lacks the tag the record keeps.
+  const trail = pi.session.sessionManager.getEntries().flatMap((entry) => {
+    if (entry.type === "custom" && entry.customType === LEVEL_ENTRY) return [`record ${String((entry.data as Record<string, unknown>).source)}`];
+    if (entry.type !== "message" || entry.message.role !== "user") return [];
+    const { content } = entry.message;
+    return [typeof content === "string" ? content : content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("")];
+  });
+  assert.deepEqual(trail, ["Tidy the zebra notes", "record jev", "Answer the zebra question", "record tag"]);
 
   // A correction after the run settled labels that run, and nothing is sent again.
   const sent = world.refCounts();
