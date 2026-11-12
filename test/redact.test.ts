@@ -1102,6 +1102,25 @@ describe("redact", () => {
     for (const [what, input, want] of tables.flat()) assert.equal(redact(input), want, what);
   });
 
+  // The README's one sentence about the user flags only introduces examples, so the examples must
+  // be there: each of curl's three flags hidden behind curl, --proxy-user hidden behind wget, and
+  // date -u and docker run -u left as they are. The test above holds the README to these rows.
+  test("the README's examples show curl's user flags behind curl and --proxy-user behind wget, as its sentence says", () => {
+    const hidden = readmeExamples.filter(([, input, want]) => want !== undefined && want !== input);
+    for (const [flag, shape] of [
+      ["-u", /^curl -u \S+:Hunter2pw /],
+      ["--user", /^curl .* --user \S+:Hunter3pw /],
+      ["-U", /^curl .* -U \S+:Hunter4pw /],
+      ["--proxy-user", /^wget --proxy-user \S+:Hunter2pw /],
+    ] as const) {
+      const rows = hidden.filter(([, input]) => shape.test(input));
+      assert.ok(rows.length > 0, `an example with ${flag}`);
+      for (const [, , want] of rows) assert.ok(!/Hunter[234]pw/.test(want ?? ""), `${flag}: ${want}`);
+    }
+    const left = readmeExamples.filter(([, , want]) => want === undefined).map(([, input]) => input);
+    for (const text of ["date -u +%H:%M:%S", "docker run -u 1000:1000 img"]) assert.ok(left.some((input) => input.includes(text)), `${text} in a row that stays as it is`);
+  });
+
   // What five scans read that no output of redact shows. Each is asked on a copy, so that no test
   // moves a scan's own position.
   const scan = (pattern: RegExp, text: string): RegExpExecArray | null => new RegExp(pattern.source, pattern.flags).exec(text);

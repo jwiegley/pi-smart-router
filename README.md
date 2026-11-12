@@ -552,13 +552,10 @@ Redaction looks for these kinds of secret, and writes `[redacted]` where it find
 - long mixed-case runs of letters and digits, or of base64 characters.
 
 Redaction is pattern matching. It hides the shapes its tests pin, and other spellings of the same
-secret can stay: the list names what it looks for, not what it finds. Two things about it are
-decided and tested as rules:
-
-- `-u`, `--user` and `-U` are read only behind a `curl` word, because other programs give those
-  flags other meanings (`date -u`, `docker run -u`); `--proxy-user` is read in any command.
-- Its time grows in proportion to the text: a test holds it to under a second on each of its
-  hostile inputs, of 90,000 characters and more.
+secret can stay: the list names what it looks for, not what it finds. Other programs give `-u`,
+`--user` and `-U` other meanings (`date -u`, `docker run -u`), so the examples show them behind
+`curl`, and show `--proxy-user` behind `wget`. Redaction's time grows in proportion to the text:
+a test holds it to under a second on each of its hostile inputs, of 90,000 characters and more.
 
 For example, with each row a test of the suite, which reads these tables and checks them against
 the code. In a cell `⏎` stands for a line break and `⇥` for a tab:
