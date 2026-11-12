@@ -166,6 +166,20 @@ describe("redact", () => {
     for (const [input, want] of cases) assert.equal(redact(input), want);
   });
 
+  test("a digit or an underscore behind a quote is a word character too, so that quote closes no value", () => {
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      ['the password: "it is 5"9 wide" in the dialog', `the password: ${REDACTED} is 5"9 wide" in the dialog`],
+      ['the password: "see row"_2 of the table" now', `the password: ${REDACTED} row"_2 of the table" now`],
+      ["masterkey: 'it is 5'9 wide' in the dialog", `masterkey: ${REDACTED} is 5'9 wide' in the dialog`],
+      ["masterkey: 'see row'_2 of the table' now", `masterkey: ${REDACTED} row'_2 of the table' now`],
+      ['the --token "it is 5"9 wide" in the dialog', `the --token ${REDACTED} is 5"9 wide" in the dialog`],
+      ['the --token "see row"_2 of the table" now', `the --token ${REDACTED} row"_2 of the table" now`],
+      ["the --token 'it is 5'9 wide' in the dialog", `the --token ${REDACTED} is 5'9 wide' in the dialog`],
+      ["the --token 'see row'_2 of the table' now", `the --token ${REDACTED} row'_2 of the table' now`],
+    ];
+    for (const [input, want] of cases) assert.equal(redact(input), want);
+  });
+
   test("hides escaped quotes and an Authorization name", () => {
     const cases: ReadonlyArray<readonly [string, string]> = [
       ['{\\"password\\": \\"hunter2\\"}', "hunter2"],
@@ -216,6 +230,10 @@ describe("redact", () => {
     ["a credential after an escaped CRLF", "\\r\\nAuthorization: Bearer q8Zt1rLm9XaQ", `  ${REDACTED}`],
     ["the API key after a password and an escaped line break", `"password: hunter2\\napi_key: ${hexKey}"`, `"password: ${REDACTED} api_key: ${REDACTED}"`],
     ["the API key flag after a password flag and an escaped line break", `"--password hunter2\\n--api-key ${hexKey}"`, `"--password ${REDACTED} --api-key ${REDACTED}"`],
+    // A backslash before the escape does not keep it: the n of \\n still reads as a space, and the
+    // first backslash goes with the value before it.
+    ["the API key after a password and a line break escaped twice", `"password: hunter2\\\\napi_key: ${hexKey}"`, `"password: ${REDACTED} api_key: ${REDACTED}"`],
+    ["the password after a header and a tab escaped twice", '"Authorization: Bearer abc\\\\tpassword: hunter2"', `"${REDACTED} password: ${REDACTED}"`],
   ];
 
   for (const [name, input, want] of escapedBreaks) {
@@ -249,6 +267,12 @@ describe("redact", () => {
 
   test("leaves a backslash before any other letter as it is, uppercase T included", () => {
     for (const text of ["CORP\\Tom", "C:\\Temp", "logged in as CORP\\Tom from C:\\Temp\\New"]) {
+      assert.equal(redact(text), text);
+    }
+  });
+
+  test("leaves a backslash before b, f and v as it is: only n, r and t are escaped breaks", () => {
+    for (const text of ["C:\\bin\\foo\\var", "a\\bc", "a\\fc", "a\\vc", "see C:\\build\\fonts\\vendor for the files"]) {
       assert.equal(redact(text), text);
     }
   });
@@ -496,6 +520,20 @@ describe("redact", () => {
       }
     });
   }
+
+  // The same rule for every run of 1 to 64 backslashes, each expectation computed from the run's
+  // parity. A run longer than 64 is not pinned.
+  test("reads a quote behind a run of 1 to 64 backslashes in a double-quoted curl argument by the run's parity, 64 being the longest run pinned", () => {
+    for (let run = 1; run <= 64; run += 1) {
+      const backslashes = "\\".repeat(run);
+      if (run % 2 === 1) {
+        assert.equal(redact(`curl -d "a${backslashes}"b; c" -u admin:Hunter2pw https://h`), `curl -d "a${backslashes}"b; c" -u admin:${REDACTED} https://h`, `a run of ${run}: the quote is text`);
+      } else {
+        const text = `curl -d "a${backslashes}" https://h; date -u +%H:%M:%S`;
+        assert.equal(redact(text), text, `a run of ${run}: the quote closes the argument`);
+      }
+    }
+  });
 
   test("redacts every part of a private key block and a vendor token that the backstops would miss", () => {
     const block = `-----BEGIN PGP PRIVATE KEY BLOCK-----\n\n${pgpBody}\nshort/Tail+9\n-----END PGP PRIVATE KEY BLOCK-----`;
