@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test, { describe } from "node:test";
 
-import { redact, REDACTED } from "../src/redact.ts";
+import { redact, REDACTED, SCANS } from "../src/redact.ts";
 
 const pgpBody = "lQOYBF1bU2kBCAC7nV3rXQ9p+Kq/2mZtYw8sH4dLcE6aR0uJfGiT5vNoBxWy1zA3";
 const awsSecret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
@@ -877,6 +877,36 @@ describe("redact", () => {
       assert.equal(redact(input), want ?? input);
     });
   }
+
+  // What five scans read that no output of redact shows. Each is asked on a copy, so that no test
+  // moves a scan's own position.
+  const scan = (pattern: RegExp, text: string): RegExpExecArray | null => new RegExp(pattern.source, pattern.flags).exec(text);
+
+  test("the name scan finds a name of one letter, which is never secret", () => {
+    assert.deepEqual([...(scan(SCANS.NAME_SEPARATOR, "k = v") ?? [])], ["k = ", "k"]);
+    assert.equal(redact("k = v"), "k = v");
+  });
+
+  test("the flag scan finds a flag of one letter, and no flag in a bare double hyphen", () => {
+    assert.deepEqual([...(scan(SCANS.FLAG_SPACE, "--v x") ?? [])], ["--v ", "--v"]);
+    assert.equal(scan(SCANS.FLAG_SPACE, "-- x"), null);
+    for (const text of ["--v x", "-- x"]) assert.equal(redact(text), text);
+  });
+
+  test("the netrc candidate takes a line that ends in the word password, which has no value", () => {
+    assert.deepEqual([...(scan(SCANS.NETRC_CANDIDATE, "first\nlogin bob password\nlast") ?? [])], ["login bob password"]);
+    assert.equal(redact("login bob password"), "login bob password");
+  });
+
+  test("the XML scan finds an element whose name is one letter, which is never secret", () => {
+    assert.deepEqual([...(scan(SCANS.XML_ELEMENT, "<a>text</a>") ?? [])], ["<a>text", "<a>", "a"]);
+    assert.equal(redact("<a>text</a>"), "<a>text</a>");
+  });
+
+  test("the Cookie scan finds a header with nothing behind its colon, where there is no cookie", () => {
+    assert.deepEqual([...(scan(SCANS.COOKIE_HEADER, "Cookie:") ?? [])], ["Cookie:", "Cookie:", ""]);
+    assert.equal(redact("Cookie:"), "Cookie:");
+  });
 
   test("runs in linear time on long hostile input", () => {
     const inputs = [

@@ -238,6 +238,17 @@ const SET_COOKIE = /(?<!\w)(set-cookie\\?["']?[ \t]*:[ \t]*\\?["']?[^=;:\s"'\\]*
 const COOKIE_HEADER = /(?<![\w-])(cookie\\?["']?[ \t]*:[ \t]*\\?["']?)([^\n"']*)/gi;
 const COOKIE_VALUE = /=[^;\s\\]+/g;
 
+/**
+ * Five of the scans, for the unit tests alone. Each reads something that changes nothing `redact`
+ * returns, so no input to `redact` can pin it, and the tests pin it on the scan itself:
+ * - the name scan and the flag scan find a name of one letter, and no such name is secret, and the
+ *   flag scan finds no flag in a bare `--`;
+ * - the netrc candidate takes a line that ends in the word password, which has no value to hide;
+ * - the XML scan finds an element whose name is one letter, which is never secret;
+ * - the Cookie scan finds a header with nothing behind its colon, where there is no cookie.
+ */
+export const SCANS = { NAME_SEPARATOR, FLAG_SPACE, NETRC_CANDIDATE, XML_ELEMENT, COOKIE_HEADER } as const;
+
 /** Basic credentials in command-line and config forms, each password replaced with REDACTED. */
 function redactBasic(text: string): string {
   let out = redactUserPasswords(text, false);
