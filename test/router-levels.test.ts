@@ -628,6 +628,41 @@ describe("a session replaced, or a newer input, during the wait", () => {
     assert.deepEqual([fresh.router?.record("new")?.plan, fresh.router?.record("new")?.pendingLevel], [undefined, undefined]);
   });
 
+  // Pi tells the extension that a session ends before it makes the session's context stale. In
+  // that window the context still answers, so only the router's own check of the session's record
+  // keeps a late answer from planning.
+  test("an untagged message's answer that arrives after the session's shutdown, while its context still answers, plans nothing and shows no level", { timeout: 10_000 }, async (t) => {
+    const loaded = await hera(t);
+    const late = deferred<ClassifierResult>();
+    loaded.runtime.answer = () => late.promise;
+    const waiting = say(loaded, "go ahead");
+    await settled();
+    assert.equal(calls(loaded), 1, "the message waits for Jev");
+    const left = recordOf(loaded);
+    await loaded.host.emit("session_shutdown", { reason: "quit" });
+    const notices = loaded.session.notices.length;
+    late.resolve(jevAnswer(LOW));
+    assert.deepEqual(await waiting, [undefined]);
+    assert.equal(loaded.session.statuses.get(LEVEL_KEY), undefined, "no level is shown");
+    assert.equal(loaded.session.notices.length, notices, "and nothing is said");
+    assert.deepEqual([left?.plan, left?.pendingLevel, left?.lastInput], [undefined, undefined, undefined], "the record the session left holds no plan");
+    assert.equal(recordOf(loaded), undefined, "and the session has no record again");
+  });
+
+  test("a tagged run's opinion that arrives after the session's shutdown does not land in the record the session left", { timeout: 10_000 }, async (t) => {
+    const loaded = await hera(t);
+    const late = deferred<ClassifierResult>();
+    loaded.runtime.answer = () => late.promise;
+    await say(loaded, "go ahead #high");
+    const left = recordOf(loaded);
+    assert.equal(left?.pendingLevel?.jev, "pending");
+    await loaded.host.emit("session_shutdown", { reason: "quit" });
+    late.resolve(jevAnswer(SUPER));
+    await settled();
+    assert.equal(left?.pendingLevel?.jev, "pending", "the opinion is dropped: the record is no longer the session's");
+    assert.equal(recordOf(loaded), undefined);
+  });
+
   test("a tagged run's opinion lands in its own pending level, never in a later message's", { timeout: 10_000 }, async (t) => {
     const loaded = await hera(t);
     const first = deferred<ClassifierResult>();
