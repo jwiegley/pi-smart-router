@@ -1,9 +1,10 @@
 // One instance of the router: the session whose extension runtime loaded it, the two files it
-// reads, its per-session records and cooldowns, the limits both models declare, the guards of the
-// pin and of work scope, the pin's handoffs, the session's scope with its handoffs and work
-// directories, a message's tag and Jev's request, each planned run's level record and the footer
-// item that shows its level, the /smart-router command, what it tells pi-cache-optimizer, and the
-// handlers wire() registers.
+// reads, its per-session records and cooldowns, the limits both models declare, the pin's handoffs
+// and status item, the session's scope with its handoffs and work directories, the refusals of its
+// own two models for a scope their policy does not serve, a message's tag and Jev's request, each
+// planned run's level record and the footer item that shows its level, the /smart-router command,
+// what it tells pi-cache-optimizer, and the handlers wire() registers. No handler changes or blocks
+// what is selected (src/selection.ts).
 //
 // createRouter only builds closures. It makes no pi.on, registration or command call, so a throw
 // while it is built leaves only the two refusing models index.ts registered, and wire() makes
@@ -25,7 +26,7 @@ import type {
   SessionShutdownEvent,
 } from "@earendil-works/pi-coding-agent";
 
-import { checkAccount, isWorkCodex, labelsFile, needsLabels } from "./accounts.ts";
+import { labelsFile, needsLabels } from "./accounts.ts";
 import { registerAdapter, unregisterAdapter } from "./cache-optimizer.ts";
 import type { ActiveRoute } from "./cache-optimizer.ts";
 import { smartRouterCommand } from "./commands.ts";
@@ -58,8 +59,6 @@ import {
 import type { RouterError, TagIgnored } from "./errors.ts";
 import { isRecord } from "./files.ts";
 import type { FileSystem, Loaded } from "./files.ts";
-import { createGuards, describeModel, newGuardState } from "./guards.ts";
-import type { GuardState } from "./guards.ts";
 import { askJev, buildContext, jevAsk, recentMessages } from "./jev.ts";
 import type { JevAsk, JevOutcome } from "./jev.ts";
 import { EMPTY_POLICY, policyFromRoster } from "./local.ts";
@@ -76,6 +75,7 @@ import { autoRoles, parseRef, rosterFile, SCOPES, scopeSection, servesScope } fr
 import type { Roster, Scope, ScopedBinding } from "./roster.ts";
 import { readScope, scopeEntry, workDirectoryOf } from "./scope.ts";
 import type { ScopeEntryData, ScopeState, WorkDirectories } from "./scope.ts";
+import { describeModel, showPinStatus, switchToLocal } from "./selection.ts";
 import { parseTag } from "./tags.ts";
 import type { Tagged } from "./tags.ts";
 import type { Tier } from "./tiers.ts";
@@ -100,11 +100,10 @@ export interface RouterOptions {
 }
 
 /**
- * What a router instance keeps per session: the route records, the guards' state, whether it
- * tried to record the work directories' scope, and what binds a plan to the run that uses it.
+ * What a router instance keeps per session: the route records, whether it tried to record the work
+ * directories' scope, and what binds a plan to the run that uses it.
  */
 export interface Session extends SessionRecord {
-  readonly guard: GuardState;
   /** Whether this instance has tried to record the scope the work directories gave the session. It tries once. */
   directoryTried: boolean;
   /** The token of the latest input that planned: an input that waited for Jev plans only if no newer input has planned since. */
@@ -208,7 +207,6 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     if (record === undefined) {
       record = {
         ...newRecord(),
-        guard: newGuardState(),
         directoryTried: false,
         plannedToken: 0,
         levelShown: false,
@@ -271,26 +269,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
    */
   const scopeOf = (ctx: ExtensionContext): ScopeState => readScope(managerOf(ctx), scopeLatched(slot), workOf(ctx));
 
-  /**
-   * Whether a provider is the work account, by routing's own verdict: a work-bound Codex provider
-   * whose binding passes checkAccount in work scope, so a Multi-Pass alias needs the label its binding
-   * names. It reads the bindings rosterFacts gives, so while the roster fails to load, the last valid
-   * roster's, against Multi-Pass's labels as refreshFiles or /smart-router reload last read them, so
-   * a label change shows at the next idle input. Before any roster has loaded there is no work
-   * account. Never throws: a check that cannot be made says no.
-   */
-  const workAccount = (provider: string): boolean => {
-    try {
-      const accounts = rosterFacts()?.accounts;
-      if (accounts === undefined || !isWorkCodex(accounts, provider)) return false;
-      const read = accounts.get(provider)?.kind === "multi-pass" ? labels.current() : undefined;
-      return checkAccount(provider, { version: 2, accounts }, read, "work").ok;
-    } catch {
-      return false;
-    }
-  };
-
-  const guards = createGuards({ pi, now, pinOf, scopeOf, workAccount, stateOf: (ctx) => recordOf(ctx.sessionManager.getSessionId()).guard });
+  /** The pin's status item, for the selection or for the model a model_select names (showPinStatus). Never throws. */
+  const showStatus = (ctx: ExtensionContext, model?: Model<Api>): void => showPinStatus(ctx, pinOf(ctx), model);
 
   /**
    * The scope a session resolves in. A scope that cannot be read resolves in work scope, the
@@ -343,7 +323,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     return bindings !== undefined && needsLabels(bindings);
   };
 
-  /** Re-read both files when they changed. Only here and on /smart-router reload, never in a guard. */
+  /** Re-read both files when they changed. Only here and on /smart-router reload, never in a route. */
   const refreshFiles = (): Loaded<Roster> => {
     const state = loaded(roster.refresh());
     if (labelsNeeded(state)) labels.refresh();
@@ -353,7 +333,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   /**
    * Why smart-router/auto refuses this session's scope, if it does: a scope that cannot be read, a
    * work-scope session under a version 1 roster, and a scope a version 2 roster has no section for.
-   * Its way out is worded for the work guard, which holds a work or unreadable scope outside the pin.
+   * Its way out is worded for a work session that is not pinned (chooseModel in src/errors.ts): a
+   * work or unreadable scope, outside the pin.
    */
   const scopeRefusal = (value: Roster, ctx: ExtensionContext): RouterError | undefined => {
     const scope = scopeOf(ctx);
@@ -388,7 +369,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     requireBoundedHistory(id, sessionManager);
     const state = loaded(roster.current());
     const pin = pinOf(ctx);
-    // The work guard holds a session in work scope, or with a scope that cannot be read, outside the pin.
+    // A work session that is not pinned: work scope, or a scope that cannot be read, outside the pin.
     if (state.kind !== "ok") throw rosterRefusal(id, state, !pin.on && resolvedScope(ctx) === "work");
     const refused = refusalFor(id, state.value, ctx);
     if (refused !== undefined) throw refused;
@@ -564,11 +545,11 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   };
 
   // The pin's steps come first and last, and nothing between them can skip them: a fork or /new
-  // records the pin it carries before any other step runs, and the pin is enforced on the restored
-  // selection, with its status item, whatever failed in between. The scope a fork or /new carries
-  // is recorded next, and the scope the work directories give is recorded as soon as the roster is
-  // read. Each of the other steps reports its own failure and lets the rest run.
-  const start = async (ctx: ExtensionContext): Promise<void> => {
+  // records the pin it carries before any other step runs, and the pin's status item is shown
+  // whatever failed in between. The restored selection is left as it is. The scope a fork or /new
+  // carries is recorded next, and the scope the work directories give is recorded as soon as the
+  // roster is read. Each of the other steps reports its own failure and lets the rest run.
+  const start = (ctx: ExtensionContext): void => {
     try {
       const { sessionManager } = ctx;
       const sessionId = sessionManager.getSessionId();
@@ -593,8 +574,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       const notice = state !== undefined && state.kind !== "ok" ? rosterNotice(state) : view === undefined ? historyNotice() : undefined;
       if (notice !== undefined) notify(ctx, notice, "warning");
     } finally {
-      await guards.enforce(ctx);
-      guards.showStatus(ctx);
+      showStatus(ctx);
     }
   };
 
@@ -830,7 +810,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   /**
    * A fork or /new carries the scope the latch, an entry or the work directories set. A default
    * scope is not carried, so the new session decides its own. An unreadable one is carried as work,
-   * the scope routing and the work guard hold that session in, as a malformed pin is carried as a pin.
+   * the scope routing holds that session in, as a malformed pin is carried as a pin.
    */
   const leaveScope = (event: SessionShutdownEvent, ctx: ExtensionContext): void => {
     const { reason, targetSessionFile: target } = event;
@@ -875,14 +855,6 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     }
   };
 
-  const guardedAsync = async (name: string, ctx: ExtensionContext, run: () => Promise<void>): Promise<void> => {
-    try {
-      await run();
-    } catch (error) {
-      report(name, ctx, error);
-    }
-  };
-
   const filesNow = (state: Loaded<Roster>): Files => ({
     roster: state,
     labels: state.kind === "ok" && needsLabels(state.value) ? labels.current() : undefined,
@@ -890,7 +862,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
 
   const commandHost: CommandHost = {
     pi,
-    guards,
+    selectLocal: (ctx) => switchToLocal(pi, ctx, pinOf(ctx)),
+    showStatus,
     now,
     refresh: () => filesNow(refreshFiles()),
     reload: (ctx) => {
@@ -929,7 +902,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     },
 
     wire(target) {
-      target.on("session_start", (_event, ctx) => guardedAsync("session_start", ctx, () => start(ctx)));
+      target.on("session_start", (_event, ctx) => guarded("session_start", ctx, () => start(ctx)));
       target.on("input", async (event, ctx) => {
         // The tag first: whatever fails after this, the model never sees it, and a message that is
         // only a tag is never sent.
@@ -937,8 +910,6 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         const result: InputEventResult | undefined = tagged === undefined ? undefined : tagged.text === "" ? HANDLED : { action: "transform", text: tagged.text };
         try {
           const previous = guarded("input", ctx, () => resetInput(ctx));
-          const veto = guards.input(ctx);
-          if (veto !== undefined) return veto;
           if (tagged !== undefined && tagged.text === "") {
             notify(ctx, tagOnlyNotice(tagged.tier), "warning");
           } else {
@@ -989,23 +960,16 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         // continuation's) records the work directories' scope too.
         guarded("before_agent_start", ctx, () => recordDirectory(ctx));
       });
-      target.on("turn_start", async (_event, ctx) => {
-        guarded("turn_start", ctx, () => void heal(ctx));
-        await guards.turnStart(ctx);
-      });
+      // Whatever is selected, a run's turn starts as it is: the router only heals its registration.
+      target.on("turn_start", (_event, ctx) => guarded("turn_start", ctx, () => void heal(ctx)));
       target.on("message_end", (event, ctx) => guarded("message_end", ctx, () => messageEnd(event, ctx)));
       target.on("agent_settled", (event, ctx) => guarded("agent_settled", ctx, () => settle(recordOf(ctx.sessionManager.getSessionId()), event.aborted === true)));
-      target.on("model_select", (event, ctx) => guards.modelSelect(event, ctx));
-      target.on("session_before_compact", (_event, ctx) => {
-        guarded("session_before_compact", ctx, () => void heal(ctx));
-        return guards.beforeCompact(ctx);
-      });
-      target.on("session_before_tree", (event, ctx) => {
-        guarded("session_before_tree", ctx, () => void heal(ctx));
-        return guards.beforeTree(event, ctx);
-      });
-      target.on("before_provider_request", (_event, ctx) => guards.beforeProviderRequest(ctx));
-      target.on("cache_warming_decision", (_event, ctx) => guards.cacheWarming(ctx));
+      // A selection is never answered: the only thing that follows it is the pin's status item.
+      target.on("model_select", (event, ctx) => guarded("model_select", ctx, () => showStatus(ctx, event.model)));
+      // Compaction and tree navigation go on under any selection: these only heal the registration
+      // their summary may route through, and return nothing.
+      target.on("session_before_compact", (_event, ctx) => guarded("session_before_compact", ctx, () => void heal(ctx)));
+      target.on("session_before_tree", (_event, ctx) => guarded("session_before_tree", ctx, () => void heal(ctx)));
       target.on("session_shutdown", (event, ctx) => guarded("session_shutdown", ctx, () => shutdown(event, ctx)));
       target.registerCommand(COMMAND, smartRouterCommand(commandHost));
     },

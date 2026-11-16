@@ -1,8 +1,8 @@
 // The local-only pin: a property of the session, kept in `smart-router.pin` custom entries.
 //
-// It is read on every route and guard call with the fork's bounded getLatestCustomEntry over the
-// whole session (scope "all"), so nothing mirrors it in memory, and a /tree summary of a pinned
-// branch into another branch stays pinned. The read fails closed:
+// It is read each time it is needed, on every route call among them, with the fork's bounded
+// getLatestCustomEntry over the whole session (scope "all"), so nothing mirrors it in memory, and a
+// /tree summary of a pinned branch into another branch stays pinned. The read fails closed:
 //
 //   no entry                          unpinned
 //   a custom entry {v: 1, on: false}  unpinned

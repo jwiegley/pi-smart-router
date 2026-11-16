@@ -50,11 +50,11 @@ const COMMANDS = [
 ] as unknown as SlashCommandInfo[];
 const TOOLS = ["read", "bash", "web_fetch", "batch_web_fetch", "web_search", "subagent", "agent_browser", "subagent"].map((name) => ({ name })) as unknown as ToolInfo[];
 const EGRESS =
-  "The pin covers the model only. Still able to send data off this machine: /warden (pi-warden's judge sends redacted context to its backend while it is enabled); /subs (Multi-Pass can move the session to another subscription); the tools agent_browser, batch_web_fetch, subagent, web_fetch, web_search; Pi's own /share, /export and /bug.";
-/** EGRESS with Hera's version 2 classifier first, as an unpinned session's status lists it. */
+  "The pin covers smart-router/auto and smart-router/local only. Still able to send data off this machine: a model picked by hand with /model, which is sent as it is; /warden (pi-warden's judge sends redacted context to its backend while it is enabled); /subs (Multi-Pass can move the session to another subscription); the tools agent_browser, batch_web_fetch, subagent, web_fetch, web_search; Pi's own /share, /export and /bug.";
+/** EGRESS with Hera's version 2 classifier behind the model picked by hand, as an unpinned session's status lists it. */
 const EGRESS_JEV = EGRESS.replace(
-  "off this machine: ",
-  `off this machine: the classifier ${JEV} (smart-router/auto sends it each message and the recent conversation, redacted); `,
+  "which is sent as it is; ",
+  `which is sent as it is; the classifier ${JEV} (smart-router/auto sends it each message and the recent conversation, redacted); `,
 );
 
 async function answer(loaded: Loaded, args: string): Promise<{ readonly message: string; readonly type: string }> {
@@ -144,7 +144,7 @@ describe("status", () => {
     assert.deepEqual(await answer(loaded, "status"), { message, type });
   });
 
-  test("shows each candidate's resolver reason, the pin's recorded policy, the lock and the last decision", async (t) => {
+  test("shows each candidate's resolver reason, the pin's recorded policy and the last decision, and no lock line", async (t) => {
     const loaded = await hera(t);
     await loaded.host.emit("message_end", { message: assistant(SOL, { stopReason: "error", errorMessage: "You've hit your usage limit." }) });
     await loaded.host.emit("input", { text: "plan the migration to the new store", source: "interactive" });
@@ -152,13 +152,16 @@ describe("status", () => {
     loaded.runtime.route("auto", request("user", { signal }));
     loaded.session.endRun();
     await loaded.host.command("smart-router", "local on");
-    const record = loaded.router?.record("session-1");
-    assert.ok(record !== undefined);
-    record.guard.lock = { since: NOW, model: KIMI, cause: "conflict", policy: "pin" };
+    // A model picked by hand under the pin is no conflict: status shows it as the selection, and no lock.
+    await loaded.host.choose(KIMI);
+    const picked = (await answer(loaded, "status")).message.split("\n");
+    assert.ok(picked.includes(`Selection: ${KIMI}, thinking high`), picked.join("\n"));
+    assert.ok(!picked.some((line) => /^Lock:|locked/.test(line)), picked.join("\n"));
+    await loaded.host.choose("smart-router/local");
     const { message } = await answer(loaded, "status");
     const lines = message.split("\n");
     assert.ok(lines.includes(`Pin: on since ${AT}, with models ${GLM}; providers omlx-hera; hosts hera.lan`), message);
-    assert.ok(lines.includes(`Lock: since ${clock(NOW)}: something keeps switching the selection to ${KIMI}. Prompts are refused and runs stopped until the selection stays local.`), message);
+    assert.ok(!lines.some((line) => /^Lock:|locked/.test(line)), message);
     assert.ok(lines.includes(`  engineer: ${SOL} cooling-until-${clock(NOW + 30 * 60_000)}`), message);
     assert.ok(lines.includes("Selection: smart-router/local, thinking high"), message);
     assert.ok(lines.some((line) => new RegExp(`^Last decision: \\d\\d:\\d\\d:\\d\\d smart-router/auto user: architect → ${ASTRA.replace(/\//g, "\\/")} \\(signal:planning, planning:plan-words\\)$`).test(line)), message);
@@ -300,6 +303,33 @@ describe("local", () => {
     assert.equal(loaded.session.model?.provider, "omlx-hera");
   });
 
+  test("on asks for local routing, so it selects smart-router/local over a model picked by hand outside the policy; a later pick by hand is kept", async (t) => {
+    const loaded = await hera(t);
+    await loaded.host.choose(KIMI);
+    const { message, type } = await answer(loaded, "local on");
+    assert.equal(type, "info");
+    assert.equal(message.split("\n")[1], "The selection is smart-router/local now.");
+    assert.equal(loaded.session.model?.id, "local");
+    // After the command, the selection is John's again: a pick by hand stays, and the pin's item is not shown over it.
+    await loaded.host.choose(KIMI);
+    assert.deepEqual([`${loaded.session.model?.provider}/${loaded.session.model?.id}`, loaded.session.statuses.get("smart-router")], [KIMI, undefined]);
+    assert.deepEqual(await loaded.host.emit("input", { text: "fix the build", source: "interactive" }), [undefined], "and its prompt is sent");
+  });
+
+  test("on, when smart-router/local cannot be selected, says that the selection stays and is sent as it is", async (t) => {
+    const loaded = await hera(t);
+    await loaded.host.choose(KIMI);
+    loaded.host.setModel = async () => false;
+    const { message, type } = await answer(loaded, "local on");
+    assert.equal(type, "warning");
+    assert.equal(
+      message.split("\n")[1],
+      `The selection ${KIMI} could not be switched to smart-router/local and stays as it is. Choose smart-router/local with /model: the pin routes only the router's own two models, and a model picked by hand is sent as it is.`,
+    );
+    assert.equal(`${loaded.session.model?.provider}/${loaded.session.model?.id}`, KIMI);
+    assert.equal(loaded.session.statuses.get("smart-router"), undefined);
+  });
+
   test("on with an invalid roster pins with an empty policy and says how to fix it", async (t) => {
     const loaded = await hera(t, { roster: "{ nope" });
     const { message, type } = await answer(loaded, "local on");
@@ -322,7 +352,7 @@ describe("local", () => {
     assert.deepEqual(loaded.session.pinEntries(), []);
   });
 
-  test("status shows the pin, the lock and what can still leave", async (t) => {
+  test("status shows the pin and what can still leave", async (t) => {
     const loaded = await hera(t);
     assert.deepEqual((await answer(loaded, "local status")).message.split("\n"), ["pi-smart-router: pin off.", EGRESS]);
     loaded.session.pin(POLICY);
@@ -432,49 +462,20 @@ describe("status under a version 2 roster", () => {
   });
 });
 
-describe("the lock line", () => {
-  const LOCK_TIME = clock(NOW);
-  const lockLines = (message: string): string[] => message.split("\n").filter((line) => line.startsWith("Lock:"));
+describe("no lock", () => {
+  const lockLines = (message: string): string[] => message.split("\n").filter((line) => /^Lock:|locked/.test(line));
 
-  test("in work scope shows work scope's lock, in its words, and not a lock the pin set", async (t) => {
-    const loaded = await heraV2(t, { setup: workEntry });
-    const record = loaded.router?.record(loaded.session.id);
-    assert.ok(record !== undefined);
-    record.guard.lock = { since: NOW, model: KIMI, cause: "conflict", policy: "work" };
-    const conflict = `Lock: since ${LOCK_TIME}: something keeps switching the selection to ${KIMI}. Prompts are refused and runs stopped until the selection stays within work scope.`;
-    assert.deepEqual(lockLines((await answer(loaded, "status")).message), [conflict]);
-    assert.deepEqual(lockLines((await answer(loaded, "local status")).message), [conflict]);
-    record.guard.lock = { since: NOW, model: KIMI, cause: "restore", policy: "work" };
-    assert.deepEqual(lockLines((await answer(loaded, "status")).message), [
-      `Lock: since ${LOCK_TIME}: the restored selection ${KIMI} could not be switched to smart-router/auto. Prompts are refused and runs stopped until the selection stays within work scope.`,
-    ]);
-    record.guard.lock = { since: NOW, model: KIMI, cause: "conflict", policy: "pin" };
-    assert.deepEqual(lockLines((await answer(loaded, "status")).message), [], "the pin's lock is no lock of work scope's");
-    assert.deepEqual(lockLines((await answer(loaded, "local status")).message), []);
-  });
-
-  test("while pinned shows the pin's lock, in its words, and not a lock work scope set; in personal scope, unpinned, shows none", async (t) => {
-    const pinned = await heraV2(t, { id: "pinned", select: "local", setup: (session) => {
+  test("status and local status show no lock line, in work scope, pinned or personal, however often a model is picked by hand", async (t) => {
+    const pinnedWork = (session: FakeSession): void => {
       workEntry(session);
       session.pin(POLICY_V2);
-    } });
-    const record = pinned.router?.record(pinned.session.id);
-    assert.ok(record !== undefined);
-    record.guard.lock = { since: NOW, model: KIMI, cause: "conflict", policy: "work" };
-    assert.deepEqual(lockLines((await answer(pinned, "status")).message), [], "the pin outranks work scope");
-    record.guard.lock = { since: NOW, model: KIMI, cause: "conflict", policy: "pin" };
-    assert.deepEqual(lockLines((await answer(pinned, "local status")).message), [
-      `Lock: since ${LOCK_TIME}: something keeps switching the selection to ${KIMI}. Prompts are refused and runs stopped until the selection stays local.`,
-    ]);
-    const personal = await heraV2(t, { id: "personal" });
-    // An input makes the session's records; nothing else in a personal session does.
-    await personal.host.emit("input", { text: "x", source: "interactive" });
-    const own = personal.router?.record(personal.session.id);
-    assert.ok(own !== undefined);
-    for (const policy of ["pin", "work"] as const) {
-      own.guard.lock = { since: NOW, model: KIMI, cause: "conflict", policy };
-      assert.deepEqual(lockLines((await answer(personal, "status")).message), [], policy);
-      assert.deepEqual(lockLines((await answer(personal, "local status")).message), [], policy);
+    };
+    for (const [id, setup] of [["work", workEntry], ["pinned", pinnedWork], ["personal", undefined]] as const) {
+      const loaded = await heraV2(t, { id, runtime: priced(), ...(setup === undefined ? {} : { setup }) });
+      for (const ref of [KIMI, SOL, KIMI, SOL]) await loaded.host.choose(ref);
+      assert.deepEqual(lockLines((await answer(loaded, "status")).message), [], id);
+      assert.deepEqual(lockLines((await answer(loaded, "local status")).message), [], id);
+      assert.equal(`${loaded.session.model?.provider}/${loaded.session.model?.id}`, SOL, id);
     }
   });
 });
@@ -526,14 +527,62 @@ describe("scope", () => {
     });
   });
 
-  test("work in a pinned session records the entry and leaves the selection to the pin's rules", async (t) => {
+  test("work in a pinned session records the entry and leaves the selection: smart-router/local routes locally there, and a model picked by hand is sent as it is", async (t) => {
     const loaded = await heraV2(t, { select: "local", setup: (session) => session.pin(POLICY_V2) });
     assert.deepEqual(await answer(loaded, "scope work"), { type: "info", message: "pi-smart-router: scope work (entry)." });
     assert.equal(`${loaded.session.model?.provider}/${loaded.session.model?.id}`, "smart-router/local");
-    // A selection outside the pin is the pin's to switch back, at the next guard; work scope does not report it.
-    loaded.session.force(KIMI);
-    assert.deepEqual(await answer(loaded, "scope work"), { type: "info", message: "pi-smart-router: scope work (entry)." });
+    await loaded.host.choose(KIMI);
+    assert.deepEqual(await answer(loaded, "scope work"), {
+      type: "info",
+      message: `pi-smart-router: scope work (entry).\nThe selection stays ${KIMI}. A model picked by hand is sent as it is, in work scope too.`,
+    });
     assert.equal(`${loaded.session.model?.provider}/${loaded.session.model?.id}`, KIMI);
+  });
+
+  test("work leaves a model picked by hand selected, and says that it is sent as it is; nothing is selected in its place", async (t) => {
+    for (const ref of [KIMI, SOL, WORK_SOL, GLM]) {
+      resetSlot();
+      const loaded = await heraV2(t);
+      await loaded.host.choose(ref);
+      const selections = loaded.host.selections.length;
+      assert.deepEqual(await answer(loaded, "scope work"), {
+        type: "info",
+        message: `pi-smart-router: scope work (entry).\nThe selection stays ${ref}. A model picked by hand is sent as it is, in work scope too.`,
+      });
+      assert.deepEqual([`${loaded.session.model?.provider}/${loaded.session.model?.id}`, loaded.host.selections.length], [ref, selections], ref);
+      assert.deepEqual(await loaded.host.emit("input", { text: "fix the build", source: "interactive" }), [undefined], `${ref}: the next prompt is sent`);
+    }
+  });
+
+  test("work leaves smart-router/local selected, and warns that its requests are refused outside the pin, with what to choose or run", async (t) => {
+    const loaded = await heraV2(t, { select: "local" });
+    assert.deepEqual(await answer(loaded, "scope work"), {
+      type: "warning",
+      message:
+        "pi-smart-router: scope work (entry).\nThe selection stays smart-router/local. In work scope smart-router/local answers only while the session is pinned, so its next requests are refused. Choose smart-router/auto or a work Codex model with /model, or run /smart-router local on.",
+    });
+    assert.deepEqual([`${loaded.session.model?.provider}/${loaded.session.model?.id}`, loaded.host.selections.length], ["smart-router/local", 0]);
+    // Under a roster that serves no work scope, smart-router/auto is no way out, and the answer says why.
+    resetSlot();
+    const v1 = await hera(t);
+    await v1.host.choose("smart-router/local");
+    assert.deepEqual(await answer(v1, "scope work"), {
+      type: "warning",
+      message:
+        "pi-smart-router: scope work (entry).\nThe selection stays smart-router/local. In work scope smart-router/local answers only while the session is pinned, so its next requests are refused.\nIt is in work scope, which a version 1 roster does not serve, so smart-router/auto refuses its requests: give the roster a work scope (version 2), or run /smart-router scope personal.",
+    });
+  });
+
+  test("personal leaves the selection as it is, a model picked by hand and either of the router's", async (t) => {
+    for (const ref of [KIMI, "smart-router/local", "smart-router/auto"]) {
+      resetSlot();
+      const loaded = await heraV2(t, { setup: workEntry });
+      if (ref !== "smart-router/auto") await loaded.host.choose(ref);
+      const selections = loaded.host.selections.length;
+      loaded.session.dialogKeys = ["down", "enter"];
+      assert.deepEqual(await answer(loaded, "scope personal"), { type: "warning", message: "pi-smart-router: scope personal (entry)." });
+      assert.deepEqual([`${loaded.session.model?.provider}/${loaded.session.model?.id}`, loaded.host.selections.length], [ref, selections], ref);
+    }
   });
 
   test("status reads the work directories as the roster lists them now, and an unreadable scope says why", async (t) => {
@@ -627,30 +676,6 @@ describe("scope", () => {
     malformed.session.dialogKeys = ["down", "enter"];
     assert.deepEqual(await answer(malformed, "scope personal"), { type: "warning", message: "pi-smart-router: scope personal (entry)." });
     assert.equal(malformed.session.dialogs.length, 1);
-  });
-
-  test("personal clears work scope's lock once it is confirmed, and leaves a lock the pin set", async (t) => {
-    const loaded = await heraV2(t, { setup: workEntry });
-    const record = loaded.router?.record(loaded.session.id);
-    assert.ok(record !== undefined);
-    const lock = { since: NOW, model: KIMI, cause: "conflict", policy: "work" } as const;
-    record.guard.lock = lock;
-    await answer(loaded, "scope personal");
-    assert.equal(record.guard.lock, lock, "kept in work scope, it stays locked");
-    loaded.session.dialogKeys = ["down", "enter"];
-    await answer(loaded, "scope personal");
-    assert.equal(record.guard.lock, undefined);
-    const pinned = await heraV2(t, { id: "pinned", select: "local", setup: (session) => {
-      workEntry(session);
-      session.pin(POLICY_V2);
-    } });
-    const own = pinned.router?.record(pinned.session.id);
-    assert.ok(own !== undefined);
-    const pinLock = { since: NOW, model: KIMI, cause: "conflict", policy: "pin" } as const;
-    own.guard.lock = pinLock;
-    pinned.session.dialogKeys = ["down", "enter"];
-    await answer(pinned, "scope personal");
-    assert.deepEqual([own.guard.lock, entriesOf(pinned, SCOPE_ENTRY).at(-1)?.scope], [pinLock, "personal"]);
   });
 });
 
@@ -821,75 +846,91 @@ describe("local off in work scope", () => {
       },
     });
 
-  test("switches the selection to smart-router/auto, and says the next requests go to the work account", async (t) => {
+  const LOCAL_REFUSED = "In work scope smart-router/local answers only while the session is pinned, so its next requests are refused.";
+  const STAYS_LOCAL = "pi-smart-router: this session is no longer pinned, and the selection stays smart-router/local.";
+
+  test("leaves smart-router/local selected, and warns that its requests are now refused, with what to choose", async (t) => {
     const loaded = await pinnedWork(t, "work");
     loaded.session.dialogKeys = [...UNPINS];
     assert.deepEqual(await answer(loaded, "local off"), {
       type: "warning",
-      message: "pi-smart-router: this session is no longer pinned, and the selection is smart-router/auto now. It is in work scope, so the next requests go to the work account.",
+      message: `${STAYS_LOCAL} ${LOCAL_REFUSED} Choose smart-router/auto or a work Codex model with /model.`,
     });
-    assert.equal(selection(loaded), "smart-router/auto");
+    assert.deepEqual([selection(loaded), loaded.host.selections.length], ["smart-router/local", 0], "unpinning selects nothing");
     assert.deepEqual(entriesOf(loaded, PIN_ENTRY).at(-1), { v: 1, on: false, at: AT });
+    assert.equal(loaded.session.statuses.get("smart-router"), undefined, "the pin's item is cleared");
   });
 
-  test("keeps a selection work scope allows, and says when the selection cannot be switched", async (t) => {
-    const kept = await pinnedWork(t, "kept");
-    kept.session.force(WORK_SOL);
-    kept.session.dialogKeys = [...UNPINS];
-    assert.deepEqual(await answer(kept, "local off"), {
-      type: "warning",
-      message: `pi-smart-router: this session is no longer pinned, and the selection stays ${WORK_SOL}. It is in work scope, so the next requests go to the work account.`,
-    });
-    const stuck = await pinnedWork(t, "stuck");
-    stuck.host.setModel = async () => false;
-    stuck.session.dialogKeys = [...UNPINS];
-    assert.deepEqual(await answer(stuck, "local off"), {
-      type: "warning",
-      message:
-        "pi-smart-router: this session is no longer pinned, and it is in work scope, but its selection smart-router/local could not be switched to smart-router/auto, so prompts are refused until you choose smart-router/auto or a work Codex model.",
-    });
-    assert.equal(selection(stuck), "smart-router/local");
-  });
-
-  test("with a scope that cannot be read, switches as work scope does, and says that smart-router/auto refuses until a scope is recorded", async (t) => {
-    const loaded = await pinnedWork(t, "unreadable", { v: 9 });
+  test("leaves smart-router/auto selected, and says the next requests go to the work account", async (t) => {
+    const loaded = await pinnedWork(t, "auto");
+    await loaded.host.choose("smart-router/auto");
     loaded.session.dialogKeys = [...UNPINS];
     assert.deepEqual(await answer(loaded, "local off"), {
       type: "warning",
-      message:
-        "pi-smart-router: this session is no longer pinned, and the selection is smart-router/auto now. Its scope cannot be read (the latest smart-router.scope entry is not one the router wrote), so smart-router/auto refuses its requests until /smart-router scope work or /smart-router scope personal records it again.",
+      message: "pi-smart-router: this session is no longer pinned, and the selection stays smart-router/auto. It is in work scope, so the next requests go to the work account.",
     });
   });
 
-  test("in work scope, asks with the work account as where the next requests can go", async (t) => {
+  test("leaves a model picked by hand selected, a work Codex model or any other, and says that it is sent as it is", async (t) => {
+    for (const ref of [WORK_SOL, KIMI, SOL]) {
+      resetSlot();
+      const loaded = await pinnedWork(t, "hand");
+      await loaded.host.choose(ref);
+      const selections = loaded.host.selections.length;
+      loaded.session.dialogKeys = [...UNPINS];
+      assert.deepEqual(await answer(loaded, "local off"), {
+        type: "warning",
+        message: `pi-smart-router: this session is no longer pinned, and the selection stays ${ref}. A model picked by hand is sent as it is, in work scope too.`,
+      });
+      assert.deepEqual([selection(loaded), loaded.host.selections.length], [ref, selections], ref);
+    }
+  });
+
+  test("with a scope that cannot be read, leaves the selection, and says that the router's model refuses until a scope is recorded", async (t) => {
+    const UNTIL = "until /smart-router scope work or /smart-router scope personal records it again";
+    const WHY = "Its scope cannot be read (the latest smart-router.scope entry is not one the router wrote)";
+    const local = await pinnedWork(t, "unreadable", { v: 9 });
+    local.session.dialogKeys = [...UNPINS];
+    assert.deepEqual(await answer(local, "local off"), { type: "warning", message: `${STAYS_LOCAL} ${WHY}, so smart-router/local refuses its requests, as smart-router/auto does, ${UNTIL}.` });
+    resetSlot();
+    const auto = await pinnedWork(t, "unreadable-auto", { v: 9 });
+    await auto.host.choose("smart-router/auto");
+    auto.session.dialogKeys = [...UNPINS];
+    assert.deepEqual(await answer(auto, "local off"), {
+      type: "warning",
+      message: `pi-smart-router: this session is no longer pinned, and the selection stays smart-router/auto. ${WHY}, so smart-router/auto refuses its requests ${UNTIL}.`,
+    });
+  });
+
+  test("in work scope, asks with the work account as where smart-router/auto's next requests go", async (t) => {
     const loaded = await pinnedWork(t, "work");
     await answer(loaded, "local off");
     assert.deepEqual(loaded.session.dialogs, [
       {
-        title: "Unpin this session from local models?\nThe next requests can go only to the work account. Earlier turns stay where they are.",
+        title: "Unpin this session from local models?\nIt is in work scope, so smart-router/auto's next requests go to the work account. Earlier turns stay where they are.",
         options: ["No, keep the pin", "Yes, unpin"],
       },
     ]);
   });
 
-  test("with a roster that serves no work scope, or did not load, says smart-router/auto refuses, and the way out: the roster, and outside the latch /smart-router scope personal", async (t) => {
+  test("with a roster that serves no work scope, or did not load, says that smart-router/auto refuses too, and the way out: the roster, and outside the latch /smart-router scope personal", async (t) => {
     const UNSERVED_V1 = "It is in work scope, which a version 1 roster does not serve, so smart-router/auto refuses its requests: give the roster a work scope (version 2)";
     const unpinned = (loaded: Loaded) => {
       loaded.session.dialogKeys = [...UNPINS];
       return answer(loaded, "local off");
     };
-    const now = "pi-smart-router: this session is no longer pinned, and the selection is smart-router/auto now.";
+    const stays = `${STAYS_LOCAL} ${LOCAL_REFUSED}`;
     await withScope("work", async () => {
       const latched = await start({ dir: agentDir(t), id: "latched", select: "local", now: () => NOW, setup: (session) => session.pin(POLICY) });
-      assert.deepEqual(await unpinned(latched), { type: "warning", message: `${now} ${UNSERVED_V1}.` });
-      assert.equal(selection(latched), "smart-router/auto");
+      assert.deepEqual(await unpinned(latched), { type: "warning", message: `${stays} ${UNSERVED_V1}.` });
+      assert.equal(selection(latched), "smart-router/local");
     });
     resetSlot();
     const entry = await start({ dir: agentDir(t), id: "entry", select: "local", now: () => NOW, setup: (session) => {
       workEntry(session);
       session.pin(POLICY);
     } });
-    assert.deepEqual(await unpinned(entry), { type: "warning", message: `${now} ${UNSERVED_V1}, or run /smart-router scope personal.` });
+    assert.deepEqual(await unpinned(entry), { type: "warning", message: `${stays} ${UNSERVED_V1}, or run /smart-router scope personal.` });
     const roster = JSON.parse(HERA_V2);
     delete roster.scopes.work;
     roster.roles = roster.roles.filter((role: { name: string }) => !role.name.startsWith("work-"));
@@ -900,7 +941,7 @@ describe("local off in work scope", () => {
     } });
     assert.deepEqual(await unpinned(personalOnly), {
       type: "warning",
-      message: `${now} It is in work scope, which the roster does not serve, so smart-router/auto refuses its requests: give the roster a work scope, or run /smart-router scope personal.`,
+      message: `${stays} It is in work scope, which the roster does not serve, so smart-router/auto refuses its requests: give the roster a work scope, or run /smart-router scope personal.`,
     });
     const dir = agentDir(t, { roster: HERA_V2 });
     const broken = await start({ dir, id: "broken", select: "local", runtime: priced(), now: () => NOW, setup: (session) => {
@@ -912,29 +953,15 @@ describe("local off in work scope", () => {
     utimesSync(path, new Date(), new Date(Date.now() + 5_000));
     assert.deepEqual(await unpinned(broken), {
       type: "warning",
-      message: `${now} It is in work scope, but the roster did not load, so smart-router/auto refuses its requests until it is fixed; see /smart-router status.`,
+      message: `${stays} It is in work scope, but the roster did not load, so smart-router/auto refuses its requests until it is fixed; see /smart-router status.`,
     });
   });
 
-  test("clears only a lock the pin set, whether it unpins or the session was not pinned", async (t) => {
-    const work = { since: NOW, model: KIMI, cause: "conflict", policy: "work" } as const;
-    const pin = { since: NOW, model: KIMI, cause: "conflict", policy: "pin" } as const;
-    const unpinnedWork = await heraV2(t, { id: "unpinned", setup: workEntry });
-    const own = unpinnedWork.router?.record(unpinnedWork.session.id);
-    assert.ok(own !== undefined);
-    own.guard.lock = work;
-    assert.deepEqual(await answer(unpinnedWork, "local off"), { type: "info", message: "pi-smart-router: this session is not pinned." });
-    assert.equal(own.guard.lock, work, "work scope's lock is not the pin's to clear");
-    own.guard.lock = pin;
-    await answer(unpinnedWork, "local off");
-    assert.equal(own.guard.lock, undefined, "a lock the pin set is");
-    const unpins = await pinnedWork(t, "unpins");
-    const record = unpins.router?.record(unpins.session.id);
-    assert.ok(record !== undefined);
-    record.guard.lock = work;
-    unpins.session.dialogKeys = [...UNPINS];
-    await answer(unpins, "local off");
-    assert.equal(record.guard.lock, work);
+  test("a session that is not pinned says so, and its selection is left as it is", async (t) => {
+    const loaded = await heraV2(t, { id: "unpinned", setup: workEntry });
+    await loaded.host.choose(KIMI);
+    assert.deepEqual(await answer(loaded, "local off"), { type: "info", message: "pi-smart-router: this session is not pinned." });
+    assert.equal(selection(loaded), KIMI);
   });
 
   test("in personal scope, keeps the selection and says the next requests may go to cloud models, as before", async (t) => {

@@ -163,8 +163,8 @@ export interface JevAsk {
  * Whether Jev is asked about a message, and with what. Never for a steer or a follow-up, off
  * smart-router/auto, under the pin, without the bounded readers, for an extension's resend of the
  * latest message, without a version 2 roster's classifier, or in a scope that cannot be read or
- * that the roster does not serve. Pure: the router reads every condition first. The pin's guard
- * already refuses a pinned session's prompt on smart-router/auto; this checks the pin as well.
+ * that the roster does not serve. Pure: the router reads every condition first. Nothing refuses a
+ * pinned session's prompt on smart-router/auto before this, so the pin is checked here.
  */
 export function jevAsk(gate: JevGate): JevAsk | undefined {
   const { roster, scope, history } = gate;

@@ -295,7 +295,7 @@ describe("handoffs", () => {
     assert.equal(processSlot().scopeHandoffs?.size ?? 0, 0);
   });
 
-  // A scope that cannot be read holds its session as work scope (the work guard and routing), so the
+  // A scope that cannot be read holds its session as work scope (routing resolves it there), so the
   // session a fork or /new makes from it starts there too, as a malformed pin is carried as a pin.
   for (const reason of ["new", "fork"] as const) {
     test(`an unreadable scope is carried into a ${reason === "new" ? "/new" : "fork"} as work scope`, async (t) => {
@@ -526,7 +526,7 @@ describe("smart-router/auto refuses a scope it cannot serve", () => {
   test("a version 1 roster with PI_SMART_ROUTER_SCOPE=work, on every path, sending nothing; smart-router/local, outside the pin, sends nothing either", async (t) => {
     await withScope("work", async () => {
       const loaded = await begin({ dir: agentDir(t) });
-      // The work guard keeps only smart-router/auto and the work account, which a version 1 roster cannot bind.
+      // A work session's way out names only the work account's models, and a version 1 roster binds no work account.
       const refusal = scopeUnserved("auto", "work", 1, true);
       assert.equal(
         refusal.message,
@@ -572,7 +572,7 @@ describe("smart-router/auto refuses a scope it cannot serve", () => {
   test("an unreadable scope, which routing resolves in work scope, the narrower one", async (t) => {
     const dir = agentDir(t, { roster: HERA_V2 });
     const malformed = await begin({ dir, id: "malformed", runtime: new FakeRuntime(workCatalog()), setup: (session) => session.appendCustom(SCOPE_ENTRY, { v: 1, scope: "work" }) });
-    // The work guard holds a session whose scope cannot be read, so only a work Codex model is offered.
+    // A scope that cannot be read counts as work scope, so only a work Codex model is offered.
     const unreadable = scopeUnreadable("auto", "the latest smart-router.scope entry is not one the router wrote", true);
     assert.equal(
       unreadable.message,
@@ -638,17 +638,21 @@ describe("smart-router/auto refuses a scope it cannot serve", () => {
 });
 
 describe("smart-router/local in work scope", () => {
-  // Work scope sends a conversation to LAN models only under the pin, and the route says so itself.
+  // Work scope sends a conversation to LAN models only under the pin. The route says so itself: the
+  // selection is John's, and the router changes none (his decision of 2026-11-16).
   const policy = policyFromRoster(rosterFixture("roster-hera.json"));
 
-  test("outside the pin it refuses every request, names the ways out and tells pi-cache-optimizer of no pick", async (t) => {
+  test("outside the pin it refuses every request, names the ways out, plans nothing and tells pi-cache-optimizer of no pick; the selection stays", async (t) => {
     const loaded = await begin({ dir: agentDir(t, { roster: HERA_V2 }), runtime: new FakeRuntime(workCatalog()), setup: recorded("work") });
+    await loaded.host.choose("smart-router/local");
     const refusal = localInWorkScope(true);
     assert.equal(
       refusal.message,
       "smart-router/local: this session is in work scope, where smart-router/local answers only while the session is pinned to local models. Nothing was sent. Run /smart-router local on to pin the session to local models, choose smart-router/auto or a work Codex model with /model, or run /smart-router scope personal.",
     );
     assert.equal(isRetryableAssistantError(assistant("smart-router/local", { stopReason: "error", errorMessage: refusal.message })), false, "Pi does not retry it");
+    assert.deepEqual(await loaded.host.emit("input", { text: PLANNING, source: "interactive" }), [undefined], "the prompt itself is passed on");
+    assert.equal(loaded.router?.record(loaded.session.id)?.plan, undefined, "nothing is planned for a request the route refuses");
     const signal = loaded.session.startRun();
     refuses(() => loaded.runtime.route("local", request("user", { signal })), refusal, "the owned run");
     refuses(() => loaded.runtime.route("local", request("continuation", { signal })), refusal, "a continuation");
@@ -657,6 +661,8 @@ describe("smart-router/local in work scope", () => {
     refuses(() => loaded.runtime.route("local", request("continuation", { signal: new AbortController().signal })), refusal, "a foreign request");
     assert.equal(loaded.router?.activeRoute("local"), undefined);
     assert.deepEqual(loaded.router?.record(loaded.session.id)?.history, [], "no request reached a model");
+    assert.equal(loaded.session.model?.id, "local", "the selection is left as it is");
+    assert.deepEqual(messages(loaded), [], "and nothing is said outside the refusals");
     // smart-router/auto, in the same session, still routes to the work account.
     assert.equal(routed(loaded.runtime.route("auto", request("direct"))), WORK_TERRA);
   });
@@ -722,7 +728,7 @@ describe("/smart-router status", () => {
   });
 });
 
-describe("in work scope, a refusal offers only what the work guard keeps", () => {
+describe("in work scope, a refusal names only the models that keep the conversation on the work account", () => {
   /** The text a request's refusal carries. */
   const refusalOf = (run: () => unknown): string => {
     try {

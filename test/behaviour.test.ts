@@ -9,6 +9,12 @@
 // bounded session reads. Each asserts which faux provider received each request, with the
 // provider's call count; ./support/host.ts describes the harness.
 //
+// Scenarios 6 to 9, 11, 20 and 26, and L5, L6 and L10, once showed the guards that kept a pinned or
+// work-scope session off a model picked by hand. Since John's decision of 2026-11-16 that a manual
+// choice always wins, they show the opposite in Pi's own runtime: the model picked by hand stays
+// selected and receives the request, whole, and the router's own two models still route only
+// inside their policies.
+//
 // The L tests are the four levels' scenarios, the behaviour-suite list of the Jev-levels design, on
 // version 2 rosters shaped like Hera's: both Codex accounts, OpenRouter and a local model, with
 // Jev faked by a classifier provider registered through Pi's provider `classifiers` hook. L9
@@ -200,36 +206,42 @@ test("5. smart-router/local without its local provider refuses: nothing is sent 
   assert.equal(pi.eventsOf("auto_retry_start").length, 0, "Pi does not retry a refusal");
 });
 
-test("6. pinned: a set to a cloud model is reverted, and a prompt under a cloud selection is refused", TIMEOUT, async (t) => {
+test("6. pinned: a cloud model set by hand stays selected, and its prompt reaches that model", TIMEOUT, async (t) => {
   const world = new World(t);
   const pi = await world.start({ select: "smart-router/local" });
   await pi.command("local on");
   assert.equal(pi.ui.status(), "local models");
+  const said = pi.ui.notices.length;
   await pi.session.setModel(pi.model("cloud-a/m"));
-  assert.equal(pi.selection(), "smart-router/local", "the guard reverted the set");
-  assert.equal(pi.ui.saw(/so cloud-a\/m was not kept, and the selection is smart-router\/local again/).length, 1);
-  pi.force("cloud-a/m");
-  const messages = pi.session.messages.length;
+  assert.equal(pi.selection(), "cloud-a/m", "the set is kept");
+  assert.equal(pi.ui.status(), undefined, "the pin's item is not shown over a model the pin does not route");
   await pi.prompt(PROMPTS.plain);
-  assert.equal(pi.session.messages.length, messages, "the prompt was not sent");
-  assert.equal(pi.ui.saw(/cloud-a\/m is not local, so the prompt was not sent/).length, 1);
-  assert.deepEqual(called(world.counts()), {});
+  assert.equal(pi.lastAssistant()?.stopReason, "stop", pi.lastAssistant()?.errorMessage);
+  assert.equal(pi.lastAssistant()?.provider, "cloud-a");
+  assert.deepEqual(called(world.counts()), { "cloud-a": 1 });
+  assert.equal(pi.selection(), "cloud-a/m");
+  assert.deepEqual(pi.ui.notices.slice(said), [], "and the router said nothing about it");
+  // Chosen by hand again, smart-router/local routes to the local model.
+  await pi.session.setModel(pi.model("smart-router/local"));
+  assert.equal(pi.ui.status(), "local models");
+  await pi.prompt(PROMPTS.plain);
+  assert.deepEqual(called(world.counts()), { "cloud-a": 1, "local-a": 1 });
 });
 
-test("7. pinned with a forced cloud selection, a custom-triggered run is switched to local at turn_start", TIMEOUT, async (t) => {
+test("7. pinned with a forced cloud selection, a custom-triggered run goes to that model: nothing is switched at turn_start", TIMEOUT, async (t) => {
   const world = new World(t);
   const pi = await world.start({ select: "smart-router/local" });
   await pi.command("local on");
   pi.force("cloud-a/m");
   await pi.custom();
-  assert.deepEqual(called(world.counts()), { "local-a": 1 });
-  assert.equal(pi.lastAssistant()?.provider, "local-a");
-  assert.equal(pi.selection(), "smart-router/local");
+  assert.deepEqual(called(world.counts()), { "cloud-a": 1 });
+  assert.equal(pi.lastAssistant()?.provider, "cloud-a");
+  assert.equal(pi.selection(), "cloud-a/m");
 });
 
 for (const order of ["before", "after"] as const) {
   for (const trigger of ["a typed prompt", "a custom-triggered run"] as const) {
-    test(`8. pinned against a competitor loaded ${order} the router, ${trigger}: codex-like receives nothing`, TIMEOUT, async (t) => {
+    test(`8. pinned against a competitor loaded ${order} the router, ${trigger}: the competitor's selection stands, and the router neither switches back nor locks`, TIMEOUT, async (t) => {
       const world = new World(t);
       const pi = await world.start({ select: "smart-router/local", [order]: [COMPETITOR_ENTRY] });
       await pi.command("local on");
@@ -239,22 +251,19 @@ for (const order of ["before", "after"] as const) {
         pi.force("cloud-a/m");
         await pi.custom();
       }
-      const fought = pi.session.sessionManager.getEntries().some((entry) => entry.type === "model_change" && entry.provider === "codex-like");
-      assert.ok(fought, "the competitor did switch the selection to codex-like");
+      // The router cannot tell an extension's selection from John's, and it answers neither.
+      assert.equal(pi.selection(), "codex-like/m", "the competitor switched the selection to codex-like, and it stayed there");
+      assert.deepEqual(called(world.counts()), { "codex-like": 1 });
+      assert.equal(pi.lastAssistant()?.provider, "codex-like");
       const codex = world.faux("codex-like");
-      assert.equal(codex.callCount, 0, JSON.stringify(world.counts()));
-      assert.ok(
-        codex.calls.every((call) => call.payload === null),
-        "any payload codex-like would have sent is null",
-      );
-      assert.equal(world.faux("cloud-a").callCount, 0);
-      const local = pi.lastAssistant()?.provider === "local-a";
-      assert.ok(local || pi.ui.status() === "local models: locked", `ends on local-a or locked; status ${pi.ui.status()}, counts ${JSON.stringify(world.counts())}`);
+      assert.ok(codex.calls.every((call) => call.payload !== null), "its request was sent whole");
+      assert.deepEqual(pi.ui.saw(/locked|was not kept|not sent|was stopped|emptied/), []);
+      assert.notEqual(pi.ui.status(), "local models: locked");
     });
   }
 }
 
-test("9. pinned with a forced cloud selection over the threshold: every compaction is cancelled, and the cloud model gets nothing", TIMEOUT, async (t) => {
+test("9. pinned with a forced cloud selection over the threshold: compaction proceeds on that model, and so does the run", TIMEOUT, async (t) => {
   const world = new World(t, {
     fleet: [{ provider: "local-a", baseUrl: "http://localhost:0" }, { provider: "cloud-a", contextWindow: 40_000 }, { provider: "cloud-b" }, { provider: "cloud-c" }, { provider: "codex-like", api: "openai-codex-responses" }],
   });
@@ -275,16 +284,17 @@ test("9. pinned with a forced cloud selection over the threshold: every compacti
   assert.ok(starts.some((event) => event.reason === "threshold"), "the pre-run threshold check started a compaction");
   assert.equal(ends.length, starts.length);
   assert.ok(
-    ends.every((event) => event.aborted && event.result === undefined),
-    "and the router cancelled each one",
+    ends.every((event) => !event.aborted && event.result !== undefined),
+    "and the router cancelled none",
   );
-  assert.ok(pi.ui.saw(/cloud-a\/m is not local, so compaction was cancelled/).length >= 1);
-  assert.equal(pi.selection(), "smart-router/local");
-  pi.force("cloud-a/m");
-  await assert.rejects(pi.session.compact(), /Compaction cancelled/, "manual compaction is cancelled too");
-  assert.equal(cloud.callCount, 0, JSON.stringify(world.counts()));
-  assert.equal(world.faux("local-a").callCount, 1);
-  assert.equal(pi.lastAssistant()?.provider, "local-a");
+  assert.deepEqual(pi.ui.saw(/compaction was cancelled/), []);
+  assert.equal(pi.selection(), "cloud-a/m");
+  assert.ok(cloud.calls.some((call) => call.summary), "the summary was asked of the model picked by hand");
+  assert.ok(cloud.calls.some((call) => !call.summary), "and so was the run");
+  assert.equal(pi.lastAssistant()?.provider, "cloud-a");
+  const result = await pi.session.compact();
+  assert.match(result.summary, /ok from cloud-a\/m/, "manual compaction proceeds too");
+  assert.equal(world.faux("local-a").callCount, 0, JSON.stringify(world.counts()));
 });
 
 test("10. pinned on smart-router/local, compaction summarizes on the local model", TIMEOUT, async (t) => {
@@ -303,7 +313,7 @@ test("10. pinned on smart-router/local, compaction summarizes on the local model
   assert.deepEqual(Object.keys(called(world.counts())), ["local-a"]);
 });
 
-test("11. pinned with a forced cloud selection, navigation with a summary is cancelled and navigation without one proceeds", TIMEOUT, async (t) => {
+test("11. pinned with a forced cloud selection, navigation with a summary proceeds on that model, and so does navigation without one", TIMEOUT, async (t) => {
   const world = new World(t);
   const pi = await world.start({ select: "smart-router/local" });
   await pi.command("local on");
@@ -312,13 +322,17 @@ test("11. pinned with a forced cloud selection, navigation with a summary is can
   const target = userEntry(pi, 0);
   const leaf = pi.session.sessionManager.getLeafId();
   pi.force("cloud-a/m");
-  assert.deepEqual(await pi.session.navigateTree(target, { summarize: true }), { cancelled: true });
-  assert.equal(pi.session.sessionManager.getLeafId(), leaf, "the cancelled navigation moved nothing");
-  assert.equal(pi.ui.saw(/the navigation with a summary was cancelled/).length, 1);
-  const plain = await pi.session.navigateTree(target, { summarize: false });
+  const summarized = await pi.session.navigateTree(target, { summarize: true });
+  assert.equal(summarized.cancelled, false);
+  assert.notEqual(pi.session.sessionManager.getLeafId(), leaf, "the navigation with a summary moved the leaf");
+  assert.deepEqual(pi.ui.saw(/the navigation with a summary was cancelled/), []);
+  const cloud = world.faux("cloud-a");
+  assert.ok(cloud.callCount >= 1 && cloud.calls.every((call) => call.summary), "the branch summary was asked of the model picked by hand");
+  assert.ok(typeof leaf === "string");
+  const plain = await pi.session.navigateTree(leaf, { summarize: false });
   assert.equal(plain.cancelled, false);
-  assert.notEqual(pi.session.sessionManager.getLeafId(), leaf, "the navigation without a summary moved the leaf");
-  assert.deepEqual(called(world.counts()), { "local-a": 2 });
+  assert.equal(pi.session.sessionManager.getLeafId(), leaf, "the navigation without a summary moved the leaf back");
+  assert.equal(world.faux("local-a").callCount, 2, "the two prompts, and nothing since");
 });
 
 test("12. pre-run compaction routes direct and leaves the plan: the optimizer sees the plan, and the first request takes it", TIMEOUT, async (t) => {
@@ -534,29 +548,33 @@ test("19. a retryable 429 retries the same model, and nothing is cooled", TIMEOU
   assert.match(notice(pi, /^pi-smart-router status/), /engineer: cloud-a\/m ok/);
 });
 
-test("20. the pin survives a resume through fresh services, and is enforced on the restored selection", TIMEOUT, async (t) => {
+test("20. the pin survives a resume through fresh services, and the restored selection is kept", TIMEOUT, async (t) => {
   const world = new World(t);
   const first = await world.start({ persisted: true, select: "smart-router/auto" });
   await first.command("local on");
   assert.equal(first.selection(), "smart-router/local");
   await first.prompt(PROMPTS.plain);
   assert.equal(first.lastAssistant()?.provider, "local-a");
-  // A selection recorded behind the guards' back, as an extension that writes the session could.
+  // The session's last selection is a cloud model, as after a /model there.
   first.session.sessionManager.appendModelChange("cloud-a", "m");
   const file = first.session.sessionFile;
   assert.ok(file !== undefined);
   await first.close();
 
   const resumed = await world.start({ sessionManager: world.open(file) });
-  assert.equal(resumed.selection(), "smart-router/local", "the restored cloud-a/m was switched at session_start");
-  assert.equal(resumed.ui.saw(/its selection cloud-a\/m was switched to smart-router\/local/).length, 1);
-  assert.equal(resumed.ui.status(), "local models");
+  assert.equal(resumed.selection(), "cloud-a/m", "the restored selection is left as it is at session_start");
+  assert.deepEqual(resumed.ui.saw(/was switched to smart-router/), []);
+  assert.equal(resumed.ui.status(), undefined, "the pin's item is not shown over a model the pin does not route");
   await resumed.command("local status");
   assert.match(notice(resumed, /^pi-smart-router: pin /), /^pi-smart-router: pin on since \S+, with models local-a\/m; providers local-a; hosts localhost\./);
-  resumed.force("cloud-a/m");
+  await resumed.custom();
+  assert.equal(resumed.lastAssistant()?.provider, "cloud-a", "its run goes to the model picked by hand");
+  // The pin still holds the router's own models: chosen by hand, smart-router/local routes locally.
+  await resumed.session.setModel(resumed.model("smart-router/local"));
+  assert.equal(resumed.ui.status(), "local models");
   await resumed.custom();
   assert.equal(resumed.lastAssistant()?.provider, "local-a");
-  assert.deepEqual(called(world.counts()), { "local-a": 2 });
+  assert.deepEqual(called(world.counts()), { "local-a": 2, "cloud-a": 1 });
 });
 
 test("21. max thinking is clamped per routed model, and a role's fixed level wins", TIMEOUT, async (t) => {
@@ -760,7 +778,7 @@ test("26. control: unpinned, idle warming arms and sends the request's content a
   assert.match(JSON.stringify(warm.payload), /how are you today/);
 });
 
-test("26. pinned, a Codex-like request aborted by the payload barrier: its payload is empty, and the router stops the warming Pi wanted", TIMEOUT, async (t) => {
+test("26. pinned, a Codex-like model selected at turn_start is sent as it is: its payload is whole, and the router does not stop the warming Pi wanted", TIMEOUT, async (t) => {
   const world = new World(t, WARMING);
   const race = racer();
   const pi = await world.start({ select: "smart-router/local", extensions: [race.extension] });
@@ -770,17 +788,16 @@ test("26. pinned, a Codex-like request aborted by the payload barrier: its paylo
   race.force = undefined;
   const codex = world.faux("codex-like");
   assert.equal(codex.callCount, 1, "the forced request reached the provider");
-  assert.equal(codex.calls[0]?.payload, null, "with an empty payload");
-  assert.equal(pi.ui.saw(/a request to codex-like\/m would leave this machine, so the request was emptied and the run stopped/).length, 1);
-  await until(() => pi.session.cacheWarmingStatus?.state === "inactive" && pi.session.cacheWarmingStatus.decision !== undefined, 10_000, "Pi's warming decision");
-  const status = pi.session.cacheWarmingStatus;
-  assert.equal(status?.decision?.action, "warm", "Pi's own economics chose to warm");
-  assert.equal(status?.reason, "stopped by extension");
-  assert.equal(status?.extensionOverride, true);
-  assert.equal(codex.callCount, 1, "no warm request was sent");
+  assert.ok(codex.calls[0]?.payload !== null && typeof codex.calls[0]?.payload === "object", "with its payload");
+  assert.deepEqual(pi.ui.saw(/the request was emptied and the run stopped/), []);
+  await until(() => warmCalls(world).length > 0, 10_000, "a warm request");
+  const [warm] = warmCalls(world);
+  assert.ok(warm !== undefined && warm.payload !== null && typeof warm.payload === "object", "the warm request carries content");
+  assert.notEqual(pi.session.cacheWarmingStatus?.reason, "stopped by extension");
+  assert.notEqual(pi.session.cacheWarmingStatus?.extensionOverride, true, "no extension overrode Pi's decision");
 });
 
-test("26. pinned, when a later extension forces warming anyway, the warm requests carry no content", TIMEOUT, async (t) => {
+test("26. pinned, when a later extension asks for warming, the warm requests carry their content: the router empties none", TIMEOUT, async (t) => {
   const world = new World(t, WARMING);
   const race = racer();
   const insist: InlineExtension = { name: "insist", factory: (api) => void api.on("cache_warming_decision", () => ({ action: "warm" })) };
@@ -792,10 +809,9 @@ test("26. pinned, when a later extension forces warming anyway, the warm request
   await until(() => warmCalls(world).length > 0, 10_000, "a warm request");
   const codex = world.faux("codex-like");
   assert.ok(codex.calls.length >= 2);
-  assert.deepEqual(
-    codex.calls.map((call) => call.payload),
-    codex.calls.map(() => null),
-    "the payload barrier empties every request, warm requests included",
+  assert.ok(
+    codex.calls.every((call) => call.payload !== null && typeof call.payload === "object"),
+    "every request reached the provider whole, warm requests included",
   );
 });
 
@@ -821,11 +837,23 @@ test("Q6. /new and a fork carry the pin; resuming an unpinned session after a pi
   assert.equal(pinEntries().length, 1, "the fork recorded the pin it carried");
   assert.equal(pi.ui.status(), "local models");
   assert.ok(pi.ui.saw(/this session is pinned to local models, as the session it came from was/).length >= 1);
-  assert.equal(pi.selection(), "smart-router/local", "the default selection was switched at session_start");
+  // The fork starts on the selection its branch held, smart-router/auto, and the router leaves it there:
+  // only /smart-router local on selects smart-router/local. Under the carried pin, auto's own route refuses.
+  assert.equal(pi.selection(), "smart-router/auto", "the selection is left as it is at session_start");
+  await pi.prompt(PROMPTS.complex);
+  assert.equal(pi.lastAssistant()?.stopReason, "error");
+  assert.match(
+    pi.lastAssistant()?.errorMessage ?? "",
+    /^smart-router\/auto: no local model can take this request while this session is pinned to local models \(.*\)\. Nothing was sent\. Choose smart-router\/local with \/model, or run \/smart-router local off\.$/,
+  );
+  assert.equal(pi.selection(), "smart-router/auto", "and the refusal changes no selection");
+  await pi.session.setModel(pi.model("smart-router/local"));
 
   await pi.runtime.newSession();
   assert.equal(pinEntries().length, 1, "/new carried the pin");
-  assert.equal(pi.selection(), "smart-router/local");
+  // Pi starts a new session on the settings default, here smart-router/auto, and the router leaves it there too.
+  assert.equal(pi.selection(), "smart-router/auto");
+  await pi.session.setModel(pi.model("smart-router/local"));
   await pi.prompt(PROMPTS.complex);
   assert.equal(pi.lastAssistant()?.provider, "local-a");
 
@@ -840,14 +868,19 @@ test("Q6. PI_SMART_ROUTER_LOCAL_ONLY pins every session of the process, latched 
   process.env.PI_SMART_ROUTER_LOCAL_ONLY = "1";
   const pi = await world.start({ persisted: true, select: "smart-router/auto" });
   delete process.env.PI_SMART_ROUTER_LOCAL_ONLY;
-  assert.equal(pi.selection(), "smart-router/local");
+  // The switch pins the router's routing, and selects nothing: smart-router/auto stays, and refuses.
+  assert.equal(pi.selection(), "smart-router/auto");
   assert.equal(pi.ui.status(), "local models");
+  await pi.prompt(PROMPTS.complex);
+  assert.match(pi.lastAssistant()?.errorMessage ?? "", /^smart-router\/auto: no local model can take this request while this session is pinned to local models/);
+  await pi.session.setModel(pi.model("smart-router/local"));
   await pi.prompt(PROMPTS.complex);
   assert.equal(pi.lastAssistant()?.provider, "local-a");
   await pi.runtime.newSession();
-  assert.equal(pi.selection(), "smart-router/local", "the switch stays latched after the variable is gone");
+  assert.equal(pi.ui.status(), "local models", "the switch stays latched after the variable is gone");
   await pi.command("local off");
   assert.equal(pi.ui.saw(/PI_SMART_ROUTER_LOCAL_ONLY pins every session in this process, so this one cannot be unpinned/).length, 1);
+  await pi.session.setModel(pi.model("smart-router/local"));
   await pi.prompt(PROMPTS.planning);
   assert.equal(pi.lastAssistant()?.provider, "local-a");
   assert.deepEqual(called(world.counts()), { "local-a": 2 });
@@ -1182,9 +1215,10 @@ test("L4 no classifier call when pinned, on local, with PI_SMART_ROUTER_LOCAL_ON
     await pi.prompt("Fix the parser #high");
     assert.equal(answered(pi), "local-a/m");
     assert.equal(notice(pi, /tag was removed/), "pi-smart-router: the HIGH tag was removed and has no effect, because this session is pinned to local models.");
-    // smart-router/auto, forced back, is refused by the pin's guard before anything is planned.
+    // smart-router/auto, selected again, is refused by its own route under the pin, and Jev is not asked.
     pi.force("smart-router/auto");
     await pi.prompt(PROMPTS.planning);
+    assert.match(pi.lastAssistant()?.errorMessage ?? "", /^smart-router\/auto: no local model can take this request while this session is pinned to local models/);
     assert.deepEqual(world.jev.calls, []);
     assert.deepEqual(called(world.counts()), { "local-a": 2 });
   });
@@ -1208,15 +1242,13 @@ test("L4 no classifier call when pinned, on local, with PI_SMART_ROUTER_LOCAL_ON
     process.env.PI_SMART_ROUTER_LOCAL_ONLY = "1";
     const pi = await world.start({ select: "smart-router/auto" });
     delete process.env.PI_SMART_ROUTER_LOCAL_ONLY;
-    assert.equal(pi.selection(), "smart-router/local");
-    // The variable pins the session, not only its first selection: smart-router/auto, forced back,
-    // is refused by the pin's guard, tag or not, and nothing reaches Jev or a cloud model.
-    const refused =
-      "pi-smart-router: this session is pinned to local models, and smart-router/auto is not local, so the prompt was not sent. Choose smart-router/local or a local model with /model, or run /smart-router local off.";
-    pi.force("smart-router/auto");
+    assert.equal(pi.selection(), "smart-router/auto", "the variable selects nothing");
+    // The variable pins the session's routing: smart-router/auto's own route refuses, tag or not,
+    // and nothing reaches Jev or a cloud model.
     await pi.prompt(PROMPTS.planning);
     await pi.prompt("Fix the parser #high");
-    assert.equal(count(pi, refused), 2, "both prompts were refused");
+    const refusals = pi.assistants().filter((message) => /^smart-router\/auto: no local model can take this request while this session is pinned to local models/.test(message.errorMessage ?? ""));
+    assert.equal(refusals.length, 2, "both prompts were refused by the route");
     assert.deepEqual(world.jev.calls, []);
     assert.deepEqual(called(world.counts()), {});
     // Back on smart-router/local, the session routes locally, still without Jev.
@@ -1287,7 +1319,7 @@ test("L5 scope: the latch, the entry carried into /new and a fork, resume, direc
     assert.deepEqual(called(world.counts()), { "openai-codex-3": 2 });
   });
 
-  await t.test("an entry: work at once, carried into a fork and /new, and enforced at resume", async (t) => {
+  await t.test("an entry: work at once, carried into a fork and /new, and kept at resume", async (t) => {
     const world = levelsWorld(t);
     const pi = await world.start({ persisted: true, select: "smart-router/auto" });
     await pi.prompt(PROMPTS.plain);
@@ -1300,7 +1332,7 @@ test("L5 scope: the latch, the entry carried into /new and a fork, resume, direc
     assert.equal(notice(pi, /^pi-smart-router: scope/), "pi-smart-router: scope work (entry).");
     await pi.prompt(PROMPTS.plain);
     assert.equal(answered(pi), WORK.medium, "personal to work takes effect at once");
-    // A selection recorded behind the guards' back, as an extension that writes the session could.
+    // The session's last selection is an OpenRouter model, as after a /model there.
     pi.session.sessionManager.appendModelChange("openrouter", "z-ai/glm-5.3");
     const work = pi.session.sessionFile;
     assert.ok(personal !== undefined && work !== undefined);
@@ -1316,10 +1348,16 @@ test("L5 scope: the latch, the entry carried into /new and a fork, resume, direc
     assert.equal(answered(pi), WORK.medium);
     assert.equal(count(pi, "pi-smart-router: this session is in work scope, as the session it came from was."), 2);
 
-    // Resumed, the work session's entry holds, and the work guard switches the selection it restored.
+    // Resumed, the work session's entry holds, and the selection it restored is kept: the model
+    // picked by hand answers, and smart-router/auto, chosen again, goes to the work account.
     await pi.runtime.switchSession(work);
-    assert.equal(pi.selection(), "smart-router/auto");
-    assert.equal(count(pi, "pi-smart-router: this session is in work scope, so its selection openrouter/z-ai/glm-5.3 was switched to smart-router/auto."), 1);
+    assert.equal(pi.selection(), "openrouter/z-ai/glm-5.3");
+    assert.deepEqual(pi.ui.saw(/was switched to smart-router\/auto|was not kept/), []);
+    await pi.command("scope");
+    assert.equal(notice(pi, /^pi-smart-router: scope/), "pi-smart-router: scope work (entry).");
+    await pi.prompt(PROMPTS.plain);
+    assert.equal(answered(pi), "openrouter/z-ai/glm-5.3");
+    await pi.session.setModel(pi.model("smart-router/auto"));
     await pi.prompt(PROMPTS.plain);
     assert.equal(answered(pi), WORK.medium);
     // Resumed, the personal session is personal.
@@ -1328,7 +1366,7 @@ test("L5 scope: the latch, the entry carried into /new and a fork, resume, direc
     assert.equal(notice(pi, /^pi-smart-router: scope/), "pi-smart-router: scope personal (default).");
     await pi.prompt(PROMPTS.plain);
     assert.equal(answered(pi), PERSONAL.medium);
-    assert.equal(world.faux("openrouter").callCount, 0);
+    assert.equal(world.faux("openrouter").callCount, 1, "OpenRouter answered only the one run on the model picked by hand");
   });
 
   await t.test("work directories: a running session moves at its next idle input, recorded once, and a new session starts in work scope", async (t) => {
@@ -1412,20 +1450,25 @@ test("L5 scope: the latch, the entry carried into /new and a fork, resume, direc
   });
 });
 
-test("L6 the work guard switches a hand-picked OpenRouter model back, and work runs reach only the work account", TIMEOUT, async (t) => {
+test("L6 in work scope a hand-picked OpenRouter model stays selected and answers, and smart-router/auto's runs reach only the work account", TIMEOUT, async (t) => {
   const world = levelsWorld(t);
   const pi = await world.start({ select: "smart-router/auto" });
   await pi.command("scope work");
-  // A model picked by hand outside the work account is switched back.
+  const said = pi.ui.notices.length;
+  // A model picked by hand outside the work account is kept, and answers.
   await pi.session.setModel(pi.model("openrouter/z-ai/glm-5.3"));
-  assert.equal(pi.selection(), "smart-router/auto");
-  assert.equal(count(pi, "pi-smart-router: this session is in work scope, so openrouter/z-ai/glm-5.3 was not kept, and the selection is smart-router/auto again."), 1);
-  // One of the work account's is kept, and answers.
+  assert.equal(pi.selection(), "openrouter/z-ai/glm-5.3");
+  await pi.prompt("Check the error paths");
+  assert.equal(answered(pi), "openrouter/z-ai/glm-5.3");
+  // So is one of the work account's.
   await pi.session.setModel(pi.model(WORK.high));
   assert.equal(pi.selection(), WORK.high);
   await pi.prompt("Check the error paths");
   assert.equal(answered(pi), WORK.high);
+  assert.deepEqual(pi.ui.notices.slice(said), [], "and the router said nothing about either");
+  assert.deepEqual(world.jev.calls, [], "nor asked Jev about a message it does not route");
   await pi.session.setModel(pi.model("smart-router/auto"));
+  const outside = { ...world.counts() };
 
   // Every tier goes to the work account, and Jev reads the work scope's descriptions.
   for (const tier of TIERS) {
@@ -1438,23 +1481,22 @@ test("L6 the work guard switches a hand-picked OpenRouter model back, and work r
     world.jev.calls.map((call) => criteriaOf(call)),
     world.jev.calls.map(() => [WORK_DESCRIBE]),
   );
-
-  // A selection written past model_select: a prompt is refused, and a run without one is switched at turn_start.
-  pi.force("openrouter/z-ai/glm-5.3");
-  const messages = pi.session.messages.length;
-  await pi.prompt("Ship it");
-  assert.equal(pi.session.messages.length, messages, "the prompt was not sent");
-  assert.equal(
-    count(
-      pi,
-      "pi-smart-router: this session is in work scope, and openrouter/z-ai/glm-5.3 is outside it, so the prompt was not sent. Choose smart-router/auto or a work Codex model with /model, or run /smart-router scope personal.",
-    ),
-    1,
+  const routed = world.counts();
+  assert.deepEqual(
+    Object.keys(routed).filter((provider) => routed[provider] !== (outside[provider] ?? 0)),
+    ["openai-codex-3"],
+    "the router's own runs reached nothing but the work account",
   );
+
+  // A selection written past model_select is sent as it is too: a prompt, and a run without one.
+  pi.force("openrouter/z-ai/glm-5.3");
+  await pi.prompt("Ship it");
+  assert.equal(answered(pi), "openrouter/z-ai/glm-5.3");
   await pi.custom();
-  assert.equal(pi.selection(), "smart-router/auto");
-  assert.match(answered(pi), /^openai-codex-3\//);
-  assert.deepEqual(Object.keys(called(world.counts())), ["openai-codex-3"], "nothing reached the personal account or OpenRouter");
+  assert.equal(pi.selection(), "openrouter/z-ai/glm-5.3");
+  assert.equal(answered(pi), "openrouter/z-ai/glm-5.3");
+  assert.equal(world.faux("openrouter").callCount, 3, "the three runs on the model picked by hand, and no other");
+  assert.deepEqual(pi.ui.saw(/was not kept|not sent|was stopped|emptied|locked/), []);
 });
 
 test("L7 one smart-router.level record per run; /smart-router was appends a correction", TIMEOUT, async (t) => {
@@ -1589,7 +1631,7 @@ test("L8 the risky floor raises a Jev LOW to HIGH, and a tag overrides it", TIME
   assert.deepEqual(fields(runRecords(pi).at(-1), tagged), tagged);
 });
 
-test("L9 a version 1 roster keeps its history and status text byte-identical", TIMEOUT, async (t) => {
+test("L9 a version 1 roster keeps its history and status text byte-identical, but for the line that says what the pin covers", TIMEOUT, async (t) => {
   const world = new World(t);
   const pi = await world.start({ select: "smart-router/auto" });
   await pi.prompt(PROMPTS.complex);
@@ -1622,7 +1664,7 @@ test("L9 a version 1 roster keeps its history and status text byte-identical", T
       "  architect: codex-like/m ok",
       "Routing: default worker, trivial worker, complex engineer, planning architect; fallback engineer → coder",
       "Last decision: <time> smart-router/auto user: architect → codex-like/m (hold:sticky, triage:no_fast_path)",
-      "The pin covers the model only. Still able to send data off this machine: Pi's own /share, /export and /bug.",
+      "The pin covers smart-router/auto and smart-router/local only. Still able to send data off this machine: a model picked by hand with /model, which is sent as it is; Pi's own /share, /export and /bug.",
     ].join("\n"),
   );
   // A version 1 run has no level: no record, no scope entry, no footer item, and Jev is never asked,
@@ -1667,17 +1709,23 @@ test("L10 where a session's scope reaches: the default goal-x auditor, a command
     assert.equal(answered(child), "openrouter/z-ai/glm-5.3");
   });
 
-  await t.test("under the latch, a child that loads the router is held in work scope, and one that does not keeps its model", async (t) => {
+  await t.test("under the latch, a child that loads the router is in work scope: its smart-router/auto goes to the work account, and a model it was given is kept, as in a child without the router", async (t) => {
     const world = levelsWorld(t);
     process.env[ENV_SCOPE] = "work";
-    const held = await world.start({ select: "openrouter/z-ai/glm-5.3" });
-    assert.equal(held.selection(), "smart-router/auto");
-    await held.prompt(PROMPTS.plain);
-    assert.equal(answered(held), WORK.medium);
+    const routed = await world.start({ select: "smart-router/auto" });
+    await routed.command("scope");
+    assert.equal(notice(routed, /^pi-smart-router: scope/), "pi-smart-router: scope work (latch).");
+    await routed.prompt(PROMPTS.plain);
+    assert.equal(answered(routed), WORK.medium);
+    // A child started on an explicit model keeps it, with the router or without.
+    const given = await world.start({ select: "openrouter/z-ai/glm-5.3" });
+    assert.equal(given.selection(), "openrouter/z-ai/glm-5.3");
+    await given.prompt(PROMPTS.plain);
+    assert.equal(answered(given), "openrouter/z-ai/glm-5.3");
     const bare = await world.start({ router: false, probe: false, select: "openrouter/z-ai/glm-5.3" });
     await bare.prompt(PROMPTS.plain);
     assert.equal(answered(bare), "openrouter/z-ai/glm-5.3");
-    assert.equal(world.faux("openrouter").callCount, 1, "only the child without the router reached OpenRouter");
+    assert.equal(world.faux("openrouter").callCount, 2, "the two children on the explicit model, and no run of smart-router/auto");
   });
 });
 

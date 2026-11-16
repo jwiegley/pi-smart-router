@@ -107,10 +107,12 @@ describe("the environment switch", () => {
       assert.deepEqual(processSlot().env.policy, policy, "the first valid roster's local section is latched as the switch's policy");
       assert.deepEqual(readPin(second.session.ctx.sessionManager, processSlot().env), { on: true, policy, entry: "none", at: undefined, env: true });
       for (const loaded of [first, second]) {
-        assert.equal(loaded.session.model?.id, "local", "session_start switched the selection to smart-router/local");
+        assert.deepEqual([loaded.session.model?.id, loaded.host.selections.length], ["auto", 0], "session_start leaves the selection as it is");
         assert.equal(routed(loaded.runtime.route("local", request("direct"))), GLM);
-        // smart-router/auto never reaches the local role in John's roster, so pinned, it refuses.
-        assert.throws(() => loaded.runtime.route("auto", request("direct", { previous: previous(loaded.runtime, KIMI) })), { message: /^smart-router\/auto: .*pinned to local models/ });
+        // smart-router/auto never reaches the local role in John's roster, so pinned, it refuses, and names the model that routes there.
+        assert.throws(() => loaded.runtime.route("auto", request("direct", { previous: previous(loaded.runtime, KIMI) })), {
+          message: /^smart-router\/auto: .*pinned to local models.* Nothing was sent\. Choose smart-router\/local with \/model, or run \/smart-router local off\.$/,
+        });
       }
     } finally {
       if (saved === undefined) delete process.env[ENV_PIN];

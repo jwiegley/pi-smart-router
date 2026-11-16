@@ -56,7 +56,7 @@ function templates(id: VirtualId, ref: string, reason: string): Array<readonly [
     ["invariant", invariant(id, ref, reason)],
     ["scope unreadable", scopeUnreadable(id, reason)],
     ["scope unserved", scopeUnserved(id, "personal", 2)],
-    // In work scope, outside the pin, as the work guard holds the session.
+    // In work scope, outside the pin, where a way out names only the models of the work account.
     ["roster missing in work scope", rosterRefusal(id, { kind: "missing", path: `/agent/${ref}/smart-router.json`, error: reason }, true)],
     ["roster invalid in work scope", rosterRefusal(id, { kind: "invalid", path: "/agent/smart-router.json", error: `roles[0].models[0]: "${ref}" ${reason}` }, true)],
     ["scope unreadable in work scope", scopeUnreadable(id, reason, true)],
@@ -139,7 +139,7 @@ describe("in work scope, outside the pin", () => {
   const INVALID = { kind: "invalid", path: "/agent/smart-router.json", error: "JSON syntax error" } as const;
   const ATTEMPTS: Attempt[] = [{ role: "work-medium", exists: true, candidates: [{ ok: false, ref: "openai-codex-3/gpt-6.1-terra", reason: "not-in-catalog", detail: "not in the catalog" }] }];
 
-  test("a refusal offers only what the work guard keeps: a work Codex model on smart-router/auto, and smart-router/auto too on smart-router/local", () => {
+  test("a refusal names only the models that keep the conversation on the work account: a work Codex model on smart-router/auto, and smart-router/auto too on smart-router/local", () => {
     assert.deepEqual(
       [
         rosterRefusal("auto", MISSING, true),

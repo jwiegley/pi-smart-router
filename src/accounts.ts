@@ -3,8 +3,8 @@
 // native login carries John's acknowledgement, which the router cannot verify. A work or Positron
 // label is refused wherever it appears, except on a version 2 work binding, which must carry one.
 // Even that binding passes only a check made in work scope: routing and status check each binding
-// in the session's scope and the work guard in work scope, so a personal session refuses it for its
-// scope, and a check made without a scope refuses its label.
+// in the session's scope, so a personal session refuses it for its scope, and a check made without
+// a scope refuses its label.
 //
 // Multi-Pass's labels come from its own global file, <agentDir>/multi-pass.json, read with the
 // same safe reader. Only subscriptions[].{provider, index, label} is used, and the file holds no
@@ -35,8 +35,8 @@ export type ScopedAccounts = ReadonlyMap<string, { readonly scope: Scope }>;
 
 /**
  * Whether a provider is a work-bound Codex provider: Codex, and bound to the work scope. It is the
- * only kind of account a work level holds (roster validation), a work-scope pick goes to (assertSafe)
- * and a work-scope session may select by hand (the work guard).
+ * only kind of account a work level holds (roster validation) and a work-scope pick goes to
+ * (assertSafe). A model picked by hand is not checked: it is sent as it is.
  */
 export function isWorkCodex(accounts: ScopedAccounts, provider: string): boolean {
   return isCodexProvider(provider) && accounts.get(provider)?.scope === "work";
