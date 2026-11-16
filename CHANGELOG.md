@@ -2,8 +2,43 @@
 
 All notable changes to this fork are recorded here, in the form of
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A version is `<upstream base>-jw.<n>`:
-the base is the upstream release the fork started from, and `jw.<n>` counts the fork's releases.
-Releases are signed tags; nothing is published to npm.
+the base is the latest upstream release merged into the fork's history, and `jw.<n>` counts the
+fork's releases on that base. Releases are signed tags; nothing is published to npm.
+
+## [1.4.0-jw.1] - 2026-11-16
+
+The fork's 1.3.0-jw.3 carried onto upstream v1.4.0. Upstream's v1.4.0 tag (`54bee53d`) is merged
+into the fork's history by a merge that keeps the fork's tree, as upstream main (`58e87b59`) was
+for 1.3.0-jw.1. No commit is rewritten, and `main` fast-forwards. The router behaves as it did in
+1.3.0-jw.3.
+
+Upgrading from 1.3.0-jw.3: nothing is required. No roster, command, notice, refusal or handler
+changes. Of the shipped files, only `package.json` and `README.md` differ, in the version and in
+the statement of the upstream base.
+
+### Changed
+
+- The upstream base is v1.4.0. The 35 upstream commits from `58e87b59` to v1.4.0 bump upstream's Pi
+  development dependencies from `^1.3.0` to `^1.5.2`, add a model-mapper rule and benchmark aliases
+  for Kimi K3 and K3.1 Pro, list Gemini 4 `carbon` and `hydrogen` as ungrounded, add a SWE-Marathon
+  benchmark source, keep curated benchmark rows through a live ingest, and keep release records
+  under `spine-tasks/`. Of the 47 files they change, 44 belong to what this port removed: the model
+  mapper, the benchmark profiles with their ingest scripts, fixtures and tests, two documents and
+  `spine-tasks/`. The other three, `README.md`, `package.json` and `package-lock.json`, the port
+  had replaced with its own. So none of upstream's changes is in this fork, and nothing among them
+  selects, reverts or blocks a model or adds an event handler.
+- Development and the tests use Pi 1.5.2: `@earendil-works/pi-ai` and
+  `@earendil-works/pi-coding-agent` are pinned at exactly 1.5.2, from 1.5.0. That is the version
+  upstream's lock resolves, and the version of jwiegley/pi that John's nix-config builds. In the
+  lock, the eight `@earendil-works` packages move to 1.5.2, and `lovely-mermaid` 0.3.3 takes the
+  place of `grok-mermaid` 0.2.3 as a dependency of pi-coding-agent; the lock still holds 124
+  packages, and the two that declare an install script are unchanged.
+- The peer ranges stay `>=1.5.0`, and the router still needs jwiegley/pi 1.5.0 or later. Pi 1.5.2
+  from npm lacks the bounded session reads, as 1.5.0 does, so the router still refuses every request
+  on upstream Pi.
+- A version's base, in this file's first paragraph, is the latest upstream release merged into the
+  fork's history. It read "the upstream release the fork started from".
+- The package version is `1.4.0-jw.1`.
 
 ## [1.3.0-jw.3] - 2026-11-16
 
@@ -313,6 +348,7 @@ directories, its ONNX models and its SQLite database are not read, and can be de
 - Tests run offline in an isolated root with a network and process tripwire, and the behaviour
   suite runs only in a sandbox.
 
+[1.4.0-jw.1]: https://github.com/jwiegley/pi-smart-router/compare/v1.3.0-jw.3...v1.4.0-jw.1
 [1.3.0-jw.3]: https://github.com/jwiegley/pi-smart-router/compare/v1.3.0-jw.2...v1.3.0-jw.3
 [1.3.0-jw.2]: https://github.com/jwiegley/pi-smart-router/compare/v1.3.0-jw.1...v1.3.0-jw.2
 [1.3.0-jw.1]: https://github.com/jwiegley/pi-smart-router/compare/f31b2304...v1.3.0-jw.1
