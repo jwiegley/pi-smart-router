@@ -20,10 +20,10 @@ const HANDLERS = [
   "model_select",
   "session_before_compact",
   "session_before_tree",
-  "before_provider_request",
-  "cache_warming_decision",
   "session_shutdown",
 ];
+/** Events whose handler could change what a selection sends. The router registers none: a model picked by hand is sent as it is. */
+const NEVER_HANDLED = ["before_provider_request", "cache_warming_decision", "tool_call"];
 
 beforeEach(resetSlot);
 afterEach(resetSlot);
@@ -61,7 +61,7 @@ test("both models are registered first, and every handler is wired once, after t
   assert.deepEqual(order, ["registerVirtualModel:auto", "registerVirtualModel:local", "build"]);
   assert.deepEqual(host.calls.slice(2), [...HANDLERS.map((event) => `on:${event}`), "registerCommand:smart-router"]);
   for (const event of HANDLERS) assert.equal(host.count(event), 1, event);
-  assert.equal(host.count("tool_call"), 0, "the pin blocks no tools (Q7)");
+  for (const event of NEVER_HANDLED) assert.equal(host.count(event), 0, `${event}: the router empties no payload, stops no warming and blocks no tools (Q7)`);
 });
 
 test("the factory does no I/O: the files are first read at session_start", async (t) => {
@@ -92,7 +92,7 @@ test("a builder that throws leaves both models refusing with the load error, and
     },
   });
   assert.equal(loaded.router, undefined);
-  assert.deepEqual(loaded.host.calls, ["registerVirtualModel:auto", "registerVirtualModel:local", "on:session_start"], "no guard, handler or command of a router that failed to build");
+  assert.deepEqual(loaded.host.calls, ["registerVirtualModel:auto", "registerVirtualModel:local", "on:session_start"], "no handler or command of a router that failed to build");
   loaded.session.select("auto");
   for (const id of ["auto", "local"] as const) {
     let message = "";

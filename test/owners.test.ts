@@ -6,7 +6,7 @@ import { writeFileSync } from "node:fs";
 import { join as joinPath } from "node:path";
 
 import { ENV_PIN, ENV_SCOPE, SCOPE_ENTRY, SLOT_KEY } from "../src/constants.ts";
-import { scopeUnserved, stale } from "../src/errors.ts";
+import { localInWorkScope, scopeUnserved, stale } from "../src/errors.ts";
 import { EMPTY_POLICY, policyFromRoster } from "../src/local.ts";
 import {
   envSwitchOn,
@@ -107,10 +107,12 @@ describe("the environment switch", () => {
       assert.deepEqual(processSlot().env.policy, policy, "the first valid roster's local section is latched as the switch's policy");
       assert.deepEqual(readPin(second.session.ctx.sessionManager, processSlot().env), { on: true, policy, entry: "none", at: undefined, env: true });
       for (const loaded of [first, second]) {
-        assert.equal(loaded.session.model?.id, "local", "session_start switched the selection to smart-router/local");
+        assert.deepEqual([loaded.session.model?.id, loaded.host.selections.length], ["auto", 0], "session_start leaves the selection as it is");
         assert.equal(routed(loaded.runtime.route("local", request("direct"))), GLM);
-        // smart-router/auto never reaches the local role in John's roster, so pinned, it refuses.
-        assert.throws(() => loaded.runtime.route("auto", request("direct", { previous: previous(loaded.runtime, KIMI) })), { message: /^smart-router\/auto: .*pinned to local models/ });
+        // smart-router/auto never reaches the local role in John's roster, so pinned, it refuses, and names the model that routes there.
+        assert.throws(() => loaded.runtime.route("auto", request("direct", { previous: previous(loaded.runtime, KIMI) })), {
+          message: /^smart-router\/auto: .*pinned to local models.* Nothing was sent\. Choose smart-router\/local with \/model, or run \/smart-router local off\.$/,
+        });
       }
     } finally {
       if (saved === undefined) delete process.env[ENV_PIN];
@@ -170,10 +172,13 @@ describe("the scope switch", () => {
       const second = await start({ dir: agentDir(t), id: "second", runtime: new FakeRuntime(), setup: personal });
       assert.equal(scopeLatched(processSlot()), true);
       assert.deepEqual(readScope(second.session.ctx.sessionManager, scopeLatched(processSlot()), undefined), { kind: "ok", scope: "work", source: "latch" });
-      // Hera's roster is version 1, which serves no work scope: auto refuses, and local still routes.
+      // Hera's roster is version 1, which serves no work scope: auto refuses, and so does local, outside the pin.
       assert.throws(() => second.runtime.route("auto", request("direct", { previous: previous(second.runtime, KIMI) })), { message: scopeUnserved("auto", "work", 1, true).message });
-      assert.equal(routed(second.runtime.route("local", request("direct"))), GLM);
+      assert.throws(() => second.runtime.route("local", request("direct")), { message: localInWorkScope(false).message });
       assert.equal(processSlot().env.on, false, "the scope switch does not pin");
+      // Pinned, the latched session's smart-router/local routes to the LAN model.
+      second.session.pin(policyFromRoster(rosterFixture("roster-hera.json")));
+      assert.equal(routed(second.runtime.route("local", request("direct"))), GLM);
     } finally {
       if (saved === undefined) delete process.env[ENV_SCOPE];
       else process.env[ENV_SCOPE] = saved;
@@ -211,23 +216,16 @@ describe("the last valid roster", () => {
     const slot = processSlot();
     assert.equal("lastRoster" in slot, false, "nothing is kept until a roster loads");
     assert.equal(rememberedRoster(slot), undefined);
-    const binding = { kind: "multi-pass", label: "Positron work", scope: "work" } as const;
-    const accounts = new Map([["openai-codex-3", binding]]);
-    rememberRoster(slot, { directories: ["/x/work"], accounts });
-    assert.deepEqual(rememberedRoster(slot), { directories: ["/x/work"], accounts });
-    const bound = (value: unknown) => ({ directories: [], accounts: new Map([["openai-codex-3", value]]) });
+    rememberRoster(slot, { directories: ["/x/work"] });
+    assert.deepEqual(rememberedRoster(slot), { directories: ["/x/work"] });
+    // A memory an earlier load of this module kept, with the account bindings the work guard read, still gives its directories, and nothing else.
+    slot.lastRoster = { directories: ["/x/work"], accounts: new Map([["openai-codex-3", { kind: "multi-pass", label: "Positron work", scope: "work" }]]) };
+    assert.deepEqual(rememberedRoster(slot), { directories: ["/x/work"] });
     const others: Array<[string, unknown]> = [
       ["not an object", "x"],
-      ["directories as text", { directories: "/x/work", accounts }],
-      ["a directory that is not text", { directories: [1], accounts }],
-      ["accounts in a plain object", { directories: [], accounts: { "openai-codex-3": binding } }],
-      ["a scope that is neither", bound({ ...binding, scope: "team" })],
-      ["no scope", bound({ kind: "multi-pass", label: "Positron work" })],
-      ["a kind that is neither", bound({ ...binding, kind: "alias" })],
-      ["no label", bound({ kind: "multi-pass", scope: "work" })],
-      ["a label that is not text", bound({ ...binding, label: 3 })],
-      ["a binding that is not an object", bound("work")],
-      ["a provider that is not text", { directories: [], accounts: new Map([[3, binding]]) }],
+      ["no directories", {}],
+      ["directories as text", { directories: "/x/work" }],
+      ["a directory that is not text", { directories: [1] }],
     ];
     for (const [name, other] of others) {
       slot.lastRoster = other;

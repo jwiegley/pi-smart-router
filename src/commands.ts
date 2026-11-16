@@ -2,13 +2,17 @@
 // [work|personal|status], was low|medium|high|super, and reload. It reports through notices, and
 // the only things it writes are the pin's and the scope's session entries and a run's correction.
 //
-// status shows the roster's state, the selection, the pin, the session's scope, the lock the guards
-// honour, each role's candidates on this host with the resolver's verdict and the catalog price,
-// the account bindings checked in the session's scope, with each provider's auth source (never a
-// credential), a version 1 roster's routing table or a version 2 roster's levels in each scope and
-// its classifier, the last decision, what can still send data off the machine, and a warning for
-// any version 1 fallback that moves a run onto Codex's API from another one. It replaces upstream's
-// doctor, plan, stats, pricing and mode commands.
+// status shows the roster's state, the selection, the pin, the session's scope, each role's
+// candidates on this host with the resolver's verdict and the catalog price, the account bindings
+// checked in the session's scope, with each provider's auth source (never a credential), a version 1
+// roster's routing table or a version 2 roster's levels in each scope and its classifier, the last
+// decision, what can still send data off the machine, and a warning for any version 1 fallback that
+// moves a run onto Codex's API from another one. It replaces upstream's doctor, plan, stats, pricing
+// and mode commands.
+//
+// One command selects a model: local on, which asks for local routing, selects smart-router/local.
+// No other command moves the selection: scope work and local off change what the router's own
+// models do, and say what the selection John keeps will do next (src/selection.ts).
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 
@@ -19,8 +23,6 @@ import type { VirtualId } from "./constants.ts";
 import { firstLine, rosterNamed } from "./errors.ts";
 import { isRecord } from "./files.ts";
 import type { Loaded } from "./files.ts";
-import { describeModel } from "./guards.ts";
-import type { GuardState, Guards, Lock } from "./guards.ts";
 import { checkLocal, EMPTY_POLICY, policyFromRoster } from "./local.ts";
 import type { LocalPolicy } from "./local.ts";
 import { describePin, describePolicy, pinOff, pinOn } from "./pin.ts";
@@ -35,6 +37,7 @@ import { autoRoles, parseRef, SCOPES, servesScope } from "./roster.ts";
 import type { Roster, RosterV1, RosterV2, Scope } from "./roster.ts";
 import { scopeEntry } from "./scope.ts";
 import type { ScopeState } from "./scope.ts";
+import { describeModel, ownModel } from "./selection.ts";
 import { isTier, tierLabel, TIERS } from "./tiers.ts";
 import type { Tier } from "./tiers.ts";
 
@@ -47,17 +50,20 @@ export interface Files {
 /** What the command needs of its router instance. */
 export interface CommandHost {
   readonly pi: Pick<ExtensionAPI, "appendEntry" | "getAllTools" | "getCommands" | "getThinkingLevel">;
-  readonly guards: Pick<Guards, "lockOf" | "showStatus" | "switchToAuto" | "switchToLocal" | "unlock">;
+  /** For local on: select smart-router/local unless the selection is already local. True when a local selection holds afterwards. */
+  selectLocal(ctx: ExtensionContext): Promise<boolean>;
+  /** Show the pin's status item, or clear it, for the session as it is now. */
+  showStatus(ctx: ExtensionContext): void;
   readonly now: () => number;
   /** Re-stat both files, and read them again when they changed. */
   refresh(): Files;
   /** Read both files again now, and register both models again when their declared limits changed. */
   reload(ctx: ExtensionContext): Files & { readonly limitsChanged: boolean };
   pinOf(ctx: ExtensionContext): PinReading;
-  /** The session's scope, as routing and the guards read it: the latch, the session's entry, then the work directories. */
+  /** The session's scope, as routing reads it: the latch, the session's entry, then the work directories. */
   scopeOf(ctx: ExtensionContext): ScopeState;
-  /** The session's records: its decisions, its guard state, and the level of the run planned or in flight, marked once that run starts. */
-  session(ctx: ExtensionContext): { readonly history: readonly HistoryEntry[]; readonly guard: GuardState; readonly pendingLevel: PendingLevel | undefined } | undefined;
+  /** The session's records: its decisions, and the level of the run planned or in flight, marked once that run starts. */
+  session(ctx: ExtensionContext): { readonly history: readonly HistoryEntry[]; readonly pendingLevel: PendingLevel | undefined } | undefined;
   /** A resolver context for one of the two models, built as routing builds it: in the session's scope, or in `scope`. */
   resolver(ctx: ExtensionContext, roster: Roster, id: VirtualId, pin: Pin, scope?: Scope): ResolveContext;
 }
@@ -79,15 +85,18 @@ const CODEX_API = "openai-codex-responses";
  * so it is not used here.
  */
 const UNPIN_QUESTION = "Unpin this session from local models?\nThe next requests may go to cloud models. Earlier turns stay where they are.";
-/** The same outside personal scope, where the work guard keeps the next requests on the work account. */
-const UNPIN_QUESTION_WORK = "Unpin this session from local models?\nThe next requests can go only to the work account. Earlier turns stay where they are.";
+/** The same outside personal scope, where smart-router/auto routes only to the work account. */
+const UNPIN_QUESTION_WORK = "Unpin this session from local models?\nIt is in work scope, so smart-router/auto's next requests go to the work account. Earlier turns stay where they are.";
 const KEEP_PIN = "No, keep the pin";
 const UNPIN = "Yes, unpin";
 
 /** How a session whose scope cannot be read gets one again. */
 const UNTIL_RECORDED = "until /smart-router scope work or /smart-router scope personal records it again";
-/** What follows when the work guard could not switch a selection outside work scope. */
-const NOT_SWITCHED = "could not be switched to smart-router/auto, so prompts are refused until you choose smart-router/auto or a work Codex model";
+/** What a model picked by hand does in a work session: the same as anywhere. */
+const BY_HAND = "A model picked by hand is sent as it is, in work scope too.";
+/** What smart-router/local's route does in a work session that is not pinned, and the models to choose instead. */
+const LOCAL_REFUSED = "In work scope smart-router/local answers only while the session is pinned, so its next requests are refused.";
+const CHOOSE_FOR_WORK = "Choose smart-router/auto or a work Codex model with /model";
 
 /** What /smart-router scope personal asks a session in work scope, and its two answers: Enter keeps work scope, as for the pin. */
 const MOVE_QUESTION = "Move this session to personal scope?\nIts earlier turns are work content, and the next requests would send them to personal accounts.";
@@ -112,17 +121,19 @@ function attempt<T>(read: () => T, fallback: T): T {
 }
 
 /**
- * What can still send data off this machine while the session is pinned (design §5.2, §5.3), and
- * first, while it is not, the classifier smart-router/auto asks about each message.
+ * What can still send data off this machine while the session is pinned (design §5.2, §5.3): first
+ * a model picked by hand, which the pin does not route, and then, while the session is not pinned,
+ * the classifier smart-router/auto asks about each message.
  */
 export function egress(pi: Pick<ExtensionAPI, "getAllTools" | "getCommands">, classifier?: string): string {
   const commands = new Set(attempt(() => pi.getCommands(), []).filter((command) => command.source === "extension").map((command) => command.name));
-  const parts = classifier === undefined ? [] : [`the classifier ${classifier} (smart-router/auto sends it each message and the recent conversation, redacted)`];
+  const parts = ["a model picked by hand with /model, which is sent as it is"];
+  if (classifier !== undefined) parts.push(`the classifier ${classifier} (smart-router/auto sends it each message and the recent conversation, redacted)`);
   parts.push(...EGRESS_COMMANDS.filter(([name]) => commands.has(name)).map(([name, what]) => `/${name} (${what})`));
   const tools = [...new Set(attempt(() => pi.getAllTools(), []).map((tool) => tool.name).filter((name) => EGRESS_TOOL.test(name)))].sort();
   if (tools.length > 0) parts.push(`the tools ${tools.join(", ")}`);
   parts.push("Pi's own /share, /export and /bug");
-  return `The pin covers the model only. Still able to send data off this machine: ${parts.join("; ")}.`;
+  return `The pin covers smart-router/auto and smart-router/local only. Still able to send data off this machine: ${parts.join("; ")}.`;
 }
 
 const stamp = (ms: number): string => {
@@ -149,17 +160,6 @@ function describeEntry(entry: HistoryEntry): string {
   const { level } = entry;
   const tier = level === undefined ? "" : ` [${level.scope} ${tierLabel(level.tier)} (${levelNote(level)})]`;
   return `${stamp(entry.at)} ${PROVIDER}/${entry.virtual} ${entry.reason}: ${entry.role} → ${entry.ref} (${entry.code}${trigger})${entry.foreign ? ", foreign" : ""}${tier}`;
-}
-
-/** The lock the guards honour (Guards.lockOf), in the words of the policy that set it. */
-function lockLine(lock: Lock | undefined): string | undefined {
-  if (lock === undefined) return undefined;
-  const pin = lock.policy === "pin";
-  const why =
-    lock.cause === "conflict"
-      ? `something keeps switching the selection to ${lock.model}`
-      : `the restored selection ${lock.model} could not be switched to ${pin ? "smart-router/local" : "smart-router/auto"}`;
-  return `Lock: since ${clock(lock.since)}: ${why}. Prompts are refused and runs stopped until the selection stays ${pin ? "local" : "within work scope"}.`;
 }
 
 const catalogModel = (rc: ResolveContext, ref: string): Model<Api> | undefined => {
@@ -264,9 +264,10 @@ function scopeLine(roster: Roster, scope: ScopeState): string | undefined {
 }
 
 /**
- * Why smart-router/auto refuses a session the work guard holds, if it does, and the way out: a scope
- * that cannot be read, a roster that did not load, or one that serves no work scope, as status's Scope
- * line reads it (servesScope). Outside the latch, /smart-router scope personal is a way out too.
+ * Why smart-router/auto refuses a session in work scope outside the pin, if it does, and the way
+ * out: a scope that cannot be read, a roster that did not load, or one that serves no work scope, as
+ * status's Scope line reads it (servesScope). Outside the latch, /smart-router scope personal is a
+ * way out too.
  */
 function workRefusal(roster: Loaded<Roster>, scope: ScopeState): string | undefined {
   if (scope.kind === "unreadable") return `Its scope cannot be read (${scope.reason}), so smart-router/auto refuses its requests ${UNTIL_RECORDED}.`;
@@ -276,9 +277,15 @@ function workRefusal(roster: Loaded<Roster>, scope: ScopeState): string | undefi
   return `It is in work scope, which ${rosterNamed(roster.value.version)} does not serve, so smart-router/auto refuses its requests: ${give}${scope.source === "latch" ? "" : ", or run /smart-router scope personal"}.`;
 }
 
-/** Clear the session's lock when `policy` set it: each command clears only the lock of the policy it ends. */
-function unlockOwn(host: CommandHost, ctx: ExtensionContext, policy: Lock["policy"]): void {
-  if (host.session(ctx)?.guard.lock?.policy === policy) host.guards.unlock(ctx);
+/**
+ * A selection that is not smart-router/auto: a model picked by hand, or smart-router/local. In a
+ * work session that is not pinned, the first is sent as it is and the second's route refuses. No
+ * command changes either: scope work and local off say which it is, and leave the choice to John.
+ */
+function otherSelection(ctx: ExtensionContext): "hand" | "local" | undefined {
+  if (ctx.model === undefined) return undefined;
+  const own = ownModel(ctx.model);
+  return own === undefined ? "hand" : own === "local" ? "local" : undefined;
 }
 
 /** Each scope's tiers, low to super, with each tier's candidates and the verdicts they get in that scope. */
@@ -319,8 +326,6 @@ export function statusText(host: CommandHost, ctx: ExtensionContext): string {
   ];
   const scope = roster.kind === "ok" ? scopeLine(roster.value, host.scopeOf(ctx)) : undefined;
   if (scope !== undefined) lines.push(scope);
-  const lock = lockLine(host.guards.lockOf(ctx));
-  if (lock !== undefined) lines.push(lock);
   if (roster.kind === "ok") {
     const { value } = roster;
     const auto = host.resolver(ctx, value, "auto", UNPINNED);
@@ -371,10 +376,13 @@ async function localOn(host: CommandHost, ctx: ExtensionContext): Promise<Answer
       ? `pi-smart-router: this session is pinned to local models, but ${roster.kind === "ok" ? "the roster has no local section" : `the roster is ${roster.kind}`}, so the pin has an empty policy and no model qualifies. Fix the roster, then run /smart-router local on again.`
       : `pi-smart-router: this session is pinned to local models, with ${describePolicy(policy)}.`,
   ];
+  // The command asks for local routing, so it selects the model that routes locally.
   const before = describeModel(ctx.model);
-  const allowed = await host.guards.switchToLocal(ctx);
-  if (!allowed) {
-    lines.push(`The selection ${describeModel(ctx.model)} is not local and could not be switched to smart-router/local, so prompts are refused until you choose a local model.`);
+  const local = await host.selectLocal(ctx);
+  if (!local) {
+    lines.push(
+      `The selection ${describeModel(ctx.model)} could not be switched to smart-router/local and stays as it is. Choose smart-router/local with /model: the pin routes only the router's own two models, and a model picked by hand is sent as it is.`,
+    );
   } else if (describeModel(ctx.model) !== before) {
     lines.push(`The selection is ${describeModel(ctx.model)} now.`);
   }
@@ -384,9 +392,9 @@ async function localOn(host: CommandHost, ctx: ExtensionContext): Promise<Answer
   }
   // Pinned now, so smart-router/auto asks no classifier.
   lines.push(egress(host.pi));
-  host.guards.showStatus(ctx);
+  host.showStatus(ctx);
   const text = lines.join("\n");
-  return empty || !allowed ? warning(text) : info(text);
+  return empty || !local ? warning(text) : info(text);
 }
 
 async function localOff(host: CommandHost, ctx: ExtensionContext): Promise<Answer> {
@@ -398,41 +406,37 @@ async function localOff(host: CommandHost, ctx: ExtensionContext): Promise<Answe
     return warning("pi-smart-router: this Pi cannot read pin entries (it has no bounded session history), so an unpinning entry would not be seen; the session stays pinned.");
   }
   if (!pin.on) {
-    unlockOwn(host, ctx, "pin");
-    host.guards.showStatus(ctx);
+    host.showStatus(ctx);
     return info("pi-smart-router: this session is not pinned.");
   }
   if (!ctx.hasUI) return warning("pi-smart-router: /smart-router local off asks for confirmation, and this mode has no dialogs, so the session stays pinned.");
-  // Outside personal scope, a scope that cannot be read included, the work guard holds the session once it is unpinned.
+  // Outside personal scope, a scope that cannot be read included, smart-router/auto routes only to the work account once the session is unpinned.
   const personal = (scope: ScopeState): boolean => scope.kind === "ok" && scope.scope === "personal";
   // Only the one answer unpins: Escape, a timeout, a cancelled dialog and anything else keep the pin.
   const answer = await ctx.ui.select(personal(host.scopeOf(ctx)) ? UNPIN_QUESTION : UNPIN_QUESTION_WORK, [KEEP_PIN, UNPIN]);
   if (answer !== UNPIN) return info("pi-smart-router: the session stays pinned to local models.");
   host.pi.appendEntry(PIN_ENTRY, pinOff(host.now()));
-  unlockOwn(host, ctx, "pin");
+  host.showStatus(ctx);
+  // Unpinning asks for no routing, so the selection stays, in either scope.
+  const stays = `pi-smart-router: this session is no longer pinned, and the selection stays ${describeModel(ctx.model)}.`;
   const scope = host.scopeOf(ctx);
-  if (personal(scope)) {
-    host.guards.showStatus(ctx);
-    return warning(`pi-smart-router: this session is no longer pinned, and the selection stays ${describeModel(ctx.model)}. The next requests may go to cloud models.`);
+  if (personal(scope)) return warning(`${stays} The next requests may go to cloud models.`);
+  const selection = otherSelection(ctx);
+  if (selection === "hand") return warning(`${stays} ${BY_HAND}`);
+  const refused = workRefusal(host.refresh().roster, scope);
+  if (selection === "local") {
+    return warning(
+      scope.kind === "unreadable"
+        ? `${stays} Its scope cannot be read (${scope.reason}), so smart-router/local refuses its requests, as smart-router/auto does, ${UNTIL_RECORDED}.`
+        : `${stays} ${LOCAL_REFUSED} ${refused ?? `${CHOOSE_FOR_WORK}.`}`,
+    );
   }
-  // The work guard keeps only smart-router/auto and the work account, so the selection goes where
-  // its next turn would.
-  const before = describeModel(ctx.model);
-  const allowed = await host.guards.switchToAuto(ctx);
-  host.guards.showStatus(ctx);
-  const selection = describeModel(ctx.model);
-  if (!allowed) return warning(`pi-smart-router: this session is no longer pinned, and it is in work scope, but its selection ${selection} ${NOT_SWITCHED}.`);
-  const next = workRefusal(host.refresh().roster, scope) ?? "It is in work scope, so the next requests go to the work account.";
-  return warning(`pi-smart-router: this session is no longer pinned, and the selection ${selection === before ? `stays ${selection}` : `is ${selection} now`}. ${next}`);
+  return warning(`${stays} ${refused ?? "It is in work scope, so the next requests go to the work account."}`);
 }
 
 function localStatus(host: CommandHost, ctx: ExtensionContext): Answer {
   const pin = host.pinOf(ctx);
-  const lines = [`pi-smart-router: pin ${describePin(pin)}.`];
-  const lock = lockLine(host.guards.lockOf(ctx));
-  if (lock !== undefined) lines.push(lock);
-  lines.push(egress(host.pi, classifierOf(host.refresh().roster, pin)));
-  return info(lines.join("\n"));
+  return info([`pi-smart-router: pin ${describePin(pin)}.`, egress(host.pi, classifierOf(host.refresh().roster, pin))].join("\n"));
 }
 
 /** The session's scope, as /smart-router scope answers it. */
@@ -443,26 +447,26 @@ function scopeAnswer(scope: ScopeState): Answer {
 }
 
 /**
- * Personal to work takes effect at once: the entry, then a selection outside work scope is switched
- * to smart-router/auto, and the answer says when smart-router/auto refuses the scope.
+ * Personal to work takes effect at once: the entry is recorded, and the answer says when
+ * smart-router/auto refuses the scope. Changing the scope asks for no routing, so the selection
+ * stays: the answer says what a model picked by hand, or smart-router/local, does in work scope.
  */
-async function scopeWork(host: CommandHost, ctx: ExtensionContext, roster: Loaded<Roster>): Promise<Answer> {
+function scopeWork(host: CommandHost, ctx: ExtensionContext, roster: Loaded<Roster>): Answer {
   host.pi.appendEntry(SCOPE_ENTRY, scopeEntry("work", "command", host.now()));
   const scope = host.scopeOf(ctx);
   const answer = scopeAnswer(scope);
   const lines = [answer.text];
   let warned = answer.type !== "info";
-  const before = describeModel(ctx.model);
-  const allowed = await host.guards.switchToAuto(ctx);
-  // While pinned, only the pin's rules apply, and they are not this command's to report.
-  if (!allowed && !host.pinOf(ctx).on) {
-    lines.push(`The selection ${describeModel(ctx.model)} is outside work scope and ${NOT_SWITCHED}.`);
-    warned = true;
-  } else if (describeModel(ctx.model) !== before) {
-    lines.push(`The selection is ${describeModel(ctx.model)} now.`);
-  }
   // A scope that cannot be read, which only a Pi without bounded history gives here, is answered above.
   const refused = scope.kind === "ok" ? workRefusal(roster, scope) : undefined;
+  const selection = otherSelection(ctx);
+  if (selection === "hand") {
+    lines.push(`The selection stays ${describeModel(ctx.model)}. ${BY_HAND}`);
+  } else if (selection === "local" && !host.pinOf(ctx).on) {
+    // While pinned, smart-router/local routes to the LAN models in either scope.
+    lines.push(`The selection stays smart-router/local. ${LOCAL_REFUSED}${refused === undefined ? ` ${CHOOSE_FOR_WORK}, or run /smart-router local on.` : ""}`);
+    warned = true;
+  }
   if (refused !== undefined) {
     lines.push(refused);
     warned = true;
@@ -472,9 +476,8 @@ async function scopeWork(host: CommandHost, ctx: ExtensionContext, roster: Loade
 
 /**
  * Work to personal asks first, as unpinning does, and says that the earlier turns are work content;
- * a scope that cannot be read counts as work, as routing and the guards treat it. Under the latch it
- * is refused. Once confirmed, a lock work scope set is cleared: it does nothing in personal scope,
- * but would come back with work scope.
+ * a scope that cannot be read counts as work, as routing treats it. Under the latch it is refused.
+ * The selection stays as it is.
  */
 async function scopePersonal(host: CommandHost, ctx: ExtensionContext): Promise<Answer> {
   const scope = host.scopeOf(ctx);
@@ -489,7 +492,6 @@ async function scopePersonal(host: CommandHost, ctx: ExtensionContext): Promise<
     if (answer !== TO_PERSONAL) return info("pi-smart-router: the session stays in work scope.");
   }
   host.pi.appendEntry(SCOPE_ENTRY, scopeEntry("personal", "command", host.now()));
-  unlockOwn(host, ctx, "work");
   const answer = scopeAnswer(host.scopeOf(ctx));
   return fromWork ? warning(answer.text) : answer;
 }

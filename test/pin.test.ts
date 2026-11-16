@@ -6,7 +6,7 @@ import test, { afterEach, beforeEach, describe } from "node:test";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 
 import { ENV_PIN, PIN_ENTRY, ROUTING_REGISTRY_KEY } from "../src/constants.ts";
-import { carriedNotice, PIN_POLICY_CHANGED, resumeNotice } from "../src/errors.ts";
+import { carriedNotice, noBoundedHistory, PIN_POLICY_CHANGED, resumeNotice } from "../src/errors.ts";
 import { EMPTY_POLICY, policyFromRoster } from "../src/local.ts";
 import type { LocalPolicy } from "../src/local.ts";
 import { processSlot } from "../src/owners.ts";
@@ -155,12 +155,16 @@ describe("the recorded policy", () => {
     assert.equal(routed(pinned.runtime.route("local", request("continuation", { signal: next }))), LAN_BOX);
   });
 
-  test("a model the recorded policy holds stays allowed after the edit", async (t) => {
+  test("the pin's item goes by the recorded policy after the edit, and a model picked by hand is kept either way", async (t) => {
     const { pinned } = await edited(t);
     await pinned.host.choose(GLM);
-    assert.equal(pinned.session.model?.provider, "omlx-hera", "GLM, chosen directly, is still local under the recorded policy");
+    assert.deepEqual([pinned.session.model?.provider, pinned.session.statuses.get("smart-router")], ["omlx-hera", "local models"], "GLM, chosen directly, is still local under the recorded policy");
     await pinned.host.choose(LAN_BOX);
-    assert.equal(pinned.session.model?.provider, "omlx-hera", "the roster's new local model is not, so the choice was reverted");
+    assert.deepEqual(
+      [pinned.session.model?.provider, pinned.session.statuses.get("smart-router")],
+      ["lan-box", undefined],
+      "the roster's new local model is not in the recorded policy: picked by hand it is kept, and the pin's item is not shown over it",
+    );
   });
 });
 
@@ -183,7 +187,7 @@ describe("handoffs", () => {
       // A new session starts on the settings default, a cloud model.
       const child = await start({ dir, id: file, file, runtime: new FakeRuntime(), select: KIMI });
       assert.deepEqual(pinOf(child), { on: true, policy, entry: "on", at: pinOf(child).at, env: false }, file);
-      assert.equal(child.session.model?.id, "local", `${file}: switched to smart-router/local`);
+      assert.deepEqual([`${child.session.model?.provider}/${child.session.model?.id}`, child.host.selections.length], [KIMI, 0], `${file}: the selection it started on is left as it is`);
       assert.ok(child.session.notices.some((notice) => /pinned to local models, as the session it came from was/.test(notice.message)), file);
     }
     assert.equal(processSlot().handoffs.size, 0, "each handoff is taken once");
@@ -311,31 +315,35 @@ describe("session_start keeps the pin when another of its steps fails", () => {
     return child;
   }
 
-  /** The new session recorded the pin it carried, took its handoff, and switched to smart-router/local. */
-  function assertCarried(child: Loaded): void {
+  /** The new session recorded the pin it carried, took its handoff, left its selection as it was, and ran the pin's status step. */
+  async function assertCarried(child: Loaded): Promise<void> {
     assert.deepEqual(pinOf(child), { on: true, policy: POLICY, entry: "on", at: AT, env: false }, "the pin was recorded in the new session");
     assert.equal(processSlot().handoffs.size, 0, "the handoff was taken");
-    assert.equal(selection(child), LOCAL, "the cloud selection was switched to smart-router/local");
+    assert.deepEqual([selection(child), child.host.selections.length], [KIMI, 0], "the selection the session started on is left as it is");
+    assert.ok(child.session.statuses.has("smart-router"), "the status step ran");
+    assert.equal(child.session.statuses.get("smart-router"), undefined, "and shows nothing over a model the pin does not route");
+    // Once smart-router/local is selected, the carried pin shows.
+    await child.host.choose(LOCAL);
     assert.equal(child.session.statuses.get("smart-router"), "local models");
   }
 
-  function assertPinned(child: Loaded, failure: string): void {
-    assertCarried(child);
+  async function assertPinned(child: Loaded, failure: string): Promise<void> {
+    await assertCarried(child);
     assert.ok(child.session.notices.some((notice) => notice.message === carriedNotice()));
     assert.ok(reported(child, failure), JSON.stringify(child.session.notices));
   }
 
   test("/new, when the seed read of the new session throws", async (t) => {
-    assertPinned(await inherit(t, "new", (child) => failSeed(child, "database is locked")), "database is locked");
+    await assertPinned(await inherit(t, "new", (child) => failSeed(child, "database is locked")), "database is locked");
   });
 
   test("a fork, when another extension's routing registry throws", async (t) => {
-    assertPinned(await inherit(t, "fork", breakRegistry), "broken registry");
+    await assertPinned(await inherit(t, "fork", breakRegistry), "broken registry");
   });
 
   test("/new, when registering the models again throws", async (t) => {
     const conflict = "Virtual model smart-router/auto conflicts with a registered model";
-    assertPinned(
+    await assertPinned(
       await inherit(t, "new", (child) => {
         child.host.api.registerVirtualModel = throwing(conflict);
       }),
@@ -345,17 +353,22 @@ describe("session_start keeps the pin when another of its steps fails", () => {
 
   test("/new, when Pi's agent directory cannot be found", async (t) => {
     const build: NonNullable<LoadOptions["build"]> = (pi, options) => createRouter(pi, { ...options, agentDir: throwing("HOME is not set") });
-    assertPinned(await inherit(t, "new", () => {}, { build }), "HOME is not set");
+    await assertPinned(await inherit(t, "new", () => {}, { build }), "HOME is not set");
   });
 
-  test("a resume, when the seed read throws: the restored cloud selection is switched at once", async (t) => {
-    const loaded = load({ dir: agentDir(t), id: "resumed", file: "/sessions/r.jsonl", setup: (session) => session.pin(POLICY) });
-    failSeed(loaded, "Cycle in session ancestry at e3");
-    loaded.session.select(KIMI);
-    await loaded.host.emit("session_start", { reason: "resume" });
-    assert.equal(selection(loaded), LOCAL);
-    assert.equal(loaded.session.statuses.get("smart-router"), "local models");
-    assert.ok(reported(loaded, "Cycle in session ancestry at e3"));
+  test("a resume, when the seed read throws: the restored selection is kept, and the pin's item is shown for a selection the pin covers", async (t) => {
+    for (const [restored, status] of [
+      [KIMI, undefined],
+      [LOCAL, "local models"],
+    ] as const) {
+      resetSlot();
+      const loaded = load({ dir: agentDir(t), id: "resumed", file: "/sessions/r.jsonl", setup: (session) => session.pin(POLICY) });
+      failSeed(loaded, "Cycle in session ancestry at e3");
+      loaded.session.select(restored);
+      await loaded.host.emit("session_start", { reason: "resume" });
+      assert.deepEqual([selection(loaded), loaded.host.selections.length, loaded.session.statuses.get("smart-router")], [restored, 0, status], restored);
+      assert.ok(reported(loaded, "Cycle in session ancestry at e3"));
+    }
   });
 
   test("/new, when no notice can be shown and the roster is missing", async (t) => {
@@ -363,7 +376,7 @@ describe("session_start keeps the pin when another of its steps fails", () => {
     const breakNotices = (child: Loaded): void => {
       (child.session.ctx.ui as unknown as Record<string, unknown>).notify = throwing("the terminal is gone");
     };
-    assertCarried(await inherit(t, "new", breakNotices, { roster: null }));
+    await assertCarried(await inherit(t, "new", breakNotices, { roster: null }));
   });
 
   test("a step that fails leaves the others to run", async (t) => {
@@ -415,18 +428,15 @@ describe("/smart-router local off", () => {
     assert.equal(loaded.session.pinEntries().length, 1, "nothing was written");
   });
 
-  test("the answer that unpins unpins, clears the lock and keeps the selection", async (t) => {
+  test("the answer that unpins unpins, clears the pin's item and keeps the selection", async (t) => {
     const loaded = await start({ dir: agentDir(t), select: "local", setup: (session) => session.pin(POLICY), now: () => NOW });
-    const record = loaded.router?.record("session-1");
-    assert.ok(record !== undefined);
-    record.guard.lock = { since: NOW, model: KIMI, cause: "conflict", policy: "pin" };
+    assert.equal(loaded.session.statuses.get("smart-router"), "local models");
     loaded.session.dialogKeys = ["down", "enter"];
     await loaded.host.command("smart-router", "local off");
     assert.deepEqual(loaded.session.pinEntries().at(-1), { v: 1, on: false, at: AT });
     assert.deepEqual([pinOf(loaded).on, pinOf(loaded).entry], [false, "off"]);
-    assert.equal(record.guard.lock, undefined);
     assert.equal(loaded.session.statuses.get("smart-router"), undefined);
-    assert.equal(loaded.session.model?.id, "local", "the selection stays as it is");
+    assert.deepEqual([loaded.session.model?.id, loaded.host.selections.length], ["local", 0], "the selection stays as it is");
     assert.match(loaded.session.notices.at(-1)?.message ?? "", /no longer pinned, and the selection stays smart-router\/local\. The next requests may go to cloud models\.$/);
   });
 
@@ -460,6 +470,11 @@ test("a Pi without bounded history counts every session as pinned, and says so",
   loaded.session.select(KIMI);
   await loaded.host.emit("session_start", { reason: "startup" });
   assert.match(loaded.session.notices[0]?.message ?? "", /every session counts as pinned to local models because its pin cannot be read/);
-  assert.equal(loaded.session.model?.id, "local", "the cloud selection was switched to smart-router/local, which refuses");
+  // The router's own models refuse there; a model picked by hand is left selected and sent as it is.
+  assert.deepEqual([`${loaded.session.model?.provider}/${loaded.session.model?.id}`, loaded.host.selections.length], [KIMI, 0]);
+  assert.deepEqual(await loaded.host.emit("input", { text: "fix the build", source: "interactive" }), [undefined], "its prompt is sent");
+  for (const id of ["auto", "local"] as const) {
+    assert.throws(() => loaded.runtime.route(id, request("direct")), { message: noBoundedHistory(id).message }, id);
+  }
   assert.equal(loaded.session.wholeHistoryReads, 0);
 });

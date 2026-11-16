@@ -7,7 +7,7 @@ import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import type { Api, Model } from "@earendil-works/pi-ai";
 
 import { ENV_SCOPE, LEVEL_ENTRY, LEVEL_KEY, PIN_ENTRY, SCOPE_ENTRY, STATUS_KEY } from "../src/constants.ts";
-import { directoryFailedNotice, directoryNotice, scopeCarriedNotice, scopeCarryFailedNotice, scopeUnreadable, scopeUnserved } from "../src/errors.ts";
+import { directoryFailedNotice, directoryNotice, localInWorkScope, scopeCarriedNotice, scopeCarryFailedNotice, scopeUnreadable, scopeUnserved } from "../src/errors.ts";
 import { policyFromRoster } from "../src/local.ts";
 import { processSlot, scopeLatched } from "../src/owners.ts";
 import { createRouter } from "../src/router.ts";
@@ -295,7 +295,7 @@ describe("handoffs", () => {
     assert.equal(processSlot().scopeHandoffs?.size ?? 0, 0);
   });
 
-  // A scope that cannot be read holds its session as work scope (the work guard and routing), so the
+  // A scope that cannot be read holds its session as work scope (routing resolves it there), so the
   // session a fork or /new makes from it starts there too, as a malformed pin is carried as a pin.
   for (const reason of ["new", "fork"] as const) {
     test(`an unreadable scope is carried into a ${reason === "new" ? "/new" : "fork"} as work scope`, async (t) => {
@@ -523,10 +523,10 @@ describe("a roster that comes to list a running session's directory", () => {
 });
 
 describe("smart-router/auto refuses a scope it cannot serve", () => {
-  test("a version 1 roster with PI_SMART_ROUTER_SCOPE=work, on every path, sending nothing; smart-router/local still routes to the LAN model", async (t) => {
+  test("a version 1 roster with PI_SMART_ROUTER_SCOPE=work, on every path, sending nothing; smart-router/local, outside the pin, sends nothing either", async (t) => {
     await withScope("work", async () => {
       const loaded = await begin({ dir: agentDir(t) });
-      // The work guard keeps only smart-router/auto and the work account, which a version 1 roster cannot bind.
+      // A work session's way out names only the work account's models, and a version 1 roster binds no work account.
       const refusal = scopeUnserved("auto", "work", 1, true);
       assert.equal(
         refusal.message,
@@ -541,12 +541,9 @@ describe("smart-router/auto refuses a scope it cannot serve", () => {
       loaded.session.endRun();
       refuses(() => loaded.runtime.route("auto", request("direct")), refusal, "a direct request without a plan");
       refuses(() => loaded.runtime.route("auto", request("continuation", { signal: new AbortController().signal })), refusal, "a foreign request");
-      assert.equal(routed(loaded.runtime.route("local", request("direct"))), GLM);
-      assert.deepEqual(
-        loaded.router?.record(loaded.session.id)?.history.map((entry) => [entry.virtual, entry.ref]),
-        [["local", GLM]],
-        "only the local request reached a model",
-      );
+      // Under the latch, /smart-router scope personal is refused, so smart-router/local's refusal leaves it out.
+      refuses(() => loaded.runtime.route("local", request("direct")), localInWorkScope(false), "smart-router/local, outside the pin");
+      assert.deepEqual(loaded.router?.record(loaded.session.id)?.history, [], "no request reached a model");
     });
   });
 
@@ -575,7 +572,7 @@ describe("smart-router/auto refuses a scope it cannot serve", () => {
   test("an unreadable scope, which routing resolves in work scope, the narrower one", async (t) => {
     const dir = agentDir(t, { roster: HERA_V2 });
     const malformed = await begin({ dir, id: "malformed", runtime: new FakeRuntime(workCatalog()), setup: (session) => session.appendCustom(SCOPE_ENTRY, { v: 1, scope: "work" }) });
-    // The work guard holds a session whose scope cannot be read, so only a work Codex model is offered.
+    // A scope that cannot be read counts as work scope, so only a work Codex model is offered.
     const unreadable = scopeUnreadable("auto", "the latest smart-router.scope entry is not one the router wrote", true);
     assert.equal(
       unreadable.message,
@@ -585,11 +582,11 @@ describe("smart-router/auto refuses a scope it cannot serve", () => {
     const signal = malformed.session.startRun();
     refuses(() => malformed.runtime.route("auto", request("continuation", { signal })), unreadable, "the owned run");
     malformed.session.endRun();
-    assert.equal(routed(malformed.runtime.route("local", request("direct"))), GLM, "smart-router/local stays on the LAN");
-    // pi-cache-optimizer is told of no pick on smart-router/auto, which refuses this scope, and of
-    // smart-router/local's, which it does not.
+    // Outside the pin, smart-router/local refuses a scope that cannot be read too: it counts as work scope.
+    refuses(() => malformed.runtime.route("local", request("direct")), scopeUnreadable("local", "the latest smart-router.scope entry is not one the router wrote", true), "smart-router/local");
+    // pi-cache-optimizer is told of no pick on either model, since both refuse this scope.
     assert.equal(malformed.router?.activeRoute("auto"), undefined);
-    assert.equal(malformed.router?.activeRoute("local")?.modelId, "GLM-5.3-Flash-oQ4e-mtp");
+    assert.equal(malformed.router?.activeRoute("local"), undefined);
     const personal = await begin({ dir, id: "personal", runtime: new FakeRuntime(workCatalog()) });
     assert.equal(personal.router?.activeRoute("auto")?.modelId, "deepseek/deepseek-v4.1-flash-1017");
 
@@ -601,7 +598,7 @@ describe("smart-router/auto refuses a scope it cannot serve", () => {
       return latest(customType, options);
     };
     refuses(() => locked.runtime.route("auto", request("direct")), scopeUnreadable("auto", "reading its smart-router.scope entries failed: database is locked", true), "a reader that throws");
-    assert.equal(routed(locked.runtime.route("local", request("direct"))), GLM);
+    refuses(() => locked.runtime.route("local", request("direct")), scopeUnreadable("local", "reading its smart-router.scope entries failed: database is locked", true), "smart-router/local, with a reader that throws");
   });
 
   test("a version 2 roster without the session's scope", async (t) => {
@@ -621,7 +618,7 @@ describe("smart-router/auto refuses a scope it cannot serve", () => {
       const latched = await begin({ dir: personalOnly, id: "latched", runtime: new FakeRuntime(workCatalog()) });
       assert.equal(latched.session.notices.length, 0, "the roster is valid");
       refuses(() => latched.runtime.route("auto", request("direct")), scopeUnserved("auto", "work", 2, true), "a personal-only roster in work scope");
-      assert.equal(routed(latched.runtime.route("local", request("direct"))), GLM);
+      refuses(() => latched.runtime.route("local", request("direct")), localInWorkScope(false), "smart-router/local in a latched process, outside the pin");
     });
   });
 
@@ -637,6 +634,97 @@ describe("smart-router/auto refuses a scope it cannot serve", () => {
       const machine = await begin({ dir: agentDir(t, { roster: fixture("roster-work.json") }), id: "machine", runtime: new FakeRuntime(workCatalog()) });
       assert.equal(routed(machine.runtime.route("auto", request("direct"))), NATIVE_TERRA, "a work machine");
     });
+  });
+});
+
+describe("smart-router/local in work scope", () => {
+  // Work scope sends a conversation to LAN models only under the pin. The route says so itself: the
+  // selection is John's, and the router changes none (his decision of 2026-11-16).
+  const policy = policyFromRoster(rosterFixture("roster-hera.json"));
+
+  test("outside the pin it refuses every request, names the ways out, plans nothing and tells pi-cache-optimizer of no pick; the selection stays", async (t) => {
+    const loaded = await begin({ dir: agentDir(t, { roster: HERA_V2 }), runtime: new FakeRuntime(workCatalog()), setup: recorded("work") });
+    await loaded.host.choose("smart-router/local");
+    const refusal = localInWorkScope(true);
+    assert.equal(
+      refusal.message,
+      "smart-router/local: this session is in work scope, where smart-router/local answers only while the session is pinned to local models. Nothing was sent. Run /smart-router local on to pin the session to local models, choose smart-router/auto or a work Codex model with /model, or run /smart-router scope personal.",
+    );
+    assert.equal(isRetryableAssistantError(assistant("smart-router/local", { stopReason: "error", errorMessage: refusal.message })), false, "Pi does not retry it");
+    assert.deepEqual(await loaded.host.emit("input", { text: PLANNING, source: "interactive" }), [undefined], "the prompt itself is passed on");
+    assert.equal(loaded.router?.record(loaded.session.id)?.plan, undefined, "nothing is planned for a request the route refuses");
+    const signal = loaded.session.startRun();
+    refuses(() => loaded.runtime.route("local", request("user", { signal })), refusal, "the owned run");
+    refuses(() => loaded.runtime.route("local", request("continuation", { signal })), refusal, "a continuation");
+    loaded.session.endRun();
+    refuses(() => loaded.runtime.route("local", request("direct")), refusal, "a compaction or summary");
+    refuses(() => loaded.runtime.route("local", request("continuation", { signal: new AbortController().signal })), refusal, "a foreign request");
+    assert.equal(loaded.router?.activeRoute("local"), undefined);
+    assert.deepEqual(loaded.router?.record(loaded.session.id)?.history, [], "no request reached a model");
+    assert.equal(loaded.session.model?.id, "local", "the selection is left as it is");
+    assert.deepEqual(messages(loaded), [], "and nothing is said outside the refusals");
+    // smart-router/auto, in the same session, still routes to the work account.
+    assert.equal(routed(loaded.runtime.route("auto", request("direct"))), WORK_TERRA);
+  });
+
+  test("under the pin it routes to the LAN model, by an entry or under the latch; in personal scope it routes as before", async (t) => {
+    const dir = agentDir(t, { roster: HERA_V2 });
+    const pinned = await begin({ dir, id: "pinned", runtime: new FakeRuntime(workCatalog()), setup: (session) => {
+      recorded("work")(session);
+      session.pin(policy);
+    } });
+    assert.equal(routed(pinned.runtime.route("local", request("direct"))), GLM);
+    assert.equal(pinned.router?.activeRoute("local")?.modelId, "GLM-5.3-Flash-oQ4e-mtp");
+    const personal = await begin({ dir, id: "personal", runtime: new FakeRuntime(workCatalog()) });
+    assert.equal(routed(personal.runtime.route("local", request("direct"))), GLM);
+    await withScope("work", async () => {
+      const latched = await begin({ dir, id: "latched", runtime: new FakeRuntime(workCatalog()), setup: (session) => session.pin(policy) });
+      assert.equal(routed(latched.runtime.route("local", request("direct"))), GLM);
+    });
+  });
+});
+
+describe("while the roster fails to load, the scope keeps the last valid roster's work directories", () => {
+  /** A session whose scope entry cannot be written, so that its scope rests on the work directories. */
+  async function unrecorded(options: LoadOptions): Promise<Loaded> {
+    const loaded = load({ now: () => NOW, ...options });
+    loaded.host.api.appendEntry = () => {
+      throw new Error("the session file is read-only");
+    };
+    loaded.session.select("auto");
+    await loaded.host.emit("session_start", { reason: "startup" });
+    return loaded;
+  }
+  const scopeAnswer = async (loaded: Loaded): Promise<string | undefined> => {
+    await loaded.host.command("smart-router", "scope");
+    return loaded.session.notices.at(-1)?.message;
+  };
+
+  test("in this instance, and in one built later in the process, as /reload builds one", async (t) => {
+    const dir = agentDir(t, { roster: HERA_V2 });
+    const loaded = await unrecorded({ dir, cwd: APP });
+    writeFileSync(join(dir, "smart-router.json"), "{ nope");
+    await loaded.host.command("smart-router", "reload");
+    assert.equal(await scopeAnswer(loaded), "pi-smart-router: scope work (directory).", "still in work scope by its directory");
+    const rebuilt = await unrecorded({ dir, id: "rebuilt", cwd: APP, runtime: new FakeRuntime() });
+    assert.equal(await scopeAnswer(rebuilt), "pi-smart-router: scope work (directory).", "an instance that never saw a valid roster reads the process's memory");
+    // A session outside those directories is personal, as before the roster broke.
+    const outside = await unrecorded({ dir, id: "outside", cwd: ACME_APP, runtime: new FakeRuntime() });
+    assert.equal(await scopeAnswer(outside), "pi-smart-router: scope personal (default).");
+  });
+
+  test("an instance that reads its own older roster again leaves in the slot the one loaded last in the process", async (t) => {
+    const dir = agentDir(t, { roster: HERA_V2 });
+    const older = await start({ dir, id: "older", now: () => NOW });
+    // A later instance loads an edited roster, which lists the directory its session works in.
+    listDirectories(dir, [ACME]);
+    const newer = await unrecorded({ dir, id: "newer", cwd: ACME_APP, runtime: new FakeRuntime() });
+    assert.equal(await scopeAnswer(newer), "pi-smart-router: scope work (directory).");
+    // The older instance routes by the roster it holds, which is no new load.
+    assert.equal(routed(older.runtime.route("auto", request("direct"))), DEEPSEEK);
+    writeFileSync(join(dir, "smart-router.json"), "{ nope");
+    await newer.host.command("smart-router", "reload");
+    assert.equal(await scopeAnswer(newer), "pi-smart-router: scope work (directory).", "the directory the last roster loaded lists");
   });
 });
 
@@ -684,7 +772,7 @@ describe("/smart-router status", () => {
   });
 });
 
-describe("in work scope, a refusal offers only what the work guard keeps", () => {
+describe("in work scope, a refusal names only the models that keep the conversation on the work account", () => {
   /** The text a request's refusal carries. */
   const refusalOf = (run: () => unknown): string => {
     try {

@@ -13,14 +13,14 @@ import { isDeepStrictEqual } from "node:util";
 import type { Api, ClassifierResult, Model } from "@earendil-works/pi-ai";
 import type { InputEventResult } from "@earendil-works/pi-coding-agent";
 
-import { ENV_PIN, ENV_SCOPE, LEVEL_ENTRY, LEVEL_KEY, PIN_ENTRY, SCOPE_ENTRY, STATUS_KEY } from "../src/constants.ts";
+import { ENV_PIN, ENV_SCOPE, LEVEL_ENTRY, LEVEL_KEY, SCOPE_ENTRY, STATUS_KEY } from "../src/constants.ts";
 import { JEV_INSTRUCTIONS } from "../src/jev.ts";
 import { policyFromRoster } from "../src/local.ts";
 import { createRouter } from "../src/router.ts";
 import { scopeEntry } from "../src/scope.ts";
 import { TIERS } from "../src/tiers.ts";
 import type { Tier } from "../src/tiers.ts";
-import { ASTRA, CHATGPT, DEEPSEEK, FakeCatalog, GLM, GLM_CLOUD, HERA_LAN, heraModels, KIMI, model, NOW, rosterFixtureV2, SOL } from "./support/catalog.ts";
+import { ASTRA, CHATGPT, DEEPSEEK, FakeCatalog, GLM, GLM_CLOUD, HERA_LAN, heraModels, KIMI, model, NOW, rosterFixture, rosterFixtureV2, SOL } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
 import { agentDir, assistant, failure as failedRequest, FakeRuntime, load, request, resetSlot, routed, start } from "./support/pi.ts";
 import type { Loaded, LoadOptions } from "./support/pi.ts";
@@ -286,18 +286,19 @@ describe("a trailing tag", () => {
     assert.match(lastNotice(loaded)?.message ?? "", /no effect/);
     assert.deepEqual(lastNotice(loaded), { type: "warning", message: "pi-smart-router: the LOW tag was removed and has no effect, because this session is pinned to local models." });
     assert.deepEqual([recordOf(loaded)?.plan?.signal, recordOf(loaded)?.pendingLevel], ["local", undefined], "the run is planned on the local role");
-    // The pin's refusal comes first: a selection outside its policy sends nothing, tag or not.
-    loaded.session.force(KIMI);
-    for (const text of ["x #low", "#low"]) {
-      assert.deepEqual(await say(loaded, text), [{ action: "handled" }], text);
-      assert.match(lastNotice(loaded)?.message ?? "", /is not local, so the prompt was not sent/, text);
-    }
+    // On a model picked by hand the message is sent, without its tag; only a message that is nothing but a tag is not.
+    await loaded.host.choose(KIMI);
+    assert.deepEqual(await say(loaded, "x #low"), [{ action: "transform", text: "x" }]);
+    assert.deepEqual(lastNotice(loaded), { type: "warning", message: "pi-smart-router: the LOW tag was removed and has no effect, because this session is pinned to local models." });
+    assert.deepEqual(await say(loaded, "#low"), [{ action: "handled" }]);
+    assert.deepEqual(lastNotice(loaded), { type: "warning", message: "pi-smart-router: the message was only a LOW tag, so nothing was sent. Put the tag at the end of a message." });
+    assert.equal(calls(loaded), 0);
   });
 
   test("has no effect under PI_SMART_ROUTER_LOCAL_ONLY, and Jev is not asked", async (t) => {
     await withEnv(ENV_PIN, "1", async () => {
       const loaded = await hera(t);
-      assert.equal(loaded.session.model?.id, "local", "the latch switched the selection to smart-router/local");
+      assert.equal(loaded.session.model?.id, "auto", "the selection is left on smart-router/auto, whose routes obey the pin");
       assert.deepEqual(await say(loaded, "x #low"), [{ action: "transform", text: "x" }]);
       assert.deepEqual(await say(loaded, "x"), [undefined]);
       assert.equal(calls(loaded), 0);
@@ -443,27 +444,20 @@ describe("an untagged message", () => {
     assert.equal(recordOf(none)?.plan?.level?.jev, undefined, "a roster without a classifier asks nothing, so nothing failed");
   });
 
-  test("asks nothing in a pinned session even when the pin's guard missed the pin: the input reads it again", async (t) => {
-    // The pin's input guard refuses a pinned session's prompt on smart-router/auto first. To show
-    // the router checks the pin again before Jev, its first pin read, the guard's, misses the entry.
+  test("asks nothing in a pinned session on smart-router/auto: the prompt goes on, and the run is planned under the pin", async (t) => {
+    // Nothing refuses a pinned session's prompt on smart-router/auto, so the input itself reads the pin before Jev.
     const loaded = await hera(t);
     loaded.runtime.answer = async () => jevAnswer(LOW);
     loaded.session.pin(policyFromRoster(rosterFixtureV2("roster-hera-v2.json")));
-    const manager = loaded.session.ctx.sessionManager as unknown as { getLatestCustomEntry: (type: string, options?: unknown) => unknown };
-    const read = manager.getLatestCustomEntry;
-    let missed = false;
-    manager.getLatestCustomEntry = (type, options) => {
-      if (type !== PIN_ENTRY || missed) return read(type, options);
-      missed = true;
-      return undefined;
-    };
-    for (const text of ["go ahead", "go ahead #high"]) {
-      missed = false;
-      assert.notDeepEqual(await say(loaded, text), [{ action: "handled" }], `${text}: the guard missed the pin and let the prompt through`);
-      assert.ok(missed, text);
+    for (const [text, sent] of [
+      ["go ahead", undefined],
+      ["go ahead #high", { action: "transform", text: "go ahead" }],
+    ] as const) {
+      assert.deepEqual(await say(loaded, text), [sent], `${text}: the prompt is passed on`);
       assert.equal(calls(loaded), 0, `${text}: Jev was asked`);
       assert.equal(recordOf(loaded)?.plan?.localOnly, true, `${text}: the run is planned under the pin`);
     }
+    assert.equal(loaded.session.model?.id, "auto", "and the selection stays");
   });
 });
 
@@ -1327,11 +1321,15 @@ describe("what pi-cache-optimizer is told", () => {
     assert.equal(firstRequest(loaded), WORK_TERRA);
   });
 
-  test("smart-router/auto has no pick in a scope it refuses, and smart-router/local is not refused", async (t) => {
+  test("smart-router/auto has no pick in a scope it refuses, and smart-router/local has none in work scope outside the pin", async (t) => {
     await withEnv(ENV_SCOPE, "work", async () => {
       const loaded = await start({ dir: agentDir(t), runtime: heraRuntime(), now: () => NOW });
       assert.throws(() => loaded.runtime.route("auto", request("direct")), /work scope, which a version 1 roster does not serve/);
       assert.equal(brief(loaded), undefined);
+      assert.throws(() => loaded.runtime.route("local", request("direct")), /work scope, where smart-router\/local answers only while the session is pinned/);
+      assert.equal(brief(loaded, "local"), undefined);
+      // Pinned, the same session's smart-router/local routes to the LAN model, and says so.
+      loaded.session.pin(policyFromRoster(rosterFixture("roster-hera.json")));
       assert.equal(brief(loaded, "local"), `${GLM} selected`);
     });
   });
@@ -1909,30 +1907,39 @@ describe("/smart-router scope work", () => {
   const scopeEntries = (loaded: Loaded): unknown[] => loaded.session.entries.filter((entry) => entry.customType === SCOPE_ENTRY).map((entry) => entry.data);
   const selection = (loaded: Loaded): string | undefined => (loaded.session.model === undefined ? undefined : `${loaded.session.model.provider}/${loaded.session.model.id}`);
 
-  test("records work scope, and switches a selection outside it to smart-router/auto", async (t) => {
+  test("records work scope and leaves a model picked by hand selected: nothing is routed until smart-router/auto is chosen, and then it goes to the work account", async (t) => {
     const loaded = await hera(t, { select: KIMI });
     await loaded.host.command("smart-router", "scope work");
-    assert.equal(selection(loaded), "smart-router/auto");
+    assert.deepEqual([selection(loaded), loaded.host.selections.length], [KIMI, 0], "changing the scope asks for no routing");
     assert.deepEqual(scopeEntries(loaded), [{ v: 1, scope: "work", by: "command", at: NOW }]);
-    assert.deepEqual(lastNotice(loaded), { type: "info", message: "pi-smart-router: scope work (entry).\nThe selection is smart-router/auto now." });
+    assert.deepEqual(lastNotice(loaded), {
+      type: "info",
+      message: `pi-smart-router: scope work (entry).\nThe selection stays ${KIMI}. A model picked by hand is sent as it is, in work scope too.`,
+    });
+    // On the model picked by hand, Jev is not asked and nothing is planned.
     loaded.runtime.answer = async () => jevAnswer(LOW);
+    await say(loaded, "go ahead");
+    assert.deepEqual([loaded.runtime.classifyCalls.length, recordOf(loaded)?.plan], [0, undefined]);
+    // Asked for by hand, smart-router/auto routes the work session to the work account.
+    assert.equal(await loaded.host.choose("smart-router/auto"), true);
     await say(loaded, "go ahead");
     assert.equal(firstRequest(loaded), WORK_LUNA);
   });
 
-  test("keeps a selection work scope allows, and says when the switch fails", async (t) => {
+  test("leaves a work Codex model picked by hand selected too, and when nothing could be selected anyway", async (t) => {
     const kept = await hera(t, { id: "kept", select: WORK_LUNA });
     await kept.host.command("smart-router", "scope work");
-    assert.deepEqual([selection(kept), lastNotice(kept)], [WORK_LUNA, { type: "info", message: "pi-smart-router: scope work (entry)." }]);
+    assert.deepEqual(
+      [selection(kept), lastNotice(kept)],
+      [WORK_LUNA, { type: "info", message: `pi-smart-router: scope work (entry).\nThe selection stays ${WORK_LUNA}. A model picked by hand is sent as it is, in work scope too.` }],
+    );
     const stuck = await hera(t, { id: "stuck", select: KIMI });
-    stuck.host.setModel = async () => false;
+    let attempts = 0;
+    stuck.host.setModel = async () => {
+      attempts += 1;
+      return false;
+    };
     await stuck.host.command("smart-router", "scope work");
-    assert.deepEqual([selection(stuck), lastNotice(stuck)], [
-      KIMI,
-      {
-        type: "warning",
-        message: `pi-smart-router: scope work (entry).\nThe selection ${KIMI} is outside work scope and could not be switched to smart-router/auto, so prompts are refused until you choose smart-router/auto or a work Codex model.`,
-      },
-    ]);
+    assert.deepEqual([selection(stuck), attempts, lastNotice(stuck)?.type], [KIMI, 0, "info"], "the command tries no switch");
   });
 });

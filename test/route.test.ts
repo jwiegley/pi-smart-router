@@ -472,7 +472,7 @@ describe("the final assertions", () => {
     refuses(() => assertSafe("local", heraContext({ virtualId: "local" }), safe), /which is not in the local role; this is a bug in pi-smart-router/);
   });
 
-  test("the way out offers a work Codex model while the work guard holds the session, and any model under the pin", () => {
+  test("the way out offers a work Codex model to a work session that is not pinned, and any model under the pin", () => {
     const work = heraContext({ scope: "work" });
     const deepseek = work.catalog.find("openrouter", "deepseek/deepseek-v4.1-flash-1017");
     assert.ok(deepseek !== undefined);
