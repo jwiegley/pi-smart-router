@@ -13,7 +13,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { Api, ClassifierResult, Model } from "@earendil-works/pi-ai";
 import type { InputEventResult } from "@earendil-works/pi-coding-agent";
 
-import { ENV_PIN, ENV_SCOPE, LEVEL_ENTRY, LEVEL_KEY, PIN_ENTRY, SCOPE_ENTRY, STATUS_KEY } from "../src/constants.ts";
+import { ENV_PIN, ENV_SCOPE, LEVEL_ENTRY, LEVEL_KEY, SCOPE_ENTRY, STATUS_KEY } from "../src/constants.ts";
 import { JEV_INSTRUCTIONS } from "../src/jev.ts";
 import { policyFromRoster } from "../src/local.ts";
 import { createRouter } from "../src/router.ts";
