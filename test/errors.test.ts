@@ -11,8 +11,10 @@ import {
   historyNotice,
   invariant,
   loadFailed,
+  localInWorkScope,
   loadFailedNotice,
   looksRetryable,
+  PIN_POLICY_CHANGED,
   noBoundedHistory,
   refusal,
   RouterError,
@@ -195,6 +197,46 @@ describe("in work scope, outside the pin", () => {
       assert.match(error.message, /[Cc]hoose a model with \/model\.$/, error.message);
     }
     assert.match(unroutable("local", { attempts: [], problem: "x" }, { localOnly: true, pinned: true, work: false }).message, /or run \/smart-router local off\.$/);
+  });
+});
+
+describe("the router's own models, where their policy sends nothing", () => {
+  const LOCAL_ATTEMPTS: Attempt[] = [{ role: "worker", exists: true, candidates: [{ ok: false, ref: "openrouter/deepseek/deepseek-v4.1-flash-1017", reason: "not-local", detail: "host openrouter.ai is not a local host" }] }];
+
+  test("smart-router/local in work scope, outside the pin, names the pin, the models to choose and, outside the latch, /smart-router scope personal", () => {
+    assert.equal(
+      localInWorkScope(true).message,
+      "smart-router/local: this session is in work scope, where smart-router/local answers only while the session is pinned to local models. Nothing was sent. Run /smart-router local on to pin the session to local models, choose smart-router/auto or a work Codex model with /model, or run /smart-router scope personal.",
+    );
+    assert.equal(
+      localInWorkScope(false).message,
+      "smart-router/local: this session is in work scope, where smart-router/local answers only while the session is pinned to local models. Nothing was sent. Run /smart-router local on to pin the session to local models, or choose smart-router/auto or a work Codex model with /model.",
+    );
+    for (const movable of [true, false]) {
+      const error = localInWorkScope(movable);
+      assert.ok(error instanceof RouterError);
+      assert.equal(retryable(error.message), false);
+    }
+  });
+
+  test("smart-router/local in a scope that cannot be read offers a work Codex model, since smart-router/auto refuses that scope too", () => {
+    assert.equal(
+      scopeUnreadable("local", "the latest smart-router.scope entry is not one the router wrote", true).message,
+      "smart-router/local: this session's scope cannot be read (the latest smart-router.scope entry is not one the router wrote). Nothing was sent. Record it again with /smart-router scope work or /smart-router scope personal, or choose a work Codex model with /model.",
+    );
+  });
+
+  test("smart-router/auto under the pin names smart-router/local and /smart-router local off; smart-router/local under the pin keeps its words", () => {
+    assert.equal(
+      unroutable("auto", { attempts: LOCAL_ATTEMPTS }, { localOnly: true, pinned: true }).message,
+      "smart-router/auto: no local model can take this request while this session is pinned to local models (worker: openrouter/deepseek/deepseek-v4.1-flash-1017: host openrouter.ai is not a local host). Nothing was sent. Choose smart-router/local with /model, or run /smart-router local off.",
+    );
+    assert.match(unroutable("local", { attempts: LOCAL_ATTEMPTS }, { localOnly: true, pinned: true }).message, /Nothing was sent\. Start the local model server and send the prompt again, or run \/smart-router local off\.$/);
+    // A roster whose local role changed after the pin says so on both models.
+    const changed: Attempt[] = [{ role: "local", exists: true, candidates: [{ ok: false, ref: "omlx-hera/GLM-5.3-Flash-oQ4e-mtp", reason: "not-local", detail: PIN_POLICY_CHANGED }] }];
+    for (const id of ["auto", "local"] as const) {
+      assert.match(unroutable(id, { attempts: changed }, { localOnly: true, pinned: true }).message, /Nothing was sent\. Run \/smart-router local on to accept the roster's local role, or run \/smart-router local off\.$/);
+    }
   });
 });
 

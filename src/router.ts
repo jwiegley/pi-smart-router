@@ -41,6 +41,7 @@ import {
   directoryNotice,
   firstLine,
   historyNotice,
+  localInWorkScope,
   resumeNotice,
   rosterNotice,
   rosterRefusal,
@@ -352,9 +353,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   /**
    * Why smart-router/auto refuses this session's scope, if it does: a scope that cannot be read, a
    * work-scope session under a version 1 roster, and a scope a version 2 roster has no section for.
-   * Local-only requests carry no account, so smart-router/local is never refused for its scope.
-   * prepare() throws the refusal; what pi-cache-optimizer is told and an input's plan follow it. Its
-   * way out is worded for the work guard, which holds a work or unreadable scope outside the pin.
+   * Its way out is worded for the work guard, which holds a work or unreadable scope outside the pin.
    */
   const scopeRefusal = (value: Roster, ctx: ExtensionContext): RouterError | undefined => {
     const scope = scopeOf(ctx);
@@ -364,6 +363,26 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     return scopeUnserved("auto", scope.scope, value.version, scope.scope === "work" && !pinOf(ctx).on, scope.source !== "latch");
   };
 
+  /**
+   * Why smart-router/local refuses this session's scope, if it does. Local-only requests carry no
+   * account, so under the pin, which serves both scopes, and in personal scope it refuses none. A
+   * work session that is not pinned it refuses: work scope sends a conversation to LAN models only
+   * under the pin. A scope that cannot be read counts as work scope, the narrower one.
+   */
+  const localRefusal = (ctx: ExtensionContext): RouterError | undefined => {
+    if (pinOf(ctx).on) return undefined;
+    const scope = scopeOf(ctx);
+    if (scope.kind === "unreadable") return scopeUnreadable("local", scope.reason, true);
+    // Outside the latch, /smart-router scope personal can move the session.
+    return scope.scope === "work" ? localInWorkScope(scope.source !== "latch") : undefined;
+  };
+
+  /**
+   * Why one of the router's models refuses this session for its scope, if it does. prepare() throws
+   * the refusal; what pi-cache-optimizer is told and an input's plan follow it.
+   */
+  const refusalFor = (id: VirtualId, value: Roster, ctx: ExtensionContext): RouterError | undefined => (id === "auto" ? scopeRefusal(value, ctx) : localRefusal(ctx));
+
   const prepare = (id: VirtualId, request: ModelRouteRequest, ctx: ExtensionContext): RouteInput => {
     const { sessionManager } = ctx;
     requireBoundedHistory(id, sessionManager);
@@ -371,7 +390,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     const pin = pinOf(ctx);
     // The work guard holds a session in work scope, or with a scope that cannot be read, outside the pin.
     if (state.kind !== "ok") throw rosterRefusal(id, state, !pin.on && resolvedScope(ctx) === "work");
-    const refused = id === "auto" ? scopeRefusal(state.value, ctx) : undefined;
+    const refused = refusalFor(id, state.value, ctx);
     if (refused !== undefined) throw refused;
     return { id, request, rc: contextFor(ctx, state.value, id, pin), pin, record: recordOf(sessionManager.getSessionId()) };
   };
@@ -449,8 +468,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       const { ctx } = owner;
       const state = loaded(roster.current());
       if (state.kind !== "ok" || boundedHistory(ctx.sessionManager) === undefined) return undefined;
-      // smart-router/auto has no pick in a scope that prepare() refuses.
-      if (id === "auto" && scopeRefusal(state.value, ctx) !== undefined) return undefined;
+      // Neither model has a pick in a scope that prepare() refuses it for.
+      if (refusalFor(id, state.value, ctx) !== undefined) return undefined;
       const rc = contextFor(ctx, state.value, id, pinOf(ctx));
       const record = records.get(owner.sessionId) ?? newRecord();
       const at = now();
@@ -630,8 +649,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     const state = loaded(roster.current());
     const id = virtualIdOf(ctx.model);
     if (id === undefined || state.kind !== "ok" || boundedHistory(sessionManager) === undefined) return undefined;
-    // smart-router/auto refuses this scope at the run's first request, so there is no run to plan.
-    if (id === "auto" && scopeRefusal(state.value, ctx) !== undefined) return undefined;
+    // The selected model refuses this scope at the run's first request, so there is no run to plan.
+    if (refusalFor(id, state.value, ctx) !== undefined) return undefined;
     const rc = contextFor(ctx, state.value, id, pinOf(ctx));
     const planned = planUserTurn({ rc, text, last: record.last, now: now(), reserve: reserveFor(pi.getSettings(), id), level });
     record.plan = planned;

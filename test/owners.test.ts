@@ -6,7 +6,7 @@ import { writeFileSync } from "node:fs";
 import { join as joinPath } from "node:path";
 
 import { ENV_PIN, ENV_SCOPE, SCOPE_ENTRY, SLOT_KEY } from "../src/constants.ts";
-import { scopeUnserved, stale } from "../src/errors.ts";
+import { localInWorkScope, scopeUnserved, stale } from "../src/errors.ts";
 import { EMPTY_POLICY, policyFromRoster } from "../src/local.ts";
 import {
   envSwitchOn,
@@ -170,10 +170,13 @@ describe("the scope switch", () => {
       const second = await start({ dir: agentDir(t), id: "second", runtime: new FakeRuntime(), setup: personal });
       assert.equal(scopeLatched(processSlot()), true);
       assert.deepEqual(readScope(second.session.ctx.sessionManager, scopeLatched(processSlot()), undefined), { kind: "ok", scope: "work", source: "latch" });
-      // Hera's roster is version 1, which serves no work scope: auto refuses, and local still routes.
+      // Hera's roster is version 1, which serves no work scope: auto refuses, and so does local, outside the pin.
       assert.throws(() => second.runtime.route("auto", request("direct", { previous: previous(second.runtime, KIMI) })), { message: scopeUnserved("auto", "work", 1, true).message });
-      assert.equal(routed(second.runtime.route("local", request("direct"))), GLM);
+      assert.throws(() => second.runtime.route("local", request("direct")), { message: localInWorkScope(false).message });
       assert.equal(processSlot().env.on, false, "the scope switch does not pin");
+      // Pinned, the latched session's smart-router/local routes to the LAN model.
+      second.session.pin(policyFromRoster(rosterFixture("roster-hera.json")));
+      assert.equal(routed(second.runtime.route("local", request("direct"))), GLM);
     } finally {
       if (saved === undefined) delete process.env[ENV_SCOPE];
       else process.env[ENV_SCOPE] = saved;

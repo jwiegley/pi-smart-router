@@ -133,13 +133,30 @@ export function carryFailedNotice(reason: string): string {
   return `pi-smart-router: the session this one came from was pinned to local models, but its pin could not be recorded here (${reason}). Run /smart-router local on before you send anything.`;
 }
 
-/** smart-router/auto refuses a session whose scope cannot be read. `work`: whether the work guard holds the session (chooseModel). */
+/**
+ * Both models refuse a session whose scope cannot be read: smart-router/auto always, and
+ * smart-router/local outside the pin, where such a scope counts as work scope. Neither answers
+ * until the scope is recorded again, so the model offered is the one smart-router/auto's refusals
+ * offer, never smart-router/auto itself. `work`: whether the work guard holds the session
+ * (chooseModel).
+ */
 export function scopeUnreadable(id: VirtualId, reason: string, work = false): RouterError {
   return refusal(
     id,
     `this session's scope cannot be read (${reason})`,
-    `Record it again with /smart-router scope work or /smart-router scope personal, or ${chooseModel(id, work)}.`,
+    `Record it again with /smart-router scope work or /smart-router scope personal, or ${chooseModel("auto", work)}.`,
   );
+}
+
+/**
+ * smart-router/local refuses a session in work scope that is not pinned. It answers only from LAN
+ * models, which are not the work account, and work scope sends them a conversation only under the
+ * pin. `movable`: whether /smart-router scope personal can move the session, which the latch
+ * refuses.
+ */
+export function localInWorkScope(movable: boolean): RouterError {
+  const ways = ["Run /smart-router local on to pin the session to local models", chooseModel("local", true), ...(movable ? ["run /smart-router scope personal"] : [])];
+  return refusal("local", "this session is in work scope, where smart-router/local answers only while the session is pinned to local models", `${either(ways)}.`);
 }
 
 /** A roster that does not serve a scope, as the texts name it: by its version, when that is 1. */
@@ -253,11 +270,15 @@ export function unroutable(
   const detail = failure.attempts.map((attempt, index) => describeAttempt(attempt, index, later)).join("; ");
   const cause = `${subject} can take this request${pinned}${detail === "" ? "" : ` (${detail})`}`;
   const changed = context.pinned && failure.attempts.some((attempt) => attempt.candidates.some((candidate) => candidate.detail === PIN_POLICY_CHANGED));
+  // Under the pin smart-router/auto routes only within the pin's policy, which its roles seldom
+  // reach, so its way out is the model that does route there.
   const way = changed
     ? "Run /smart-router local on to accept the roster's local role, or run /smart-router local off."
-    : context.localOnly
-      ? `Start the local model server and send the prompt again, or ${unpin}.`
-      : `See /smart-router status, or ${chooseModel(id, work)}.`;
+    : context.pinned && id === "auto"
+      ? "Choose smart-router/local with /model, or run /smart-router local off."
+      : context.localOnly
+        ? `Start the local model server and send the prompt again, or ${unpin}.`
+        : `See /smart-router status, or ${chooseModel(id, work)}.`;
   return refusal(id, cause, way);
 }
 
