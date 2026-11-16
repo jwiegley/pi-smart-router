@@ -13,8 +13,8 @@
 // and never refreshes over the network; settings live in memory; the resource loader discovers no
 // extensions, skills, prompt templates, themes or context files.
 //
-// Pi 1.5.0 from npm lacks jwiegley/pi's bounded session reads, which the router requires. They are
-// installed on SessionManager.prototype as the fork's own fallbacks behave
+// Pi from npm, 1.5.2 like 1.5.0, lacks jwiegley/pi's bounded session reads, which the router
+// requires. They are installed on SessionManager.prototype as the fork's own fallbacks behave
 // (packages/coding-agent/src/core/session-manager.ts), as pi-flag's harness does.
 //
 // The faux providers answer in memory. Unlike Pi's stock faux provider, each one calls `onPayload`

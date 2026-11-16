@@ -19,8 +19,8 @@ function record(value: unknown, what: string): Record<string, unknown> {
 const manifest = record(JSON.parse(read("package.json")), "package.json");
 
 const devDependencies = {
-  "@earendil-works/pi-ai": "1.5.0",
-  "@earendil-works/pi-coding-agent": "1.5.0",
+  "@earendil-works/pi-ai": "1.5.2",
+  "@earendil-works/pi-coding-agent": "1.5.2",
   "@types/node": "22.19.19",
   typescript: "5.9.3",
 };
