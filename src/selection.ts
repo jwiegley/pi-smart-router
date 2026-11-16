@@ -24,6 +24,7 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import { PROVIDER, STATUS_KEY, VIRTUAL_API } from "./constants.ts";
+import type { VirtualId } from "./constants.ts";
 import { checkLocal } from "./local.ts";
 import type { Pin } from "./route.ts";
 
@@ -35,8 +36,11 @@ type Selection = Pick<Model<Api>, "provider" | "id" | "api" | "baseUrl">;
 export const describeModel = (model: { readonly provider: string; readonly id: string } | undefined): string =>
   model === undefined ? "no model" : `${model.provider}/${model.id}`;
 
-/** Whether a selection is one of the router's own two models. */
-const isOwnModel = (model: Selection): boolean => model.provider === PROVIDER && model.api === VIRTUAL_API;
+/** Which of the router's own two models a selection is, if either: any other model is one picked by hand. */
+export function ownModel(model: Pick<Selection, "provider" | "id" | "api"> | undefined): VirtualId | undefined {
+  if (model === undefined || model.provider !== PROVIDER || model.api !== VIRTUAL_API) return undefined;
+  return model.id === "auto" || model.id === "local" ? model.id : undefined;
+}
 
 /** Whether a selection is a physical model inside the pin's policy, such as GLM selected directly. */
 const insidePolicy = (model: Selection, pin: Pin): boolean => model.api !== VIRTUAL_API && checkLocal(model, pin.policy, false).ok;
@@ -47,7 +51,7 @@ const insidePolicy = (model: Selection, pin: Pin): boolean => model.api !== VIRT
  */
 export function localSelection(model: Selection | undefined, pin: Pin): boolean {
   if (model === undefined) return false;
-  return isOwnModel(model) ? model.id === "local" : insidePolicy(model, pin);
+  return ownModel(model) === "local" || insidePolicy(model, pin);
 }
 
 /**
@@ -58,7 +62,7 @@ export function localSelection(model: Selection | undefined, pin: Pin): boolean 
  */
 export function coveredByPin(model: Selection | undefined, pin: Pin): boolean {
   if (!pin.on) return false;
-  return model === undefined || isOwnModel(model) || insidePolicy(model, pin);
+  return model === undefined || ownModel(model) !== undefined || insidePolicy(model, pin);
 }
 
 /**

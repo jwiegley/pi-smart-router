@@ -15,7 +15,7 @@ import { policyFromRoster } from "../src/local.ts";
 import { processSlot } from "../src/owners.ts";
 import { readPin } from "../src/pin.ts";
 import { readScope, scopeEntry } from "../src/scope.ts";
-import { coveredByPin, describeModel, localSelection, STATUS_PINNED } from "../src/selection.ts";
+import { coveredByPin, describeModel, localSelection, ownModel, STATUS_PINNED } from "../src/selection.ts";
 import { CHATGPT, FakeCatalog, GLM, heraModels, KIMI, model, NATIVE_SOL, NOW, rosterFixture, rosterFixtureV2, SOL, WORK_SOL } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
 import { agentDir, FakeRuntime, load, request, resetSlot, routed, start } from "./support/pi.ts";
@@ -521,6 +521,23 @@ describe("how the router reads a selection", () => {
 
   test("describeModel names a model by provider and id, and no model as such", () => {
     assert.deepEqual([describeModel({ provider: "openrouter", id: "z-ai/glm-5.3" }), describeModel(undefined)], ["openrouter/z-ai/glm-5.3", "no model"]);
+  });
+
+  test("ownModel: only smart-router/auto and smart-router/local, as Pi's virtual catalog entries, are the router's; every other model is one picked by hand", () => {
+    assert.deepEqual(
+      [LOCAL, AUTO, GLM, KIMI, WORK_SOL, OTHER_ROUTER].map((ref) => [ref, ownModel(find(ref))]),
+      [
+        [LOCAL, "local"],
+        [AUTO, "auto"],
+        [GLM, undefined],
+        [KIMI, undefined],
+        [WORK_SOL, undefined],
+        [OTHER_ROUTER, undefined],
+      ],
+    );
+    assert.equal(ownModel(undefined), undefined);
+    assert.equal(ownModel({ provider: "smart-router", id: "auto", api: "openai-completions" }), undefined, "a physical model that only bears the name");
+    assert.equal(ownModel({ provider: "smart-router", id: "other", api: "pi-virtual" }), undefined, "a virtual model of that provider the router does not register");
   });
 
   test("localSelection: what /smart-router local on leaves selected is smart-router/local or a physical model inside the pin's policy", () => {

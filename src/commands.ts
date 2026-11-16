@@ -37,7 +37,7 @@ import { autoRoles, parseRef, SCOPES, servesScope } from "./roster.ts";
 import type { Roster, RosterV1, RosterV2, Scope } from "./roster.ts";
 import { scopeEntry } from "./scope.ts";
 import type { ScopeState } from "./scope.ts";
-import { describeModel } from "./selection.ts";
+import { describeModel, ownModel } from "./selection.ts";
 import { isTier, tierLabel, TIERS } from "./tiers.ts";
 import type { Tier } from "./tiers.ts";
 
@@ -283,10 +283,9 @@ function workRefusal(roster: Loaded<Roster>, scope: ScopeState): string | undefi
  * command changes either: scope work and local off say which it is, and leave the choice to John.
  */
 function otherSelection(ctx: ExtensionContext): "hand" | "local" | undefined {
-  const { model } = ctx;
-  if (model === undefined) return undefined;
-  if (model.provider !== PROVIDER || model.api !== VIRTUAL_API) return "hand";
-  return model.id === "local" ? "local" : undefined;
+  if (ctx.model === undefined) return undefined;
+  const own = ownModel(ctx.model);
+  return own === undefined ? "hand" : own === "local" ? "local" : undefined;
 }
 
 /** Each scope's tiers, low to super, with each tier's candidates and the verdicts they get in that scope. */
