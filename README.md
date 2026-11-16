@@ -5,8 +5,11 @@ physical model chosen from a roster you keep on each host.
 
 This is John Wiegley's fork of [beettlle/pi-smart-router](https://github.com/beettlle/pi-smart-router),
 rewritten for the virtual models of Pi 1.5. It keeps upstream's deterministic prompt classifier and
-nothing else; [CHANGELOG.md](CHANGELOG.md) lists what was removed and why. Version `1.3.0-jw.3`
-is based on upstream v1.3.0 (`f31b2304`). It is not published to npm.
+nothing else; [CHANGELOG.md](CHANGELOG.md) lists what was removed and why. The port started from
+upstream v1.3.0 (`f31b2304`). Version `1.4.0-jw.1` has upstream v1.4.0 (`54bee53d`) in its history
+through a merge that keeps the port's tree, as an earlier one recorded upstream main at `58e87b59`:
+everything upstream changed between v1.3.0 and v1.4.0 is in files the port had removed or
+replaced, so none of it is in this code. It is not published to npm.
 
 ## What it does
 
