@@ -5,6 +5,87 @@ All notable changes to this fork are recorded here, in the form of
 the base is the upstream release the fork started from, and `jw.<n>` counts the fork's releases.
 Releases are signed tags; nothing is published to npm.
 
+## [1.3.0-jw.3] - 2026-11-16
+
+A model picked by hand always stays selected. On 2026-11-16 John decided that in every context,
+work scope and the local-only pin included, a model he selects with `/model` or by cycling stays
+selected and is sent as it is, and that the router routes only while the selection is
+`smart-router/auto` or `smart-router/local`.
+
+Upgrading from 1.3.0-jw.2: no roster change is needed. Three things behave differently:
+
+- In a work session, a personal-account or OpenRouter model picked by hand now receives the
+  conversation under that account, and under the pin a cloud model picked by hand receives it too.
+  John accepted this with the decision.
+- A session that starts pinned, by a pin carried into a fork or `/new`, at resume, or under
+  `PI_SMART_ROUTER_LOCAL_ONLY`, is no longer switched to `smart-router/local`. On
+  `smart-router/auto` its requests are refused until you choose `smart-router/local`; on a cloud
+  model, that model is sent as it is.
+- The router no longer registers `before_provider_request` and `cache_warming_decision` handlers.
+
+### Changed
+
+- The selection is never changed, reverted, blocked or locked by an event. `model_select` only
+  shows or clears the pin's status item; `turn_start`, `session_before_compact` and
+  `session_before_tree` only heal the registration and answer nothing; `input` refuses no prompt;
+  `session_start` switches no restored selection.
+- The router's policies are in the routes of its own two models. In work scope, outside the pin,
+  `smart-router/local` refuses: "smart-router/local: this session is in work scope, where
+  smart-router/local answers only while the session is pinned to local models. Nothing was sent.
+  Run /smart-router local on to pin the session to local models, choose smart-router/auto or a work
+  Codex model with /model, or run /smart-router scope personal." Under the latch the last way out
+  is left off, and a scope that cannot be read is refused with the scope's own text. Until now
+  that request was routed to a LAN model, and the work guard emptied it.
+- Under the pin, `smart-router/auto`'s refusal ends "Choose smart-router/local with /model, or run
+  /smart-router local off." It ended "Start the local model server and send the prompt again, or
+  run /smart-router local off."
+- `/smart-router local on` is the only place where the router selects a model. When
+  `smart-router/local` cannot be selected, it says "The selection … could not be switched to
+  smart-router/local and stays as it is. Choose smart-router/local with /model: the pin routes only
+  the router's own two models, and a model picked by hand is sent as it is."
+- `/smart-router scope work` no longer selects `smart-router/auto`. With a model picked by hand
+  selected it adds "The selection stays …. A model picked by hand is sent as it is, in work scope
+  too."; with `smart-router/local` selected it warns that its next requests are refused.
+- `/smart-router local off` no longer selects `smart-router/auto` in work scope, and says the same
+  of the selection it leaves. Its question there reads "It is in work scope, so smart-router/auto's
+  next requests go to the work account."
+- The pin's status item, `local models`, shows only while the pin covers the selection: either of
+  the router's models, or a physical model inside the pin's policy.
+- Status and local status begin their last line "The pin covers smart-router/auto and
+  smart-router/local only", and list "a model picked by hand with /model, which is sent as it is"
+  first among what can still send data off the machine.
+- On a Pi without bounded session reads, both models refuse every request, and no selection is
+  switched.
+- The package version is `1.3.0-jw.3`.
+
+### Removed
+
+- The pin's guard and the work guard: the revert of a selection outside the policy, the switch and
+  the abort at `turn_start`, the refused prompt, the cancelled compaction and tree summary, the
+  emptied provider payload, the stopped cache warming, and the switch of a restored selection at
+  session start.
+- The lock: its state in each session's record, the one-second revert window, the status text
+  `local models: locked`, the `Lock:` line of status and local status, and the notices "so … was
+  not kept", "so it is locked", "so the session is no longer locked", "so the prompt was not sent",
+  "so compaction was cancelled", "so the navigation with a summary was cancelled", "so the request
+  was emptied and the run stopped", "so the run was stopped before anything was sent", "was
+  switched to smart-router/local", "was switched to smart-router/auto", "the … guard failed (…), so
+  it denied", and the commands' "could not be switched to smart-router/auto, so prompts are refused
+  until you choose smart-router/auto or a work Codex model".
+- The process slot's memory of the last valid roster's account bindings, which only the work guard
+  read. It keeps the work directories.
+- `src/guards.ts`; `src/selection.ts` holds what is left.
+
+### Security
+
+- The pin and work scope no longer hold the selection. They hold the requests routed through
+  `smart-router/auto` and `smart-router/local`, and those still go only where each policy allows,
+  or are refused with "Nothing was sent". A model picked by hand, and a model another extension
+  selects, is outside both: its turns, compactions, summaries and warm requests go to it whole.
+- No OpenRouter model answers a request routed through a work session's `smart-router/auto`. The
+  sentence of 1.3.0-jw.2 that none answers a request "picked by hand" no longer holds.
+- The README's "A model picked by hand" gives the behaviour by tested example.
+
 ## [1.3.0-jw.2] - 2026-11-12
 
 Four intelligence levels on `smart-router/auto`, classified by Jev through Pi's model registry, and
@@ -232,5 +313,6 @@ directories, its ONNX models and its SQLite database are not read, and can be de
 - Tests run offline in an isolated root with a network and process tripwire, and the behaviour
   suite runs only in a sandbox.
 
+[1.3.0-jw.3]: https://github.com/jwiegley/pi-smart-router/compare/v1.3.0-jw.2...v1.3.0-jw.3
 [1.3.0-jw.2]: https://github.com/jwiegley/pi-smart-router/compare/v1.3.0-jw.1...v1.3.0-jw.2
 [1.3.0-jw.1]: https://github.com/jwiegley/pi-smart-router/compare/f31b2304...v1.3.0-jw.1
