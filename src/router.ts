@@ -72,7 +72,7 @@ import type { ResolveContext } from "./resolve.ts";
 import { boundedHistory, newRecord, planApplies, predict, requireBoundedHistory, routeOther, routeOwned } from "./route.ts";
 import type { BoundedHistory, LastInput, Pin, RouteInput, SessionRecord } from "./route.ts";
 import { autoRoles, parseRef, rosterFile, SCOPES, scopeSection, servesScope } from "./roster.ts";
-import type { Roster, Scope, ScopedBinding } from "./roster.ts";
+import type { Roster, Scope } from "./roster.ts";
 import { readScope, scopeEntry, workDirectoryOf } from "./scope.ts";
 import type { ScopeEntryData, ScopeState, WorkDirectories } from "./scope.ts";
 import { describeModel, showPinStatus, switchToLocal } from "./selection.ts";
@@ -170,14 +170,8 @@ function smallest(decisions: readonly Decision[]): Limits {
 const sameLimits = (a: Readonly<Record<VirtualId, Limits>>, b: Readonly<Record<VirtualId, Limits>>): boolean =>
   VIRTUAL_IDS.every((id) => a[id].contextWindow === b[id].contextWindow && a[id].maxTokens === b[id].maxTokens);
 
-/** No account bindings: a version 1 roster's, as work scope reads them. */
-const NO_ACCOUNTS: ReadonlyMap<string, ScopedBinding> = new Map();
-
-/** What the scope and the work guard read of a valid roster: its work directories, and its account bindings. */
-const memoryOf = (value: Roster): RosterMemory => ({
-  directories: scopeSection(value, "work")?.directories ?? [],
-  accounts: value.version === 2 ? value.accounts : NO_ACCOUNTS,
-});
+/** What the scope reads of a valid roster: its work directories. */
+const memoryOf = (value: Roster): RosterMemory => ({ directories: scopeSection(value, "work")?.directories ?? [] });
 
 export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   const { slot, now } = options;
@@ -233,10 +227,9 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   const pinOf = (ctx: ExtensionContext): PinReading => readPin(managerOf(ctx), slot.env);
 
   /**
-   * What the scope and the work guard read of the roster: its work directories and account bindings
-   * as it is now, else, while it fails to load, those of the last valid roster loaded in the process
-   * (the slot keeps them), else none. Never throws: an agent directory that cannot be found counts
-   * as a roster that fails to load.
+   * What the scope reads of the roster: its work directories as it is now, else, while it fails to
+   * load, those of the last valid roster loaded in the process (the slot keeps them), else none.
+   * Never throws: an agent directory that cannot be found counts as a roster that fails to load.
    */
   const rosterFacts = (): RosterMemory | undefined => {
     try {
@@ -314,14 +307,10 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   };
 
   /**
-   * Whether Multi-Pass's labels matter with the roster as it loaded: it binds a Multi-Pass alias,
-   * or, while it fails to load, the bindings remembered from the last valid roster do, which the work
-   * guard still checks against the labels (workAccount).
+   * Whether Multi-Pass's labels matter with the roster as it loaded: it binds a Multi-Pass alias.
+   * A roster that fails to load routes nothing, so no account is checked against them.
    */
-  const labelsNeeded = (state: Loaded<Roster>): boolean => {
-    const bindings = state.kind === "ok" ? state.value : rememberedRoster(slot);
-    return bindings !== undefined && needsLabels(bindings);
-  };
+  const labelsNeeded = (state: Loaded<Roster>): boolean => state.kind === "ok" && needsLabels(state.value);
 
   /** Re-read both files when they changed. Only here and on /smart-router reload, never in a route. */
   const refreshFiles = (): Loaded<Roster> => {
@@ -855,10 +844,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     }
   };
 
-  const filesNow = (state: Loaded<Roster>): Files => ({
-    roster: state,
-    labels: state.kind === "ok" && needsLabels(state.value) ? labels.current() : undefined,
-  });
+  const filesNow = (state: Loaded<Roster>): Files => ({ roster: state, labels: labelsNeeded(state) ? labels.current() : undefined });
 
   const commandHost: CommandHost = {
     pi,

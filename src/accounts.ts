@@ -88,7 +88,7 @@ export function labelsFile(options: LabelsFileOptions): AgentFile<Labels> {
   return agentFile({ ...options, name: MULTI_PASS_FILE, maxBytes: MULTI_PASS_MAX_BYTES, parse: parseMultiPass });
 }
 
-/** Whether bindings, a roster's or those remembered from one, hold any Multi-Pass alias, which is the only reason to read the labels. */
+/** Whether a roster's bindings hold any Multi-Pass alias, which is the only reason to read the labels. */
 export function needsLabels(roster: Pick<Roster, "accounts">): boolean {
   return [...roster.accounts.values()].some((binding) => binding.kind === "multi-pass");
 }

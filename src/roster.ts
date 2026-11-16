@@ -3,10 +3,9 @@
 // routes by its routing table. Version 2 replaces the table with the four levels of each scope it
 // serves, personal, work or both, binds every account to a scope, and may configure the
 // classifier. Validation is strict and fails closed: the first error, with its location, makes the
-// whole file invalid, and nothing routes by a last-known-good copy (the scope and the work guard
-// keep only the last valid roster's work directories and account bindings, src/router.ts). Unknown
-// keys are refused at every level, so the file has nowhere to hold a key, token, header, base URL
-// or environment.
+// whole file invalid, and nothing routes by a last-known-good copy (the scope keeps only the last
+// valid roster's work directories, src/router.ts). Unknown keys are refused at every level, so the
+// file has nowhere to hold a key, token, header, base URL or environment.
 import { isWorkCodex, subscriptionKind } from "./accounts.ts";
 import {
   ALL_LEVELS,

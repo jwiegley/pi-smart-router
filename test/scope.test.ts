@@ -684,6 +684,50 @@ describe("smart-router/local in work scope", () => {
   });
 });
 
+describe("while the roster fails to load, the scope keeps the last valid roster's work directories", () => {
+  /** A session whose scope entry cannot be written, so that its scope rests on the work directories. */
+  async function unrecorded(options: LoadOptions): Promise<Loaded> {
+    const loaded = load({ now: () => NOW, ...options });
+    loaded.host.api.appendEntry = () => {
+      throw new Error("the session file is read-only");
+    };
+    loaded.session.select("auto");
+    await loaded.host.emit("session_start", { reason: "startup" });
+    return loaded;
+  }
+  const scopeAnswer = async (loaded: Loaded): Promise<string | undefined> => {
+    await loaded.host.command("smart-router", "scope");
+    return loaded.session.notices.at(-1)?.message;
+  };
+
+  test("in this instance, and in one built later in the process, as /reload builds one", async (t) => {
+    const dir = agentDir(t, { roster: HERA_V2 });
+    const loaded = await unrecorded({ dir, cwd: APP });
+    writeFileSync(join(dir, "smart-router.json"), "{ nope");
+    await loaded.host.command("smart-router", "reload");
+    assert.equal(await scopeAnswer(loaded), "pi-smart-router: scope work (directory).", "still in work scope by its directory");
+    const rebuilt = await unrecorded({ dir, id: "rebuilt", cwd: APP, runtime: new FakeRuntime() });
+    assert.equal(await scopeAnswer(rebuilt), "pi-smart-router: scope work (directory).", "an instance that never saw a valid roster reads the process's memory");
+    // A session outside those directories is personal, as before the roster broke.
+    const outside = await unrecorded({ dir, id: "outside", cwd: ACME_APP, runtime: new FakeRuntime() });
+    assert.equal(await scopeAnswer(outside), "pi-smart-router: scope personal (default).");
+  });
+
+  test("an instance that reads its own older roster again leaves in the slot the one loaded last in the process", async (t) => {
+    const dir = agentDir(t, { roster: HERA_V2 });
+    const older = await start({ dir, id: "older", now: () => NOW });
+    // A later instance loads an edited roster, which lists the directory its session works in.
+    listDirectories(dir, [ACME]);
+    const newer = await unrecorded({ dir, id: "newer", cwd: ACME_APP, runtime: new FakeRuntime() });
+    assert.equal(await scopeAnswer(newer), "pi-smart-router: scope work (directory).");
+    // The older instance routes by the roster it holds, which is no new load.
+    assert.equal(routed(older.runtime.route("auto", request("direct"))), DEEPSEEK);
+    writeFileSync(join(dir, "smart-router.json"), "{ nope");
+    await newer.host.command("smart-router", "reload");
+    assert.equal(await scopeAnswer(newer), "pi-smart-router: scope work (directory).", "the directory the last roster loaded lists");
+  });
+});
+
 test("a session started before the latch was set is in work scope once any instance latches it", async (t) => {
   const dir = agentDir(t, { roster: HERA_V2 });
   const before = await start({ dir, id: "before", runtime: new FakeRuntime(workCatalog()), now: () => NOW });

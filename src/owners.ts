@@ -29,7 +29,7 @@ import { SLOT_KEY } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { isRecord } from "./files.ts";
 import type { LocalPolicy } from "./local.ts";
-import type { Scope, ScopedBinding } from "./roster.ts";
+import type { Scope } from "./roster.ts";
 
 /** What the slot asks of a router instance. Instances of every load of this module answer it. */
 export interface OwnerRouter {
@@ -156,34 +156,31 @@ export function takeScopeHandoff(slot: Slot, file: string): Scope | undefined {
 }
 
 /**
- * What the slot keeps of the last valid roster loaded in the process: what the scope and the work
- * guard read of it while a later load fails, so that a reload that fails, in this instance or in one
- * a /reload builds, never moves a work session to personal scope or widens what it may select.
+ * What the slot keeps of the last valid roster loaded in the process: what the scope reads of it
+ * while a later load fails, so that a reload that fails, in this instance or in one a /reload
+ * builds, never moves a work session to personal scope.
  */
 export interface RosterMemory {
   /** The work scope's directories; none for a roster without a work scope. */
   readonly directories: readonly string[];
-  /** The account bindings, with the kind, label and scope of each, which an account check reads; none for a version 1 roster. */
-  readonly accounts: ReadonlyMap<string, ScopedBinding>;
 }
 
-/** Keep what the scope and the work guard read of a roster that loaded. */
+/** Keep what the scope reads of a roster that loaded. */
 export function rememberRoster(slot: Slot, memory: RosterMemory): void {
   slot.lastRoster = memory;
 }
 
-/** What the slot keeps of the last valid roster loaded in the process; undefined before any, or when another load of this module kept another shape. */
+/**
+ * What the slot keeps of the last valid roster loaded in the process; undefined before any, or when
+ * another load of this module kept another shape. Whatever else such a load kept beside the
+ * directories is not read.
+ */
 export function rememberedRoster(slot: Slot): RosterMemory | undefined {
   const memory = slot.lastRoster;
   if (!isRecord(memory)) return undefined;
-  const { directories, accounts } = memory;
-  if (!Array.isArray(directories) || !directories.every((directory) => typeof directory === "string") || !(accounts instanceof Map)) return undefined;
-  for (const [provider, binding] of accounts) {
-    if (typeof provider !== "string" || !isRecord(binding)) return undefined;
-    const { kind, label, scope } = binding;
-    if ((kind !== "multi-pass" && kind !== "native") || typeof label !== "string" || (scope !== "personal" && scope !== "work")) return undefined;
-  }
-  return { directories, accounts };
+  const { directories } = memory;
+  if (!Array.isArray(directories) || !directories.every((directory) => typeof directory === "string")) return undefined;
+  return { directories };
 }
 
 export function sessionHash(sessionId: string): string {
