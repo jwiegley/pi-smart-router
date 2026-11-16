@@ -5,6 +5,15 @@ Written 2026-11-09 from a design conversation with John, then revised after an i
 check. Choices John made are stated as his. Choices the designer made are marked
 **(designer's call)**; John can override them. What remains open is listed at the end.
 
+**Note of 2026-11-16.** John decided that a model picked by hand always stays selected and is sent
+as it is, in work scope and under the local-only pin ("Manual choice always wins"). That decision
+supersedes three things below: the paragraph "Selection guard in work scope"; the anti-goals where
+they speak of a model John selected by hand, or of any text leaving the LAN under the pin; and the
+designer's call "In work scope, the router guards the selection the way the pin does". The router's
+own two models keep the policies this design gives them. The rest of this document stands as
+written on 2026-11-09; the README and the CHANGELOG entry for 1.3.0-jw.3 describe the router as
+built.
+
 ## Intent
 
 John wants each message he sends through `smart-router/auto` to go to a model whose intelligence
