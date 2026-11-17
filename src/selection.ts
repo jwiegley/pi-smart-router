@@ -7,8 +7,10 @@
 //
 //   the pin     both models route only inside the pin's policy. smart-router/auto's roles seldom
 //               reach it, so on John's rosters its requests are refused while the session is pinned
-//   work scope  smart-router/auto routes only to the work account, and smart-router/local refuses
-//               outside the pin
+//   work scope  smart-router/auto routes only to the work account, and smart-router/local routes
+//               only to the local role's models, as in personal scope, pinned or not: selecting
+//               it is the request for local routing (John's decision of 2026-11-16, "Let
+//               smart-router/local route in work scope")
 //
 // At no event does the router change or revert a selection, lock a session, refuse a prompt, cancel
 // a compaction or a tree summary, empty a provider request, stop cache warming or abort a run

@@ -42,7 +42,6 @@ import {
   directoryNotice,
   firstLine,
   historyNotice,
-  localInWorkScope,
   resumeNotice,
   rosterNotice,
   rosterRefusal,
@@ -335,16 +334,15 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
 
   /**
    * Why smart-router/local refuses this session's scope, if it does. Local-only requests carry no
-   * account, so under the pin, which serves both scopes, and in personal scope it refuses none. A
-   * work session that is not pinned it refuses: work scope sends a conversation to LAN models only
-   * under the pin. A scope that cannot be read counts as work scope, the narrower one.
+   * account, and selecting smart-router/local is itself the request for local routing, so it
+   * refuses neither scope, pinned or not, whatever scopes the roster serves (John's decision of
+   * 2026-11-16, "Let smart-router/local route in work scope"). Outside the pin it refuses only a
+   * scope that cannot be read, as smart-router/auto does, until the scope is recorded again.
    */
   const localRefusal = (ctx: ExtensionContext): RouterError | undefined => {
     if (pinOf(ctx).on) return undefined;
     const scope = scopeOf(ctx);
-    if (scope.kind === "unreadable") return scopeUnreadable("local", scope.reason, true);
-    // Outside the latch, /smart-router scope personal can move the session.
-    return scope.scope === "work" ? localInWorkScope(scope.source !== "latch") : undefined;
+    return scope.kind === "unreadable" ? scopeUnreadable("local", scope.reason, true) : undefined;
   };
 
   /**

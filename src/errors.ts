@@ -138,10 +138,10 @@ export function carryFailedNotice(reason: string): string {
 
 /**
  * Both models refuse a session whose scope cannot be read: smart-router/auto always, and
- * smart-router/local outside the pin, where such a scope counts as work scope. Neither answers
- * until the scope is recorded again, so the model offered is the one smart-router/auto's refusals
- * offer, never smart-router/auto itself. `work`: whether the session is a work session that is
- * not pinned (chooseModel).
+ * smart-router/local outside the pin, though it routes in both scopes when the scope can be read.
+ * Neither answers until the scope is recorded again, and such a scope counts as work scope, so the
+ * model offered is the one smart-router/auto's refusals offer, never smart-router/auto itself.
+ * `work`: whether the session is a work session that is not pinned (chooseModel).
  */
 export function scopeUnreadable(id: VirtualId, reason: string, work = false): RouterError {
   return refusal(
@@ -149,17 +149,6 @@ export function scopeUnreadable(id: VirtualId, reason: string, work = false): Ro
     `this session's scope cannot be read (${reason})`,
     `Record it again with /smart-router scope work or /smart-router scope personal, or ${chooseModel("auto", work)}.`,
   );
-}
-
-/**
- * smart-router/local refuses a session in work scope that is not pinned. It answers only from LAN
- * models, which are not the work account, and work scope sends them a conversation only under the
- * pin. `movable`: whether /smart-router scope personal can move the session, which the latch
- * refuses.
- */
-export function localInWorkScope(movable: boolean): RouterError {
-  const ways = ["Run /smart-router local on to pin the session to local models", chooseModel("local", true), ...(movable ? ["run /smart-router scope personal"] : [])];
-  return refusal("local", "this session is in work scope, where smart-router/local answers only while the session is pinned to local models", `${either(ways)}.`);
 }
 
 /** A roster that does not serve a scope, as the texts name it: by its version, when that is 1. */
