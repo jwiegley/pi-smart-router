@@ -14,7 +14,7 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import { checkRoster } from "../src/check.ts";
 import { SCOPE_ENTRY } from "../src/constants.ts";
 import { policyFromRoster } from "../src/local.ts";
-import { Cooldowns, holdFrom, isUnreachable } from "../src/resolve.ts";
+import { holdFrom, Holds, isUnreachable } from "../src/resolve.ts";
 import { parseRoster, unreachableMinutesOf } from "../src/roster.ts";
 import { scopeEntry } from "../src/scope.ts";
 import { TIERS } from "../src/tiers.ts";
@@ -160,7 +160,7 @@ describe("what counts as unreachable", () => {
   });
 
   test("only for a local model, and only before any output", () => {
-    const holds = new Cooldowns();
+    const holds = new Holds();
     const failed = (ref: string, content: unknown[] = [], stamp = 1) => {
       const slash = ref.indexOf("/");
       return { provider: ref.slice(0, slash), model: ref.slice(slash + 1), api: "openai-completions", stopReason: "error", errorMessage: REFUSED, timestamp: stamp, content };
@@ -175,37 +175,37 @@ describe("what counts as unreachable", () => {
     assert.equal(holdFrom(failed(NYX_QWEN, [{ type: "text", text: "Half an ans" }]), NYX, ROSTER, holds, NOW), undefined);
     assert.equal(holdFrom(failed(NYX_QWEN, [{ type: "toolCall", id: "1", name: "read", arguments: {} }]), NYX, ROSTER, holds, NOW), undefined);
     assert.equal(holds.until(NYX_QWEN, NOW), undefined);
-    // Before any output, with empty blocks or none: held for the default two minutes, once per response.
+    // Before any output, with empty blocks or none: held for the default five minutes, once per response.
     assert.equal(holdFrom(failed(NYX_QWEN, [{ type: "text", text: "" }]), NYX, ROSTER, holds, NOW), NYX_QWEN);
-    assert.equal(holds.until(NYX_QWEN, NOW), NOW + 2 * MINUTE);
+    assert.deepEqual(holds.get(NYX_QWEN, NOW), { until: NOW + 5 * MINUTE, kind: "unreachable" });
     holdFrom(failed(NYX_QWEN), NYX, ROSTER, holds, NOW + MINUTE);
-    assert.equal(holds.until(NYX_QWEN, NOW), NOW + 2 * MINUTE);
+    assert.equal(holds.until(NYX_QWEN, NOW), NOW + 5 * MINUTE);
     holdFrom(failed(NYX_QWEN, [], 2), NYX, ROSTER, holds, NOW + MINUTE);
-    assert.equal(holds.until(NYX_QWEN, NOW), NOW + 3 * MINUTE);
+    assert.equal(holds.until(NYX_QWEN, NOW), NOW + 6 * MINUTE);
     // Neither a response that did not fail nor another kind of failure holds.
     assert.equal(holdFrom({ ...failed(GLM), errorMessage: "Request timed out" }, model(GLM, { baseUrl: HERA_LAN }), ROSTER, holds, NOW), undefined);
     assert.equal(holdFrom({ ...failed(GLM), stopReason: "aborted" }, model(GLM, { baseUrl: HERA_LAN }), ROSTER, holds, NOW), undefined);
   });
 
-  test("unreachableMinutes: 2 by default, 1 to 60, beside cooldownMinutes, in either version", () => {
+  test("unreachableMinutes: 5 by default, 1 to 60, beside cooldownMinutes, in either version", () => {
     const edited = (edit: (roster: any) => void, base = TEXT): string => {
       const roster = JSON.parse(base);
       edit(roster);
       return JSON.stringify(roster);
     };
     assert.equal(Object.hasOwn(ROSTER, "unreachableMinutes"), false);
-    assert.equal(unreachableMinutesOf(ROSTER), 2);
+    assert.equal(unreachableMinutesOf(ROSTER), 5);
     for (const base of [TEXT, fixture("roster-hera.json")]) {
-      const parsed = parseRoster(edited((r) => (r.unreachableMinutes = 5), base));
+      const parsed = parseRoster(edited((r) => (r.unreachableMinutes = 9), base));
       assert.ok(parsed.ok, parsed.ok ? "" : parsed.error);
-      assert.equal(unreachableMinutesOf(parsed.value), 5);
+      assert.equal(unreachableMinutesOf(parsed.value), 9);
       for (const bad of [0, 61, 1.5, "2"]) {
         const refused = parseRoster(edited((r) => (r.unreachableMinutes = bad), base));
         assert.deepEqual(refused, { ok: false, error: "unreachableMinutes: must be a whole number of minutes from 1 to 60" });
       }
     }
-    const lines = checkRoster(edited((r) => (r.unreachableMinutes = 5))).lines;
-    assert.ok(lines.includes("A local model whose server cannot be reached is skipped for 5 minutes, and the request goes to the next model in the order above."), lines.join("\n"));
+    const lines = checkRoster(edited((r) => (r.unreachableMinutes = 9))).lines;
+    assert.ok(lines.includes("A local model whose server cannot be reached is skipped for 9 minutes, and the request goes to the next model in the order above."), lines.join("\n"));
   });
 });
 
@@ -232,7 +232,7 @@ describe("smart-router/local when a server cannot be reached", () => {
     ]);
 
     // After unreachableMinutes, Nyx is first again.
-    state.clock = NOW + 2 * MINUTE;
+    state.clock = NOW + 5 * MINUTE;
     signal = await prompt(loaded, "rename baz to qux");
     assert.equal(routed(runtime.route("local", request("user", { signal }))), NYX_QWEN);
     assert.equal((await status(loaded)).some((line) => line.startsWith("Unreachable:")), false);

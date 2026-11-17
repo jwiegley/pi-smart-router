@@ -18,7 +18,7 @@ const NYX_QWEN = "nyx/g3mjym7raqj6147biq46zxym32gyda9g-Qwen3.8-27B-exl3-6fe61ad"
 
 const TAIL = [
   "A usage-limit or authentication error takes a cloud model out of routing for 30 minutes, and with it every model of the same subscription account; a local-role model is never taken out.",
-  "A local model whose server cannot be reached is skipped for 2 minutes, and the request goes to the next model in the order above.",
+  "A local model whose server cannot be reached is skipped for 5 minutes, and the request goes to the next model in the order above.",
   "This reads the roster alone. Whether each model is in Pi's catalog on this host, available and has credentials is /smart-router status's to say.",
 ];
 

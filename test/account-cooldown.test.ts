@@ -14,7 +14,7 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import { checkRoster } from "../src/check.ts";
 import { SCOPE_ENTRY } from "../src/constants.ts";
 import { policyFromRoster } from "../src/local.ts";
-import { accountScoped, coolFrom, Cooldowns } from "../src/resolve.ts";
+import { accountScoped, coolFrom, Cooldowns, creditScoped, isRateLimit, waitMinutes } from "../src/resolve.ts";
 import { parseRoster } from "../src/roster.ts";
 import { scopeEntry } from "../src/scope.ts";
 import { TIERS } from "../src/tiers.ts";
@@ -124,10 +124,10 @@ describe("a usage limit cools the account", () => {
   };
 
   test("which errors are the account's: limits, quota, billing and authentication, not a model that is not found", () => {
-    for (const text of [LIMIT, "Monthly usage_limit reached", "quota exceeded for this key", "insufficient_quota", "billing details required", "subscription_sharing_usage_limit_exceeded", "RESOURCE_EXHAUSTED", "401 Unauthorized", "HTTP 403", "Forbidden"]) {
+    for (const text of [LIMIT, "Monthly usage_limit reached", "quota exceeded for this key", "insufficient_quota", "billing details required", "subscription_sharing_usage_limit_exceeded", "RESOURCE_EXHAUSTED", "401 Unauthorized", "unauthorised", "402 Payment Required", "Insufficient credits", "This request requires more credits, or fewer max_tokens"]) {
       assert.equal(accountScoped(text), true, text);
     }
-    for (const text of ["The model gpt-6.1-sol was not found", "model_not_found", "403: model gpt-6-nova not found for this plan", "429 Too Many Requests", "content_filter", "Request timed out", "", undefined]) {
+    for (const text of ["The model gpt-6.1-sol was not found", "model_not_found", "403: model gpt-6-nova not found for this plan", "HTTP 403", "Forbidden", "429 Too Many Requests", "content_filter", "Request timed out", "", undefined]) {
       assert.equal(accountScoped(text), false, String(text));
     }
   });
@@ -203,5 +203,111 @@ describe("a usage limit cools the account", () => {
     const message = refusal(() => work.loaded.runtime.route("auto", request("user", { signal })));
     assert.match(message, /^smart-router\/auto: no model can take this request \(work-super: openai-codex-3\/gpt-6-astra: cooling down until \d\d:\d\d after a usage-limit or authentication error on its account openai-codex-3\)/);
     assert.doesNotMatch(message, /openrouter|omlx-hera|nyx|openai-codex-2/);
+    // The refusal says when the account is tried again, and names only the work account's models as a way out.
+    assert.match(message, / Nothing was sent\. See \/smart-router status, or choose a work Codex model with \/model\. The account openai-codex-3 is left alone until \d\d:\d\d; after that this request routes again\. A model picked by hand is sent as it is\.$/);
+  });
+
+  test("a 403 is the model's own: it cools that model and not its account", () => {
+    const cooldowns = new Cooldowns();
+    for (const text of ["HTTP 403", "Forbidden"]) coolFrom(failed(LUNA, text, text.length), ROSTER, cooldowns, NOW);
+    assert.deepEqual([cooldowns.until(LUNA, NOW), cooldowns.until(ASTRA, NOW), cooldowns.accounts(NOW)], [NOW + 30 * MINUTE, undefined, []]);
+  });
+
+  test("the wait a limit names is the cooldown: Codex's own text, in minutes, hours or seconds, at most a day", () => {
+    const codexText = "You have hit your ChatGPT usage limit (plus plan). Try again in ~42 min.";
+    assert.equal(accountScoped(codexText), true);
+    assert.deepEqual(
+      [codexText, "Try again in 3 hours", "try again in ~1.5 h", "Try again in 30 seconds", "Try again in 2 days", "Try again in 9 days", "Try again later.", "usage limit", undefined].map(waitMinutes),
+      [42, 180, 90, 1, 1440, 1440, undefined, undefined, undefined],
+    );
+    const cooldowns = new Cooldowns();
+    coolFrom(failed(LUNA, codexText), ROSTER, cooldowns, NOW);
+    assert.deepEqual(cooldowns.accounts(NOW), [{ provider: "openai-codex-2", until: NOW + 42 * MINUTE }]);
+    assert.deepEqual([cooldowns.until(ASTRA, NOW + 41 * MINUTE), cooldowns.until(ASTRA, NOW + 42 * MINUTE)], [NOW + 42 * MINUTE, undefined]);
+    // Without a wait in the text, the roster's cooldownMinutes.
+    const plain = new Cooldowns();
+    coolFrom(failed(LUNA, LIMIT), ROSTER, plain, NOW);
+    assert.equal(plain.until(ASTRA, NOW), NOW + 30 * MINUTE);
+  });
+
+  test("spent credit is the account's on any provider: OpenRouter out of credit cools both of its models", () => {
+    for (const text of ["402 Payment Required", "Insufficient credits", "This request requires more credits, or fewer max_tokens. You requested up to 65536 tokens."]) {
+      assert.equal(creditScoped(text), true, text);
+      const cooldowns = new Cooldowns();
+      assert.equal(coolFrom(failed(OR_GLM, text), ROSTER, cooldowns, NOW), OR_GLM);
+      assert.deepEqual([cooldowns.until(OR_QWEN, NOW), cooldowns.accounts(NOW)], [NOW + 30 * MINUTE, [{ provider: "openrouter", until: NOW + 30 * MINUTE }]], text);
+      assert.equal(cooldowns.until(LUNA, NOW), undefined);
+    }
+    // A local-role model is never cooled, whatever it says.
+    const cooldowns = new Cooldowns();
+    assert.equal(coolFrom(failed(GLM, "402 Payment Required"), ROSTER, cooldowns, NOW), undefined);
+    assert.deepEqual(cooldowns.accounts(NOW), []);
+    assert.equal(creditScoped("429 Too Many Requests"), false);
+  });
+
+  test("Codex out of tokens and OpenRouter out of credit: the local models answer, with one failed run for each account", async (t) => {
+    const state = await session(t);
+    const { loaded } = state;
+    const { runtime } = loaded;
+    const fail = async (ref: string, text: string): Promise<void> => {
+      await loaded.host.emit("message_end", { message: assistant(ref, { stopReason: "error", errorMessage: text, content: [] }) });
+      await loaded.host.emit("agent_settled", { aborted: false });
+      loaded.session.endRun();
+    };
+    let signal = await prompt(loaded, "rename foo to bar #low");
+    assert.equal(routed(runtime.route("auto", request("user", { signal }))), LUNA);
+    await fail(LUNA, "You have hit your ChatGPT usage limit (plus plan). Try again in ~42 min.");
+    signal = await prompt(loaded, "rename foo to bar #low");
+    assert.equal(routed(runtime.route("auto", request("user", { signal }))), OR_GLM);
+    await fail(OR_GLM, "402 Insufficient credits");
+    signal = await prompt(loaded, "rename foo to bar #low");
+    assert.deepEqual([routed(runtime.route("auto", request("user", { signal }))), lastCode(loaded)], [GLM, "fallback:low→local"]);
+    await finish(loaded, GLM);
+    const lines = await status(loaded);
+    assert.deepEqual(lines.filter((line) => line.startsWith("Cooling:")).map((line) => line.replace(/\d\d:\d\d/, "HH:MM")), [
+      "Cooling: the account openai-codex-2, every model of it, until HH:MM after a usage-limit or authentication error",
+      "Cooling: the account openrouter, every model of it, until HH:MM after a usage-limit or authentication error",
+    ]);
+    // OpenRouter's cooldown is the roster's 30 minutes, Codex's the 42 its error named.
+    state.clock = NOW + 31 * MINUTE;
+    signal = await prompt(loaded, "rename foo to bar #low");
+    assert.equal(routed(runtime.route("auto", request("user", { signal }))), OR_GLM);
+    await finish(loaded, OR_GLM);
+    state.clock = NOW + 43 * MINUTE;
+    signal = await prompt(loaded, "rename foo to bar #low");
+    assert.equal(routed(runtime.route("auto", request("user", { signal }))), LUNA);
+  });
+
+  test("a rate limit keeps its model while Pi retries it; if it never answers, the runs that follow skip it for a few minutes", async (t) => {
+    for (const text of ["429 Rate limit exceeded", "rate_limit_exceeded", "Too Many Requests"]) assert.equal(isRateLimit(text), true, text);
+    for (const text of [LIMIT, "402 Payment Required", "content_filter 429", "overloaded", undefined]) assert.equal(isRateLimit(text), false, String(text));
+    const state = await session(t);
+    const { loaded, cat } = state;
+    const { runtime } = loaded;
+    cat.unavailable.add(LUNA);
+    const throttled = assistant(OR_GLM, { stopReason: "error", errorMessage: "429 Rate limit exceeded", content: [] });
+    let signal = await prompt(loaded, "rename foo to bar #low");
+    assert.equal(routed(runtime.route("auto", request("user", { signal }))), OR_GLM);
+    // Pi backs off and retries: the same model, as before.
+    await loaded.host.emit("message_end", { message: throttled });
+    const retry = runtime.route("auto", request("retry", { signal, failed: failure(runtime, OR_GLM, "429 Rate limit exceeded") }));
+    assert.deepEqual([routed(retry), lastCode(loaded)], [OR_GLM, "retry:same"]);
+    // It answers: nothing is held, and the run's continuations and the next run stay on it.
+    await finish(loaded, OR_GLM);
+    signal = await prompt(loaded, "rename bar to baz #low");
+    assert.equal(routed(runtime.route("auto", request("user", { signal }))), OR_GLM);
+    // This time the retries run out: the run ends on the rate limit.
+    await loaded.host.emit("message_end", { message: { ...throttled, timestamp: NOW + 1 } });
+    await loaded.host.emit("agent_settled", { aborted: false });
+    loaded.session.endRun();
+    signal = await prompt(loaded, "rename baz to qux #low");
+    assert.equal(routed(runtime.route("auto", request("user", { signal }))), OR_QWEN);
+    await finish(loaded, OR_QWEN);
+    const lines = await status(loaded);
+    assert.deepEqual(lines.filter((line) => line.startsWith("Rate-limited:")).map((line) => line.replace(/\d\d:\d\d/, "HH:MM")), [`Rate-limited: ${OR_GLM} is skipped until HH:MM after a rate limit`]);
+    assert.deepEqual(lines.filter((line) => line.startsWith("Cooling:")), []);
+    state.clock = NOW + 5 * MINUTE;
+    signal = await prompt(loaded, "rename qux to quux #low");
+    assert.equal(routed(runtime.route("auto", request("user", { signal }))), OR_GLM);
   });
 });

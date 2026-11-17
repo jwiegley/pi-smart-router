@@ -37,7 +37,7 @@ import { invariant, noBoundedHistory, unroutable } from "./errors.ts";
 import type { JevOutcome } from "./jev.ts";
 import { checkLocal } from "./local.ts";
 import type { LocalPolicy } from "./local.ts";
-import { coolFrom, failureKind, holdFrom, refOf, resolveCandidate } from "./resolve.ts";
+import { clock, coolFrom, failureKind, holdFrom, refOf, resolveCandidate } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
 import { autoRoles, excludedBy, excludesFor, isWorkBound, roleOf, scopeSection } from "./roster.ts";
 
@@ -114,6 +114,12 @@ export interface LastInput {
 export interface SessionRecord {
   plan: Plan | undefined;
   runPick: RunPick | undefined;
+  /**
+   * The models whose requests failed with a limit-kind error in the current run. A retry skips
+   * them all, so a run tries each candidate once: local-role models are never cooled, and without
+   * this a retry went back and forth between two of them.
+   */
+  readonly limited: Set<string>;
   last: LastResponder | undefined;
   readonly history: HistoryEntry[];
   /** The planned version 2 run's level, until its record is written. */
@@ -123,7 +129,7 @@ export interface SessionRecord {
 }
 
 export function newRecord(): SessionRecord {
-  return { plan: undefined, runPick: undefined, last: undefined, history: [], pendingLevel: undefined, lastInput: undefined };
+  return { plan: undefined, runPick: undefined, limited: new Set(), last: undefined, history: [], pendingLevel: undefined, lastInput: undefined };
 }
 
 /** The fork's bounded session readers. Pi 1.5.0's npm types lack them, so they are detected. */
@@ -204,14 +210,19 @@ function retry(rc: ResolveContext, request: ModelRouteRequest, record: SessionRe
   const ref = refOf(failed.model);
   const role = eligibleRole(rc, ref);
   const kind = failureKind(failed.message.errorMessage);
-  if (kind === "limit" && role !== undefined) return pickInRole(rc, role, { skip: ref, fallback: !rc.localOnly, code: "retry:next" });
-  // A server that could not be reached is held, so each such retry takes a candidate not yet tried:
-  // one pass over the order, and then a refusal that names every hold. The pick stays where every
-  // pick of this request may go: the role, then what is left of the scope's chain.
+  if (kind === "limit" && role !== undefined) {
+    record.limited.add(ref);
+    return pickInRole(rc, role, { skip: ref, skipped: record.limited, fallback: !rc.localOnly, code: "retry:next" });
+  }
+  // A local model whose server could not be reached is held, and gives way to the candidate written
+  // after it. Each such retry holds one more model, so it takes a candidate not yet tried: one pass
+  // over the order, and then a refusal that names every hold. The pick stays where every pick of
+  // this request may go: the role, then what is left of the scope's chain.
   const held = rc.holds === undefined ? undefined : holdFrom(failed.message, failed.model, rc.roster, rc.holds, rc.now);
   if (held !== undefined && role !== undefined) return pickInRole(rc, role, { after: ref, fallback: !rc.localOnly, code: "retry:unreachable" });
   if (role !== undefined) {
-    const same = resolveCandidate(ref, rc);
+    // Pi has backed off before this retry, so a rate-limited model's hold does not stand in its way.
+    const same = resolveCandidate(ref, rc.holds?.get(ref, rc.now)?.kind === "rate" ? { ...rc, holds: undefined } : rc);
     if (same.ok) return { ok: true, choice: { role, ref, model: same.model, code: "retry:same" } };
   }
   // Content a model refused is never sent to another model.
@@ -310,11 +321,24 @@ export function levelFor(rc: ResolveContext, roleName: string, selected: ModelTh
   return role === undefined || role.thinking === "selected" ? selected : role.thinking;
 }
 
+/** The first cooling account that a refusal's candidates wait for, and the time it stops, as HH:MM. */
+function coolingAccount(rc: ResolveContext, decision: Decision & { readonly ok: false }): { readonly provider: string; readonly until: string } | undefined {
+  const refs = decision.attempts.flatMap((attempt) => attempt.candidates.map((candidate) => candidate.ref));
+  const found = rc.cooldowns.accounts(rc.now).find(({ provider }) => refs.some((ref) => ref.startsWith(`${provider}/`)));
+  return found === undefined ? undefined : { provider: found.provider, until: clock(found.until) };
+}
+
 function settle(input: RouteInput, decision: Decision): Choice {
   // A version 2 decision tries more than one role when its run steps up a tier, or when its scope
   // declares a fallback chain, whose roles each attempt marks as a fallback.
   if (!decision.ok) {
-    throw unroutable(input.id, decision, { localOnly: input.rc.localOnly, pinned: input.pin.on, stepUps: input.rc.roster.version === 2, work: workUnpinned(input.rc) });
+    throw unroutable(input.id, decision, {
+      localOnly: input.rc.localOnly,
+      pinned: input.pin.on,
+      stepUps: input.rc.roster.version === 2,
+      work: workUnpinned(input.rc),
+      cooling: coolingAccount(input.rc, decision),
+    });
   }
   assertSafe(input.id, input.rc, decision.choice);
   return decision.choice;

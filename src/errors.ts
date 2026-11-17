@@ -248,6 +248,8 @@ export interface UnroutableContext {
   readonly stepUps?: boolean;
   /** Whether the session is a work session that is not pinned (chooseModel). */
   readonly work?: boolean;
+  /** An account some candidate waits for after a usage-limit or authentication error, and when that ends (HH:MM). */
+  readonly cooling?: { readonly provider: string; readonly until: string } | undefined;
 }
 
 /** No candidate could take the request: every role tried and why, or the problem found first. */
@@ -276,7 +278,12 @@ export function unroutable(
       : context.localOnly
         ? `Start the local model server and send the prompt again, or ${unpin}.`
         : `See /smart-router status, or ${chooseModel(id, work)}.`;
-  return refusal(id, cause, way);
+  // An exhausted account ends by itself: the refusal says when, and that the selection is John's.
+  const wait =
+    context.cooling === undefined || context.localOnly
+      ? ""
+      : ` The account ${context.cooling.provider} is left alone until ${context.cooling.until}; after that this request routes again. A model picked by hand is sent as it is.`;
+  return refusal(id, cause, `${way}${wait}`);
 }
 
 export function stale(id: VirtualId): RouterError {

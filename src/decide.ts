@@ -77,6 +77,8 @@ export interface PickOptions {
   readonly prefer?: string | undefined;
   /** Never taken: the model whose request just failed. */
   readonly skip?: string | undefined;
+  /** Never taken either: the models whose requests failed with a limit earlier in this run, so that a run tries each candidate once. */
+  readonly skipped?: ReadonlySet<string> | undefined;
   /**
    * The model whose server could not be reached: the role's candidates are tried in the written
    * order starting after it and going round once, so that the next one written takes the request.
@@ -125,7 +127,11 @@ export function pickInRole(rc: ResolveContext, roleName: string, options: PickOp
     const refused: Array<Resolution & { readonly ok: false }> = [];
     for (const ref of order) {
       const resolution: Resolution =
-        ref === options.skip ? { ok: false, ref, reason: "failed", detail: "its request just failed" } : resolveCandidate(ref, rc);
+        ref === options.skip
+          ? { ok: false, ref, reason: "failed", detail: "its request just failed" }
+          : options.skipped?.has(ref) === true
+            ? { ok: false, ref, reason: "failed", detail: "its request failed earlier in this run" }
+            : resolveCandidate(ref, rc);
       if (resolution.ok) return resolution;
       refused.push(resolution);
     }

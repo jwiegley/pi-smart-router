@@ -496,6 +496,8 @@ function refusal(run: () => unknown): string {
 }
 
 describe("a run through the router with a fallback chain", () => {
+  // The rule for a retry that names a limit. Pi does not retry Codex's own usage-limit text, so the
+  // path a real limit takes is in test/failover.test.ts; this text is one Pi would hand back.
   test("a usage limit moves the run down the chain, one candidate at a time, and the level it records stays its own", async (t) => {
     const { loaded } = await session(t);
     const { runtime } = loaded;
@@ -507,6 +509,7 @@ describe("a run through the router with a fallback chain", () => {
       [OR_GLM, OR_QWEN, "retry:next", "high"],
       [OR_QWEN, GLM, "fallback:openrouter→local", "max"],
       [GLM, NYX_QWEN, "retry:next", "max"],
+      [NYX_QWEN, HERA_QWEN, "retry:next", "max"],
     ];
     for (const [failed, next, code, thinking] of hops) {
       const route = runtime.route("auto", request("retry", { signal, failed: failure(runtime, failed, LIMIT) }));
@@ -514,16 +517,22 @@ describe("a run through the router with a fallback chain", () => {
       // The run's continuations stay on the model it moved to.
       assert.equal(routed(runtime.route("auto", request("continuation", { signal, previous: previous(runtime, next) }))), next);
     }
-    // The local role's models are never cooled, so a usage limit from its second model goes round
-    // to its first, as in the local role's own routes, and never back up the chain to a cloud model.
-    const round = runtime.route("auto", request("retry", { signal, failed: failure(runtime, NYX_QWEN, LIMIT) }));
-    assert.deepEqual([routed(round), lastHistory(loaded)?.code], [GLM, "retry:next"]);
-    await finish(loaded, GLM);
+    // Local-role models are never cooled, but a run tries each candidate once: when the last one
+    // fails too, the retry is refused, naming all three, and goes neither round nor back up the chain.
+    const message = refusal(() => runtime.route("auto", request("retry", { signal, failed: failure(runtime, HERA_QWEN, LIMIT) })));
+    assert.match(message, /^smart-router\/auto: no model can take this request \(local: /);
+    for (const ref of [GLM, NYX_QWEN]) assert.ok(message.includes(`${ref}: its request failed earlier in this run`), message);
+    assert.ok(message.includes(`${HERA_QWEN}: its request just failed`), message);
+    await loaded.host.emit("agent_settled", { aborted: false });
+    loaded.session.endRun();
     const [record, ...others] = records(loaded);
     assert.deepEqual(others, []);
     // The keywords' reason and Jev's opinion (unavailable on this fake host) are not this test's.
     const { keyword: _keyword, jev: _jev, ...rest } = record ?? {};
-    assert.deepEqual(rest, { v: 1, at: NOW, scope: "personal", source: "tag", tier: "low", asked: "low", tag: "low", ref: GLM, fallback: true });
+    assert.deepEqual(rest, { v: 1, at: NOW, scope: "personal", source: "tag", tier: "low", asked: "low", tag: "low" });
+    // The next run starts afresh: the local models are tried again.
+    const next = await prompt(loaded, "rename bar to baz #low");
+    assert.equal(routed(runtime.route("auto", request("user", { signal: next }))), GLM);
   });
 
   test("while a level's model cools, each new run takes the chain with a notice, and returns when the cooldown ends", async (t) => {

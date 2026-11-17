@@ -36,7 +36,7 @@ import type { PromptReader } from "./prompts.ts";
 import type { PinReading } from "./pin.ts";
 import { correctionRecord, levelNote, levelRecord, readLevelRecord } from "./records.ts";
 import type { LevelRecord } from "./records.ts";
-import { clock, resolveCandidate } from "./resolve.ts";
+import { clock, describeHold, resolveCandidate } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
 import { boundedHistory, HISTORY_LIMIT } from "./route.ts";
 import type { HistoryEntry, PendingLevel, Pin } from "./route.ts";
@@ -331,7 +331,7 @@ function holdLines(rc: ResolveContext): string[] {
     .accounts(rc.now)
     .map(({ provider, until }) => `Cooling: the account ${provider}, every model of it, until ${clock(until)} after a usage-limit or authentication error`);
   return accounts.concat(
-    (rc.holds?.active(rc.now) ?? []).map(({ ref, until }) => `Unreachable: ${ref} is skipped until ${clock(until)}, since its server could not be reached`),
+    (rc.holds?.active(rc.now) ?? []).map((hold) => `${hold.kind === "unreachable" ? "Unreachable" : "Rate-limited"}: ${hold.ref} is ${describeHold(hold).detail}`),
   );
 }
 

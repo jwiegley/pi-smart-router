@@ -69,7 +69,7 @@ import { latchEnvPolicy, leaveHandoff, pinOn, readPin, takeHandoff } from "./pin
 import { promptProblem, promptStore, promptUses, scopePrompts } from "./prompts.ts";
 import type { PinReading } from "./pin.ts";
 import { footerText, levelRecord } from "./records.ts";
-import { coolFrom, Cooldowns, holdFrom, resolveContext } from "./resolve.ts";
+import { coolFrom, Cooldowns, holdFrom, Holds, resolveContext, throttleFrom } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
 import { boundedHistory, newRecord, planApplies, predict, requireBoundedHistory, routeOther, routeOwned } from "./route.ts";
 import type { BoundedHistory, LastInput, Pin, RouteInput, SessionRecord } from "./route.ts";
@@ -182,8 +182,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   const labels = labelsFile(files);
   const prompts = promptStore(files);
   const cooldowns = new Cooldowns();
-  /** The local models whose servers could not be reached, each skipped for a few minutes (holdFrom). */
-  const holds = new Cooldowns();
+  /** The models skipped for a few minutes: unreachable local ones, local-role ones after a limit, rate-limited cloud ones (src/resolve.ts). */
+  const holds = new Holds();
   const records = new Map<string, Session>();
   const reported = new Set<string>();
   let limits = BOTH_DEFAULT;
@@ -790,11 +790,14 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         coolFrom(message, state.value, cooldowns, now());
         // A failure Pi does not retry holds its model too, so that the next run skips it.
         holdFrom(message, ctx.modelRegistry.find(message.provider, message.model), state.value, holds, now());
+        throttleFrom(message, state.value, holds, now());
       }
       return;
     }
     const sessionId = ctx.sessionManager.getSessionId();
     const ref = `${message.provider}/${message.model}`;
+    // A rate-limited model that answers is no longer held.
+    holds.release(ref, "rate");
     // The footer names the model that answered a run's level, when the run's own route picked it.
     const record = records.get(sessionId);
     const pick = record?.runPick;
@@ -818,6 +821,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     record.plan = undefined;
     record.planDigest = undefined;
     record.runPick = undefined;
+    record.limited.clear();
     record.pendingLevel = undefined;
     record.answered = undefined;
     if (pending !== undefined) pi.appendEntry(LEVEL_ENTRY, levelRecord(pending, answered, aborted, answered !== undefined && inChain(pending.level.scope, answered)));
