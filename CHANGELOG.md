@@ -5,6 +5,87 @@ All notable changes to this fork are recorded here, in the form of
 the base is the latest upstream release merged into the fork's history, and `jw.<n>` counts the
 fork's releases on that base. Releases are signed tags; nothing is published to npm.
 
+## [1.4.0-jw.4] - 2026-11-17
+
+A scope's fallback chain, a roster checker, and Jev's prompts as files John edits. On 2026-11-17
+John specified the routing he wants ("smart-router/auto on personal should also use: astra, sol,
+terra, luna -- based on difficulty of the task -- and then when tokens run out there it should use
+OpenRouter GLM-5.3-Flash and Qwen3.8, with a final fallback to GLM-5.3-Flash on Hera, Qwen3.8 on
+Nyx with a fallback to Qwen3.8 on Hera. smart-router/local only uses those last three."), and asked
+that "these decisions about which models to use ... should be very easy to change and reconfigure",
+with Jev's instructions as "a set of prompts ... that is also very easy to modify".
+
+Upgrading from 1.4.0-jw.3: no roster change is needed, and a roster that uses none of the new
+fields parses to the same value, routes the same and sends Jev the same request, byte for byte.
+Three things are visible without a roster change: `/smart-router status` has one more line, for
+the prompt sources; the usage text names `check`; and a run's record may carry `fallback` or the
+Jev failure `prompt`, both only under the new fields.
+
+### Added
+
+- **`scopes.<scope>.fallback`**, a list of roles: the scope's fallback chain. On
+  `smart-router/auto`, outside the pin, a level tries its own models and then each chain role's
+  models, in the order written. One chain serves every level of its scope, and its roles are no
+  level's, so a model still sits in exactly one role.
+  - A level takes the chain before it passes its run up, so the run keeps its level: its record's
+    `tier` does not change, and the record carries `fallback` when a chain model answered.
+  - A chain model holds no level, and each new run starts from its level's first model, so a
+    session returns to the level's own model as soon as that can take requests again, as version
+    1's fallback role returned to its primary. A retry after a usage-limit or authentication error
+    goes on through the chain and never back to an earlier role or to the level.
+  - The chain is the declaring scope's alone. A personal chain takes no work-bound model, and a
+    work chain takes only work-bound Codex models, for which the built-in `openai-codex-3/*`
+    exclusion is lifted as for a work level. A work scope without the field behaves as before.
+  - A chain may name the local role, which is how `smart-router/auto` reaches the local models.
+    `smart-router/local` never uses a chain.
+  - A run planned onto a chain model shows a notice and `; fallback` in the footer; status lists
+    each scope's chain with its models' verdicts and says when the last request went to one; a
+    refusal names the chain's roles as fallbacks.
+- **`/smart-router check`** and the standalone **`node src/check-cli.ts <roster.json>`**: the
+  roster read back with the router's own parser. For each selection and scope, the models in the
+  order tried, the fallback chain, what the pin leaves, the local set, the source of each of Jev's
+  prompts and the account bindings; or the first error with its place. The standalone checker
+  imports nothing of Pi's and needs no session and no credentials; it exits 0, 1 or 2.
+- **Jev's prompts are editable.** `classifier.instructions` (inline) or
+  `classifier.instructionsFile` (a file's name) replaces the built-in question, and a level takes
+  `describeFile` in place of `describe`. Prompt files are plain text or Markdown in
+  `<agentDir>/smart-router/`, read with the roster's safe reader, refreshed with the roster, with
+  HTML comments left out of what is sent. Status shows each prompt's source.
+- README: "A fallback chain", with John's routing as the worked example and the note that a
+  fallback sends the conversation to another vendor and to LAN models; "Jev's prompts"; and
+  "Changing the routing", with the commonest edits as before and after, and "Checking a roster".
+
+### Changed
+
+- **A pinned session on `smart-router/auto`**, in a scope whose fallback chain names the local
+  role, now routes to the local role's models, in the role's order and inside the pin's policy. It
+  was refused, and still is in every other scope, with the text that names `smart-router/local`.
+  The chain's cloud roles are never used under the pin.
+- `smart-router/auto` declares the smallest context window and output budget among the first
+  available model of every role it reaches, which now includes each fallback chain's roles.
+- A prompt file that cannot be used (missing, unsafe, empty, too long, an unclosed comment, a
+  `{{placeholder}}` or a `TODO` line) stops no route: Jev is not asked in the scopes that need it,
+  the keywords decide, and the record and footer say `jev prompt`.
+- AGENTS.md: the runtime reads the prompt files too, a prompt reaches nothing but Jev, and
+  `src/check-cli.ts` is not runtime code.
+- The package version is `1.4.0-jw.4`.
+
+### Unchanged
+
+- An invalid, missing or unsafe roster still makes both models refuse every request, with no last
+  valid copy kept in use: such a copy would keep sending to a model or account an edit had just
+  removed. The checker is the remedy.
+- `smart-router/local` routes only to the local role, in the role's order, never to a cloud model,
+  in every scope, pinned or not.
+- A work session on `smart-router/auto` reaches only the work-bound Codex account. No chain can
+  name a personal-account, OpenRouter or local model for it.
+- Jev is asked once per routed run, never under the pin, on `smart-router/local`, for a steer or a
+  follow-up. Its request has one question whose choices are exactly the four levels; no prompt can
+  add a label, name a model, change the scope or lift the pin.
+- A model picked by hand is never changed, reverted, refused or locked.
+- A local server that is down is not passed over: only a model Pi's catalog cannot offer, or one
+  cooling after a usage-limit or authentication error, is. Local-role models are never cooled.
+
 ## [1.4.0-jw.3] - 2026-11-17
 
 `smart-router/local` routes in a session whose scope cannot be read, without the pin. On 2026-11-17

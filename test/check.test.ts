@@ -129,10 +129,19 @@ describe("checking a roster's text", () => {
     assert.deepEqual(checkRoster("[]").lines[0], "INVALID: roster: must be a JSON object");
   });
 
+  test("the README's fallback example is John's roster, and its read-back is what the checker prints", () => {
+    const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+    const section = readme.slice(readme.indexOf("### A fallback chain"), readme.indexOf("### Fields in version 2"));
+    const [, example] = /```json\n([\s\S]*?)\n```/.exec(section) ?? [];
+    assert.equal(`${example}\n`, JOHN);
+    const [, shown] = /```text\n([\s\S]*?)\n```/.exec(section) ?? [];
+    assert.deepEqual((shown ?? "").split("\n"), JOHN_ROUTING.slice(0, 12));
+  });
+
   test("every roster the README shows is valid", () => {
     const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
     const rosters = [...readme.matchAll(/```json\n([\s\S]*?)\n```/g)].map((match) => match[1] ?? "").filter((text) => /"version"\s*:/.test(text));
-    assert.ok(rosters.length >= 4, `the README shows ${rosters.length} rosters`);
+    assert.ok(rosters.length >= 5, `the README shows ${rosters.length} rosters`);
     for (const text of rosters) {
       const report = checkRoster(text);
       assert.equal(report.ok, true, `${report.lines[0]}\n${text.slice(0, 200)}`);
