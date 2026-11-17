@@ -2,7 +2,8 @@
 // roles of exact provider/id refs, the account bindings and the local section. Schema version 1
 // routes by its routing table. Version 2 replaces the table with the four levels of each scope it
 // serves, personal, work or both, binds every account to a scope, and may configure the
-// classifier. Validation is strict and fails closed: the first error, with its location, makes the
+// classifier. A scope may also declare a fallback: an ordered chain of other roles that take a run
+// when its level's own models cannot. Validation is strict and fails closed: the first error, with its location, makes the
 // whole file invalid, and nothing routes by a last-known-good copy (the scope keeps only the last
 // valid roster's work directories, src/router.ts). Unknown keys are refused at every level, so the
 // file has nowhere to hold a key, token, header, base URL or environment.
@@ -72,6 +73,11 @@ export interface ScopeSection {
   readonly levels: Readonly<Record<Tier, TierEntry>>;
   /** Absolute paths whose sessions start in this scope. Only the work scope has any. */
   readonly directories: readonly string[];
+  /**
+   * The scope's fallback chain, when it declares one: roles, in the order written, that take a run
+   * of smart-router/auto after its level's own models. None is a level's role, in either scope.
+   */
+  readonly fallback?: readonly string[];
 }
 
 /** A version 2 account binding: personal, the default, or work. */
@@ -167,13 +173,52 @@ export function isWorkBound(roster: Roster, provider: string): boolean {
 }
 
 /** A scope's level roles, low to super; none without the scope. */
-function levelRoles(section: ScopeSection | undefined): string[] {
+export function levelRoles(section: ScopeSection | undefined): string[] {
   return section === undefined ? [] : TIERS.map((tier) => section.levels[tier].role);
+}
+
+/** The roles smart-router/auto reaches in a scope: its level roles, low to super, then its fallback chain. */
+function scopeRoles(section: ScopeSection | undefined): string[] {
+  return [...levelRoles(section), ...(section?.fallback ?? [])];
+}
+
+/**
+ * The roles a pick goes on to after `roleName`, in a session's scope: the scope's whole fallback
+ * chain after one of its level roles, the rest of the chain after one of the chain's roles, and
+ * nothing after any other role, in a scope without a chain or under version 1 (whose one-hop
+ * routing.fallback is pickInRole's). The chain only ever moves forward: no role leads back to a
+ * level. The helper knows no session, so its callers apply it only to smart-router/auto outside the
+ * pin.
+ */
+export function fallbackAfter(roster: Roster, scope: Scope, roleName: string): readonly string[] {
+  const section = scopeSection(roster, scope);
+  const chain = section?.fallback;
+  if (section === undefined || chain === undefined) return [];
+  if (levelRoles(section).includes(roleName)) return chain;
+  const at = chain.indexOf(roleName);
+  return at < 0 ? [] : chain.slice(at + 1);
+}
+
+/** A candidate of a pick: a model, and the role that holds it. */
+export interface Candidate {
+  readonly role: string;
+  readonly ref: string;
+}
+
+/**
+ * Every model a pick that starts in `roleName` can reach in a session's scope, in the order it
+ * tries them: the role's own models, then each role fallbackAfter gives, each in its own order.
+ * It is what smart-router/auto tries outside the pin; status and the checker print it.
+ */
+export function candidatesOf(roster: Roster, scope: Scope, roleName: string): readonly Candidate[] {
+  return [roleName, ...fallbackAfter(roster, scope, roleName)].flatMap((name) =>
+    (roster.roles.find((role) => role.name === name)?.models ?? []).map((ref) => ({ role: name, ref })),
+  );
 }
 
 /**
  * The exclusions that apply to a ref: `patterns`, less openai-codex-3/* when the ref's provider is
- * bound as a work account and its role is one of the work scope's level roles. The helper knows no
+ * bound as a work account and its role is one of the work scope's level roles or fallback roles. The helper knows no
  * session, so its callers lift only in a work-scope session. Validation lifts only the built-in
  * pattern, so a valid roster whose own exclude names openai-codex-3/* holds no openai-codex-3 ref,
  * and lifting over its merged exclusions at runtime reaches none.
@@ -181,13 +226,13 @@ function levelRoles(section: ScopeSection | undefined): string[] {
 export function liftWorkAlias(roster: Pick<RosterV2, "accounts" | "roles" | "scopes">, ref: string, patterns: readonly string[]): readonly string[] {
   const provider = parseRef(ref)?.provider;
   const role = roleOf(roster, ref)?.name;
-  const lifted = provider !== undefined && role !== undefined && boundToWork(roster.accounts, provider) && levelRoles(roster.scopes.work).includes(role);
+  const lifted = provider !== undefined && role !== undefined && boundToWork(roster.accounts, provider) && scopeRoles(roster.scopes.work).includes(role);
   return lifted ? patterns.filter((pattern) => pattern !== WORK_ALIAS_EXCLUDE) : patterns;
 }
 
 /**
  * The exclusions that apply to a ref in a session's scope: the built-ins and the roster's own. A
- * version 2 work-scope session lifts openai-codex-3/* from them for a work level's work-bound ref
+ * version 2 work-scope session lifts openai-codex-3/* from them for a work level's or work fallback's work-bound ref
  * (liftWorkAlias); every other session, and version 1, keeps them all.
  */
 export function excludesFor(roster: Roster, scope: Scope, ref: string): readonly string[] {
@@ -198,11 +243,12 @@ export function excludesFor(roster: Roster, scope: Scope, ref: string): readonly
 /**
  * The roles `smart-router/auto` may route to in a session's scope. Version 1 ignores the scope:
  * routing targets and fallback targets; a role that neither names, such as a local role kept for
- * smart-router/local, is never routed by auto. Version 2: the scope's four level roles, none when
- * the roster has no section for that scope.
+ * smart-router/local, is never routed by auto. Version 2: the scope's four level roles and the
+ * roles of its fallback chain, which may name the local role; none when the roster has no section
+ * for that scope.
  */
 export function autoRoles(roster: Roster, scope: Scope): ReadonlySet<string> {
-  if (roster.version === 2) return new Set(levelRoles(scopeSection(roster, scope)));
+  if (roster.version === 2) return new Set(scopeRoles(scopeSection(roster, scope)));
   const { routing } = roster;
   return new Set([routing.default, routing.trivial, routing.complex, routing.planning, ...routing.fallback.values()]);
 }
@@ -485,7 +531,7 @@ function validate(value: unknown): Roster {
 // ─── Version 2 ───────────────────────────────────────────────────────────────
 
 const V2_TOP_KEYS = ["version", "exclude", "roles", "scopes", "accounts", "classifier", "local", "stickyIdleMinutes", "cooldownMinutes"];
-const SCOPE_KEYS: Readonly<Record<Scope, readonly string[]>> = { personal: ["levels"], work: ["levels", "directories"] };
+const SCOPE_KEYS: Readonly<Record<Scope, readonly string[]>> = { personal: ["levels", "fallback"], work: ["levels", "directories", "fallback"] };
 const LEVEL_KEYS = ["role", "describe"];
 const SCOPED_BINDING_KEYS = ["multiPassLabel", "native", "scope"];
 const CLASSIFIER_KEYS = ["model", "timeoutMs", "closeCall", "context"];
@@ -544,7 +590,8 @@ function classifierSettings(value: unknown, exclude: readonly string[]): JevSett
 
 /**
  * Version 2, checked in this order: the keys, the exclusions, the roles, the accounts and their
- * scopes, the scopes and their levels, each level's accounts, the work alias's exclusion, the local
+ * scopes, the scopes and their levels, each scope's fallback chain, each level's and each chain's
+ * accounts, the work alias's exclusion, the local
  * section, the classifier and the minutes. The checks it shares with version 1 are version 1's
  * helpers, so they keep version 1's messages.
  */
@@ -604,16 +651,37 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
     const levels = { low: parseLevel("low"), medium: parseLevel("medium"), high: parseLevel("high"), super: parseLevel("super") };
     const given = own(section, "directories");
     const directories = given === undefined ? [] : uniqueTexts(given, `${path}.directories`, false, workDirectory);
-    scopes[scope] = { levels, directories };
+    // The chain's role names are checked once every scope's levels are known.
+    const chain = own(section, "fallback") === undefined ? undefined : uniqueTexts(own(section, "fallback"), `${path}.fallback`, true);
+    scopes[scope] = { levels, directories, ...(chain === undefined ? {} : { fallback: chain }) };
   }
 
+  // A fallback chain names roles that are no level's, in either scope: a level's role in a chain
+  // would give its models two places in one order, and a level of its own to hold.
+  const chainOf = new Map<string, Scope>();
+  for (const scope of SCOPES) {
+    for (const [index, name] of (scopes[scope]?.fallback ?? []).entries()) {
+      const where = `scopes.${scope}.fallback[${index}]`;
+      const role = roleName(name, where);
+      const level = levelOf.get(role);
+      if (level !== undefined) fail(where, `"${role}" is already the role of ${levelName(level)}`);
+      // One chain per role, so that the account rules below judge it for one scope.
+      const other = chainOf.get(role);
+      if (other !== undefined) fail(where, `"${role}" is already in the ${other} scope's fallback`);
+      chainOf.set(role, scope);
+    }
+  }
+
+  // A pick from a chain passes the same account rules as a pick from a level: a personal session
+  // never reaches a work-bound account, and a work session reaches only the work Codex account.
   for (const { where, ref, provider, role } of refs) {
     const level = levelOf.get(role);
-    if (level === undefined) continue;
-    if (level.scope === "personal" && boundToWork(accounts, provider)) fail(where, `"${ref}" is in ${levelName(level)}, but ${provider} is work-bound`);
-    if (level.scope === "work" && !isWorkCodex(accounts, provider)) {
-      fail(where, `"${ref}" is in ${levelName(level)}, which takes only work-bound Codex models`);
-    }
+    const chain = chainOf.get(role);
+    const scope = level?.scope ?? chain;
+    if (scope === undefined) continue;
+    const place = level !== undefined ? levelName(level) : `the ${scope} scope's fallback`;
+    if (scope === "personal" && boundToWork(accounts, provider)) fail(where, `"${ref}" is in ${place}, but ${provider} is work-bound`);
+    if (scope === "work" && !isWorkCodex(accounts, provider)) fail(where, `"${ref}" is in ${place}, which takes only work-bound Codex models`);
   }
 
   for (const { where, ref } of refs) {
@@ -621,7 +689,7 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
     if (pattern !== undefined) fail(where, `"${ref}" is excluded by ${pattern}`);
   }
 
-  // The local role is no level's: smart-router/auto never routes to it.
+  // The local role is no level's: smart-router/auto reaches it only at the end of a chain that names it.
   const local = parseLocal(root, parsed, (role) => {
     const level = levelOf.get(role);
     if (level !== undefined) fail("local.role", `"${role}" is already the role of ${levelName(level)}`);

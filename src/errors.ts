@@ -218,14 +218,19 @@ export function unmatchedTagNotice(): string {
   return "pi-smart-router: a tagged message's level could not be matched to the run that started, so it was dropped.";
 }
 
+/** Shown when a version 2 run's plan took a model of its scope's fallback chain: the conversation goes to that role's vendor or host. */
+export function fallbackNotice(tier: Tier, role: string, modelId: string): string {
+  return `pi-smart-router: no ${tierLabel(tier)} model can take this run, so it goes to the fallback ${role} (${modelId}).`;
+}
+
 /** Shown when a version 2 run went to a higher tier than the one its pick started at. */
 export function stepUpNotice(start: Tier, tier: Tier, modelId: string): string {
   return `pi-smart-router: no ${tierLabel(start)} model can take this run, so it goes to ${tierLabel(tier)} (${modelId}).`;
 }
 
-/** What one role's candidates said, as a refusal lists it: the first role, then each `later` one. */
+/** What one role's candidates said, as a refusal lists it: the first role, then each `later` one, a fallback role named as one. */
 function describeAttempt(attempt: Attempt, index: number, later: string): string {
-  const label = index === 0 ? attempt.role : `${later} ${attempt.role}`;
+  const label = index === 0 ? attempt.role : `${attempt.fallback === true ? "fallback" : later} ${attempt.role}`;
   if (!attempt.exists) return `${label}: no such role in the roster`;
   if (attempt.candidates.length === 0) return `${label}: no candidates`;
   return `${label}: ${attempt.candidates.map((candidate) => `${candidate.ref}: ${candidate.detail}`).join("; ")}`;
@@ -234,7 +239,7 @@ function describeAttempt(attempt: Attempt, index: number, later: string): string
 export interface UnroutableContext {
   readonly localOnly: boolean;
   readonly pinned: boolean;
-  /** Whether the roles after the first are a version 2 run's step-ups to higher tiers, not version 1's declared fallback. */
+  /** Whether the roles after the first are a version 2 run's step-ups to higher tiers, apart from those tried as a fallback, not version 1's declared fallback. */
   readonly stepUps?: boolean;
   /** Whether the session is a work session that is not pinned (chooseModel). */
   readonly work?: boolean;

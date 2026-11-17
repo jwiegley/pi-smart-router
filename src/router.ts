@@ -40,6 +40,7 @@ import {
   carryFailedNotice,
   directoryFailedNotice,
   directoryNotice,
+  fallbackNotice,
   firstLine,
   historyNotice,
   resumeNotice,
@@ -70,7 +71,7 @@ import { coolFrom, Cooldowns, resolveContext } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
 import { boundedHistory, newRecord, planApplies, predict, requireBoundedHistory, routeOther, routeOwned } from "./route.ts";
 import type { BoundedHistory, LastInput, Pin, RouteInput, SessionRecord } from "./route.ts";
-import { autoRoles, parseRef, rosterFile, SCOPES, scopeSection, servesScope } from "./roster.ts";
+import { autoRoles, parseRef, roleOf, rosterFile, SCOPES, scopeSection, servesScope } from "./roster.ts";
 import type { Roster, Scope } from "./roster.ts";
 import { readScope, scopeEntry, workDirectoryOf } from "./scope.ts";
 import type { ScopeEntryData, ScopeState, WorkDirectories } from "./scope.ts";
@@ -752,6 +753,16 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     // A plan that found no model shows none: its run is refused at its first request.
     showLevel(ctx, record, planned.decision.ok ? footerText(planLevel, planned.decision.choice.model.id) : undefined);
     if (planLevel.steppedUp && planned.decision.ok) notify(ctx, stepUpNotice(planLevel.start, planLevel.tier, planned.decision.choice.model.id), "info");
+    // A chain model is another vendor's or a LAN host's, so the run says where it goes.
+    if (planLevel.fallback === true && planned.decision.ok) notify(ctx, fallbackNotice(planLevel.tier, planned.decision.choice.role, planned.decision.choice.model.id), "info");
+  };
+
+  /** Whether a model is one of a scope's fallback chain under the roster as it is now; false when the roster does not load. */
+  const inChain = (scope: Scope, ref: string): boolean => {
+    const state = roster.current();
+    if (state.kind !== "ok") return false;
+    const role = roleOf(state.value, ref)?.name;
+    return role !== undefined && (scopeSection(state.value, scope)?.fallback?.includes(role) ?? false);
   };
 
   const messageEnd = (event: MessageEndEvent, ctx: ExtensionContext): void => {
@@ -767,7 +778,10 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     // The footer names the model that answered a run's level, when the run's own route picked it.
     const record = records.get(sessionId);
     const pick = record?.runPick;
-    if (record?.pendingLevel !== undefined && pick?.id === "auto" && pick.ref === ref) showLevel(ctx, record, footerText(record.pendingLevel.level, message.model));
+    if (record?.pendingLevel !== undefined && pick?.id === "auto" && pick.ref === ref) {
+      const { level } = record.pendingLevel;
+      showLevel(ctx, record, footerText(level, message.model, inChain(level.scope, ref)));
+    }
     if (record !== undefined) record.answered = ref;
     if (message.stopReason === "aborted") return;
     recordOf(sessionId).last = { ref, at: now(), usage: message.usage };
@@ -786,7 +800,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     record.runPick = undefined;
     record.pendingLevel = undefined;
     record.answered = undefined;
-    if (pending !== undefined) pi.appendEntry(LEVEL_ENTRY, levelRecord(pending, answered, aborted));
+    if (pending !== undefined) pi.appendEntry(LEVEL_ENTRY, levelRecord(pending, answered, aborted, answered !== undefined && inChain(pending.level.scope, answered)));
   };
 
   /**

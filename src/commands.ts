@@ -5,8 +5,8 @@
 // status shows the roster's state, the selection, the pin, the session's scope, each role's
 // candidates on this host with the resolver's verdict and the catalog price, the account bindings
 // checked in the session's scope, with each provider's auth source (never a credential), a version 1
-// roster's routing table or a version 2 roster's levels in each scope and its classifier, the last
-// decision, what can still send data off the machine, and a warning for any version 1 fallback that
+// roster's routing table or a version 2 roster's levels and fallback chain in each scope and its
+// classifier, the last decision, whether the last request went to a fallback chain's model, what can still send data off the machine, and a warning for any version 1 fallback that
 // moves a run onto Codex's API from another one. It replaces upstream's doctor, plan, stats, pricing
 // and mode commands.
 //
@@ -33,7 +33,7 @@ import { clock, resolveCandidate } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
 import { boundedHistory, HISTORY_LIMIT } from "./route.ts";
 import type { HistoryEntry, PendingLevel, Pin } from "./route.ts";
-import { autoRoles, parseRef, SCOPES, servesScope } from "./roster.ts";
+import { autoRoles, parseRef, scopeSection, SCOPES, servesScope } from "./roster.ts";
 import type { Roster, RosterV1, RosterV2, Scope } from "./roster.ts";
 import { scopeEntry } from "./scope.ts";
 import type { ScopeState } from "./scope.ts";
@@ -185,10 +185,12 @@ function roleLines(host: CommandHost, ctx: ExtensionContext, roster: Roster, pin
   const localRole = roster.local?.role;
   const local = host.resolver(ctx, roster, "local", pin);
   const reached = autoRoles(roster, auto.scope);
+  const chains = SCOPES.filter((scope) => scopeSection(roster, scope)?.fallback !== undefined);
   return roster.roles.map((role) => {
     const rc = role.name === localRole ? local : auto;
     const tags = [
       role.name === localRole ? "the local role" : undefined,
+      ...chains.filter((scope) => scopeSection(roster, scope)?.fallback?.includes(role.name)).map((scope) => `a ${scope} fallback`),
       role.name !== localRole && !reached.has(role.name) ? "smart-router/auto never routes here" : undefined,
       role.thinking === "selected" ? undefined : `thinking ${role.thinking}`,
     ].filter((tag) => tag !== undefined);
@@ -290,18 +292,37 @@ function otherSelection(ctx: ExtensionContext): "hand" | "local" | undefined {
   return own === undefined ? "hand" : own === "local" ? "local" : undefined;
 }
 
-/** Each scope's tiers, low to super, with each tier's candidates and the verdicts they get in that scope. */
+/**
+ * Each scope's tiers, low to super, with each tier's own candidates and the verdicts they get in
+ * that scope, and, when any scope declares a fallback chain, each scope's chain in its order, or
+ * that it has none.
+ */
 function levelLines(host: CommandHost, ctx: ExtensionContext, roster: RosterV2): string[] {
+  const anyChain = SCOPES.some((scope) => roster.scopes[scope]?.fallback !== undefined);
   return SCOPES.flatMap((scope) => {
     const section = roster.scopes[scope];
     if (section === undefined) return [];
     const rc = host.resolver(ctx, roster, "auto", UNPINNED, scope);
-    const tiers = TIERS.map((tier) => {
-      const models = roster.roles.find((role) => role.name === section.levels[tier].role)?.models ?? [];
-      return `${tierLabel(tier)} → ${models.map((ref) => verdict(ref, rc)).join(", ")}`;
-    });
-    return [`Levels (${scope}): ${tiers.join("; ")}`];
+    const modelsOf = (name: string): readonly string[] => roster.roles.find((role) => role.name === name)?.models ?? [];
+    const tiers = TIERS.map((tier) => `${tierLabel(tier)} → ${modelsOf(section.levels[tier].role).map((ref) => verdict(ref, rc)).join(", ")}`);
+    const lines = [`Levels (${scope}): ${tiers.join("; ")}`];
+    if (section.fallback !== undefined) {
+      const chain = section.fallback.map((name) => `${name} → ${modelsOf(name).map((ref) => verdict(ref, rc)).join(", ")}`);
+      lines.push(`Fallback (${scope}), after any level's own models, in this order: ${chain.join("; ")}`);
+    } else if (anyChain) {
+      lines.push(`Fallback (${scope}): none, so a level with no available model passes its run up or refuses it`);
+    }
+    return lines;
   });
+}
+
+/** Said when the session's last request on smart-router/auto went to a model of a scope's fallback chain. */
+function onFallbackLine(roster: RosterV2, last: HistoryEntry | undefined): string | undefined {
+  if (last === undefined || last.virtual !== "auto") return undefined;
+  const scope = SCOPES.find((name) => roster.scopes[name]?.fallback?.includes(last.role));
+  // Under the pin a chain's local role takes the request as the local role, not as a fallback.
+  if (scope === undefined || last.code === "local") return undefined;
+  return `On a fallback: the last request went to ${last.ref}, in the ${scope} fallback role ${last.role}; each new run tries its level's own models first.`;
 }
 
 function classifierLine(roster: RosterV2): string {
@@ -337,6 +358,8 @@ export function statusText(host: CommandHost, ctx: ExtensionContext): string {
   }
   const last = session?.history.at(-1);
   lines.push(`Last decision: ${last === undefined ? "none yet" : describeEntry(last)}`);
+  const onFallback = roster.kind === "ok" && roster.value.version === 2 ? onFallbackLine(roster.value, last) : undefined;
+  if (onFallback !== undefined) lines.push(onFallback);
   lines.push(egress(host.pi, classifierOf(roster, pin)));
   return lines.join("\n");
 }

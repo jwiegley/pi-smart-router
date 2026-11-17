@@ -303,7 +303,8 @@ export function levelFor(rc: ResolveContext, roleName: string, selected: ModelTh
 }
 
 function settle(input: RouteInput, decision: Decision): Choice {
-  // A version 2 decision tries more than one role only when its run steps up a tier.
+  // A version 2 decision tries more than one role when its run steps up a tier, or when its scope
+  // declares a fallback chain, whose roles each attempt marks as a fallback.
   if (!decision.ok) {
     throw unroutable(input.id, decision, { localOnly: input.rc.localOnly, pinned: input.pin.on, stepUps: input.rc.roster.version === 2, work: workUnpinned(input.rc) });
   }

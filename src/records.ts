@@ -60,6 +60,8 @@ export interface LevelRecord {
   readonly steppedUp?: true;
   /** The run went back to an earlier candidate than the model that answered last, at the cost of a prompt-cache miss. */
   readonly returnedToFirst?: true;
+  /** The model that answered is one of the scope's fallback chain, not one of the tier's own; `tier` is still the run's. */
+  readonly fallback?: true;
   readonly aborted?: true;
   /** A correction's: the `at` of the run it corrects. */
   readonly refers?: number;
@@ -72,8 +74,11 @@ function jevRecord(jev: PendingLevel["jev"]): JevRecord | undefined {
   return { model: jev.model, choice: jev.choice, probabilities: { ...jev.probabilities }, confidence: jev.confidence, ms: jev.ms };
 }
 
-/** A settled run's record, from the level its input planned. Neither the digest nor anything else of the text goes in. */
-export function levelRecord(pending: PendingLevel, answeringRef: string | undefined, aborted: boolean): LevelRecord {
+/**
+ * A settled run's record, from the level its input planned. Neither the digest nor anything else of
+ * the text goes in. `fallback`: whether the answering model is one of the scope's fallback chain.
+ */
+export function levelRecord(pending: PendingLevel, answeringRef: string | undefined, aborted: boolean, fallback = false): LevelRecord {
   const { level, keyword } = pending;
   const jev = jevRecord(pending.jev);
   return {
@@ -90,6 +95,7 @@ export function levelRecord(pending: PendingLevel, answeringRef: string | undefi
     ...(answeringRef === undefined ? {} : { ref: answeringRef }),
     ...(level.steppedUp ? { steppedUp: true as const } : {}),
     ...(level.returnedToFirst ? { returnedToFirst: true as const } : {}),
+    ...(fallback ? { fallback: true as const } : {}),
     ...(aborted ? { aborted: true as const } : {}),
   };
 }
@@ -146,7 +152,11 @@ export function levelNote(level: PlanLevel): string {
   }
 }
 
-/** The footer's item for a run: its scope, its tier, the model, and what decided the tier. */
-export function footerText(level: PlanLevel, modelId: string): string {
-  return `${level.scope} ${tierLabel(level.tier)} → ${modelId} (${levelNote(level)})`;
+/**
+ * The footer's item for a run: its scope, its tier, the model, and what decided the tier.
+ * `fallback`: whether the model is one of the scope's fallback chain, as the plan's pick was unless
+ * the caller knows the model that answered.
+ */
+export function footerText(level: PlanLevel, modelId: string, fallback: boolean = level.fallback === true): string {
+  return `${level.scope} ${tierLabel(level.tier)} → ${modelId} (${levelNote(level)}${fallback ? "; fallback" : ""})`;
 }

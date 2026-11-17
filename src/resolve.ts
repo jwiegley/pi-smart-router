@@ -6,7 +6,8 @@
 //   not-local (local-only requests only).
 //
 // A version 2 roster resolves within the session's scope: the exclusions, the account bindings and
-// the roles auto reaches are that scope's. Version 1 ignores the scope.
+// the roles auto reaches, its levels' and its fallback chain's, are that scope's. Version 1 ignores
+// the scope.
 //
 // Also the cooldowns: in memory, per router instance, and fed only by the owner session's own
 // error responses. A usage-limit or authentication error cools its model; a content-filter
@@ -21,7 +22,7 @@ import { PIN_POLICY_CHANGED } from "./errors.ts";
 import type { Loaded } from "./files.ts";
 import { checkLocal, policyFromRoster } from "./local.ts";
 import type { LocalPolicy } from "./local.ts";
-import { autoRoles, excludedBy, excludesFor, parseRef, roleOf } from "./roster.ts";
+import { autoRoles, excludedBy, excludesFor, parseRef, roleOf, scopeSection } from "./roster.ts";
 import type { Roster, Scope } from "./roster.ts";
 
 /** The catalog reads the resolver makes. Pi's ModelRegistry (`ctx.modelRegistry`) has them. */
@@ -107,7 +108,7 @@ export function resolveCandidate(ref: string, rc: ResolveContext): Resolution {
           ? "it is in no role"
           : rc.roster.version === 1
             ? `its role ${role.name} is neither a routing target nor a fallback`
-            : `its role ${role.name} is not one of the ${rc.scope} scope's level roles`;
+            : `its role ${role.name} is not one of the ${rc.scope} scope's level roles${scopeSection(rc.roster, rc.scope)?.fallback === undefined ? "" : " or fallback roles"}`;
       return refuse("not-routable-by-auto", `${why}, so smart-router/auto never routes to it`);
     }
   }
