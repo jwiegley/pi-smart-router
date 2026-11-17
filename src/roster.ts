@@ -19,6 +19,9 @@ import {
   CLASSIFIER_TOTAL_CHARS,
   COOLDOWN_MINUTES,
   DESCRIBE_MAX_CHARS,
+  INSTRUCTIONS_MAX_CHARS,
+  PROMPT_DIR,
+  PROMPT_FILE_NAME,
   REFUSED_LABEL,
   ROSTER_FILE,
   ROSTER_MAX_BYTES,
@@ -63,10 +66,15 @@ export const SCOPES: readonly Scope[] = ["personal", "work"];
 /** Whether a value read from a roster, a session entry or a record names a scope. */
 export const isScope = (value: unknown): value is Scope => typeof value === "string" && (SCOPES as readonly string[]).includes(value);
 
-/** One level of a scope: the role it routes to, and the description Jev reads. */
+/**
+ * One level of a scope: the role it routes to, and the description Jev reads, which the roster
+ * gives inline (`describe`) or as a prompt file's name (`describeFile`, and then `describe` is
+ * empty). src/prompts.ts turns either into the text.
+ */
 export interface TierEntry {
   readonly role: string;
   readonly describe: string;
+  readonly describeFile?: string;
 }
 
 export interface ScopeSection {
@@ -532,9 +540,9 @@ function validate(value: unknown): Roster {
 
 const V2_TOP_KEYS = ["version", "exclude", "roles", "scopes", "accounts", "classifier", "local", "stickyIdleMinutes", "cooldownMinutes"];
 const SCOPE_KEYS: Readonly<Record<Scope, readonly string[]>> = { personal: ["levels", "fallback"], work: ["levels", "directories", "fallback"] };
-const LEVEL_KEYS = ["role", "describe"];
+const LEVEL_KEYS = ["role", "describe", "describeFile"];
 const SCOPED_BINDING_KEYS = ["multiPassLabel", "native", "scope"];
-const CLASSIFIER_KEYS = ["model", "timeoutMs", "closeCall", "context"];
+const CLASSIFIER_KEYS = ["model", "timeoutMs", "closeCall", "context", "instructions", "instructionsFile"];
 const CONTEXT_KEYS = ["messages", "messageChars", "totalChars"];
 
 interface LevelName {
@@ -554,6 +562,15 @@ function workDirectory(directory: string, where: string): void {
   if (directory.slice(1).split("/").some((segment) => segment === "" || segment === "." || segment === "..")) {
     fail(where, `"${directory}" must not contain empty, . or .. segments`);
   }
+}
+
+/** A prompt file's name: plain, ending in .md or .txt, so that it can only be a file of <agentDir>/smart-router/. */
+function promptFile(value: unknown, where: string): string {
+  const name = text(value, where);
+  if (!PROMPT_FILE_NAME.test(name)) {
+    fail(where, `"${name}" is not a prompt file name: a plain lower-case name ending in .md or .txt, for a file in <agentDir>/${PROMPT_DIR}/`);
+  }
+  return name;
 }
 
 /** A number within its range; the default when absent. */
@@ -576,6 +593,13 @@ function classifierSettings(value: unknown, exclude: readonly string[]): JevSett
   const timeoutMs = count(own(section, "timeoutMs"), "classifier.timeoutMs", CLASSIFIER_TIMEOUT_MS, "milliseconds");
   const closeCall = fraction(own(section, "closeCall"), "classifier.closeCall", CLASSIFIER_CLOSE_CALL);
   const caps: Record<string, unknown> = own(section, "context") === undefined ? {} : object(own(section, "context"), "classifier.context", CONTEXT_KEYS);
+  // The question Jev is asked: the built-in one unless the roster gives its own, inline or in a file.
+  if (own(section, "instructions") !== undefined && own(section, "instructionsFile") !== undefined) {
+    fail("classifier", 'give "instructions" or "instructionsFile", not both');
+  }
+  const instructions = own(section, "instructions") === undefined ? undefined : text(own(section, "instructions"), "classifier.instructions");
+  if (instructions !== undefined && [...instructions].length > INSTRUCTIONS_MAX_CHARS) fail("classifier.instructions", `must be at most ${INSTRUCTIONS_MAX_CHARS} characters`);
+  const instructionsFile = own(section, "instructionsFile") === undefined ? undefined : promptFile(own(section, "instructionsFile"), "classifier.instructionsFile");
   return {
     model,
     timeoutMs,
@@ -585,6 +609,8 @@ function classifierSettings(value: unknown, exclude: readonly string[]): JevSett
       messageChars: count(own(caps, "messageChars"), "classifier.context.messageChars", CLASSIFIER_MESSAGE_CHARS, "characters"),
       totalChars: count(own(caps, "totalChars"), "classifier.context.totalChars", CLASSIFIER_TOTAL_CHARS, "characters"),
     },
+    ...(instructions === undefined ? {} : { instructions }),
+    ...(instructionsFile === undefined ? {} : { instructionsFile }),
   };
 }
 
@@ -642,11 +668,15 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
       if (below !== undefined && rankOf(parsed, role) < rankOf(parsed, below.role)) {
         fail(`${where}.role`, `"${role}" must rank above "${below.role}", the role of the ${below.tier} level`);
       }
-      const describe = text(own(entry, "describe"), `${where}.describe`);
+      // The description Jev reads: inline, or the name of a prompt file, whose text has the same cap.
+      const fileGiven = own(entry, "describeFile");
+      if (fileGiven !== undefined && own(entry, "describe") !== undefined) fail(where, 'give "describe" or "describeFile", not both');
+      const describe = fileGiven === undefined ? text(own(entry, "describe"), `${where}.describe`) : "";
       if ([...describe].length > DESCRIBE_MAX_CHARS) fail(`${where}.describe`, `must be at most ${DESCRIBE_MAX_CHARS} characters`);
+      const describeFile = fileGiven === undefined ? undefined : promptFile(fileGiven, `${where}.describeFile`);
       levelOf.set(role, { scope, tier });
       below = { tier, role };
-      return { role, describe };
+      return { role, describe, ...(describeFile === undefined ? {} : { describeFile }) };
     };
     const levels = { low: parseLevel("low"), medium: parseLevel("medium"), high: parseLevel("high"), super: parseLevel("super") };
     const given = own(section, "directories");

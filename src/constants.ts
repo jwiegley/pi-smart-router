@@ -74,6 +74,16 @@ export const CLASSIFIER_TOTAL_CHARS = { default: 12_000, min: 1000, max: 32_000 
 /** The longest level description Jev reads, in characters, counted as Unicode code points. */
 export const DESCRIBE_MAX_CHARS = 2000;
 
+/**
+ * Jev's prompt files: plain text or Markdown under <agentDir>/smart-router/, named by the roster
+ * (src/prompts.ts). A name has no directory part, so a roster cannot point outside that directory.
+ * The instructions' cap is in characters, counted as a level description's is.
+ */
+export const PROMPT_DIR = "smart-router";
+export const PROMPT_FILE_NAME = /^[a-z0-9][a-z0-9._-]{0,63}\.(?:md|txt)$/;
+export const PROMPT_FILE_MAX_BYTES = 16 * 1024;
+export const INSTRUCTIONS_MAX_CHARS = 4000;
+
 /** The pin's session entry, the environment switch, the status item, the command and the process slots. */
 export const PIN_ENTRY = "smart-router.pin";
 export const COMMAND = "smart-router";

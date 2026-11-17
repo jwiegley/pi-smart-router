@@ -2,13 +2,18 @@
 // with the place it is at. /smart-router check prints it for the roster a session has loaded, and
 // src/check-cli.ts prints it for any file, without Pi, a session or a credential.
 //
-// It judges the roster's text alone, with the parser the router routes by (parseRoster), and the
-// orders it prints are the ones routing uses (candidatesOf). It knows no catalog, so it cannot say
+// It judges the roster's text, with the parser the router routes by (parseRoster), and the prompt
+// files the roster names, with the checks the router makes of them (src/prompts.ts); the orders it
+// prints are the ones routing uses (candidatesOf). It knows no catalog, so it cannot say
 // whether a model exists, is reachable or has credentials on a host: /smart-router status does.
 // Nothing here sends anything, and nothing here imports Pi.
+import { dirname } from "node:path";
+
 import { ROSTER_MAX_BYTES } from "./constants.ts";
 import { readUserFile } from "./files.ts";
 import type { ReadOptions } from "./files.ts";
+import { promptLines, promptProblem, promptReader, promptUses } from "./prompts.ts";
+import type { PromptReader, PromptUse } from "./prompts.ts";
 import { autoRoles, candidatesOf, parseRoster, SCOPES } from "./roster.ts";
 import type { Roster, RosterV1, RosterV2, Scope } from "./roster.ts";
 import { tierLabel, TIERS } from "./tiers.ts";
@@ -98,33 +103,54 @@ function describeV1(roster: RosterV1): string[] {
   return lines;
 }
 
-/** What a valid roster routes to, for each selection and scope, in the order it tries. */
-export function describeRouting(roster: Roster): string[] {
+/** Where Jev's instructions and each level's description come from; nothing for a roster that never asks Jev. */
+function promptSection(roster: Roster, uses: readonly PromptUse[]): string[] {
+  if (roster.version !== 2) return [];
+  if (roster.classifier === undefined && uses.every((use) => use.source !== "file")) return [];
+  const asked = roster.classifier === undefined ? " (no classifier section, so Jev is never asked and these are not used)" : "";
+  return [`Jev's prompts${asked}: the question it is asked, and what each level means:`, ...promptLines(uses), ""];
+}
+
+/**
+ * What a valid roster routes to, for each selection and scope, in the order it tries, and where
+ * Jev's prompts come from. `uses`: a version 2 roster's prompts as they are in effect.
+ */
+export function describeRouting(roster: Roster, uses: readonly PromptUse[] = []): string[] {
   return [
     ...(roster.version === 2 ? describeV2(roster) : describeV1(roster)),
     ...localLines(roster),
     "",
+    ...promptSection(roster, uses),
     ...accountLines(roster),
     `A usage-limit or authentication error takes a cloud model out of routing for ${roster.cooldownMinutes} minutes; a local-role model is never taken out.`,
     "This reads the roster alone. Whether each model is in Pi's catalog on this host, available and has credentials is /smart-router status's to say.",
   ];
 }
 
-/** Check a roster's text: its routing read back, or its first error with its place. */
-export function checkRoster(text: string): CheckReport {
+/**
+ * Check a roster's text: its routing read back, or its first error with its place. With `read`,
+ * the prompt files it names are checked too; a prompt that cannot be used leaves the roster valid
+ * and its routes in force, but fails the check, since Jev is then not asked.
+ */
+export function checkRoster(text: string, read?: PromptReader): CheckReport {
   const parsed = parseRoster(text);
   if (!parsed.ok) return { ok: false, lines: [`INVALID: ${parsed.error}`, "Both smart-router/auto and smart-router/local refuse every request while the roster is invalid."] };
-  return { ok: true, lines: [`OK: a valid version ${parsed.value.version} roster.`, "", ...describeRouting(parsed.value)] };
+  const uses = parsed.value.version === 2 ? promptUses(parsed.value, read) : [];
+  const problem = promptProblem(uses);
+  const routing = describeRouting(parsed.value, uses);
+  if (problem !== undefined) return { ok: false, lines: [`PROMPT NOT USABLE: ${problem}`, `The roster itself is a valid version ${parsed.value.version} roster, and it routes:`, "", ...routing] };
+  return { ok: true, lines: [`OK: a valid version ${parsed.value.version} roster.`, "", ...routing] };
 }
 
 /**
  * Check a roster file at an absolute path, read as the router reads its own: a regular file owned
  * by this user, writable by no one else, at most 64 KiB of UTF-8. A file the router would refuse
- * as missing or unsafe is reported so.
+ * as missing or unsafe is reported so. The prompt files it names are looked for where the router
+ * would find them were this the roster in use: in the directory smart-router/ beside it.
  */
 export function checkFile(path: string, options: Pick<ReadOptions, "uid" | "fs"> = {}): CheckReport {
   const read = readUserFile(path, { maxBytes: ROSTER_MAX_BYTES, ...options });
-  if (read.kind === "read") return checkRoster(read.text);
+  if (read.kind === "read") return checkRoster(read.text, promptReader(dirname(path), options));
   // No previous identity is offered, so the file is never reported unchanged.
   const error = read.kind === "unchanged" ? `${path} was not read` : read.error;
   return { ok: false, lines: [`${read.kind === "missing" ? "MISSING" : read.kind === "unsafe" ? "UNSAFE" : "INVALID"}: ${error}`] };

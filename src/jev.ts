@@ -5,6 +5,7 @@ import type { ClassifierApi, ClassifierContext, ClassifierModel, ClassifierResul
 import { capText } from "./classify.ts";
 import type { VirtualId } from "./constants.ts";
 import { isRecord } from "./files.ts";
+import { DEFAULT_INSTRUCTIONS } from "./prompts.ts";
 import { redact } from "./redact.ts";
 import type { BoundedHistory } from "./route.ts";
 import { parseRef, scopeSection } from "./roster.ts";
@@ -13,8 +14,8 @@ import type { ScopeState } from "./scope.ts";
 import { closeCallTier, isTier, TIERS, type Tier } from "./tiers.ts";
 
 export const JEV_QUESTION = "level";
-export const JEV_INSTRUCTIONS =
-  "How much model intelligence does `message` need for the work it asks for now? `recent` holds the conversation just before it, oldest first.";
+/** The built-in question, asked unless the roster gives its own instructions (src/prompts.ts). */
+export const JEV_INSTRUCTIONS = DEFAULT_INSTRUCTIONS;
 
 export interface JevContextCaps {
   readonly messages: number;
@@ -26,6 +27,10 @@ export interface JevSettings {
   readonly timeoutMs: number;
   readonly closeCall: number;
   readonly context: JevContextCaps;
+  /** The roster's own question for Jev, inline. Without it and without a file, the built-in one is asked. */
+  readonly instructions?: string;
+  /** The name of the prompt file that holds the roster's own question. */
+  readonly instructionsFile?: string;
 }
 export interface RecentMessage {
   readonly role: "user" | "assistant";
@@ -64,12 +69,18 @@ function capMessage(message: string, totalChars: number): string {
   return `${capped.slice(0, totalChars - Math.floor(totalChars / 5))}\n${capped.slice(capped.length - tail)}`;
 }
 
-/** The classifier request: the redacted message and recent turns, and the one level question. */
+/**
+ * The classifier request: the redacted message and recent turns, and the one level question.
+ * `instructions` and `descriptions` are the only parts John's prompts supply. The request's shape
+ * is fixed here whatever they say: one question, named `level`, a choice whose labels are exactly
+ * the four tiers.
+ */
 export function buildContext(
   message: string,
   recent: readonly RecentMessage[],
   descriptions: Readonly<Record<Tier, string>>,
   caps: JevContextCaps,
+  instructions: string = JEV_INSTRUCTIONS,
 ): ClassifierContext {
   const capped = capMessage(redact(message), caps.totalChars);
   const candidates = caps.messages > 0 ? recent.slice(-caps.messages) : [];
@@ -86,11 +97,12 @@ export function buildContext(
   for (const tier of TIERS) criteria[tier] = descriptions[tier];
   return {
     state: { message: capped, recent: kept.map(({ role, text }) => ({ role, text })) },
-    questions: { [JEV_QUESTION]: { type: "choice", instructions: JEV_INSTRUCTIONS, criteria } },
+    questions: { [JEV_QUESTION]: { type: "choice", instructions, criteria } },
   };
 }
 
-export type JevFailure = "unavailable" | "error" | "timeout" | "aborted" | "malformed";
+/** Why Jev gave no answer. `prompt`: one of the roster's prompt files cannot be used, so Jev was not asked. */
+export type JevFailure = "unavailable" | "error" | "timeout" | "aborted" | "malformed" | "prompt";
 export type JevOutcome =
   | {
       readonly kind: "answer";

@@ -108,6 +108,11 @@ export function rosterNotice(problem: RosterProblem): string {
   return `pi-smart-router: ${rosterCause(problem)}. smart-router/auto and smart-router/local refuse every request until it is fixed.`;
 }
 
+/** Shown at session start when a prompt file the roster names cannot be used: `problem` names the file, the cause and what follows. */
+export function promptNotice(problem: string): string {
+  return `pi-smart-router: a prompt for the classifier cannot be used: ${problem} smart-router/auto still routes.`;
+}
+
 const NO_HISTORY = "this Pi has no bounded session history (getLatestCustomEntry and getRecentActiveEntries)";
 
 export function noBoundedHistory(id: VirtualId): RouterError {

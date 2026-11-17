@@ -426,6 +426,7 @@ describe("status under a version 2 roster", () => {
         `Levels (personal): LOW → ${LUNA} not-in-catalog, ${NYX_QWEN} not-in-catalog, ${HERA_QWEN} not-in-catalog; MEDIUM → ${TERRA} not-in-catalog, ${DEEPSEEK} ok; HIGH → ${SOL} ok, ${GLM_CLOUD} ok; SUPER → ${ASTRA} ok, ${KIMI} ok`,
         `Levels (work): LOW → ${WORK_LUNA} not-in-catalog; MEDIUM → ${WORK_TERRA} not-in-catalog; HIGH → ${WORK_SOL} ok; SUPER → ${WORK_ASTRA} not-in-catalog`,
         `Classifier: ${JEV}, 1000 ms, close call 0.15`,
+        "Prompts: the built-in instructions, and each level's describe from the roster",
         "Last decision: none yet",
         EGRESS_JEV,
       ].join("\n"),

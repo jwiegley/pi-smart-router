@@ -1,5 +1,5 @@
-// One instance of the router: the session whose extension runtime loaded it, the two files it
-// reads, its per-session records and cooldowns, the limits both models declare, the pin's handoffs
+// One instance of the router: the session whose extension runtime loaded it, the files it reads
+// (the roster, Multi-Pass's labels and the prompt files the roster names), its per-session records and cooldowns, the limits both models declare, the pin's handoffs
 // and status item, the session's scope with its handoffs and work directories, the refusals of its
 // own two models for a scope their policy does not serve, a message's tag and Jev's request, each
 // planned run's level record and the footer item that shows its level, the /smart-router command,
@@ -43,6 +43,7 @@ import {
   fallbackNotice,
   firstLine,
   historyNotice,
+  promptNotice,
   resumeNotice,
   rosterNotice,
   rosterRefusal,
@@ -65,6 +66,7 @@ import { EMPTY_POLICY, policyFromRoster } from "./local.ts";
 import { healDisplaced, isLive, isLiveOwner, join, leave, leaveScopeHandoff, ownerBySignal, rememberedRoster, rememberRoster, scopeLatched, sessionHash, takeScopeHandoff } from "./owners.ts";
 import type { Owner, OwnerRouter, RosterMemory, Slot } from "./owners.ts";
 import { latchEnvPolicy, leaveHandoff, pinOn, readPin, takeHandoff } from "./pin.ts";
+import { promptProblem, promptStore, promptUses, scopePrompts } from "./prompts.ts";
 import type { PinReading } from "./pin.ts";
 import { footerText, levelRecord } from "./records.ts";
 import { coolFrom, Cooldowns, resolveContext } from "./resolve.ts";
@@ -72,7 +74,7 @@ import type { ResolveContext } from "./resolve.ts";
 import { boundedHistory, newRecord, planApplies, predict, requireBoundedHistory, routeOther, routeOwned } from "./route.ts";
 import type { BoundedHistory, LastInput, Pin, RouteInput, SessionRecord } from "./route.ts";
 import { autoRoles, parseRef, roleOf, rosterFile, SCOPES, scopeSection, servesScope } from "./roster.ts";
-import type { Roster, Scope } from "./roster.ts";
+import type { Roster, RosterV2, Scope } from "./roster.ts";
 import { readScope, scopeEntry, workDirectoryOf } from "./scope.ts";
 import type { ScopeEntryData, ScopeState, WorkDirectories } from "./scope.ts";
 import { describeModel, showPinStatus, switchToLocal } from "./selection.ts";
@@ -178,6 +180,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   const files = { agentDir: options.agentDir, uid: options.uid, fs: options.fs, now };
   const roster = rosterFile(files);
   const labels = labelsFile(files);
+  const prompts = promptStore(files);
   const cooldowns = new Cooldowns();
   const records = new Map<string, Session>();
   const reported = new Set<string>();
@@ -317,6 +320,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   const refreshFiles = (): Loaded<Roster> => {
     const state = loaded(roster.refresh());
     if (labelsNeeded(state)) labels.refresh();
+    // Jev's prompt files are John's to edit while a session runs: an edit is read where the roster's is.
+    if (state.kind === "ok" && state.value.version === 2) prompts.refresh(state.value);
     return state;
   };
 
@@ -556,6 +561,9 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       if (last !== undefined) recordOf(sessionId).last = last;
       const notice = state !== undefined && state.kind !== "ok" ? rosterNotice(state) : view === undefined ? historyNotice() : undefined;
       if (notice !== undefined) notify(ctx, notice, "warning");
+      // A prompt file that cannot be used stops no route, so it is said once here; status says it too.
+      const unusable = state?.kind === "ok" && state.value.version === 2 && state.value.classifier !== undefined ? promptProblem(promptUses(state.value, prompts.read)) : undefined;
+      if (unusable !== undefined) notify(ctx, promptNotice(unusable), "warning");
     } finally {
       showStatus(ctx);
     }
@@ -580,18 +588,20 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   /**
    * Jev's answer about a message, asked with what jevAsk gave. Jev reads the text without its tag
    * and the conversation before it (the message is not in the session yet), both redacted and then
-   * cut to the classifier's caps, and the scope's descriptions as the roster gives them. Never
-   * rejects: a request that cannot be built, such as for text too long to redact, fails as an error
-   * before anything is sent.
+   * cut to the classifier's caps, with the instructions and the scope's descriptions as the roster
+   * gives them, inline or from its prompt files (src/prompts.ts). Never rejects: a prompt file that
+   * cannot be used fails as `prompt`, and a request that cannot be built, such as for text too long
+   * to redact, as an error, both before anything is sent.
    */
-  const askFor = (ctx: ExtensionContext, ask: JevAsk, text: string): Promise<JevOutcome> => {
-    const { settings, section, history } = ask;
+  const askFor = (ctx: ExtensionContext, ask: JevAsk, text: string, value: RosterV2, scope: Scope): Promise<JevOutcome> => {
+    const { settings, history } = ask;
     try {
-      const { levels } = section;
-      const descriptions: Record<Tier, string> = { low: levels.low.describe, medium: levels.medium.describe, high: levels.high.describe, super: levels.super.describe };
+      const given = scopePrompts(value, scope, prompts.read);
+      if (!given.ok) return Promise.resolve<JevOutcome>({ kind: "failure", model: settings.model, failure: "prompt", ms: 0 });
+      const descriptions: Record<Tier, string> = given.descriptions;
       const { messages } = settings.context;
       const recent = messages === 0 ? [] : recentMessages(history.getRecentActiveEntries({ type: "message", limit: messages * 4 }), messages);
-      return askJev(ctx.modelRegistry, settings, buildContext(text, recent, descriptions, settings.context), now);
+      return askJev(ctx.modelRegistry, settings, buildContext(text, recent, descriptions, settings.context, given.instructions), now);
     } catch {
       return Promise.resolve<JevOutcome>({ kind: "failure", model: settings.model, failure: "error", ms: 0 });
     }
@@ -718,28 +728,31 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     }
     // An extension's resend of the latest message's text (pi-idle-check) keeps that message's level.
     const reused = tagged === undefined && event.source === "extension" && previous?.digest === digest ? previous.level : undefined;
+    const scope = scopeOf(ctx);
     const ask = jevAsk({
       idle: ctx.isIdle(),
       selection: id,
       pinned,
       roster: value,
       history: boundedHistory(sessionManager),
-      scope: scopeOf(ctx),
+      scope,
       resend: reused !== undefined,
     });
+    // jevAsk gives an ask only under a version 2 roster, in a scope that reads: its request is built for both.
+    const asked = ask !== undefined && value?.version === 2 && scope.kind === "ok" ? { ask, value, scope: scope.scope } : undefined;
     // A level input counts only where levels route: planUserTurn ignores it under version 1, on
     // smart-router/local and under the pin, and plan() plans nothing off the router's models.
     let level: LevelInput = reused ?? (tier === undefined ? {} : { tag: tier });
     let opinion = false;
-    if (ask !== undefined && tier !== undefined) {
+    if (asked !== undefined && tier !== undefined) {
       opinion = true;
-      void askFor(ctx, ask, text)
+      void askFor(ctx, asked.ask, text, asked.value, asked.scope)
         .then(landOpinion(sessionId, record, token))
         .catch(() => {
           // An opinion only feeds the record, so there is nothing to do when landing it fails.
         });
-    } else if (ask !== undefined) {
-      const jev = await askFor(ctx, ask, text);
+    } else if (asked !== undefined) {
+      const jev = await askFor(ctx, asked.ask, text, asked.value, asked.scope);
       // The session ended during the wait, or a newer message has planned since. A stale token
       // alone does not stop it: an earlier message whose answer comes first plans its own run.
       if (records.get(sessionId) !== record || record.plannedToken > token) return;
@@ -862,6 +875,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     reload: (ctx) => {
       const state = loaded(roster.reload());
       if (labelsNeeded(state)) labels.reload();
+      if (state.kind === "ok" && state.value.version === 2) prompts.reload(state.value);
       let limitsChanged = false;
       if (state.kind === "ok") {
         const next = computeLimits(ctx, state.value);
@@ -877,6 +891,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     scopeOf,
     session: (ctx) => records.get(ctx.sessionManager.getSessionId()),
     resolver: contextFor,
+    readPrompt: prompts.read,
   };
 
   const api: Router = {

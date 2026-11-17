@@ -1,5 +1,7 @@
-// The only module that touches the file system. It reads the router's two files under Pi's
-// agent directory, the roster and Multi-Pass's labels, and nothing else, and it never writes.
+// The only module that touches the file system. It reads the router's files under Pi's agent
+// directory, the roster, Multi-Pass's labels and the prompt files the roster names in
+// smart-router/, and nothing else, and it never writes. The standalone checker reads the one
+// roster it is given, and that roster's prompt files, with the same reader.
 //
 // A read opens the path once, read-only and non-blocking (a symlink resolves to its target; a
 // FIFO cannot stall Pi), checks the open descriptor with fstat, and then reads at most the cap

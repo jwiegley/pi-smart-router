@@ -31,6 +31,8 @@ import type { Loaded } from "./files.ts";
 import { checkLocal, EMPTY_POLICY, policyFromRoster } from "./local.ts";
 import type { LocalPolicy } from "./local.ts";
 import { describePin, describePolicy, pinOff, pinOn } from "./pin.ts";
+import { promptLines, promptProblem, promptUses } from "./prompts.ts";
+import type { PromptReader } from "./prompts.ts";
 import type { PinReading } from "./pin.ts";
 import { correctionRecord, levelNote, levelRecord, readLevelRecord } from "./records.ts";
 import type { LevelRecord } from "./records.ts";
@@ -71,6 +73,8 @@ export interface CommandHost {
   session(ctx: ExtensionContext): { readonly history: readonly HistoryEntry[]; readonly pendingLevel: PendingLevel | undefined } | undefined;
   /** A resolver context for one of the two models, built as routing builds it: in the session's scope, or in `scope`. */
   resolver(ctx: ExtensionContext, roster: Roster, id: VirtualId, pin: Pin, scope?: Scope): ResolveContext;
+  /** A prompt file the roster names, as the router last loaded it; refresh() and reload() load them with the roster. */
+  readonly readPrompt: PromptReader;
 }
 
 /** A notice the command shows. */
@@ -337,6 +341,21 @@ function classifierLine(roster: RosterV2): string {
     : `Classifier: ${settings.model}, ${settings.timeoutMs} ms, close call ${settings.closeCall}`;
 }
 
+/**
+ * The prompt sources in effect, when the roster has a classifier and any of them is John's own: an
+ * inline instruction or a file. A roster that only gives its levels' describe texts inline, as
+ * every roster before 1.4.0-jw.4 does, shows the one line that says so.
+ */
+function promptStatus(host: CommandHost, roster: RosterV2): string[] {
+  if (roster.classifier === undefined) return [];
+  const uses = promptUses(roster, host.readPrompt);
+  if (uses.every((use) => use.source === "inline" || use.source === "built-in") && uses[0]?.source === "built-in") {
+    return ["Prompts: the built-in instructions, and each level's describe from the roster"];
+  }
+  const problem = promptProblem(uses);
+  return ["Prompts:", ...promptLines(uses), ...(problem === undefined ? [] : [`Prompt problem: ${problem}`])];
+}
+
 /** The classifier smart-router/auto can ask about a message: a version 2 roster's, never while the session is pinned. */
 function classifierOf(roster: Loaded<Roster>, pin: Pin): string | undefined {
   return roster.kind === "ok" && roster.value.version === 2 && !pin.on ? roster.value.classifier?.model : undefined;
@@ -359,7 +378,7 @@ export function statusText(host: CommandHost, ctx: ExtensionContext): string {
     const auto = host.resolver(ctx, value, "auto", UNPINNED);
     lines.push("Roles on this host, cheapest first:", ...roleLines(host, ctx, value, pin, auto), ...accountLines(ctx, value, labels, auto.scope));
     if (value.version === 1) lines.push(routingLine(value), ...codexWarnings(host, ctx, value));
-    else lines.push(...levelLines(host, ctx, value), classifierLine(value));
+    else lines.push(...levelLines(host, ctx, value), classifierLine(value), ...promptStatus(host, value));
   }
   const last = session?.history.at(-1);
   lines.push(`Last decision: ${last === undefined ? "none yet" : describeEntry(last)}`);
@@ -566,7 +585,10 @@ function check(host: CommandHost): Answer {
   if (roster.kind !== "ok") {
     return warning(`${head}\nBoth smart-router/auto and smart-router/local refuse every request until it is fixed. Nothing was changed.`);
   }
-  return info([head, "", ...describeRouting(roster.value)].join("\n"));
+  const uses = roster.value.version === 2 ? promptUses(roster.value, host.readPrompt) : [];
+  const problem = promptProblem(uses);
+  const lines = [head, ...(problem === undefined ? [] : [`PROMPT NOT USABLE: ${problem}`]), "", ...describeRouting(roster.value, uses)];
+  return problem === undefined ? info(lines.join("\n")) : warning(lines.join("\n"));
 }
 
 function reload(host: CommandHost, ctx: ExtensionContext): Answer {
