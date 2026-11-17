@@ -108,6 +108,54 @@ export function rosterNotice(problem: RosterProblem): string {
   return `pi-smart-router: ${rosterCause(problem)}. smart-router/auto and smart-router/local refuse every request until it is fixed.`;
 }
 
+/** Shown at session start when a prompt file the roster names cannot be used: `problem` names the file, the cause and what follows. */
+export function promptNotice(problem: string): string {
+  return `pi-smart-router: a prompt for the classifier cannot be used: ${problem} smart-router/auto still routes.`;
+}
+
+/** Why a run's model failed before any output of that request, as the notice below words it. */
+export type FailoverCause = { readonly account: string; readonly until: string } | { readonly unreachable: true };
+
+/** What the notice below is told of the run and of what happens next. */
+export interface ResendFacts {
+  /** The failed model's id. */
+  readonly modelId: string;
+  readonly cause: FailoverCause;
+  /** Whether the run had already answered or run tools: then it stopped partway, and must not be sent again. */
+  readonly partway: boolean;
+  /** What a new run would get; undefined when nothing but the failed model is left. */
+  readonly next: { readonly role: string | undefined; readonly modelId: string } | undefined;
+  /** Whether the session is a work session that is not pinned. */
+  readonly work: boolean;
+}
+
+/**
+ * Shown when a run ends because its model failed, before any output of that request, on its
+ * account's limit or an unreachable server, with an error Pi does not retry. The router cannot go
+ * on by itself (README, "A fallback chain"), so it says exactly what happened and what to do, and
+ * never something that cannot work:
+ * - a run with nothing done is to be sent again, and the notice names where that goes;
+ * - a run that had answered or run tools stopped partway: what it did stands, so it is to be asked
+ *   to continue, not sent again;
+ * - when nothing else can take it, the notice says when the account is back. In a work session it
+ *   does not offer another work Codex model, which is on the same exhausted account.
+ */
+export function resendNotice(id: VirtualId, facts: ResendFacts): string {
+  const { cause, next, partway } = facts;
+  const why = "account" in cause ? `the account ${cause.account} is out of use until ${cause.until}` : "its server could not be reached";
+  const head = partway
+    ? `pi-smart-router: ${facts.modelId} could not go on with this run (${why}), and it stopped partway. What it did so far stands: do not send the request again.`
+    : `pi-smart-router: ${facts.modelId} could not take this run (${why}), and nothing was answered.`;
+  if (next !== undefined) {
+    const target = next.role === undefined ? next.modelId : `the fallback ${next.role} (${next.modelId})`;
+    return partway ? `${head} To go on, say: continue. It goes on with ${target}.` : `${head} Send the request again: it goes to ${target}.`;
+  }
+  const act = partway ? "to go on, say: continue" : "send the request again";
+  const when = "account" in cause ? `${act}${partway ? "," : ""} after ${cause.until}` : `${act}, and it is tried again`;
+  const other = facts.work && "account" in cause ? ". Another model picked by hand with /model is sent as it is." : `, or ${chooseModel(id, facts.work)}.`;
+  return `${head} No other model can take it now: ${when}${other}`;
+}
+
 const NO_HISTORY = "this Pi has no bounded session history (getLatestCustomEntry and getRecentActiveEntries)";
 
 export function noBoundedHistory(id: VirtualId): RouterError {
@@ -218,14 +266,24 @@ export function unmatchedTagNotice(): string {
   return "pi-smart-router: a tagged message's level could not be matched to the run that started, so it was dropped.";
 }
 
+/** Shown when a version 2 run's plan took a model of its scope's fallback chain: the conversation goes to that role's vendor or host. */
+export function fallbackNotice(tier: Tier, role: string, modelId: string): string {
+  return `pi-smart-router: no ${tierLabel(tier)} model can take this run, so it goes to the fallback ${role} (${modelId}).`;
+}
+
+/** Shown once when a run under way moves from its model onto one of its scope's fallback chain: the conversation now goes to that role's vendor or host. */
+export function fallbackMoveNotice(fromModelId: string, role: string, modelId: string): string {
+  return `pi-smart-router: ${fromModelId} can no longer take this run, so it goes on with the fallback ${role} (${modelId}).`;
+}
+
 /** Shown when a version 2 run went to a higher tier than the one its pick started at. */
 export function stepUpNotice(start: Tier, tier: Tier, modelId: string): string {
   return `pi-smart-router: no ${tierLabel(start)} model can take this run, so it goes to ${tierLabel(tier)} (${modelId}).`;
 }
 
-/** What one role's candidates said, as a refusal lists it: the first role, then each `later` one. */
+/** What one role's candidates said, as a refusal lists it: the first role, then each `later` one, a fallback role named as one. */
 function describeAttempt(attempt: Attempt, index: number, later: string): string {
-  const label = index === 0 ? attempt.role : `${later} ${attempt.role}`;
+  const label = index === 0 ? attempt.role : `${attempt.fallback === true ? "fallback" : later} ${attempt.role}`;
   if (!attempt.exists) return `${label}: no such role in the roster`;
   if (attempt.candidates.length === 0) return `${label}: no candidates`;
   return `${label}: ${attempt.candidates.map((candidate) => `${candidate.ref}: ${candidate.detail}`).join("; ")}`;
@@ -234,10 +292,12 @@ function describeAttempt(attempt: Attempt, index: number, later: string): string
 export interface UnroutableContext {
   readonly localOnly: boolean;
   readonly pinned: boolean;
-  /** Whether the roles after the first are a version 2 run's step-ups to higher tiers, not version 1's declared fallback. */
+  /** Whether the roles after the first are a version 2 run's step-ups to higher tiers, apart from those tried as a fallback, not version 1's declared fallback. */
   readonly stepUps?: boolean;
   /** Whether the session is a work session that is not pinned (chooseModel). */
   readonly work?: boolean;
+  /** An account some candidate waits for after a usage-limit or authentication error, and when that ends (HH:MM). */
+  readonly cooling?: { readonly provider: string; readonly until: string } | undefined;
 }
 
 /** No candidate could take the request: every role tried and why, or the problem found first. */
@@ -266,7 +326,14 @@ export function unroutable(
       : context.localOnly
         ? `Start the local model server and send the prompt again, or ${unpin}.`
         : `See /smart-router status, or ${chooseModel(id, work)}.`;
-  return refusal(id, cause, way);
+  // An exhausted account ends by itself: the refusal says when, and that the selection is John's.
+  // In a work session it does not offer another work Codex model: that is on the same account.
+  if (context.cooling === undefined || context.localOnly) return refusal(id, cause, way);
+  const { provider, until } = context.cooling;
+  if (work) {
+    return refusal(id, cause, `The account ${provider} is left alone until ${until}; send the request again after that, or see /smart-router status. Another model picked by hand with /model is sent as it is.`);
+  }
+  return refusal(id, cause, `${way} The account ${provider} is left alone until ${until}; after that this request routes again. A model picked by hand is sent as it is.`);
 }
 
 export function stale(id: VirtualId): RouterError {

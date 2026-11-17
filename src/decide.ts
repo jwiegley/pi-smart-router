@@ -16,6 +16,12 @@
 // for the conversation, passes the run up to the next tier. When no tier's first available
 // candidate fits, the highest tier with one takes the run, as version 1 would send it and Pi
 // compacts: a run is refused only when neither its own tier nor any above it has an available one.
+//
+// A scope that declares a fallback chain (roster.ts) gives every tier more candidates: after the
+// tier's own models, the chain's roles in the order written. A tier takes the chain before it
+// passes the run up, so a run keeps its tier while any chain model can take it. A chain model holds
+// no tier: the next run starts from its own tier's first candidate, and so returns to the tier's
+// own model as soon as that is available again.
 import type { Api, Model, Usage } from "@earendil-works/pi-ai";
 import { calculateContextTokens, DEFAULT_COMPACTION_SETTINGS, estimateTokens } from "@earendil-works/pi-coding-agent";
 
@@ -25,9 +31,9 @@ import { PROVIDER } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { isRecord, own } from "./files.ts";
 import type { JevOutcome } from "./jev.ts";
-import { resolveCandidate } from "./resolve.ts";
+import { HELD_REASON, resolveCandidate } from "./resolve.ts";
 import type { Resolution, ResolveContext } from "./resolve.ts";
-import { autoRoles, rankOf, roleOf, scopeSection } from "./roster.ts";
+import { autoRoles, candidatesOf, fallbackAfter, rankOf, roleOf, scopeSection } from "./roster.ts";
 import type { Scope, ScopeSection } from "./roster.ts";
 import { keywordTier, tierAbove, tierRank, TIERS } from "./tiers.ts";
 import type { Tier } from "./tiers.ts";
@@ -52,6 +58,8 @@ export interface Attempt {
   readonly role: string;
   /** False when the roster has no role of that name. */
   readonly exists: boolean;
+  /** Whether the role was tried as a fallback of the role the pick started in. */
+  readonly fallback?: true;
   readonly candidates: ReadonlyArray<Resolution & { readonly ok: false }>;
 }
 
@@ -69,40 +77,89 @@ export interface PickOptions {
   readonly prefer?: string | undefined;
   /** Never taken: the model whose request just failed. */
   readonly skip?: string | undefined;
-  /** Whether the role's declared fallback may take over. Never while local-only; version 2 declares none. */
+  /** Never taken either: the models whose requests failed with a limit earlier in this run, so that a run tries each candidate once. */
+  readonly skipped?: ReadonlySet<string> | undefined;
+  /**
+   * The model whose server could not be reached: the role's candidates are tried in the written
+   * order starting after it and going round once, so that the next one written takes the request.
+   * It comes last itself, where its hold passes it over.
+   */
+  readonly after?: string | undefined;
+  /**
+   * Leave held candidates out for good: the pick fails when only held ones are left. A retry asks
+   * this way, because it has something better than a held candidate: the model it is on, under Pi's
+   * backoff.
+   */
+  readonly strictHolds?: boolean | undefined;
+  /** Whether the role's declared fallback may take over: version 1's one hop, or a version 2 scope's chain on smart-router/auto. Never while local-only. */
   readonly fallback: boolean;
   readonly code: string;
 }
 
 /**
- * The first candidate of a role that resolves, else, when allowed, the first of the role's declared
- * fallback role: one hop, never further. Otherwise every candidate's reason. Only version 1's
- * routing table declares fallbacks.
+ * The roles a pick may go on to after `roleName`, when the caller allows a fallback: version 1's
+ * declared fallback role, one hop and never further; under version 2, on smart-router/auto, what is
+ * left of the session's scope's chain (fallbackAfter). Never while local-only: smart-router/local
+ * and the pin keep to the local role.
+ */
+function fallbackRoles(rc: ResolveContext, roleName: string): readonly string[] {
+  if (rc.localOnly) return [];
+  if (rc.roster.version === 1) {
+    const target = rc.roster.routing.fallback.get(roleName);
+    return target === undefined ? [] : [target];
+  }
+  return rc.virtualId === "auto" ? fallbackAfter(rc.roster, rc.scope, roleName) : [];
+}
+
+/**
+ * The first candidate of a role that resolves, else, when allowed, the first that resolves of the
+ * roles its fallback goes on to, in order (fallbackRoles). Otherwise every candidate's reason.
+ *
+ * A hold is a preference, never a refusal. When nothing resolves and a hold is among the reasons,
+ * the pick is made again without the holds, in the written order: every cooldown and every check
+ * of the selection, the scope and the pin stays, so the request goes to the first candidate that
+ * only its hold kept out. A server that had a blip is tried again rather than the request refused.
  */
 export function pickInRole(rc: ResolveContext, roleName: string, options: PickOptions): Decision {
+  const first = pickWithHolds(rc, roleName, options);
+  if (first.ok || options.strictHolds === true || rc.holds === undefined) return first;
+  const heldBack = first.attempts.some((attempt) => attempt.candidates.some((candidate) => candidate.reason.startsWith(HELD_REASON)));
+  return heldBack ? pickWithHolds({ ...rc, holds: undefined }, roleName, { ...options, after: undefined }) : first;
+}
+
+function pickWithHolds(rc: ResolveContext, roleName: string, options: PickOptions): Decision {
   const attempts: Attempt[] = [];
-  const firstIn = (name: string, prefer: string | undefined): (Resolution & { readonly ok: true }) | undefined => {
+  const firstIn = (name: string, prefer: string | undefined, fallback: boolean): (Resolution & { readonly ok: true }) | undefined => {
     const role = rc.roster.roles.find((entry) => entry.name === name);
     if (role === undefined) {
-      attempts.push({ role: name, exists: false, candidates: [] });
+      attempts.push({ role: name, exists: false, candidates: [], ...(fallback ? { fallback: true as const } : {}) });
       return undefined;
     }
-    const order = prefer !== undefined && role.models.includes(prefer) ? [prefer, ...role.models.filter((ref) => ref !== prefer)] : role.models;
+    const at = options.after === undefined ? -1 : role.models.indexOf(options.after);
+    const order =
+      at >= 0
+        ? [...role.models.slice(at + 1), ...role.models.slice(0, at + 1)]
+        : prefer !== undefined && role.models.includes(prefer)
+          ? [prefer, ...role.models.filter((ref) => ref !== prefer)]
+          : role.models;
     const refused: Array<Resolution & { readonly ok: false }> = [];
     for (const ref of order) {
       const resolution: Resolution =
-        ref === options.skip ? { ok: false, ref, reason: "failed", detail: "its request just failed" } : resolveCandidate(ref, rc);
+        ref === options.skip
+          ? { ok: false, ref, reason: "failed", detail: "its request just failed" }
+          : options.skipped?.has(ref) === true
+            ? { ok: false, ref, reason: "failed", detail: "its request failed earlier in this run" }
+            : resolveCandidate(ref, rc);
       if (resolution.ok) return resolution;
       refused.push(resolution);
     }
-    attempts.push({ role: name, exists: true, candidates: refused });
+    attempts.push({ role: name, exists: true, candidates: refused, ...(fallback ? { fallback: true as const } : {}) });
     return undefined;
   };
-  const inRole = firstIn(roleName, options.prefer);
+  const inRole = firstIn(roleName, options.prefer, false);
   if (inRole !== undefined) return { ok: true, choice: { role: roleName, ref: inRole.ref, model: inRole.model, code: options.code } };
-  const target = options.fallback && !rc.localOnly && rc.roster.version === 1 ? rc.roster.routing.fallback.get(roleName) : undefined;
-  if (target !== undefined) {
-    const other = firstIn(target, undefined);
+  for (const target of options.fallback ? fallbackRoles(rc, roleName) : []) {
+    const other = firstIn(target, undefined, true);
     if (other !== undefined) {
       return { ok: true, choice: { role: target, ref: other.ref, model: other.model, code: `fallback:${roleName}→${target}` } };
     }
@@ -147,6 +204,8 @@ export interface PlanLevel {
   readonly returnedToFirst: boolean;
   /** The outcome an untagged run waited for. */
   readonly jev?: JevOutcome;
+  /** The pick is a model of the scope's fallback chain, not one of the tier's own: the run keeps its tier. */
+  readonly fallback?: true;
 }
 
 /** A run's decision, made when its prompt arrives and consumed by its first request. */
@@ -181,6 +240,12 @@ export interface PlanInput {
   readonly reserve: number;
   /** A version 2 run's tag and Jev outcome; version 1 and local-only runs ignore it. */
   readonly level?: LevelInput;
+  /**
+   * The level role the session's last planned run took. A chain model stands for that level: while
+   * the latest response is a chain model's, the hold rules compare with it, so that a session at
+   * SUPER whose account ran out is still at SUPER when the account is back.
+   */
+  readonly held?: string | undefined;
 }
 
 /** The role of a ref that may take this request: the local role when local-only, else for auto a role auto can reach. */
@@ -204,34 +269,49 @@ const FLOOR: Tier = "high";
 const STEP_UP = "step-up";
 const NO_SCOPE = "no-scope";
 
-/** The tier of a scope whose role holds a ref. */
-function tierOf(rc: ResolveContext, section: ScopeSection, ref: string): Tier | undefined {
+/**
+ * The tier of a scope whose role holds a ref; for a model of the scope's fallback chain, the tier of
+ * `held`, the level role the session's last planned run took, when that is a level of the scope.
+ */
+function tierOf(rc: ResolveContext, section: ScopeSection, ref: string, held?: string): Tier | undefined {
   const role = roleOf(rc.roster, ref)?.name;
-  return role === undefined ? undefined : TIERS.find((tier) => section.levels[tier].role === role);
+  if (role === undefined) return undefined;
+  const standsFor = section.fallback?.includes(role) === true ? held : role;
+  return TIERS.find((tier) => section.levels[tier].role === standsFor);
 }
 
-/** Whether a pick ranks before `later` among its role's candidates. */
-function ranksBefore(rc: ResolveContext, choice: Choice, later: string): boolean {
-  const models = rc.roster.roles.find((role) => role.name === choice.role)?.models ?? [];
-  const at = models.indexOf(choice.ref);
-  return at >= 0 && at < models.indexOf(later);
+/** Whether a pick ranks before `later` among a tier's candidates: its role's own models, then the scope's chain. */
+function ranksBefore(rc: ResolveContext, section: ScopeSection, tier: Tier, choice: Choice, later: string): boolean {
+  const refs = candidatesOf(rc.roster, rc.scope, section.levels[tier].role).map((candidate) => candidate.ref);
+  const at = refs.indexOf(choice.ref);
+  return at >= 0 && at < refs.indexOf(later);
 }
 
 /**
- * From `start` upward, the first tier whose role's first available candidate fits the conversation;
- * when none fits, the highest tier with an available candidate. Fit alone never refuses: version 1
- * sends such a run, and Pi compacts. The start tier's pick carries `code`, a higher tier's
- * `step-up`. When no tier has an available candidate, every tier's reasons, and the start tier.
+ * From `start` upward, the first tier whose first available candidate fits the conversation; when
+ * none fits, the highest tier with an available candidate. A tier's candidates are its role's own
+ * models and then the scope's fallback chain, so a tier takes the chain before it passes the run up.
+ * Fit alone never refuses: version 1 sends such a run, and Pi compacts. The start tier's pick
+ * carries `code`, a higher tier's `step-up`, and a chain model's names the roles. When no tier has
+ * an available candidate, every role's reasons, each role once, and the start tier.
  */
 function climb(p: PlanInput, section: ScopeSection, start: Tier, code: string): { readonly tier: Tier; readonly decision: Decision } {
   const attempts: Attempt[] = [];
-  let highest: { readonly tier: Tier; readonly decision: Decision } | undefined;
+  let first: { readonly tier: Tier; readonly decision: Decision & { readonly ok: true } } | undefined;
+  let highest: { readonly tier: Tier; readonly decision: Decision & { readonly ok: true } } | undefined;
   for (let tier: Tier | undefined = start; tier !== undefined; tier = tierAbove(tier)) {
-    const decision = pickInRole(p.rc, section.levels[tier].role, { fallback: false, code: tier === start ? code : STEP_UP });
-    if (!decision.ok) attempts.push(...decision.attempts);
+    const decision = pickInRole(p.rc, section.levels[tier].role, { fallback: true, code: tier === start ? code : STEP_UP });
+    // Every tier shares the scope's chain, so its roles' reasons are listed with the first tier's only.
+    if (!decision.ok) attempts.push(...decision.attempts.filter((attempt) => !attempts.some((seen) => seen.role === attempt.role)));
     else if (fits(p, decision.choice.model)) return { tier, decision };
-    else highest = { tier, decision };
+    else {
+      highest = { tier, decision };
+      first ??= highest;
+    }
   }
+  // When the highest tier would take the very model the first one would, a chain model that every
+  // tier shares, moving up gains nothing: the run keeps the tier it started at.
+  if (first !== undefined && highest !== undefined && first.decision.choice.ref === highest.decision.choice.ref) return first;
   return highest ?? { tier: start, decision: { ok: false, attempts } };
 }
 
@@ -249,14 +329,14 @@ function planLevel(p: PlanInput, section: ScopeSection, signal: Signal): Pick<Pl
   const own = trigger === undefined ? asked : FLOOR;
   let start = own;
   let code: string = source;
-  const sticky = tag === undefined && last !== undefined ? tierOf(rc, section, last.ref) : undefined;
+  const sticky = tag === undefined && last !== undefined ? tierOf(rc, section, last.ref, p.held) : undefined;
   if (last !== undefined && sticky !== undefined && tierRank(start) < tierRank(sticky)) {
     const idle = p.now - last.at >= rc.roster.stickyIdleMinutes * 60_000;
     if (!idle) {
       start = sticky;
       code = "hold:sticky";
     } else {
-      const down = pickInRole(rc, section.levels[start].role, { fallback: false, code: "reopen:idle" });
+      const down = pickInRole(rc, section.levels[start].role, { fallback: true, code: "reopen:idle" });
       const held = down.ok && !fits(p, down.choice.model);
       if (held) start = sticky;
       code = held ? "hold:fit" : "reopen:idle";
@@ -272,6 +352,9 @@ function planLevel(p: PlanInput, section: ScopeSection, signal: Signal): Pick<Pl
   }
   const { tier, decision } = planned;
   const choice = decision.ok ? decision.choice : undefined;
+  // The tier's own role, whichever role the pick is in: a chain model's role is not the run's.
+  const levelRole = section.levels[tier].role;
+  const viaChain = choice !== undefined && choice.role !== levelRole;
   const level: PlanLevel = {
     scope: rc.scope,
     tier,
@@ -280,10 +363,12 @@ function planLevel(p: PlanInput, section: ScopeSection, signal: Signal): Pick<Pl
     source,
     ...(trigger === undefined ? {} : { trigger }),
     steppedUp: tierRank(tier) > tierRank(start),
-    returnedToFirst: choice !== undefined && last !== undefined && ranksBefore(rc, choice, last.ref),
+    returnedToFirst: choice !== undefined && last !== undefined && ranksBefore(rc, section, tier, choice, last.ref),
     ...(tag !== undefined || jev === undefined ? {} : { jev }),
+    ...(viaChain ? { fallback: true as const } : {}),
   };
-  return { role: choice?.role, code: choice?.code ?? code, decision, level };
+  // The plan keeps the tier's role, so the run's first request picks among the tier's candidates again.
+  return { role: choice === undefined ? undefined : levelRole, code: choice?.code ?? code, decision, level };
 }
 
 export function planUserTurn(p: PlanInput): Plan {

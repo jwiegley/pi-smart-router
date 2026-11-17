@@ -1,14 +1,18 @@
 // /smart-router: status (the default), history [n], local on|off|status, scope
-// [work|personal|status], was low|medium|high|super, and reload. It reports through notices, and
+// [work|personal|status], was low|medium|high|super, check, and reload. It reports through notices, and
 // the only things it writes are the pin's and the scope's session entries and a run's correction.
 //
 // status shows the roster's state, the selection, the pin, the session's scope, each role's
 // candidates on this host with the resolver's verdict and the catalog price, the account bindings
 // checked in the session's scope, with each provider's auth source (never a credential), a version 1
-// roster's routing table or a version 2 roster's levels in each scope and its classifier, the last
-// decision, what can still send data off the machine, and a warning for any version 1 fallback that
+// roster's routing table or a version 2 roster's levels and fallback chain in each scope and its
+// classifier, the last decision, whether the last request went to a fallback chain's model, what can still send data off the machine, and a warning for any version 1 fallback that
 // moves a run onto Codex's API from another one. It replaces upstream's doctor, plan, stats, pricing
 // and mode commands.
+//
+// check reads the roster again and prints what it routes to, for each selection and scope and in
+// the order tried, or its first error with its place (src/check.ts). It changes nothing and sends
+// nothing, and the standalone src/check-cli.ts prints the same for any file without a session.
 //
 // One command selects a model: local on, which asks for local routing, selects smart-router/local.
 // No other command moves the selection: scope work and local off change what the router's own
@@ -17,6 +21,7 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 
 import { checkAccount, subscriptionKind } from "./accounts.ts";
+import { describeRouting } from "./check.ts";
 import type { Labels } from "./accounts.ts";
 import { LEVEL_ENTRY, PIN_ENTRY, PROVIDER, SCOPE_ENTRY, VIRTUAL_API } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
@@ -26,14 +31,16 @@ import type { Loaded } from "./files.ts";
 import { checkLocal, EMPTY_POLICY, policyFromRoster } from "./local.ts";
 import type { LocalPolicy } from "./local.ts";
 import { describePin, describePolicy, pinOff, pinOn } from "./pin.ts";
+import { promptLines, promptProblem, promptUses } from "./prompts.ts";
+import type { PromptReader } from "./prompts.ts";
 import type { PinReading } from "./pin.ts";
 import { correctionRecord, levelNote, levelRecord, readLevelRecord } from "./records.ts";
 import type { LevelRecord } from "./records.ts";
-import { clock, resolveCandidate } from "./resolve.ts";
+import { clock, describeHold, resolveCandidate } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
 import { boundedHistory, HISTORY_LIMIT } from "./route.ts";
 import type { HistoryEntry, PendingLevel, Pin } from "./route.ts";
-import { autoRoles, parseRef, SCOPES, servesScope } from "./roster.ts";
+import { autoRoles, parseRef, scopeSection, SCOPES, servesScope } from "./roster.ts";
 import type { Roster, RosterV1, RosterV2, Scope } from "./roster.ts";
 import { scopeEntry } from "./scope.ts";
 import type { ScopeState } from "./scope.ts";
@@ -66,6 +73,8 @@ export interface CommandHost {
   session(ctx: ExtensionContext): { readonly history: readonly HistoryEntry[]; readonly pendingLevel: PendingLevel | undefined } | undefined;
   /** A resolver context for one of the two models, built as routing builds it: in the session's scope, or in `scope`. */
   resolver(ctx: ExtensionContext, roster: Roster, id: VirtualId, pin: Pin, scope?: Scope): ResolveContext;
+  /** A prompt file the roster names, as the router last loaded it; refresh() and reload() load them with the roster. */
+  readonly readPrompt: PromptReader;
 }
 
 /** A notice the command shows. */
@@ -74,7 +83,7 @@ export interface Answer {
   readonly type: "info" | "warning" | "error";
 }
 
-const USAGE = "Usage: /smart-router [status] | history [n] | local on|off|status | scope [work|personal|status] | was low|medium|high|super | reload";
+const USAGE = "Usage: /smart-router [status] | history [n] | local on|off|status | scope [work|personal|status] | was low|medium|high|super | check | reload";
 const UNPINNED: Pin = Object.freeze({ on: false, policy: EMPTY_POLICY });
 const HISTORY_DEFAULT = 10;
 const CODEX_API = "openai-codex-responses";
@@ -185,10 +194,12 @@ function roleLines(host: CommandHost, ctx: ExtensionContext, roster: Roster, pin
   const localRole = roster.local?.role;
   const local = host.resolver(ctx, roster, "local", pin);
   const reached = autoRoles(roster, auto.scope);
+  const chains = SCOPES.filter((scope) => scopeSection(roster, scope)?.fallback !== undefined);
   return roster.roles.map((role) => {
     const rc = role.name === localRole ? local : auto;
     const tags = [
       role.name === localRole ? "the local role" : undefined,
+      ...chains.filter((scope) => scopeSection(roster, scope)?.fallback?.includes(role.name)).map((scope) => `a ${scope} fallback`),
       role.name !== localRole && !reached.has(role.name) ? "smart-router/auto never routes here" : undefined,
       role.thinking === "selected" ? undefined : `thinking ${role.thinking}`,
     ].filter((tag) => tag !== undefined);
@@ -290,18 +301,47 @@ function otherSelection(ctx: ExtensionContext): "hand" | "local" | undefined {
   return own === undefined ? "hand" : own === "local" ? "local" : undefined;
 }
 
-/** Each scope's tiers, low to super, with each tier's candidates and the verdicts they get in that scope. */
+/**
+ * Each scope's tiers, low to super, with each tier's own candidates and the verdicts they get in
+ * that scope, and, when any scope declares a fallback chain, each scope's chain in its order, or
+ * that it has none.
+ */
 function levelLines(host: CommandHost, ctx: ExtensionContext, roster: RosterV2): string[] {
+  const anyChain = SCOPES.some((scope) => roster.scopes[scope]?.fallback !== undefined);
   return SCOPES.flatMap((scope) => {
     const section = roster.scopes[scope];
     if (section === undefined) return [];
     const rc = host.resolver(ctx, roster, "auto", UNPINNED, scope);
-    const tiers = TIERS.map((tier) => {
-      const models = roster.roles.find((role) => role.name === section.levels[tier].role)?.models ?? [];
-      return `${tierLabel(tier)} → ${models.map((ref) => verdict(ref, rc)).join(", ")}`;
-    });
-    return [`Levels (${scope}): ${tiers.join("; ")}`];
+    const modelsOf = (name: string): readonly string[] => roster.roles.find((role) => role.name === name)?.models ?? [];
+    const tiers = TIERS.map((tier) => `${tierLabel(tier)} → ${modelsOf(section.levels[tier].role).map((ref) => verdict(ref, rc)).join(", ")}`);
+    const lines = [`Levels (${scope}): ${tiers.join("; ")}`];
+    if (section.fallback !== undefined) {
+      const chain = section.fallback.map((name) => `${name} → ${modelsOf(name).map((ref) => verdict(ref, rc)).join(", ")}`);
+      lines.push(`Fallback (${scope}), after any level's own models, in this order: ${chain.join("; ")}`);
+    } else if (anyChain) {
+      lines.push(`Fallback (${scope}): none, so a level with no available model passes its run up or refuses it`);
+    }
+    return lines;
   });
+}
+
+/** The accounts cooling now, one line each however many models wait for them, then the local models skipped because their servers could not be reached. */
+function holdLines(rc: ResolveContext): string[] {
+  const accounts = rc.cooldowns
+    .accounts(rc.now)
+    .map(({ provider, until }) => `Cooling: the account ${provider}, every model of it, until ${clock(until)} after a usage-limit or authentication error`);
+  return accounts.concat(
+    (rc.holds?.active(rc.now) ?? []).map((hold) => `Unreachable: ${hold.ref} is ${describeHold(hold).detail}; it is tried again sooner if nothing else can take a request`),
+  );
+}
+
+/** Said when the session's last request on smart-router/auto went to a model of a scope's fallback chain. */
+function onFallbackLine(roster: RosterV2, last: HistoryEntry | undefined): string | undefined {
+  if (last === undefined || last.virtual !== "auto") return undefined;
+  const scope = SCOPES.find((name) => roster.scopes[name]?.fallback?.includes(last.role));
+  // Under the pin a chain's local role takes the request as the local role, not as a fallback.
+  if (scope === undefined || last.code === "local") return undefined;
+  return `On a fallback: the last request went to ${last.ref}, in the ${scope} fallback role ${last.role}; each new run tries its level's own models first.`;
 }
 
 function classifierLine(roster: RosterV2): string {
@@ -309,6 +349,21 @@ function classifierLine(roster: RosterV2): string {
   return settings === undefined
     ? "Classifier: none, so the keyword classifier decides every level"
     : `Classifier: ${settings.model}, ${settings.timeoutMs} ms, close call ${settings.closeCall}`;
+}
+
+/**
+ * The prompt sources in effect, when the roster has a classifier and any of them is John's own: an
+ * inline instruction or a file. A roster that only gives its levels' describe texts inline, as
+ * every roster before 1.4.0-jw.4 does, shows the one line that says so.
+ */
+function promptStatus(host: CommandHost, roster: RosterV2): string[] {
+  if (roster.classifier === undefined) return [];
+  const uses = promptUses(roster, host.readPrompt);
+  if (uses.every((use) => use.source === "inline" || use.source === "built-in") && uses[0]?.source === "built-in") {
+    return ["Prompts: the built-in instructions, and each level's describe from the roster"];
+  }
+  const problem = promptProblem(uses);
+  return ["Prompts:", ...promptLines(uses), ...(problem === undefined ? [] : [`Prompt problem: ${problem}`])];
 }
 
 /** The classifier smart-router/auto can ask about a message: a version 2 roster's, never while the session is pinned. */
@@ -333,10 +388,13 @@ export function statusText(host: CommandHost, ctx: ExtensionContext): string {
     const auto = host.resolver(ctx, value, "auto", UNPINNED);
     lines.push("Roles on this host, cheapest first:", ...roleLines(host, ctx, value, pin, auto), ...accountLines(ctx, value, labels, auto.scope));
     if (value.version === 1) lines.push(routingLine(value), ...codexWarnings(host, ctx, value));
-    else lines.push(...levelLines(host, ctx, value), classifierLine(value));
+    else lines.push(...levelLines(host, ctx, value), classifierLine(value), ...promptStatus(host, value));
+    lines.push(...holdLines(auto));
   }
   const last = session?.history.at(-1);
   lines.push(`Last decision: ${last === undefined ? "none yet" : describeEntry(last)}`);
+  const onFallback = roster.kind === "ok" && roster.value.version === 2 ? onFallbackLine(roster.value, last) : undefined;
+  if (onFallback !== undefined) lines.push(onFallback);
   lines.push(egress(host.pi, classifierOf(roster, pin)));
   return lines.join("\n");
 }
@@ -528,6 +586,22 @@ function was(host: CommandHost, ctx: ExtensionContext, tier: Tier): Answer {
   return info(`pi-smart-router: recorded that the last run should have been ${tierLabel(tier)}.`);
 }
 
+/**
+ * The roster as it is on disk now, read back: what each selection and scope routes to, or why the
+ * router refuses it. A check only: nothing is selected, recorded or sent.
+ */
+function check(host: CommandHost): Answer {
+  const { roster } = host.refresh();
+  const head = `pi-smart-router check: ${rosterLine(roster)}`;
+  if (roster.kind !== "ok") {
+    return warning(`${head}\nBoth smart-router/auto and smart-router/local refuse every request until it is fixed. Nothing was changed.`);
+  }
+  const uses = roster.value.version === 2 ? promptUses(roster.value, host.readPrompt) : [];
+  const problem = promptProblem(uses);
+  const lines = [head, ...(problem === undefined ? [] : [`PROMPT NOT USABLE: ${problem}`]), "", ...describeRouting(roster.value, uses)];
+  return problem === undefined ? info(lines.join("\n")) : warning(lines.join("\n"));
+}
+
 function reload(host: CommandHost, ctx: ExtensionContext): Answer {
   const { roster, labels, limitsChanged } = host.reload(ctx);
   const parts = [`pi-smart-router: reloaded the roster, ${rosterLine(roster)}`];
@@ -559,13 +633,14 @@ export async function run(host: CommandHost, ctx: ExtensionContext, args: string
     const tier = option?.toLowerCase();
     if (isTier(tier)) return was(host, ctx, tier);
   }
+  if (sub === "check" && option === undefined) return check(host);
   if (sub === "reload" && option === undefined) return reload(host, ctx);
   return warning(USAGE);
 }
 
 export function smartRouterCommand(host: CommandHost): Omit<RegisteredCommand, "name" | "sourceInfo"> {
   return {
-    description: "Smart Router: status, history [n], local on|off|status, scope [work|personal|status], was low|medium|high|super, reload",
+    description: "Smart Router: status, history [n], local on|off|status, scope [work|personal|status], was low|medium|high|super, check, reload",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       let answer: Answer;
       try {

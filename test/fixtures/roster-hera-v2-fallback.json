@@ -1,0 +1,43 @@
+{
+  "version": 2,
+  "$comment": "Hera, version 2, with John's routing of 2026-11-17. Personal levels take one Codex model each, on openai-codex-2 (John's personal ChatGPT account, labelled 'personal' in Multi-Pass). When a level's model cannot take a request, every level falls back along one chain: OpenRouter's GLM and Qwen, then the local models. Work levels take only openai-codex-3, the work account, and declare no fallback. Plain openai-codex is excluded here because Hera reserves it for the work account.",
+  "exclude": ["openai-codex/*"],
+  "roles": [
+    { "name": "local", "$comment": "smart-router/local and the pin, in this order; also the end of the personal fallback chain. Nyx's ref is a Nix-store basename that changes whenever its model is rebuilt", "models": ["omlx-hera/GLM-5.3-Flash-oQ4e-mtp", "nyx/g3mjym7raqj6147biq46zxym32gyda9g-Qwen3.8-27B-exl3-6fe61ad", "omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp"], "thinking": "max" },
+    { "name": "openrouter", "$comment": "the start of the personal fallback chain: another vendor, on another quota", "models": ["openrouter/z-ai/glm-5.3-flash", "openrouter/qwen/qwen3.8-27b"] },
+    { "name": "low", "models": ["openai-codex-2/gpt-6-luna"] },
+    { "name": "medium", "models": ["openai-codex-2/gpt-6.1-terra"] },
+    { "name": "high", "models": ["openai-codex-2/gpt-6.1-sol"] },
+    { "name": "super", "models": ["openai-codex-2/gpt-6-astra"] },
+    { "name": "work-low", "models": ["openai-codex-3/gpt-6-luna"] },
+    { "name": "work-medium", "models": ["openai-codex-3/gpt-6.1-terra"] },
+    { "name": "work-high", "models": ["openai-codex-3/gpt-6.1-sol"] },
+    { "name": "work-super", "models": ["openai-codex-3/gpt-6-astra"] }
+  ],
+  "scopes": {
+    "personal": {
+      "levels": {
+        "low": { "role": "low", "describe": "Mechanical or trivial work that follows a clear specification" },
+        "medium": { "role": "medium", "describe": "Engineering, implementation and validation" },
+        "high": { "role": "high", "describe": "Deep thought, review, and the design of verification" },
+        "super": { "role": "super", "describe": "Deep thought, research, design and planning" }
+      },
+      "fallback": ["openrouter", "local"]
+    },
+    "work": {
+      "levels": {
+        "low": { "role": "work-low", "describe": "Mechanical or trivial work that follows a clear specification" },
+        "medium": { "role": "work-medium", "describe": "Engineering, implementation and validation" },
+        "high": { "role": "work-high", "describe": "Deep thought, review, and the design of verification" },
+        "super": { "role": "work-super", "describe": "Deep thought, research, design and planning" }
+      },
+      "directories": ["/Users/johnw/src/positron"]
+    }
+  },
+  "accounts": {
+    "openai-codex-2": { "multiPassLabel": "personal" },
+    "openai-codex-3": { "multiPassLabel": "Positron work", "scope": "work", "$comment": "the label Multi-Pass stores for openai-codex-3, which must name work or Positron" }
+  },
+  "classifier": { "model": "openrouter/typesafe/jev-1.14", "timeoutMs": 1000, "closeCall": 0.15, "context": { "messages": 6, "messageChars": 1500, "totalChars": 12000 } },
+  "local": { "role": "local", "providers": ["omlx-hera", "nyx"], "hosts": ["hera.lan", "nyx.lan"] }
+}

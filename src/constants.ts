@@ -60,6 +60,14 @@ export const MULTI_PASS_MAX_BYTES = 256 * 1024;
 /** Roster defaults and their allowed ranges, in whole minutes. */
 export const STICKY_IDLE_MINUTES = { default: 5, min: 0, max: 1440 } as const;
 export const COOLDOWN_MINUTES = { default: 30, min: 1, max: 1440 } as const;
+/**
+ * How long a local model whose server could not be reached is held, that is passed over while
+ * another candidate can take the request. Five minutes by default: long enough
+ * that a server restarting or loading a model is not tried, and timed out on, by every run
+ * meanwhile, and that a session does not flap between two hosts, each move costing a cold prefill
+ * on the other; short enough that the preferred server is back in use soon after it returns.
+ */
+export const UNREACHABLE_MINUTES = { default: 5, min: 1, max: 60 } as const;
 
 /**
  * The version 2 classifier's defaults and allowed ranges. The model names a Jev version, so that a
@@ -73,6 +81,16 @@ export const CLASSIFIER_MESSAGE_CHARS = { default: 1500, min: 200, max: 8000 } a
 export const CLASSIFIER_TOTAL_CHARS = { default: 12_000, min: 1000, max: 32_000 } as const;
 /** The longest level description Jev reads, in characters, counted as Unicode code points. */
 export const DESCRIBE_MAX_CHARS = 2000;
+
+/**
+ * Jev's prompt files: plain text or Markdown under <agentDir>/smart-router/, named by the roster
+ * (src/prompts.ts). A name has no directory part, so a roster cannot point outside that directory.
+ * The instructions' cap is in characters, counted as a level description's is.
+ */
+export const PROMPT_DIR = "smart-router";
+export const PROMPT_FILE_NAME = /^[a-z0-9][a-z0-9._-]{0,63}\.(?:md|txt)$/;
+export const PROMPT_FILE_MAX_BYTES = 16 * 1024;
+export const INSTRUCTIONS_MAX_CHARS = 4000;
 
 /** The pin's session entry, the environment switch, the status item, the command and the process slots. */
 export const PIN_ENTRY = "smart-router.pin";

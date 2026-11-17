@@ -29,8 +29,16 @@ beettlle/pi-smart-router to the virtual models of Pi 1.5. `CLAUDE.md` is a link 
   the bounded readers `getLatestCustomEntry` and `getRecentActiveEntries`.
 - Runtime code does no I/O relative to the working directory or HOME, and it writes no files: its
   session entries (the pin's, the scope's and the level records) go through `pi.appendEntry`. It
-  reads only the roster and Multi-Pass's subscription labels under Pi's agent directory, through
-  `src/files.ts`, and compares `ctx.cwd` with the roster's work directories as text.
+  reads only the roster, Multi-Pass's subscription labels and the prompt files the roster names in
+  `smart-router/`, all under Pi's agent directory and all through `src/files.ts`, and compares
+  `ctx.cwd` with the roster's work directories as text.
+- A prompt file is guidance for Jev and nothing else reads it. The request's shape, the four level
+  names, what counts as an answer, the scope and the pin are fixed in code: no roster text or
+  prompt file may reach them (`test/prompts.test.ts`, "a hostile prompt").
+- `src/check-cli.ts` is the standalone roster checker, not runtime code: `index.ts` never imports
+  it. It may take a path relative to the working directory and write to standard output. It and
+  everything it imports stay free of Pi's packages (`test/check.test.ts` walks its imports), so
+  that it runs without Pi and without credentials.
 - Signed commits only (`git commit -S`), one logical change each, with explicit paths staged.
   Never bypass hooks, and never stash, reset or rewrite published history.
 - Pushing, tagging and creating remotes need John's explicit authorization.

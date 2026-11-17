@@ -5,6 +5,155 @@ All notable changes to this fork are recorded here, in the form of
 the base is the latest upstream release merged into the fork's history, and `jw.<n>` counts the
 fork's releases on that base. Releases are signed tags; nothing is published to npm.
 
+## [1.4.0-jw.4] - 2026-11-17
+
+A scope's fallback chain, a roster checker, and Jev's prompts as files John edits. On 2026-11-17
+John specified the routing he wants ("smart-router/auto on personal should also use: astra, sol,
+terra, luna -- based on difficulty of the task -- and then when tokens run out there it should use
+OpenRouter GLM-5.3-Flash and Qwen3.8, with a final fallback to GLM-5.3-Flash on Hera, Qwen3.8 on
+Nyx with a fallback to Qwen3.8 on Hera. smart-router/local only uses those last three."), and asked
+that "these decisions about which models to use ... should be very easy to change and reconfigure",
+with Jev's instructions as "a set of prompts ... that is also very easy to modify".
+
+Upgrading from 1.4.0-jw.3: no roster change is needed, and a roster that uses none of the new
+fields parses to the same value, routes the same and sends Jev the same request, byte for byte.
+These are visible without a roster change:
+
+- `/smart-router status` has one more line, for the prompt sources, and lines for accounts that
+  are cooling and models that are held; the usage text names `check`.
+- A usage limit on one model of a subscription account now cools the account's other models with
+  it, for the time the error names when it names one.
+- A local model whose server cannot be reached gives way to the next one and is passed over for
+  five minutes while another can take the request; a retry that names a limit tries each
+  candidate once per run.
+- A run that ends unanswered on its account's limit shows a notice that says to send it again and
+  where it will go.
+- Jev's request is unchanged, byte for byte, unless a prompt is edited.
+
+A run's record may carry `fallback` or the Jev failure `prompt`, both only under the new fields.
+
+### Added
+
+- **`scopes.<scope>.fallback`**, a list of roles: the scope's fallback chain. On
+  `smart-router/auto`, outside the pin, a level tries its own models and then each chain role's
+  models, in the order written. One chain serves every level of its scope, and its roles are no
+  level's, so a model still sits in exactly one role.
+  - A level takes the chain before it passes its run up, so the run keeps its level: its record's
+    `tier` does not change, and the record carries `fallback` when a chain model answered.
+  - A chain model holds no level, and each new run starts from its level's first model, so a
+    session returns to the level's own model as soon as that can take requests again, as version
+    1's fallback role returned to its primary. A retry after a usage-limit or authentication error
+    goes on through the chain and never back to an earlier role or to the level.
+  - The chain is the declaring scope's alone. A personal chain takes no work-bound model, and a
+    work chain takes only work-bound Codex models, for which the built-in `openai-codex-3/*`
+    exclusion is lifted as for a work level. A work scope without the field behaves as before.
+  - A chain may name the local role, which is how `smart-router/auto` reaches the local models.
+    `smart-router/local` never uses a chain.
+  - A run planned onto a chain model shows a notice and `; fallback` in the footer; status lists
+    each scope's chain with its models' verdicts and says when the last request went to one; a
+    refusal names the chain's roles as fallbacks.
+- **A local server that cannot be reached gives way.** John's routing ends "Qwen3.8 on Nyx with a
+  fallback to Qwen3.8 on Hera", and a connection failure used to retry the same model. Now a
+  request to a local model (the roster's local providers on its local hosts) that fails before any
+  output because a connection to its server could not be made holds that model for
+  **`unreachableMinutes`**, a new roster field (1 to 60, default 5), and goes to the candidate
+  written after it that is not held, round its role once, then on along the scope's chain.
+  - A hold is a preference, never a refusal: when every candidate is held, a retry stays on the
+    model it has under Pi's backoff, a new run takes the first held model in the written order,
+    and an answer from a held model lifts its hold. With one local model, nothing changes.
+  - Unreachable: a refused or reset connection, a name that does not resolve, no route, a connect
+    timeout, the SDK's generic connection error, a failed TLS handshake or certificate
+    verification, a socket closed before an answer, or 502. Not: a request or read that timed out,
+    503, 504, 500, a stream cut off, a rate limit, "overloaded", any failure after output has
+    started, or a cloud model's connection failure. Those keep their model.
+  - Holds are apart from cooldowns and apply to local-role models too. `smart-router/local` and
+    the pin stay in the local role and its policy. Status shows `unreachable-until-HH:MM` and an
+    `Unreachable:` line. Five minutes, not less, so that a session does not flap between two
+    hosts, each move a cold prefill.
+- **A notice when a run ends on its account's limit.** Pi does not retry Codex's usage-limit text
+  or a spent credit, so the request that hits the limit fails. The router says so at that moment:
+  a run with nothing done is to be sent again, and the notice names where that goes; a run that
+  had already answered or run tools stopped partway, and is to be asked to continue, not sent
+  again; and when nothing else can take it, the notice says when the account is back. It does not
+  resend by itself: the hook Pi 1.5.2 offers for that, `agent_before_settle`, was built and
+  removed, because registering it stopped Pi's cache warming in the behaviour suite and makes Pi
+  rebuild a session's context at every run's end.
+- **`--no-owner-check`** for the standalone checker, for a build-time check of a roster in the Nix
+  store. The router itself never reads a file another user owns.
+- **`/smart-router check`** and the standalone **`node src/check-cli.ts <roster.json>`**: the
+  roster read back with the router's own parser. For each selection and scope, the models in the
+  order tried, the fallback chain, what the pin leaves, the local set, the source of each of Jev's
+  prompts and the account bindings; or the first error with its place. The standalone checker
+  imports nothing of Pi's and needs no session and no credentials; it exits 0, 1 or 2.
+- **Jev's prompts are editable.** `classifier.instructions` (inline) or
+  `classifier.instructionsFile` (a file's name) replaces the built-in question, and a level takes
+  `describeFile` in place of `describe`. Prompt files are plain text or Markdown in
+  `<agentDir>/smart-router/`, read with the roster's safe reader, refreshed with the roster, with
+  HTML comments left out of what is sent. Status shows each prompt's source.
+- README: "A fallback chain", with John's routing as the worked example and the note that a
+  fallback sends the conversation to another vendor and to LAN models; "Jev's prompts"; and
+  "Changing the routing", with the commonest edits as before and after, and "Checking a roster".
+
+### Changed
+
+- **A pinned session on `smart-router/auto`**, in a scope whose fallback chain names the local
+  role, now routes to the local role's models, in the role's order and inside the pin's policy. It
+  was refused, and still is in every other scope, with the text that names `smart-router/local`.
+  The chain's cloud roles are never used under the pin.
+- **A limit cools what it is about.** A usage limit, a quota, billing or a 401 is the account's: on
+  a subscription provider (`openai-codex`, `anthropic`, `github-copilot`, or a Multi-Pass alias) it
+  cools every model of that provider id, not only the one that failed, under version 1 rosters too.
+  Spent credit (402, "payment required", "insufficient credits"), which was not recognised at all,
+  cools every model of the provider id on any provider, so OpenRouter out of credit no longer
+  blocks the way to the local models. A 403 and a model that is not found cool the one model. A
+  limit that names its wait ("Try again in ~42 min", "2 hours 30 min") cools for that long, at
+  most a day; others for `cooldownMinutes`. The account is cooled only by an account error's own
+  words, or by 401 or 402 where the error text begins, not by a number or a word inside an
+  unrelated error. A provider id is one account, so the work and personal accounts never
+  cool each other. In a work session, a limit on one work model now refuses the other work levels
+  for that time, where a run stepped up to another model of the same exhausted account; the
+  refusal says when the account is tried again, and does not offer another work Codex model. Status shows one `Cooling:` line for an account.
+- **A retry that names a limit tries each candidate once per run.** Local-role models are never
+  cooled, and such a retry went back and forth between two of them.
+- **A session keeps its level on the chain, and returns from it.** A chain model stands for the
+  level the session's last planned run took, so a session at SUPER stays at SUPER through the
+  sticky window and resumes there. A run that starts without a prompt (a goal continuation, a
+  loop's) now goes back to that level's own model at its first request once the model is
+  available; it stayed on the chain model for as long as such runs kept starting. A resumed
+  session takes its level from its latest level record.
+- **A run keeps its level when no candidate fits** and every level would take the same chain
+  model; it was recorded at SUPER, stepped up.
+- **Jev's prompts are redacted** like the message, whatever their source, since a prompt file can
+  be a link to any file John owns. A prompt may hold no control character, and a placeholder's own
+  text is no longer repeated in the error.
+- `smart-router/auto` declares the smallest context window and output budget among the first
+  available model of every role it reaches, which now includes each fallback chain's roles.
+- A prompt file that cannot be used (missing, unsafe, empty, too long, an unclosed comment, a
+  `{{placeholder}}` or a `TODO` line) stops no route: Jev is not asked in the scopes that need it,
+  the keywords decide, and the record and footer say `jev prompt`.
+- AGENTS.md: the runtime reads the prompt files too, a prompt reaches nothing but Jev, and
+  `src/check-cli.ts` is not runtime code.
+- The package version is `1.4.0-jw.4`.
+
+### Unchanged
+
+- An invalid, missing or unsafe roster still makes both models refuse every request, with no last
+  valid copy kept in use: such a copy would keep sending to a model or account an edit had just
+  removed. The checker is the remedy.
+- `smart-router/local` routes only to the local role, in the role's order, never to a cloud model,
+  in every scope, pinned or not.
+- A work session on `smart-router/auto` reaches only the work-bound Codex account. No chain can
+  name a personal-account, OpenRouter or local model for it.
+- Jev is asked once per routed run, never under the pin, on `smart-router/local`, for a steer or a
+  follow-up. Its request has one question whose choices are exactly the four levels; no prompt can
+  add a label, name a model, change the scope or lift the pin.
+- A model picked by hand is never changed, reverted, refused or locked.
+- Local-role models are never cooled. A cloud model's connection failure, a timeout, and a failure
+  after output has started still retry the same model.
+- A rate limit (429, "too many requests") still cools nothing, holds nothing and triggers no
+  fallback: Pi retries the same model, and the next run goes to the same model.
+- Cooldowns and holds are kept per router instance, that is per session, in memory.
+
 ## [1.4.0-jw.3] - 2026-11-17
 
 `smart-router/local` routes in a session whose scope cannot be read, without the pin. On 2026-11-17

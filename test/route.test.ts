@@ -377,12 +377,15 @@ describe("session state", () => {
     const SEED = { type: "message", messageRole: "assistant", limit: 16 };
     const PIN = { customType: "smart-router.pin", scope: "all" };
     const SCOPE = { customType: "smart-router.scope", scope: "all" };
+    // The level a resumed session held: its latest level record, one bounded read of the branch.
+    const LEVEL = { customType: "smart-router.level", scope: "active" };
     const reads = loaded.session.boundedReads;
     assert.equal(reads.filter((read) => isDeepStrictEqual(read, SEED)).length, 1, "one read of the branch: the seed's");
+    assert.equal(reads.filter((read) => isDeepStrictEqual(read, LEVEL)).length, 1, "and one of its latest level record");
     assert.ok(reads.some((read) => isDeepStrictEqual(read, PIN)), "session_start reads the pin");
     assert.ok(reads.some((read) => isDeepStrictEqual(read, SCOPE)), "and the scope");
     for (const read of reads) {
-      assert.ok([SEED, PIN, SCOPE].some((allowed) => isDeepStrictEqual(read, allowed)), `${JSON.stringify(read)}: every other read is the pin's or the scope's, over the whole session`);
+      assert.ok([SEED, LEVEL, PIN, SCOPE].some((allowed) => isDeepStrictEqual(read, allowed)), `${JSON.stringify(read)}: every other read is the pin's or the scope's, over the whole session`);
     }
     assert.equal(loaded.session.wholeHistoryReads, 0);
   });

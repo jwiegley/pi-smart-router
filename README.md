@@ -6,7 +6,7 @@ physical model chosen from a roster you keep on each host.
 This is John Wiegley's fork of [beettlle/pi-smart-router](https://github.com/beettlle/pi-smart-router),
 rewritten for the virtual models of Pi 1.5. It keeps upstream's deterministic prompt classifier and
 nothing else; [CHANGELOG.md](CHANGELOG.md) lists what was removed and why. The port started from
-upstream v1.3.0 (`f31b2304`). Version `1.4.0-jw.3` has upstream v1.4.0 (`54bee53d`) in its history
+upstream v1.3.0 (`f31b2304`). Version `1.4.0-jw.4` has upstream v1.4.0 (`54bee53d`) in its history
 through a merge that keeps the port's tree, as an earlier one recorded upstream main at `58e87b59`:
 everything upstream changed between v1.3.0 and v1.4.0 is in files the port had removed or
 replaced, so none of it is in this code. It is not published to npm.
@@ -32,7 +32,13 @@ answered, and Pi's footer shows it.
   through Pi; otherwise the keywords do. In a work session `smart-router/auto` routes only to the
   work Codex account, apart from Jev's request; a model picked by hand and extensions with models
   of their own are outside it ([What work scope does not cover](#what-work-scope-does-not-cover)).
-  See [Levels](#levels), [Jev](#jev) and [Scope](#scope-personal-or-work).
+  A scope may declare a fallback chain: models that take a run, in a fixed order, when its level's
+  own models cannot. See [Levels](#levels), [A fallback chain](#a-fallback-chain), [Jev](#jev) and
+  [Scope](#scope-personal-or-work).
+- **Easy to change, cheap to get wrong.** Which model serves which level, the fallback chain, the
+  local set and the texts Jev reads are each one edit in one place, a running session picks the
+  edit up at its next prompt, and `/smart-router check` or `node src/check-cli.ts` reads the result
+  back before anything is sent. See [Changing the routing](#changing-the-routing).
 - **`smart-router/local`** routes only to the roster's local role, and never falls back to anything
   else. If no local model can take the request, it is refused. It does so in personal scope, in
   work scope and in a session whose scope cannot be read alike, pinned or not: selecting it is the
@@ -55,8 +61,9 @@ smart-router/local, for a steer or follow-up, or without a classifier.
 
 It also starts no process, writes no file of its own and keeps no prompt text; its session entries
 (the pin's, the scope's and the level records) are written by Pi, into the session. It reads
-two files, both under Pi's agent directory: the roster, and Multi-Pass's subscription labels when
-the roster binds a Multi-Pass account. It reads no file relative to the working directory or a
+only files under Pi's agent directory: the roster, Multi-Pass's subscription labels when the
+roster binds a Multi-Pass account, and the prompt files the roster names in `smart-router/`
+([Jev's prompts](#jevs-prompts)). It reads no file relative to the working directory or a
 project; it only compares the working directory, as text, with the roster's work directories. The
 one project-influenced value it uses is the compaction reserve in Pi's settings, which Pi merges
 with a project's `.pi/settings.json`; it only affects whether stickiness may move a run down to a
@@ -109,8 +116,13 @@ The roster is one JSON file per host, at `<agentDir>/smart-router.json`, which i
   fixed, with one notice per session start. There is no last-known-good copy, so a typo cannot keep
   routing to a model you just removed. Only the scope keeps something of the last valid roster: its
   work directories, so that a broken edit cannot move a work session to personal scope.
-- **It reloads** at session start, at each idle prompt when the file changed, and on
-  `/smart-router reload`.
+- **Check before you rely on it.** `/smart-router check` in a session, or
+  `node src/check-cli.ts <roster.json>` anywhere, reads the roster back: what each selection and
+  scope routes to, in order, or the first error and its place. See
+  [Checking a roster](#checking-a-roster).
+- **It reloads without a restart:** at session start, at each idle prompt when the file changed,
+  and on `/smart-router status`, `check`, `scope` and `reload`. A running session routes its next
+  prompt by the roster as it is then; the run under way keeps the model it has.
 - **Two schema versions.** Version 1, below, routes by a routing table. Version 2 routes by four
   levels in each scope; see [Roster version 2](#roster-version-2-levels-and-scopes).
 
@@ -209,7 +221,8 @@ session that fell back to coder returns to sol at its next complex run once sol 
 | `accounts` | for subscription providers | A binding for every subscription provider a role uses. See below. |
 | `local` | no | `role` (the local role), `providers` (every provider of the local role, and nothing qualifies as local unless it is listed) and `hosts` (base-URL host names). Without it, `smart-router/local` and the pin always refuse. |
 | `stickyIdleMinutes` | no | 0 to 1440, default 5. How long a session must be idle before a run may move down the ladder. |
-| `cooldownMinutes` | no | 1 to 1440, default 30. How long a usage-limit or authentication error takes a model out of routing. |
+| `cooldownMinutes` | no | 1 to 1440, default 30. How long a usage-limit or authentication error takes a model out of routing, and with it every model of the same subscription account. |
+| `unreachableMinutes` | no | 1 to 60, default 5. How long a local model whose server could not be reached is passed over while another model can take the request. |
 
 A ref splits at its first `/`: `openrouter/deepseek/deepseek-v4.1-flash-1017` is provider `openrouter`,
 model `deepseek/deepseek-v4.1-flash-1017`. Every ref is compared whole, so
@@ -340,17 +353,169 @@ A work machine's roster has only the work roles, on its native `openai-codex` lo
 Without a `classifier` section, the keywords decide every level; with one, Jev's request goes
 through whatever OpenRouter account Pi has on that machine.
 
+### A fallback chain
+
+A scope may say what takes a run when its level's own models cannot: `"fallback"`, a list of roles
+in the order to try them. This roster is John's routing of 2026-11-17 for Hera: on a personal
+session `smart-router/auto` uses astra, sol, terra or luna by difficulty; when the Codex account
+has no tokens left, OpenRouter's GLM-5.3-Flash and then its Qwen3.8; then GLM-5.3-Flash on Hera,
+Qwen3.8 on Nyx and Qwen3.8 on Hera. `smart-router/local` uses only those last three. A work
+session uses only the work account.
+
+```json
+{
+  "version": 2,
+  "$comment": "Hera, version 2, with John's routing of 2026-11-17. Personal levels take one Codex model each, on openai-codex-2 (John's personal ChatGPT account, labelled 'personal' in Multi-Pass). When a level's model cannot take a request, every level falls back along one chain: OpenRouter's GLM and Qwen, then the local models. Work levels take only openai-codex-3, the work account, and declare no fallback. Plain openai-codex is excluded here because Hera reserves it for the work account.",
+  "exclude": ["openai-codex/*"],
+  "roles": [
+    { "name": "local", "$comment": "smart-router/local and the pin, in this order; also the end of the personal fallback chain. Nyx's ref is a Nix-store basename that changes whenever its model is rebuilt", "models": ["omlx-hera/GLM-5.3-Flash-oQ4e-mtp", "nyx/g3mjym7raqj6147biq46zxym32gyda9g-Qwen3.8-27B-exl3-6fe61ad", "omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp"], "thinking": "max" },
+    { "name": "openrouter", "$comment": "the start of the personal fallback chain: another vendor, on another quota", "models": ["openrouter/z-ai/glm-5.3-flash", "openrouter/qwen/qwen3.8-27b"] },
+    { "name": "low", "models": ["openai-codex-2/gpt-6-luna"] },
+    { "name": "medium", "models": ["openai-codex-2/gpt-6.1-terra"] },
+    { "name": "high", "models": ["openai-codex-2/gpt-6.1-sol"] },
+    { "name": "super", "models": ["openai-codex-2/gpt-6-astra"] },
+    { "name": "work-low", "models": ["openai-codex-3/gpt-6-luna"] },
+    { "name": "work-medium", "models": ["openai-codex-3/gpt-6.1-terra"] },
+    { "name": "work-high", "models": ["openai-codex-3/gpt-6.1-sol"] },
+    { "name": "work-super", "models": ["openai-codex-3/gpt-6-astra"] }
+  ],
+  "scopes": {
+    "personal": {
+      "levels": {
+        "low": { "role": "low", "describe": "Mechanical or trivial work that follows a clear specification" },
+        "medium": { "role": "medium", "describe": "Engineering, implementation and validation" },
+        "high": { "role": "high", "describe": "Deep thought, review, and the design of verification" },
+        "super": { "role": "super", "describe": "Deep thought, research, design and planning" }
+      },
+      "fallback": ["openrouter", "local"]
+    },
+    "work": {
+      "levels": {
+        "low": { "role": "work-low", "describe": "Mechanical or trivial work that follows a clear specification" },
+        "medium": { "role": "work-medium", "describe": "Engineering, implementation and validation" },
+        "high": { "role": "work-high", "describe": "Deep thought, review, and the design of verification" },
+        "super": { "role": "work-super", "describe": "Deep thought, research, design and planning" }
+      },
+      "directories": ["/Users/johnw/src/positron"]
+    }
+  },
+  "accounts": {
+    "openai-codex-2": { "multiPassLabel": "personal" },
+    "openai-codex-3": { "multiPassLabel": "Positron work", "scope": "work", "$comment": "the label Multi-Pass stores for openai-codex-3, which must name work or Positron" }
+  },
+  "classifier": { "model": "openrouter/typesafe/jev-1.14", "timeoutMs": 1000, "closeCall": 0.15, "context": { "messages": 6, "messageChars": 1500, "totalChars": 12000 } },
+  "local": { "role": "local", "providers": ["omlx-hera", "nyx"], "hosts": ["hera.lan", "nyx.lan"] }
+}
+```
+
+`node src/check-cli.ts` reads it back as:
+
+```text
+smart-router/auto in personal scope: a tag, else Jev (openrouter/typesafe/jev-1.14), else the keywords, pick the level; each level tries its own models in order:
+  LOW    openai-codex-2/gpt-6-luna  (role low)
+  MEDIUM openai-codex-2/gpt-6.1-terra  (role medium)
+  HIGH   openai-codex-2/gpt-6.1-sol  (role high)
+  SUPER  openai-codex-2/gpt-6-astra  (role super)
+  then, for every level, when its own models cannot take a request, the fallback chain in this order:
+    1. openrouter/z-ai/glm-5.3-flash  (role openrouter)
+    2. openrouter/qwen/qwen3.8-27b  (role openrouter)
+    3. omlx-hera/GLM-5.3-Flash-oQ4e-mtp  (role local, thinking max)
+    4. nyx/g3mjym7raqj6147biq46zxym32gyda9g-Qwen3.8-27B-exl3-6fe61ad  (role local, thinking max)
+    5. omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp  (role local, thinking max)
+  under the pin: only the local role local, in its own order (below)
+```
+
+How the chain works:
+
+- **A level's own models come first, always.** The chain is tried only when none of them can take
+  the request: not in the catalog, not available, no credentials, a refused account binding, or
+  cooling down after a usage-limit or authentication error.
+- **The order is the order written:** each role of the list in turn, and within a role its models
+  in turn. A model that cannot take the request is passed over by the same checks as any other.
+- **One chain serves every level of its scope.** A run keeps its level while any chain model can
+  take it: the level takes the chain before it passes the run up, so a LOW run that falls back is
+  still recorded as LOW, with `fallback` in its record. Only when the chain's models are too small
+  for the conversation, or none can take the request, does the run step up
+  ([Levels](#levels)).
+- **The first request that hits a usage limit fails.** Pi retries some errors and asks the router
+  where the retry goes; it does not retry Codex's "You have hit your ChatGPT usage limit (plus
+  plan). Try again in ~N min.", nor a spent credit. So that one run ends unanswered. The router
+  says so at that moment and tells you what to do: "gpt-6-luna could not take this run (the
+  account openai-codex-2 is out of use until 14:42), and nothing was answered. Send the request
+  again: it goes to the fallback openrouter (z-ai/glm-5.3-flash)." Send it again, and it does.
+  A run that had already answered or run tools before the limit is told otherwise: "it stopped
+  partway. What it did so far stands: do not send the request again. To go on, say: continue. It
+  goes on with the fallback openrouter (…)." When nothing else can take the request, the notice
+  says when the account is back; in a work session it does not offer another work Codex model,
+  which is on the same account, and says that another model picked by hand is sent as it is.
+  That failed run is the whole cost of a cooldown window: the account cools as one, for the time
+  the error names, so every level's next run goes straight to the chain.
+  The router does not send the request again itself. Pi 1.5.2 has a hook that could
+  (`agent_before_settle`), and it was built and removed: in Pi's own runtime, merely registering
+  it stopped the cache warming Pi wanted, and it makes Pi rebuild a session's context at the end
+  of every run.
+- **The session returns to the level's own model** as soon as it can take requests again: each new
+  run starts from its level's first model, and so does the first request of a run that starts
+  without a prompt, such as a goal continuation or a loop's, in a resumed session too, which
+  takes its level from its latest level record. A run under way stays on the model it has. A cooled account is tried again when its time is up; if it is still out of tokens, that one
+  request fails and the account cools again.
+- **The session keeps its level meanwhile.** A chain model stands for the level the session held:
+  a session at SUPER whose account ran out stays at SUPER for a trivial follow-up inside the
+  sticky window, as it would on astra, and is at SUPER when astra returns.
+- **A retry never goes back.** When a chain model itself fails with a limit, or a local one cannot
+  be reached, the retry takes another model of the same role, then the roles after it in the chain,
+  never an earlier role and never the level's own, and no model twice in one run.
+- **A chain belongs to the scope that declares it.** Here the work scope declares none, so a work
+  session behaves exactly as before: its levels' own work-account models, a step up, or a refusal.
+- **Validation keeps each scope's account rules.** No role of a chain is a level's role, in either
+  scope, and no role is in two chains. A personal chain takes no model of a work-bound provider. A
+  work chain takes only work-bound Codex models: no OpenRouter, local or personal-account model can
+  be named there. A model still sits in exactly one role, so a chain cannot repeat a level's model.
+- **The local role may end a chain.** That is the one way `smart-router/auto` reaches the local
+  models. Under the pin, `smart-router/auto` in that scope then routes to the local role, in the
+  role's own order and inside the pin's policy, and the chain's cloud roles are not used.
+  `smart-router/local` never uses a chain: it routes to the local role alone, as before.
+- **It says so.** A run planned onto a chain model shows a notice, "no LOW model can take this
+  run, so it goes to the fallback openrouter (z-ai/glm-5.3-flash)"; a run under way that moves
+  onto one says "gpt-6-astra can no longer take this run, so it goes on with the fallback
+  openrouter (z-ai/glm-5.3-flash)"; and the footer marks it:
+  `personal LOW → z-ai/glm-5.3-flash (jev 80%; fallback)`. `/smart-router status` lists each
+  scope's chain with every model's verdict, and says when the last request went to one.
+
+> **A fallback sends the conversation somewhere else.** When the chain takes a run, the whole
+> conversation so far, not only the new message, goes to that role's vendor: here to OpenRouter and
+> the provider behind the model, under their retention terms, and then to the LAN models on Hera
+> and Nyx. Delete the `fallback` line, or the roles you do not want, to be refused or stepped up
+> instead. A work scope's chain can only name the work account, so work conversations cannot reach
+> a personal account, OpenRouter or a LAN model through one.
+
+Three things to know:
+
+- **A local server that is down gives way.** When Nyx cannot be reached, the request goes to
+  Hera's Qwen, and Nyx is passed over for `unreachableMinutes`, 5 by default
+  ([Routing in detail](#routing-in-detail)). A hold is a preference: when Hera's Qwen cannot take
+  the request either, Nyx is tried again rather than the request refused. A server that accepts
+  the connection and then answers slowly or not at all is not passed over: a timeout, a 503 while
+  a model loads and a 504 retry the same model.
+- **The whole Codex account cools together.** The four personal levels share one ChatGPT account,
+  so a usage limit on any of them sends every level to the chain until the account's time is up.
+  In work scope, which has no chain, a limit on one work model refuses the other work levels for
+  that time; the refusal says when the account is tried again, and that another model picked by
+  hand is sent as it is.
+- **The local role has one `thinking` setting**, so the three local models share it.
+
 ### Fields in version 2
 
 | Field | Required | Meaning |
 |---|---|---|
 | `version` | yes | Exactly `2`. |
-| `$comment`, `exclude`, `roles`, `accounts`, `local`, `stickyIdleMinutes`, `cooldownMinutes` | as in version 1 | As in [version 1](#fields), with the rules below. There is no `routing`: the levels replace it, and version 2 declares no fallbacks. |
+| `$comment`, `exclude`, `roles`, `accounts`, `local`, `stickyIdleMinutes`, `cooldownMinutes`, `unreachableMinutes` | as in version 1 | As in [version 1](#fields), with the rules below. There is no `routing`: the levels replace it, and a scope's `fallback` replaces `routing.fallback`. |
 | `scopes` | yes | `personal`, `work` or both. `smart-router/auto` refuses a session in a scope the roster does not have. |
-| `scopes.<scope>.levels` | yes | `low`, `medium`, `high` and `super`, each `{ "role": "<role>", "describe": "<text>" }`: the role the level's runs go to, and the description Jev reads, a non-empty text of at most 2000 characters. No role serves two levels, in one scope or across both, the local role serves none, and a scope's level roles rank up the ladder from low to super. |
+| `scopes.<scope>.levels` | yes | `low`, `medium`, `high` and `super`, each `{ "role": "<role>", "describe": "<text>" }`: the role the level's runs go to, and the description Jev reads, a non-empty text of at most 2000 characters. `"describeFile": "<name>"` in place of `describe` takes the text from a prompt file ([Jev's prompts](#jevs-prompts)); a level gives exactly one of the two. No role serves two levels, in one scope or across both, the local role serves none, and a scope's level roles rank up the ladder from low to super. |
+| `scopes.<scope>.fallback` | no | Role names, in the order to try them after any level's own models ([A fallback chain](#a-fallback-chain)): not empty, none twice, none a level's role in either scope, none in both scopes' chains. The local role may be one. A personal chain takes no work-bound model; a work chain takes only work-bound Codex models. Without the field, the scope has no fallback. |
 | `scopes.work.directories` | no | Absolute paths whose sessions are in work scope ([Scope](#scope-personal-or-work)), written plainly: no trailing `/`, no empty, `.` or `..` segment, and not `/` itself. |
 | `accounts.<provider>.scope` | no | `"personal"`, the default, or `"work"`. |
-| `classifier` | no | Jev's settings; without them, Jev is never asked. `model`, an exact ref, default `openrouter/typesafe/jev-1.14`; `timeoutMs`, 100 to 1000, default 1000; `closeCall`, 0 to 0.5, default 0.15; and `context`: `messages`, 0 to 20, default 6; `messageChars`, 200 to 8000, default 1500; `totalChars`, 1000 to 32000, default 12000. The model names a Jev version, so that a tuned `closeCall` keeps its meaning; moving to a newer Jev is a roster edit. |
+| `classifier` | no | Jev's settings; without them, Jev is never asked. `model`, an exact ref, default `openrouter/typesafe/jev-1.14`; `timeoutMs`, 100 to 1000, default 1000; `closeCall`, 0 to 0.5, default 0.15; and `context`: `messages`, 0 to 20, default 6; `messageChars`, 200 to 8000, default 1500; `totalChars`, 1000 to 32000, default 12000. The model names a Jev version, so that a tuned `closeCall` keeps its meaning; moving to a newer Jev is a roster edit. `instructions`, the question Jev is asked, as a text of at most 4000 characters, or `instructionsFile`, the name of a prompt file that holds it; not both, and with neither the built-in question is asked ([Jev's prompts](#jevs-prompts)). |
 
 ### Account bindings in version 2
 
@@ -360,16 +525,126 @@ through whatever OpenRouter account Pi has on that machine.
   Multi-Pass alias it must still match the label Multi-Pass stores. Each binding serves only its
   own scope's sessions: a personal session refuses a work binding, and a work session refuses a
   personal one.
-- **Levels and accounts.** Validation refuses a model of a work-bound provider in a personal level,
-  and anything but a work-bound Codex model in a work level: no OpenRouter, local or
-  personal-account model.
+- **Levels, chains and accounts.** Validation refuses a model of a work-bound provider in a personal
+  level or a personal fallback chain, and anything but a work-bound Codex model in a work level or a
+  work chain: no OpenRouter, local or personal-account model.
 - **The built-in `openai-codex-3/*` exclusion** holds in personal scope only. A work-scope session
-  lifts it for a work level's model whose provider is bound as work. The roster's own exclusions
+  lifts it for a model of a work level or a work chain whose provider is bound as work. The roster's own exclusions
   are never lifted.
 - **The classifier's model** must match no exclusion, built-in or the roster's own, and none is
   lifted for it, because Jev reads text from both scopes. So a roster with a classifier must not
   exclude `openrouter/*`. It needs no such exclusion: work levels hold only work-bound Codex models.
   An exclusion binds the router's routes only: a model picked by hand is sent as it is.
+
+## Changing the routing
+
+Every decision has one place in the roster, `~/.config/pi/agent/smart-router.json`. Edit it, run
+the check, and the next prompt of every running session uses it: no restart, no rebuild.
+
+| To change | Edit |
+|---|---|
+| The model a level uses | The `models` of that level's role in `roles`. `scopes.<scope>.levels.<level>.role` names the role; the first model listed is the one used, the rest are tried after it. |
+| What takes over when a level's model cannot | `scopes.<scope>.fallback`: the roles, in order. Each role's own `models` order is the order inside it. |
+| The local set, for `smart-router/local` and the pin | The `models` of the local role, in order. A new server also needs its provider in `local.providers` and its host in `local.hosts`. |
+| A work session's models | The `work-*` roles, which take only the work Codex account. |
+| What a level means to Jev | That level's `describe`, or the file its `describeFile` names. |
+| How Jev judges a message | `classifier.instructions`, or the file `classifier.instructionsFile` names. |
+| How readily a close call goes to the higher level | `classifier.closeCall`. |
+| How long an exhausted account is left alone | `cooldownMinutes` (30). |
+| How long a local server that could not be reached is passed over | `unreachableMinutes` (5). |
+
+Roles are named, rather than a level listing its models inline, because the role is what a model
+has exactly one of: it gives the model its `thinking`, its place on the ladder, its line in
+`status`, and, for the local role, its membership of the pin's policy. A level and
+a fallback chain only point at roles, so swapping a model is still one edit, in `roles`.
+
+**Swap a level's model.** Move HIGH to a newer sol:
+
+```diff
+-    { "name": "high", "models": ["openai-codex-2/gpt-6.1-sol"] },
++    { "name": "high", "models": ["openai-codex-2/gpt-6.2-sol"] },
+```
+
+**Add a fallback, or reorder the chain.** Put Kimi ahead of the others, and try the local models
+before OpenRouter:
+
+```diff
+-    { "name": "openrouter", "models": ["openrouter/z-ai/glm-5.3-flash", "openrouter/qwen/qwen3.8-27b"] },
++    { "name": "openrouter", "models": ["openrouter/moonshotai/kimi-k3.1-pro", "openrouter/z-ai/glm-5.3-flash", "openrouter/qwen/qwen3.8-27b"] },
+```
+
+```diff
+-      "fallback": ["openrouter", "local"]
++      "fallback": ["local", "openrouter"]
+```
+
+With `local` first, OpenRouter is reached only when no local model can take the request: a
+local-role model is never cooled, so it is passed over only while Pi does not offer it, and a
+held one is tried again when nothing else is left. Deleting the `fallback` line removes the
+chain; deleting `"local"` from it keeps `smart-router/auto` off the LAN models.
+
+**Change the local set.** Drop Nyx, and prefer Hera's Qwen to its GLM:
+
+```diff
+-    { "name": "local", "models": ["omlx-hera/GLM-5.3-Flash-oQ4e-mtp", "nyx/g3mjym7raqj6147biq46zxym32gyda9g-Qwen3.8-27B-exl3-6fe61ad", "omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp"], "thinking": "max" },
++    { "name": "local", "models": ["omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp", "omlx-hera/GLM-5.3-Flash-oQ4e-mtp"], "thinking": "max" },
+```
+
+The same edit changes the end of any chain that names `local`. A session pinned earlier keeps the
+local set it was pinned with until `/smart-router local on` is run again.
+
+**Sharpen a level's description.** In the roster:
+
+```diff
+-        "high": { "role": "high", "describe": "Deep thought, review, and the design of verification" },
++        "high": { "role": "high", "describe": "Code review, debugging that crosses modules, concurrency, and designing tests or proofs" },
+```
+
+or, once the level names a file (`"describeFile": "personal-high.md"`), by editing
+`~/.config/pi/agent/smart-router/personal-high.md` alone ([Jev's prompts](#jevs-prompts)).
+
+A model belongs to one role. To use a model in two places, that is what a fallback chain is for;
+listing it in two roles is the error `"<model>" is already in role "<role>"`.
+
+### Checking a roster
+
+```sh
+node /path/to/pi-smart-router/src/check-cli.ts ~/.config/pi/agent/smart-router.json
+```
+
+or `/smart-router check` in a session. Both use the router's own parser. A valid roster is read
+back in plain language: for `smart-router/auto` in each scope, each level's models, the fallback
+chain in order and what the pin leaves; for `smart-router/local`, the local models in order; where
+each of Jev's prompts comes from; and the account bindings. An invalid one gives the first error
+with its place, such as
+`INVALID: roles[3].models[1]: "omlx-hera/GLM-5.3-Flash-oQ4e-mtp" is already in role "local"`.
+
+- **The standalone checker needs no Pi, no session and no credentials,** and sends nothing. It
+  reads the file it is given, with the owner and mode checks the router applies, and that roster's
+  prompt files from the `smart-router/` directory beside it, so check a candidate roster where its
+  prompt files are. Exit status: 0 valid, 1 a roster the router would refuse or a prompt it could
+  not use, 2 a wrong invocation.
+- **It runs from the installed package.** It needs Node 22.19 or later, the package's own floor,
+  and a path that is not under a `node_modules` directory, where Node does not run TypeScript.
+  nix-config installs the package under `share/pi-packages/pi-smart-router/`, which is not, so
+  `node <that>/src/check-cli.ts` checks with the installed version's own parser. No built
+  JavaScript copy is shipped: it would be a second parser to keep equal to the first.
+- **A roster in the Nix store** is root's, and the checker reports it as the router would:
+  `UNSAFE: … is owned by uid 0`. For a build-time check, pass `--no-owner-check` before the path.
+  The flag is the checker's alone, the report says the owner was not checked, and a file others
+  can write is still unsafe. The router itself always requires a file you own.
+- **It reads the roster, not the host.** Whether Pi's catalog on a host lists a model, and whether
+  it has credentials, is for `/smart-router status` there: a model Pi does not list is passed over
+  at run time as `not-in-catalog`.
+- **An invalid roster still makes both models refuse everything.** That is deliberate: a last
+  valid copy kept in use would keep sending to a model or an account the edit had just removed.
+  The check is the remedy: run it before relying on an edit.
+
+**One roster per host.** The hosts differ in more than names: on Hera, `openai-codex-2` is the
+personal account and plain `openai-codex` is the work one, while on the others plain `openai-codex`
+is the personal one, so one text for all would bind the wrong account somewhere; and the Nyx ref
+changes per rebuild. Keep the per-host files, and keep their `scopes`, `fallback` and prompt files
+alike.
 
 ## Routing in detail
 
@@ -416,9 +691,81 @@ These are version 1's rules. Version 2 keeps them, comparing levels rather than 
   content-filter or moderation refusal never cools a model and never triggers a fallback, so refused
   content is not sent to another vendor. Local-role models are never cooled, so an oMLX restart does
   not cost 30 minutes of refusals.
-- **Retries.** When Pi retries a failed request, a usage-limit or authentication failure moves to the
-  role's next model and then its fallback; any other failure, rate limits and context overflows
-  included, retries the same model, because Pi has already backed off or compacted.
+- **Whose limit it is.** A limit-kind error is one of three things, and cools accordingly:
+  - *The account's:* a usage limit, a quota, billing, or a credential that was not accepted (401).
+    On a subscription provider (`openai-codex`, `anthropic`, `github-copilot`, or a Multi-Pass
+    alias such as `openai-codex-2`) it cools every model of that provider id at once, since they
+    share one account and one credential. So when luna runs out of tokens, the next run of any
+    level goes straight to the fallback chain without first failing on terra, sol or astra. On any
+    other provider it cools the one model: the text cannot tell an account-wide limit from a limit
+    on one model, and OpenRouter has both.
+  - *The account's money:* spent credit (402, "payment required", "insufficient credits",
+    "requires more credits"). It cools every model of the provider id, whatever the provider:
+    credit is the account's by its nature. With Codex cooled and OpenRouter out of credit, the
+    chain goes on to the local models.
+  - *The model's own:* a model that is not found, and a 403, which providers also give for one
+    model an account may not use. It cools that model alone.
+
+  A provider id is one account: the work account's cooldown never touches the personal account's
+  models, nor the other way round. `/smart-router status` shows one `Cooling:` line for an
+  account, however many of its models wait. Whether an error is the account's is decided by an
+  account error's own words ("usage limit", "insufficient_quota", "quota exceeded", "billing
+  details", "unauthorized", "authentication_error") or by 401 or 402 where the error text
+  begins, so a number or a word inside an unrelated error, such as a tool result quoted back,
+  cools no account. A model picked by hand that fails with such an error cools its account for
+  the router's own picks too: the account is out of use whoever asked.
+- **How long.** A limit that names its wait ("Try again in ~42 min", "2 hours 30 min") cools for
+  that long, at least a minute and at most a day; any other cools for `cooldownMinutes`. When the
+  time is up, the first run tries its level's own model again.
+- **A rate limit moves nothing.** A 429, "rate limit" or "too many requests" is a throttle, not
+  an account out of tokens: Pi backs off and retries the same model, and the router lets it. It
+  cools nothing, holds nothing and triggers no fallback, so a run that ends on one leaves the next
+  run on the same model. (A 429 whose text is a usage limit or a quota is the account's, above.)
+- **A local server that cannot be reached is passed over.** When a request to a local model (one
+  of `local.providers` on one of `local.hosts`) fails before any output because a connection to
+  its server could not be made, the model is held for `unreachableMinutes`, and the retry goes to
+  the model written after it that is not held, round its role once, and then on along the
+  fallback chain. The runs that follow pass a held model over in the same way. This applies to
+  local-role models too, which are never cooled. It never leaves what the selection may use:
+  `smart-router/local` and the pin stay in the local role and its policy. `status` shows a held
+  model as `unreachable-until-HH:MM`, with an `Unreachable:` line.
+  - *A hold is a preference, never a refusal.* When every candidate that could take the request
+    is held, the hold gives way: a retry stays on the model it has, under Pi's backoff, as it
+    always did, so a server that is restarting is ridden out; a new run takes the first held
+    model in the written order. With one local model, a blip changes nothing. An answer from a
+    held model lifts its hold at once.
+  - *Unreachable* means the connection could not be made: refused or reset (`ECONNREFUSED`,
+    `ECONNRESET`, "reset before headers"); the name did not resolve (`ENOTFOUND`, `EAI_AGAIN`,
+    `getaddrinfo`); no route (`EHOSTUNREACH`, `ENETUNREACH`, `EHOSTDOWN`); the connect timed out
+    (`connect ETIMEDOUT`, `UND_ERR_CONNECT_TIMEOUT`, "connect timeout"); the SDK's "connection
+    error", "network error" or "fetch failed", "socket hang up", "other side closed", a closed
+    socket; a TLS handshake or certificate verification that failed (unable to verify, self-signed,
+    expired, name mismatch); or 502, "bad gateway".
+  - *Not unreachable,* because the server may be there and slow, loading or busy: a request or a
+    read that timed out (a bare `ETIMEDOUT`, "timed out", 504, "gateway time-out"), 503 and
+    "service unavailable", 500, a stream cut off, a rate limit, "overloaded", and a text that
+    merely mentions a certificate. Those retry the same model. Hera's models answer behind HTTPS,
+    where a long cold prefill can trip the proxy's timeout; that must not move a session to Nyx
+    and back.
+  - *Not after output has started.* A failure of a response that already carries text, thinking or
+    a tool call retries the same model, as every such failure always has; a half-answered request
+    is never sent on to another model.
+  - *Not for cloud models.* A cloud model's connection failure, the SDK's generic "Connection
+    error." included, retries the same model under Pi's backoff, so a network blip does not send
+    the conversation to another vendor.
+  - *Five minutes by default.* A server that is restarting or loading a model takes minutes, and
+    a session that moved to the other host has paid a cold prefill there, so moving back at once,
+    and again at the next hiccup, would pay it twice more. Five minutes bounds that to one move
+    each way per outage, and puts the preferred server back in use soon after it returns.
+- **Cooldowns and holds are per session.** Each router instance keeps its own, in memory: another
+  session finds an exhausted account or a dead server out for itself, with one failed request,
+  and a restarted session starts with none.
+- **Retries.** When Pi retries a failed request, a limit-kind failure moves to the role's next model
+  and then its fallback, skipping every model that failed with a limit earlier in the same run, so
+  a run tries each candidate once; a local server that could not be reached gives way as above; any
+  other failure, rate limits and context overflows included, retries the same model, because Pi has
+  already backed off or compacted. Pi does not retry every error: see
+  [A fallback chain](#a-fallback-chain) for what a usage limit costs.
 - **Compaction and other summaries** go to the model that answered last when it may take them, so
   the transcript does not go to a new vendor; otherwise to the default role (under version 2, the
   session's scope's medium level), or to the local role under `smart-router/local` and the pin.
@@ -428,7 +775,8 @@ These are version 1's rules. Version 2 keeps them, comparing levels rather than 
 - **Declared limits.** Pi and other extensions read a virtual model's context window and output
   budget before the first response. At every session start the router registers both models again:
   auto with the smallest window and output budget among the first available model of each role it
-  can reach (under version 2, every level's role in both scopes, each resolved in its own scope),
+  can reach (under version 2, every level's role and every fallback chain's role in both scopes,
+  each resolved in its own scope),
   local with its first available local model's. Before that, both declare 128,000 and 16,384.
 
 The router also tells pi-cache-optimizer, through its `pi.routing.registry.v1` registry, which
@@ -471,18 +819,23 @@ Then the level goes through version 1's rules, comparing levels:
   until the session has been idle for `stickyIdleMinutes`, and longer while the conversation would
   not fit the lower level's first available model. A hold is a preference, not a floor: when the
   held level and every level above it have no available model, the run climbs from its own level.
+  While a fallback chain's model is answering, it stands for the level the session's last planned
+  run took.
 - **The first available candidate.** Within the level's role, the run takes the first candidate in
   roster order that can take the request, not the model that answered last, so a level returns to
   its first model (Codex, on John's rosters) as soon as that model is available again. That costs
   one prompt-cache miss, which the run's record notes.
-- **Step-ups.** A level whose role has no available model, or whose first available model is too
-  small for the conversation, passes the run up to the next level, and a notice names the level the
+- **Step-ups.** A level with no available model, among its own and then its scope's fallback
+  chain, or whose first available model is too small for the conversation, passes the run up to
+  the next level, and a notice names the level the
   pick started at: "no LOW model can take this run, so it goes to MEDIUM (gpt-6.1-terra)". When no
   level's first available model fits, the highest level with one takes the run: as in version 1,
   fit alone never refuses a run, and Pi compacts. A run is refused only when neither its level nor
   any above it has an available model.
-- **No fallbacks.** Version 2 declares none. Cooldowns and retries work within a level's role: a
-  retry after a usage-limit or authentication error goes to the role's next model, never to another
+- **Fallbacks are the scope's chain, if it declares one**
+  ([A fallback chain](#a-fallback-chain)). Without one, cooldowns and retries work within a level's
+  role: a retry after a usage-limit or authentication error goes to the role's next model, and is
+  refused when there is none. With one, it goes on down the chain. A retry never goes to another
   level.
 
 **Tags elsewhere.** A message that is only a tag sends nothing, with a notice. A tag is removed
@@ -517,9 +870,10 @@ labelled choices and returns one, with a probability for each. Under a version 2
   registry's credential lookup before it.
 - **What it reads:** the message without its tag; up to `context.messages` (6) of the user and
   assistant messages before it on the branch, as text only, without tool calls, tool results, images
-  or thinking, read through the bounded `getRecentActiveEntries`; and the four `describe` texts of
-  the session's scope, as the criteria of the choices. Its one question asks how much model
-  intelligence the message needs for the work it asks for now.
+  or thinking, read through the bounded `getRecentActiveEntries`; the four descriptions of the
+  session's scope, as the criteria of the choices; and its one question, the instructions, which by
+  default asks how much model intelligence the message needs for the work it asks for now. The
+  instructions and the descriptions are yours to edit: see [Jev's prompts](#jevs-prompts).
 - **Redaction runs first**, in both scopes: the message and the earlier messages go through
   `src/redact.ts` before any cap. [What redaction hides](#what-redaction-hides) names the kinds of
   secret it looks for, with tested examples and its known gaps.
@@ -530,9 +884,10 @@ labelled choices and returns one, with a probability for each. Under a version 2
 - **Close calls go higher.** When Jev's two most probable levels are within `closeCall` (0.15) of
   each other, the run takes the higher one. The threshold is a starting point that training tunes.
 - **Failures fall back to the keywords.** A classifier the registry does not have, an error (an
-  OpenRouter refusal arrives as one), a timeout, an aborted request, or a malformed answer (a choice
-  that is not one of the four levels, or probabilities that miss one or add another label) counts
-  as a failure, and the keywords decide. The run's record names the failure, and so does the
+  OpenRouter refusal arrives as one), a timeout, an aborted request, a malformed answer (a choice
+  that is not one of the four levels, or probabilities that miss one or add another label), or a
+  prompt file that cannot be used (`prompt`; then nothing is sent to Jev) counts as a failure, and
+  the keywords decide. The run's record names the failure, and so does the
   footer of a run the keywords decided.
 - **Never asked** under the pin or `PI_SMART_ROUTER_LOCAL_ONLY`, on `smart-router/local` or a
   physical model, for a steer or follow-up, without a classifier, under a version 1 roster, in a
@@ -541,6 +896,71 @@ labelled choices and returns one, with a probability for each. Under a version 2
 - **Where the text goes:** to OpenRouter, then to TypeSafe in the US. TypeSafe does not train on
   inputs, but it states no retention period. `/smart-router status` lists the classifier among what
   can still send data off the machine.
+
+### Jev's prompts
+
+What Jev is told is two kinds of text, and both are yours to change without touching code:
+
+- **The instructions:** the one question asked about every message, in every scope. Built in:
+  "How much model intelligence does `message` need for the work it asks for now? `recent` holds the
+  conversation just before it, oldest first." Replace it with `classifier.instructions` (a string
+  in the roster) or `classifier.instructionsFile` (a file's name). With neither, the built-in
+  question is asked and the request is exactly what it was before 1.4.0-jw.4.
+- **The level descriptions:** per scope, what kind of work belongs at each level, and so which
+  model gets it. Each level gives `describe` (a string in the roster, as before) or `describeFile`
+  (a file's name).
+
+**Prompt files** are plain text or Markdown in `<agentDir>/smart-router/`, which is
+`~/.config/pi/agent/smart-router/` on John's hosts. The roster names each by a plain lower-case
+name ending in `.md` or `.txt`, with no directory part:
+
+```json
+"classifier": { "model": "openrouter/typesafe/jev-1.14", "instructionsFile": "classifier.md" },
+"scopes": { "personal": { "levels": {
+  "low":    { "role": "low",    "describeFile": "personal-low.md" },
+  "medium": { "role": "medium", "describe": "Engineering, implementation and validation" }
+} } }
+```
+
+- **Files rather than long JSON strings,** because prose is iterated on: a file has line breaks,
+  needs no escaping and diffs cleanly. The roster points at each file, rather than a fixed file
+  name being picked up when present, so that the roster and the checker always say which text is
+  in force, and a stray or forgotten file changes nothing.
+- **What is sent** is the file's text without HTML comments (`<!-- … -->`, your notes) and without
+  surrounding blank space. Jev reads the rest as it is written.
+- **Limits:** the instructions at most 4000 characters, a level description at most 2000, a file
+  at most 16 KiB of plain UTF-8 text, with no control characters.
+- **A prompt file must be yours:** a regular file you own, writable by no one else, in
+  `<agentDir>/smart-router/`, by the roster's own rules. A link is followed to its target, which
+  must pass the same checks, so a link into `/nix/store`, whose files are root's, is refused as
+  unsafe: keep prompt files as real files you edit.
+- **Prompts are redacted like messages.** The instructions and the descriptions go through the
+  same redaction as the message before Jev reads them
+  ([What redaction hides](#what-redaction-hides)), so a prompt file that is, or links to, something
+  else of yours does not send its secrets. Write prompts in prose: a `key: value` line whose key
+  marks a secret loses its value.
+- **Edits take effect** at the next idle prompt of a running session, as roster edits do.
+- **A file that cannot be used** (missing, unsafe, empty, too long, not text, an unclosed comment,
+  or one that still holds a `{{placeholder}}` or a line starting with `TODO`) stops no route. Jev is not
+  asked in the scopes that need that file, the keywords decide their levels, the footer shows
+  `(keywords; jev prompt)`, the session says so once when it starts, and `/smart-router status`
+  and the checker name the file and the cause. The router never falls back to an older text.
+- **`/smart-router status`** shows the source of every prompt in force: `built-in`,
+  `inline in the roster`, or `file <path>`, with its length.
+
+**You edit guidance, not the protocol.** These stay fixed in code, whatever a prompt says:
+
+- the request has one question, a choice among exactly `low`, `medium`, `high` and `super`;
+- an answer counts only when it names one of those four and gives a probability for each;
+  anything else is discarded as malformed and the keywords decide;
+- the level is routed within the session's scope, by that scope's levels, account bindings and
+  exclusions; a prompt cannot name a model, change the scope or lift the pin, and under the pin Jev
+  is not asked at all;
+- redaction, the size caps, the tag syntax (`#low` … `#super`) and the floor for risky operations.
+
+`test/prompts.test.ts` gives the router a prompt that asks for another label, a work-account
+model, work scope and an unpinning, with a classifier that does as it says, and shows that none of
+it happens.
 
 ### What redaction hides
 
@@ -709,7 +1129,7 @@ allow is refused by the model that was asked, and the selection stays where it w
 | Selection | Session | Its requests |
 |---|---|---|
 | `smart-router/auto` | work scope, not pinned | Go only to the work-bound Codex account. Refused when the roster serves no work scope, or the scope cannot be read. |
-| `smart-router/auto` | pinned | Go only inside the pin's policy. On John's rosters, where auto never reaches the local role, refused: "smart-router/auto: no local model can take this request while this session is pinned to local models (…). Nothing was sent. Choose smart-router/local with /model, or run /smart-router local off." |
+| `smart-router/auto` | pinned | Go only inside the pin's policy. In a scope whose fallback chain names the local role, to that role's models, in its order. In any other scope, where auto does not reach the local role, refused: "smart-router/auto: no local model can take this request while this session is pinned to local models (…). Nothing was sent. Choose smart-router/local with /model, or run /smart-router local off." |
 | `smart-router/local` | either scope, or a scope that cannot be read, pinned or not | Go only to the local role, and never to a cloud model. Refused only when no local model can take the request. |
 
 John's decision of 2026-11-16, "Let smart-router/local route in work scope": selecting
@@ -745,8 +1165,9 @@ event selects a model. Each of these is a test in `test/commands.test.ts`:
 
 **A session that starts pinned starts on whatever Pi selected.** A pin carried into a fork or
 `/new`, a resumed pin and `PI_SMART_ROUTER_LOCAL_ONLY` select nothing. Pi starts a new session on
-the settings default: when that is `smart-router/auto`, its requests are refused, with the text
-above, until you choose `smart-router/local`; when it is a cloud model, that model is sent as it
+the settings default: when that is `smart-router/auto`, its requests go to the local role where
+its scope's fallback chain names that role, and are otherwise refused, with the text above, until
+you choose `smart-router/local`; when it is a cloud model, that model is sent as it
 is. The pin's status item, `local models`, shows only while the pin covers the selection: either of
 the router's models, or a physical model inside the pin's policy.
 
@@ -886,8 +1307,9 @@ can still leave the machine.
   pins every session in the process, with the local section of the first valid roster, so no
   session of the process asks the classifier either. It is read each time the router loads; once
   seen, it stays on for the life of the process, even if the variable is removed later. It selects
-  nothing: a session that starts on `smart-router/auto` stays there, and its requests are refused
-  until you choose `smart-router/local`. Set it in a launcher or an alias; Nix never sets it.
+  nothing: a session that starts on `smart-router/auto` stays there, and its requests go to the
+  local role where its scope's fallback chain names that role, and are otherwise refused until you
+  choose `smart-router/local`. Set it in a launcher or an alias; Nix never sets it.
 - **It fails closed.** Only a well-formed unpinning entry unpins. A `smart-router.pin` entry of any
   other shape, a custom message of that type or another version pins with an empty policy, under
   which nothing qualifies, until you pin again. On a Pi without the fork's bounded session reads,
@@ -899,8 +1321,10 @@ While a session is pinned, every request routed through either virtual model goe
 the pinned policy, or fails with "Nothing was sent". That covers user runs, continuations, retries,
 Pi's compaction and branch summaries, a goal-x auditor that inherits the session's selection, and
 pi-subagents children that inherit `smart-router/local` and load the router. `smart-router/auto`
-obeys the pin too: with John's rosters, where auto never reaches the local role, a request on
-`smart-router/auto` in a pinned session is refused, with a text that names `smart-router/local`.
+obeys the pin too. In a scope whose fallback chain names the local role, a pinned request on
+`smart-router/auto` goes to that role's models; the chain's cloud roles are never used under the
+pin. In any other scope, where auto does not reach the local role, it is refused, with a text that
+names `smart-router/local`.
 
 The guarantee is about the router's two models, and it ends at the selection. Until 1.3.0-jw.2
 the pin also guarded the selection: it undid a model selected outside the policy, refused prompts,
@@ -963,13 +1387,16 @@ The entry's fields:
   and `tag`, for a tagged run;
 - `trigger`, the risky operation that raised the run to the floor;
 - `keyword`, the keyword classifier's signal and reason;
-- `jev`: Jev's model, choice, probabilities, confidence and latency (`ms`), or its failure. A tagged
+- `jev`: Jev's model, choice, probabilities, confidence and latency (`ms`), or its failure
+  (`unavailable`, `error`, `timeout`, `aborted`, `malformed` or `prompt`). A tagged
   run whose answer had not come when it settled records `{ "late": true }`. The field can be absent,
   as it is without a classifier, and an extension's resend can repeat the answer its message got
   before;
 - `ref`, the model of the run's last assistant message that ended without an error, absent when no
   model answered;
-- `steppedUp`, `returnedToFirst` and `aborted`, when they apply.
+- `steppedUp`, `returnedToFirst` and `aborted`, when they apply; and `fallback`, when the model
+  that answered is one of the scope's fallback chain. `tier` is the run's level all the same: a
+  fallback never changes it.
 
 A record holds no prompt text and no digest of it. It normally follows its run's first user message,
 earlier in the same session, and the run's steers and follow-ups can sit between them; that message
@@ -984,8 +1411,8 @@ Nothing is sent again.
 
 **Training** is an agent review, when John asks for one. An agent session on the host reads that
 host's session files for these records and the user messages they pair with, reports per scope and
-per level where John's tags and corrections disagree with Jev, and proposes revised `describe` texts
-and a revised `closeCall` as a diff to that host's roster. Nothing changes until John approves it.
+per level where John's tags and corrections disagree with Jev, and proposes revised descriptions
+and instructions and a revised `closeCall` as a diff to that host's roster and prompt files. Nothing changes until John approves it.
 Records stay on the host that made them, and work records are read only there. The router itself
 reads no other session and does not write the roster.
 
@@ -993,12 +1420,13 @@ reads no other session and does not write the roster.
 
 | Command | Does |
 |---|---|
-| `/smart-router` or `/smart-router status` | The roster's path and state; the selection and its thinking level; the pin; the session's scope and what set it, under a version 2 roster or whenever `smart-router/auto` refuses the scope; every role's models on this host with `ok` or the reason they cannot route, and catalog prices; account bindings, checked in the session's scope, and auth sources; a version 1 roster's routing table and fallbacks, or a version 2 roster's levels in each scope and its classifier; the last decision; what can still leave the machine, a model picked by hand first and then the classifier when `smart-router/auto` may ask it; and a warning for any fallback that would move a run onto Codex's API from another one. |
+| `/smart-router` or `/smart-router status` | The roster's path and state; the selection and its thinking level; the pin; the session's scope and what set it, under a version 2 roster or whenever `smart-router/auto` refuses the scope; every role's models on this host with `ok` or the reason they cannot route, and catalog prices; the accounts cooling and the local models held as unreachable; account bindings, checked in the session's scope, and auth sources; a version 1 roster's routing table and fallbacks, or a version 2 roster's levels and fallback chain in each scope, its classifier and the source of each of Jev's prompts; the last decision, and whether it went to a fallback chain's model; what can still leave the machine, a model picked by hand first and then the classifier when `smart-router/auto` may ask it; and a warning for any fallback that would move a run onto Codex's API from another one. |
 | `/smart-router history [n]` | The last `n` routing decisions (10 by default, at most 50), with reason codes, and on a version 2 run's first request its scope, level and what decided the level. Model ids and codes only, never prompt text. |
 | `/smart-router local on`, `off`, `status` | The pin. `on` selects `smart-router/local`, the only selection any command makes; `off` leaves the selection as it is. |
 | `/smart-router scope [work\|personal\|status]` | The session's scope and what set it: `latch`, `entry`, `directory` or `default`. `work` records work scope at once; `personal` asks first in work scope, and is refused under `PI_SMART_ROUTER_SCOPE=work`. Neither changes the selection. |
 | `/smart-router was low\|medium\|high\|super` | Record that the run in flight, when it holds a level, or else the run of the latest record, should have gone to that level. Nothing is sent again. |
-| `/smart-router reload` | Read the roster and Multi-Pass's labels again now, and register both models again if their limits changed. |
+| `/smart-router check` | Read the roster and its prompt files again and read them back: what each selection and scope routes to, in order, and where each of Jev's prompts comes from; or the first error, with its place. It selects, records and sends nothing. [Checking a roster](#checking-a-roster). |
+| `/smart-router reload` | Read the roster, its prompt files and Multi-Pass's labels again now, and register both models again if their limits changed. |
 
 ## Interactions with other extensions
 
@@ -1072,6 +1500,8 @@ npm run check:sandbox           # the same, with the behaviour suite, under sand
   registered through pi-ai's provider `classifiers` hook, so no test asks Jev or any other real
   model. It runs only sandboxed: under `npm run check:sandbox`, or in the offline Nix build.
   `npm run check` leaves it out and says so.
+- `src/check-cli.ts` is the standalone roster checker. It is not part of the extension, and it and
+  what it imports stay free of Pi's packages; `test/check.test.ts` walks its imports.
 - A source scan (`test/scan.test.ts`) holds `index.ts` and `src/` to the runtime rules, comments
   included: an import allow-list, no whole-history session reads, no dynamic code, no `fetch(` or
   `WebSocket`, and no timers (`setTimeout`, `setInterval`, `setImmediate`, `AbortSignal.timeout`).

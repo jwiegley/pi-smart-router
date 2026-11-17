@@ -14,8 +14,12 @@
 //                       resolves, else its role, else the role's fallback; with no base, the
 //                       default role (the local role when local-only) and its fallback
 //   owner retry         a usage-limit or auth failure moves to the role's next candidate, then its
-//                       fallback; any other failure, content-filter refusals and overflows
-//                       included, retries the same model; no failure routes as a continuation
+//                       fallback; a local model whose server could not be reached, before any
+//                       output, gives way to the candidate written after it that is not held,
+//                       round its role once, then to the fallback, and keeps its model when
+//                       every other is held; any other failure, content-filter refusals, rate
+//                       limits and overflows included, retries the same model; no failure
+//                       routes as a continuation
 //   direct              previous, else the session's last responder, else the default role
 //   foreign             previous, else the default role
 //
@@ -34,9 +38,9 @@ import { invariant, noBoundedHistory, unroutable } from "./errors.ts";
 import type { JevOutcome } from "./jev.ts";
 import { checkLocal } from "./local.ts";
 import type { LocalPolicy } from "./local.ts";
-import { coolFrom, failureKind, refOf, resolveCandidate } from "./resolve.ts";
+import { clock, coolFrom, failureKind, holdFrom, refOf, resolveCandidate } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
-import { autoRoles, excludedBy, excludesFor, isWorkBound, roleOf, scopeSection } from "./roster.ts";
+import { autoRoles, excludedBy, excludesFor, isWorkBound, levelRoles, roleOf, scopeSection } from "./roster.ts";
 
 /** A session's pin as routing sees it. */
 export interface Pin {
@@ -111,6 +115,18 @@ export interface LastInput {
 export interface SessionRecord {
   plan: Plan | undefined;
   runPick: RunPick | undefined;
+  /**
+   * The models whose requests failed with a limit-kind error in the current run. A retry skips
+   * them all, so a run tries each candidate once: local-role models are never cooled, and without
+   * this a retry went back and forth between two of them.
+   */
+  readonly limited: Set<string>;
+  /**
+   * The level role the session's last planned version 2 run took. While the session is on a model
+   * of the scope's fallback chain, that model stands for this level: a run that starts without a
+   * prompt picks in it again, and the hold rules compare with it (PlanInput.held).
+   */
+  levelRole: string | undefined;
   last: LastResponder | undefined;
   readonly history: HistoryEntry[];
   /** The planned version 2 run's level, until its record is written. */
@@ -120,7 +136,7 @@ export interface SessionRecord {
 }
 
 export function newRecord(): SessionRecord {
-  return { plan: undefined, runPick: undefined, last: undefined, history: [], pendingLevel: undefined, lastInput: undefined };
+  return { plan: undefined, runPick: undefined, limited: new Set(), levelRole: undefined, last: undefined, history: [], pendingLevel: undefined, lastInput: undefined };
 }
 
 /** The fork's bounded session readers. Pi 1.5.0's npm types lack them, so they are detected. */
@@ -180,6 +196,13 @@ function stick(rc: ResolveContext, previous: string | undefined, record: Session
     if (role === undefined) continue;
     const base = resolveCandidate(ref, rc);
     if (base.ok) return { ok: true, choice: { role, ref, model: base.model, code: `stick:${source}` } };
+    // Another candidate that is not held is better than this one; failing that, this one, though
+    // held, is better than any other held one: the conversation is on it.
+    const other = pickInRole(rc, role, { fallback: !rc.localOnly, code: "stick:role", strictHolds: true });
+    if (other.ok) return other;
+    const anyway = resolveCandidate(ref, { ...rc, holds: undefined });
+    if (anyway.ok) return { ok: true, choice: { role, ref, model: anyway.model, code: `stick:${source}` } };
+    // The base is out for another reason, and only held candidates are left: they are tried, in the written order.
     return pickInRole(rc, role, { fallback: !rc.localOnly, code: "stick:role" });
   }
   return byDefault(rc, "stick:default");
@@ -201,9 +224,24 @@ function retry(rc: ResolveContext, request: ModelRouteRequest, record: SessionRe
   const ref = refOf(failed.model);
   const role = eligibleRole(rc, ref);
   const kind = failureKind(failed.message.errorMessage);
-  if (kind === "limit" && role !== undefined) return pickInRole(rc, role, { skip: ref, fallback: !rc.localOnly, code: "retry:next" });
+  if (kind === "limit" && role !== undefined) {
+    record.limited.add(ref);
+    return pickInRole(rc, role, { skip: ref, skipped: record.limited, fallback: !rc.localOnly, code: "retry:next" });
+  }
+  // A local model whose server could not be reached is held, and gives way to the candidate written
+  // after it that is not held. Each such retry holds one more model, so it takes a candidate not
+  // yet tried: one pass over the order. When every other candidate is held too, the retry stays on
+  // the model it has, below, as it always did: Pi has backed off, and a server that is restarting
+  // is ridden out rather than the request refused. The pick stays where every pick of this request
+  // may go: the role, then what is left of the scope's chain.
+  const held = rc.holds === undefined ? undefined : holdFrom(failed.message, failed.model, rc.roster, rc.holds, rc.now);
+  if (held !== undefined && role !== undefined) {
+    const next = pickInRole(rc, role, { after: ref, fallback: !rc.localOnly, code: "retry:unreachable", strictHolds: true });
+    if (next.ok) return next;
+  }
   if (role !== undefined) {
-    const same = resolveCandidate(ref, rc);
+    // Its own hold does not keep a model from its own retry.
+    const same = resolveCandidate(ref, { ...rc, holds: undefined });
     if (same.ok) return { ok: true, choice: { role, ref, model: same.model, code: "retry:same" } };
   }
   // Content a model refused is never sent to another model.
@@ -211,6 +249,26 @@ function retry(rc: ResolveContext, request: ModelRouteRequest, record: SessionRe
     return { ok: false, attempts: [], problem: `${ref} refused this content and can no longer take the retry, and refused content is never sent to another model` };
   }
   return stick(rc, previousRef(request), record);
+}
+
+/** A failed response of a run's own pick, before any output: its model, and whether the account ran out or the server could not be reached. */
+export interface Failover {
+  readonly ref: string;
+  readonly kind: "limit" | "unreachable";
+}
+
+/**
+ * What would take the request if it were sent again after such a failure, as a new run's plan
+ * would pick it: from `start`, the role the new run starts in (its level's, or the local role),
+ * the first candidate in the written order that is neither cooling nor held, then the scope's
+ * chain; held to the selection, the scope and the pin as any pick is. The failed model is cooling
+ * or held by now. Nothing when only the failed model itself, or nothing, is left. Pure.
+ */
+export function afterFailure(rc: ResolveContext, failover: Failover, start: string | undefined): Choice | undefined {
+  const role = start ?? eligibleRole(rc, failover.ref);
+  if (role === undefined) return undefined;
+  const decision = pickInRole(rc, role, { fallback: !rc.localOnly, code: "resend" });
+  return decision.ok && decision.choice.ref !== failover.ref ? decision.choice : undefined;
 }
 
 /**
@@ -235,6 +293,24 @@ function takePlan(record: SessionRecord, id: VirtualId, rc: ResolveContext): Pla
   if (plan === undefined || planApplies(plan, id, rc)) return plan;
   record.pendingLevel = undefined;
   return undefined;
+}
+
+/**
+ * The level a run that starts without a plan goes back to, if it does: on smart-router/auto under a
+ * version 2 roster, outside the pin, when this is the run's first request, the model it would stay
+ * on is one of the scope's fallback chain, and the session's last planned run took a level of this
+ * scope. Such a run (a goal continuation, a loop's) has no prompt to plan it, and without this it
+ * would stay on the chain model for as long as it kept starting runs, however long ago the level's
+ * own model came back.
+ */
+function levelToReturnTo(rc: ResolveContext, request: ModelRouteRequest, record: SessionRecord): string | undefined {
+  const { levelRole } = record;
+  if (rc.roster.version !== 2 || rc.virtualId !== "auto" || rc.localOnly || record.runPick !== undefined || levelRole === undefined) return undefined;
+  const section = scopeSection(rc.roster, rc.scope);
+  const base = previousRef(request) ?? record.last?.ref;
+  const role = base === undefined ? undefined : roleOf(rc.roster, base)?.name;
+  if (section?.fallback === undefined || role === undefined || !section.fallback.includes(role)) return undefined;
+  return levelRoles(section).includes(levelRole) ? levelRole : undefined;
 }
 
 /** The planned model if it still resolves, else the planned role, then its fallback. */
@@ -302,10 +378,24 @@ export function levelFor(rc: ResolveContext, roleName: string, selected: ModelTh
   return role === undefined || role.thinking === "selected" ? selected : role.thinking;
 }
 
+/** The first cooling account that a refusal's candidates wait for, and the time it stops, as HH:MM. */
+function coolingAccount(rc: ResolveContext, decision: Decision & { readonly ok: false }): { readonly provider: string; readonly until: string } | undefined {
+  const refs = decision.attempts.flatMap((attempt) => attempt.candidates.map((candidate) => candidate.ref));
+  const found = rc.cooldowns.accounts(rc.now).find(({ provider }) => refs.some((ref) => ref.startsWith(`${provider}/`)));
+  return found === undefined ? undefined : { provider: found.provider, until: clock(found.until) };
+}
+
 function settle(input: RouteInput, decision: Decision): Choice {
-  // A version 2 decision tries more than one role only when its run steps up a tier.
+  // A version 2 decision tries more than one role when its run steps up a tier, or when its scope
+  // declares a fallback chain, whose roles each attempt marks as a fallback.
   if (!decision.ok) {
-    throw unroutable(input.id, decision, { localOnly: input.rc.localOnly, pinned: input.pin.on, stepUps: input.rc.roster.version === 2, work: workUnpinned(input.rc) });
+    throw unroutable(input.id, decision, {
+      localOnly: input.rc.localOnly,
+      pinned: input.pin.on,
+      stepUps: input.rc.roster.version === 2,
+      work: workUnpinned(input.rc),
+      cooling: coolingAccount(input.rc, decision),
+    });
   }
   assertSafe(input.id, input.rc, decision.choice);
   return decision.choice;
@@ -321,15 +411,15 @@ export function routeOwned(input: RouteInput): ModelRoute {
   const { id, request, rc, record } = input;
   let decision: Decision;
   let plan: Plan | undefined;
-  if (request.reason === "user") {
-    plan = takePlan(record, id, rc);
-    decision = plan === undefined ? stick(rc, previousRef(request), record) : fromPlan(rc, plan);
-  } else if (request.reason === "retry") {
-    decision = retry(rc, request, record);
-  } else {
-    decision = stick(rc, previousRef(request), record);
-  }
+  if (request.reason === "user") plan = takePlan(record, id, rc);
+  const back = plan === undefined && request.reason !== "retry" ? levelToReturnTo(rc, request, record) : undefined;
+  if (plan !== undefined) decision = fromPlan(rc, plan);
+  else if (request.reason === "retry") decision = retry(rc, request, record);
+  else if (back !== undefined) decision = pickInRole(rc, back, { fallback: true, code: "return:level" });
+  else decision = stick(rc, previousRef(request), record);
   const choice = settle(input, decision);
+  // The level a planned run took is the session's until the next planned run.
+  if (plan?.level !== undefined && plan.role !== undefined) record.levelRole = plan.role;
   record.runPick = { id, ref: choice.ref, role: choice.role };
   remember(record, {
     at: rc.now,
