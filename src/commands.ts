@@ -96,6 +96,8 @@ const UNTIL_RECORDED = "until /smart-router scope work or /smart-router scope pe
 const BY_HAND = "A model picked by hand is sent as it is, in work scope too.";
 /** What smart-router/local's route does in a work session that is not pinned: the same as under the pin. */
 const LOCAL_IN_WORK = "In work scope smart-router/local routes to the local models without the pin, so its next requests go to them, not to the work account.";
+/** The same in a session whose scope cannot be read, where smart-router/auto refuses (workRefusal). */
+const LOCAL_IN_ANY = "smart-router/local routes to the local models without the pin in every scope, so its next requests go to them.";
 
 /** What /smart-router scope personal asks a session in work scope, and its two answers: Enter keeps work scope, as for the pin. */
 const MOVE_QUESTION = "Move this session to personal scope?\nIts earlier turns are work content, and the next requests would send them to personal accounts.";
@@ -424,13 +426,7 @@ async function localOff(host: CommandHost, ctx: ExtensionContext): Promise<Answe
   const selection = otherSelection(ctx);
   if (selection === "hand") return warning(`${stays} ${BY_HAND}`);
   const refused = workRefusal(host.refresh().roster, scope);
-  if (selection === "local") {
-    return warning(
-      scope.kind === "unreadable"
-        ? `${stays} Its scope cannot be read (${scope.reason}), so smart-router/local refuses its requests, as smart-router/auto does, ${UNTIL_RECORDED}.`
-        : `${stays} ${LOCAL_IN_WORK}${refused === undefined ? "" : ` ${refused}`}`,
-    );
-  }
+  if (selection === "local") return warning(`${stays} ${scope.kind === "unreadable" ? LOCAL_IN_ANY : LOCAL_IN_WORK}${refused === undefined ? "" : ` ${refused}`}`);
   return warning(`${stays} ${refused ?? "It is in work scope, so the next requests go to the work account."}`);
 }
 

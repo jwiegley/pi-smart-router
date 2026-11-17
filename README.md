@@ -6,7 +6,7 @@ physical model chosen from a roster you keep on each host.
 This is John Wiegley's fork of [beettlle/pi-smart-router](https://github.com/beettlle/pi-smart-router),
 rewritten for the virtual models of Pi 1.5. It keeps upstream's deterministic prompt classifier and
 nothing else; [CHANGELOG.md](CHANGELOG.md) lists what was removed and why. The port started from
-upstream v1.3.0 (`f31b2304`). Version `1.4.0-jw.2` has upstream v1.4.0 (`54bee53d`) in its history
+upstream v1.3.0 (`f31b2304`). Version `1.4.0-jw.3` has upstream v1.4.0 (`54bee53d`) in its history
 through a merge that keeps the port's tree, as an earlier one recorded upstream main at `58e87b59`:
 everything upstream changed between v1.3.0 and v1.4.0 is in files the port had removed or
 replaced, so none of it is in this code. It is not published to npm.
@@ -34,8 +34,9 @@ answered, and Pi's footer shows it.
   of their own are outside it ([What work scope does not cover](#what-work-scope-does-not-cover)).
   See [Levels](#levels), [Jev](#jev) and [Scope](#scope-personal-or-work).
 - **`smart-router/local`** routes only to the roster's local role, and never falls back to anything
-  else. If no local model can take the request, it is refused. It does so in personal scope and in
-  work scope alike, pinned or not: selecting it is the request for local routing.
+  else. If no local model can take the request, it is refused. It does so in personal scope, in
+  work scope and in a session whose scope cannot be read alike, pinned or not: selecting it is the
+  request for local routing.
 - **The local-only pin** (`/smart-router local on`) keeps the router's two models on local models
   until you unpin it: `smart-router/local` routes to the local role, and `smart-router/auto` routes
   only inside the pin's policy. See [The local-only pin](#the-local-only-pin).
@@ -709,13 +710,18 @@ allow is refused by the model that was asked, and the selection stays where it w
 |---|---|---|
 | `smart-router/auto` | work scope, not pinned | Go only to the work-bound Codex account. Refused when the roster serves no work scope, or the scope cannot be read. |
 | `smart-router/auto` | pinned | Go only inside the pin's policy. On John's rosters, where auto never reaches the local role, refused: "smart-router/auto: no local model can take this request while this session is pinned to local models (…). Nothing was sent. Choose smart-router/local with /model, or run /smart-router local off." |
-| `smart-router/local` | either scope, pinned or not | Go only to the local role, and never to a cloud model. Refused when no local model can take the request, and, outside the pin, when the scope cannot be read. |
+| `smart-router/local` | either scope, or a scope that cannot be read, pinned or not | Go only to the local role, and never to a cloud model. Refused only when no local model can take the request. |
 
 John's decision of 2026-11-16, "Let smart-router/local route in work scope": selecting
 `smart-router/local` is itself the request for local routing, so a work session needs no pin for
 it. The consequence: in a work session, on the shared work machines too, selecting
 `smart-router/local` sends the conversation to the roster's local models, not to the work account,
 without the pin step. Until 1.4.0-jw.1 that request was refused unless the session was pinned.
+
+John's decision of 2026-11-17, "Let local route there too": `smart-router/local` routes in a
+session whose scope cannot be read as well, pinned or not, so it refuses no scope at all. Until
+1.4.0-jw.2 it refused such a session outside the pin. `smart-router/auto` still refuses one, since
+it cannot tell which account the session's requests may use.
 
 In work scope, outside the pin, a refusal names only `smart-router/auto` and work Codex models as
 models to choose, since those keep the conversation on the work account. Any other model you pick
@@ -777,8 +783,10 @@ scope, the scope the router routes that session in.
 
 **It fails closed.** A malformed `smart-router.scope` entry, a custom message of that type, or a
 session whose entries cannot be read has an unreadable scope: `smart-router/auto` refuses until
-`/smart-router scope work` or `/smart-router scope personal` records a scope again, and outside the
-pin `smart-router/local` refuses too, though it routes in either scope that can be read.
+`/smart-router scope work` or `/smart-router scope personal` records a scope again.
+`smart-router/local` routes to the local role's models all the same, pinned or not: its requests
+carry no account, so there is nothing for the scope to decide. Such a request resolves in work
+scope, the narrower one, and records neither a scope nor a pin.
 
 **Where each scope's requests go.** Scope governs the router's own two models, and nothing else.
 Outside the pin, `smart-router/auto` never sends a personal session to a work-bound account, and
@@ -786,9 +794,9 @@ sends a work session only to a work-bound Codex account. Under the pin, both sco
 the local role's models. A version 1 roster serves no work scope: `smart-router/auto` refuses a
 work session, and the check every pick passes refuses it again. A latched process whose roster has
 no work scope refuses every request on `smart-router/auto`, and `/smart-router status` says why.
-`smart-router/local` serves both scopes, pinned or not, since it carries no account: a work session
-on it goes to the local role's models, under a roster that serves no work scope too, and never to a
-cloud model. In either scope, pinned or not, a model picked by hand
+`smart-router/local` serves both scopes, and a scope that cannot be read, pinned or not, since it
+carries no account: a work session on it goes to the local role's models, under a roster that
+serves no work scope too, and never to a cloud model. In either scope, pinned or not, a model picked by hand
 is sent as it is, a work-account model in a personal session included
 ([A model picked by hand](#a-model-picked-by-hand)).
 
@@ -866,7 +874,8 @@ outside the policy it is cleared, because that model is sent as it is. It does n
 in modes without dialogs and while the environment switch is on. It leaves the selection as it is.
 In work scope, the question says that `smart-router/auto`'s next requests go to the work account,
 and the answer says what the selection will do: `smart-router/local` still routes to the local
-models once unpinned, and a model picked by hand is sent as it is. `/smart-router local status` shows the pin and what
+models once unpinned, in a session whose scope cannot be read too, and a model picked by hand is
+sent as it is. `/smart-router local status` shows the pin and what
 can still leave the machine.
 
 - **Session-wide.** The pin belongs to the session file, every branch included. Resume keeps it.

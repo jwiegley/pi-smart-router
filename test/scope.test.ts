@@ -580,11 +580,11 @@ describe("smart-router/auto refuses a scope it cannot serve", () => {
     const signal = malformed.session.startRun();
     refuses(() => malformed.runtime.route("auto", request("continuation", { signal })), unreadable, "the owned run");
     malformed.session.endRun();
-    // Outside the pin, smart-router/local refuses a scope that cannot be read too, though it routes in either scope that can be read.
-    refuses(() => malformed.runtime.route("local", request("direct")), scopeUnreadable("local", "the latest smart-router.scope entry is not one the router wrote", true), "smart-router/local");
-    // pi-cache-optimizer is told of no pick on either model, since both refuse this scope.
+    // smart-router/local refuses no scope, so without the pin it routes to the LAN model here too.
+    assert.equal(routed(malformed.runtime.route("local", request("direct"))), GLM, "smart-router/local");
+    // pi-cache-optimizer is told of no pick on smart-router/auto, which refuses this scope, and of smart-router/local's.
     assert.equal(malformed.router?.activeRoute("auto"), undefined);
-    assert.equal(malformed.router?.activeRoute("local"), undefined);
+    assert.equal(malformed.router?.activeRoute("local")?.modelId, "GLM-5.3-Flash-oQ4e-mtp");
     const personal = await begin({ dir, id: "personal", runtime: new FakeRuntime(workCatalog()) });
     assert.equal(personal.router?.activeRoute("auto")?.modelId, "deepseek/deepseek-v4.1-flash-1017");
 
@@ -596,7 +596,7 @@ describe("smart-router/auto refuses a scope it cannot serve", () => {
       return latest(customType, options);
     };
     refuses(() => locked.runtime.route("auto", request("direct")), scopeUnreadable("auto", "reading its smart-router.scope entries failed: database is locked", true), "a reader that throws");
-    refuses(() => locked.runtime.route("local", request("direct")), scopeUnreadable("local", "reading its smart-router.scope entries failed: database is locked", true), "smart-router/local, with a reader that throws");
+    assert.equal(routed(locked.runtime.route("local", request("direct"))), GLM, "smart-router/local, with a reader that throws");
   });
 
   test("a version 2 roster without the session's scope", async (t) => {
@@ -719,6 +719,105 @@ describe("smart-router/local in work scope", () => {
       const latched = await begin({ dir, id: "latched", runtime: new FakeRuntime(workCatalog()), setup: (session) => session.pin(policy) });
       assert.equal(routed(latched.runtime.route("local", request("direct"))), GLM);
     });
+  });
+});
+
+describe("smart-router/local in a scope that cannot be read", () => {
+  // Selecting smart-router/local means local routing in every scope state, so it refuses no scope,
+  // one that cannot be read included (John's decision of 2026-11-17, "Let local route there too").
+  // Its requests carry no account, and the run resolves in work scope, the narrower one.
+  const REASON = "the latest smart-router.scope entry is not one the router wrote";
+  const malformed = (session: FakeSession): void => session.appendCustom(SCOPE_ENTRY, { v: 9 });
+  const scopeEntries = (loaded: Loaded): unknown[] => loaded.session.entries.filter((entry) => entry.customType === SCOPE_ENTRY).map((entry) => entry.data);
+
+  test("without the pin it routes every request to the LAN model, plans the run and tells pi-cache-optimizer of the pick; nothing pins the session or records a scope, and smart-router/auto still refuses", async (t) => {
+    const loaded = await begin({ dir: agentDir(t, { roster: HERA_V2 }), runtime: new FakeRuntime(workCatalog()), setup: malformed });
+    await loaded.host.choose("smart-router/local");
+    assert.deepEqual(scopeOf(loaded), { kind: "unreadable", reason: REASON });
+    assert.deepEqual(await loaded.host.emit("input", { text: PLANNING, source: "interactive" }), [undefined], "the prompt itself is passed on");
+    const plan = loaded.router?.record(loaded.session.id)?.plan;
+    assert.deepEqual([plan?.virtualId, plan?.localOnly, plan?.level, plan?.decision.ok && plan.decision.choice.ref], ["local", true, undefined, GLM], "the run is planned on the local role, with no level");
+    assert.deepEqual(loaded.router?.activeRoute("local"), { provider: "omlx-hera", modelId: "GLM-5.3-Flash-oQ4e-mtp", api: plan?.decision.ok ? plan.decision.choice.model.api : undefined, status: "planned", at: NOW });
+    const signal = loaded.session.startRun();
+    assert.equal(routed(loaded.runtime.route("local", request("user", { signal }))), GLM, "the owned run");
+    assert.equal(routed(loaded.runtime.route("local", request("continuation", { signal }))), GLM, "a continuation");
+    loaded.session.endRun();
+    assert.equal(routed(loaded.runtime.route("local", request("direct"))), GLM, "a compaction or summary");
+    assert.equal(routed(loaded.runtime.route("local", request("continuation", { signal: new AbortController().signal }))), GLM, "a foreign request");
+    assert.deepEqual(
+      (loaded.router?.record(loaded.session.id)?.history ?? []).map((entry) => [entry.virtual, entry.reason, entry.role, entry.ref, entry.code]),
+      [
+        ["local", "user", "local", GLM, plan?.code],
+        ["local", "continuation", "local", GLM, "stick:run"],
+        ["local", "direct", "local", GLM, "direct:default"],
+        ["local", "continuation", "local", GLM, "foreign:default"],
+      ],
+      "every request went to the local role, and the run's first took its plan",
+    );
+    assert.equal(loaded.session.model?.id, "local", "the selection is left as it is");
+    assert.deepEqual(loaded.session.entries.filter((entry) => entry.customType === PIN_ENTRY), [], "no pin is recorded");
+    assert.deepEqual(scopeEntries(loaded), [{ v: 9 }], "no scope is recorded");
+    assert.deepEqual(scopeOf(loaded), { kind: "unreadable", reason: REASON }, "the scope still cannot be read");
+    assert.deepEqual(messages(loaded), [], "and nothing is said");
+    // smart-router/auto, in the same session, still refuses: it cannot tell which account to use.
+    refuses(() => loaded.runtime.route("auto", request("direct")), scopeUnreadable("auto", REASON, true), "smart-router/auto");
+    assert.equal(loaded.router?.activeRoute("auto"), undefined);
+  });
+
+  test("without the pin it never leaves the local role: with no local model it refuses rather than fall back, and nothing is sent", async (t) => {
+    const cloudOnly = new FakeCatalog([...heraModels().filter((entry) => `${entry.provider}/${entry.id}` !== GLM), codex(WORK_TERRA), codex(NATIVE_TERRA)]);
+    const loaded = await begin({ dir: agentDir(t, { roster: HERA_V2 }), runtime: new FakeRuntime(cloudOnly), setup: malformed });
+    await loaded.host.choose("smart-router/local");
+    const expected = /^smart-router\/local: no local model can take this request \(local: omlx-hera\/GLM-5\.3-Flash-oQ4e-mtp: not in the catalog\)\. Nothing was sent\. Start the local model server and send the prompt again, or /;
+    const signal = loaded.session.startRun();
+    assert.throws(() => loaded.runtime.route("local", request("user", { signal })), { message: expected }, "the owned run");
+    loaded.session.endRun();
+    assert.throws(() => loaded.runtime.route("local", request("direct")), { message: expected }, "a compaction or summary");
+    assert.equal(loaded.router?.activeRoute("local"), undefined, "pi-cache-optimizer is told of no pick");
+    assert.deepEqual(loaded.router?.record(loaded.session.id)?.history, [], "no request reached a model");
+  });
+
+  test("it routes the same whatever the roster serves and however the scope fails to read: a version 1 roster, a personal-only version 2, and a reader that throws", async (t) => {
+    const v1 = await begin({ dir: agentDir(t), id: "v1", setup: malformed });
+    await v1.host.choose("smart-router/local");
+    const signal = v1.session.startRun();
+    assert.equal(routed(v1.runtime.route("local", request("user", { signal }))), GLM, "a version 1 roster, the owned run");
+    v1.session.endRun();
+    assert.equal(routed(v1.runtime.route("local", request("direct"))), GLM, "a version 1 roster, a direct request");
+    refuses(() => v1.runtime.route("auto", request("direct")), scopeUnreadable("auto", REASON, true), "smart-router/auto still refuses the scope");
+    const v2 = JSON.parse(HERA_V2);
+    delete v2.scopes.work;
+    v2.roles = v2.roles.filter((role: { name: string }) => !role.name.startsWith("work-"));
+    delete v2.accounts["openai-codex-3"];
+    const personalOnly = await begin({ dir: agentDir(t, { roster: JSON.stringify(v2) }), id: "personal-only", runtime: new FakeRuntime(workCatalog()), setup: malformed });
+    assert.equal(routed(personalOnly.runtime.route("local", request("direct"))), GLM, "a version 2 roster without a work scope");
+    const locked = await begin({ dir: agentDir(t, { roster: HERA_V2 }), id: "locked", runtime: new FakeRuntime(workCatalog()) });
+    await locked.host.choose("smart-router/local");
+    const manager = locked.session.ctx.sessionManager as unknown as Record<string, unknown>;
+    const latest = manager.getLatestCustomEntry as (customType: string, options?: unknown) => unknown;
+    manager.getLatestCustomEntry = (customType: string, options?: unknown) => {
+      if (customType === SCOPE_ENTRY) throw new Error("database is locked");
+      return latest(customType, options);
+    };
+    assert.deepEqual(await locked.host.emit("input", { text: PLANNING, source: "interactive" }), [undefined]);
+    assert.equal(locked.router?.record(locked.session.id)?.plan?.localOnly, true, "the run is planned");
+    const run = locked.session.startRun();
+    assert.equal(routed(locked.runtime.route("local", request("user", { signal: run }))), GLM, "a reader that throws, the owned run");
+    locked.session.endRun();
+    assert.deepEqual(messages(locked), [], "and no handler failed");
+  });
+
+  test("under the pin it routes as before", async (t) => {
+    const loaded = await begin({
+      dir: agentDir(t, { roster: HERA_V2 }),
+      runtime: new FakeRuntime(workCatalog()),
+      setup: (session) => {
+        malformed(session);
+        session.pin(policyFromRoster(rosterFixture("roster-hera.json")));
+      },
+    });
+    assert.equal(routed(loaded.runtime.route("local", request("direct"))), GLM);
+    assert.equal(loaded.router?.activeRoute("local")?.modelId, "GLM-5.3-Flash-oQ4e-mtp");
   });
 });
 
