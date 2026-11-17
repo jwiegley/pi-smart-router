@@ -94,9 +94,8 @@ const UNPIN = "Yes, unpin";
 const UNTIL_RECORDED = "until /smart-router scope work or /smart-router scope personal records it again";
 /** What a model picked by hand does in a work session: the same as anywhere. */
 const BY_HAND = "A model picked by hand is sent as it is, in work scope too.";
-/** What smart-router/local's route does in a work session that is not pinned, and the models to choose instead. */
-const LOCAL_REFUSED = "In work scope smart-router/local answers only while the session is pinned, so its next requests are refused.";
-const CHOOSE_FOR_WORK = "Choose smart-router/auto or a work Codex model with /model";
+/** What smart-router/local's route does in a work session that is not pinned: the same as under the pin. */
+const LOCAL_IN_WORK = "In work scope smart-router/local routes to the local models without the pin, so its next requests go to them, not to the work account.";
 
 /** What /smart-router scope personal asks a session in work scope, and its two answers: Enter keeps work scope, as for the pin. */
 const MOVE_QUESTION = "Move this session to personal scope?\nIts earlier turns are work content, and the next requests would send them to personal accounts.";
@@ -279,8 +278,9 @@ function workRefusal(roster: Loaded<Roster>, scope: ScopeState): string | undefi
 
 /**
  * A selection that is not smart-router/auto: a model picked by hand, or smart-router/local. In a
- * work session that is not pinned, the first is sent as it is and the second's route refuses. No
- * command changes either: scope work and local off say which it is, and leave the choice to John.
+ * work session that is not pinned, the first is sent as it is and the second routes to the local
+ * models, not to the work account. No command changes either: scope work and local off say which
+ * it is, and leave the choice to John.
  */
 function otherSelection(ctx: ExtensionContext): "hand" | "local" | undefined {
   if (ctx.model === undefined) return undefined;
@@ -428,7 +428,7 @@ async function localOff(host: CommandHost, ctx: ExtensionContext): Promise<Answe
     return warning(
       scope.kind === "unreadable"
         ? `${stays} Its scope cannot be read (${scope.reason}), so smart-router/local refuses its requests, as smart-router/auto does, ${UNTIL_RECORDED}.`
-        : `${stays} ${LOCAL_REFUSED} ${refused ?? `${CHOOSE_FOR_WORK}.`}`,
+        : `${stays} ${LOCAL_IN_WORK}${refused === undefined ? "" : ` ${refused}`}`,
     );
   }
   return warning(`${stays} ${refused ?? "It is in work scope, so the next requests go to the work account."}`);
@@ -463,9 +463,8 @@ function scopeWork(host: CommandHost, ctx: ExtensionContext, roster: Loaded<Rost
   if (selection === "hand") {
     lines.push(`The selection stays ${describeModel(ctx.model)}. ${BY_HAND}`);
   } else if (selection === "local" && !host.pinOf(ctx).on) {
-    // While pinned, smart-router/local routes to the LAN models in either scope.
-    lines.push(`The selection stays smart-router/local. ${LOCAL_REFUSED}${refused === undefined ? ` ${CHOOSE_FOR_WORK}, or run /smart-router local on.` : ""}`);
-    warned = true;
+    // Pinned or not, smart-router/local routes to the LAN models in either scope; the pin's own texts cover a pinned session.
+    lines.push(`The selection stays smart-router/local. ${LOCAL_IN_WORK}`);
   }
   if (refused !== undefined) {
     lines.push(refused);

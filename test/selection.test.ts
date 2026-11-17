@@ -10,7 +10,7 @@ import test, { afterEach, beforeEach, describe } from "node:test";
 import type { Api, Model } from "@earendil-works/pi-ai";
 
 import { ENV_PIN, ENV_SCOPE, PIN_ENTRY, SCOPE_ENTRY } from "../src/constants.ts";
-import { directoryFailedNotice, directoryNotice, localInWorkScope } from "../src/errors.ts";
+import { directoryFailedNotice, directoryNotice } from "../src/errors.ts";
 import { policyFromRoster } from "../src/local.ts";
 import { processSlot } from "../src/owners.ts";
 import { readPin } from "../src/pin.ts";
@@ -422,15 +422,16 @@ describe("a restored selection", () => {
     assert.equal(pinStatus(loaded), undefined, "the pin's item is not shown over a model the pin does not route");
   });
 
-  test("smart-router/local restored into a work session is kept, and its own route refuses", async (t) => {
+  test("smart-router/local restored into a work session is kept, and routes to the LAN model without the pin", async (t) => {
     const loaded = await working(t, { select: "local" });
     assert.deepEqual([selection(loaded), messages(loaded), loaded.host.selections.length], [LOCAL, [], 0]);
     assert.deepEqual(await loaded.host.emit("input", { text: "fix the build", source: "interactive" }), [undefined], "the prompt is passed on");
-    assert.equal(loaded.router?.record(loaded.session.id)?.plan, undefined, "nothing is planned for a request the route refuses");
+    assert.equal(loaded.router?.record(loaded.session.id)?.plan?.localOnly, true, "the run is planned on the local role");
     const signal = loaded.session.startRun();
     await loaded.host.emit("turn_start", { turnIndex: 0, timestamp: NOW });
-    assert.throws(() => loaded.runtime.route("local", request("user", { signal })), { message: localInWorkScope(true).message });
-    assert.deepEqual([selection(loaded), signal.aborted, messages(loaded)], [LOCAL, false, []], "the refusal is the route's: the selection stays, and the router aborts nothing");
+    assert.equal(routed(loaded.runtime.route("local", request("user", { signal }))), GLM);
+    assert.deepEqual([selection(loaded), signal.aborted, messages(loaded)], [LOCAL, false, []], "the selection stays, nothing is said, and the session is not pinned");
+    assert.equal(pinStatus(loaded), undefined, "the pin's item is not shown: the session is not pinned");
   });
 });
 

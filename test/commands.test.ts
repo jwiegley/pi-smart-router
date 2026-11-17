@@ -554,22 +554,22 @@ describe("scope", () => {
     }
   });
 
-  test("work leaves smart-router/local selected, and warns that its requests are refused outside the pin, with what to choose or run", async (t) => {
+  test("work leaves smart-router/local selected, and says that it routes to the local models without the pin", async (t) => {
     const loaded = await heraV2(t, { select: "local" });
     assert.deepEqual(await answer(loaded, "scope work"), {
-      type: "warning",
+      type: "info",
       message:
-        "pi-smart-router: scope work (entry).\nThe selection stays smart-router/local. In work scope smart-router/local answers only while the session is pinned, so its next requests are refused. Choose smart-router/auto or a work Codex model with /model, or run /smart-router local on.",
+        "pi-smart-router: scope work (entry).\nThe selection stays smart-router/local. In work scope smart-router/local routes to the local models without the pin, so its next requests go to them, not to the work account.",
     });
     assert.deepEqual([`${loaded.session.model?.provider}/${loaded.session.model?.id}`, loaded.host.selections.length], ["smart-router/local", 0]);
-    // Under a roster that serves no work scope, smart-router/auto is no way out, and the answer says why.
+    // Under a roster that serves no work scope it says the same of smart-router/local, and warns that smart-router/auto refuses.
     resetSlot();
     const v1 = await hera(t);
     await v1.host.choose("smart-router/local");
     assert.deepEqual(await answer(v1, "scope work"), {
       type: "warning",
       message:
-        "pi-smart-router: scope work (entry).\nThe selection stays smart-router/local. In work scope smart-router/local answers only while the session is pinned, so its next requests are refused.\nIt is in work scope, which a version 1 roster does not serve, so smart-router/auto refuses its requests: give the roster a work scope (version 2), or run /smart-router scope personal.",
+        "pi-smart-router: scope work (entry).\nThe selection stays smart-router/local. In work scope smart-router/local routes to the local models without the pin, so its next requests go to them, not to the work account.\nIt is in work scope, which a version 1 roster does not serve, so smart-router/auto refuses its requests: give the roster a work scope (version 2), or run /smart-router scope personal.",
     });
   });
 
@@ -846,15 +846,15 @@ describe("local off in work scope", () => {
       },
     });
 
-  const LOCAL_REFUSED = "In work scope smart-router/local answers only while the session is pinned, so its next requests are refused.";
+  const LOCAL_IN_WORK = "In work scope smart-router/local routes to the local models without the pin, so its next requests go to them, not to the work account.";
   const STAYS_LOCAL = "pi-smart-router: this session is no longer pinned, and the selection stays smart-router/local.";
 
-  test("leaves smart-router/local selected, and warns that its requests are now refused, with what to choose", async (t) => {
+  test("leaves smart-router/local selected, and says that its requests still go to the local models", async (t) => {
     const loaded = await pinnedWork(t, "work");
     loaded.session.dialogKeys = [...UNPINS];
     assert.deepEqual(await answer(loaded, "local off"), {
       type: "warning",
-      message: `${STAYS_LOCAL} ${LOCAL_REFUSED} Choose smart-router/auto or a work Codex model with /model.`,
+      message: `${STAYS_LOCAL} ${LOCAL_IN_WORK}`,
     });
     assert.deepEqual([selection(loaded), loaded.host.selections.length], ["smart-router/local", 0], "unpinning selects nothing");
     assert.deepEqual(entriesOf(loaded, PIN_ENTRY).at(-1), { v: 1, on: false, at: AT });
@@ -913,13 +913,13 @@ describe("local off in work scope", () => {
     ]);
   });
 
-  test("with a roster that serves no work scope, or did not load, says that smart-router/auto refuses too, and the way out: the roster, and outside the latch /smart-router scope personal", async (t) => {
+  test("with a roster that serves no work scope, or did not load, says that smart-router/auto refuses, and the way out: the roster, and outside the latch /smart-router scope personal", async (t) => {
     const UNSERVED_V1 = "It is in work scope, which a version 1 roster does not serve, so smart-router/auto refuses its requests: give the roster a work scope (version 2)";
     const unpinned = (loaded: Loaded) => {
       loaded.session.dialogKeys = [...UNPINS];
       return answer(loaded, "local off");
     };
-    const stays = `${STAYS_LOCAL} ${LOCAL_REFUSED}`;
+    const stays = `${STAYS_LOCAL} ${LOCAL_IN_WORK}`;
     await withScope("work", async () => {
       const latched = await start({ dir: agentDir(t), id: "latched", select: "local", now: () => NOW, setup: (session) => session.pin(POLICY) });
       assert.deepEqual(await unpinned(latched), { type: "warning", message: `${stays} ${UNSERVED_V1}.` });

@@ -1321,14 +1321,14 @@ describe("what pi-cache-optimizer is told", () => {
     assert.equal(firstRequest(loaded), WORK_TERRA);
   });
 
-  test("smart-router/auto has no pick in a scope it refuses, and smart-router/local has none in work scope outside the pin", async (t) => {
+  test("smart-router/auto has no pick in a scope it refuses, and smart-router/local has its LAN pick in work scope, pinned or not", async (t) => {
     await withEnv(ENV_SCOPE, "work", async () => {
       const loaded = await start({ dir: agentDir(t), runtime: heraRuntime(), now: () => NOW });
       assert.throws(() => loaded.runtime.route("auto", request("direct")), /work scope, which a version 1 roster does not serve/);
       assert.equal(brief(loaded), undefined);
-      assert.throws(() => loaded.runtime.route("local", request("direct")), /work scope, where smart-router\/local answers only while the session is pinned/);
-      assert.equal(brief(loaded, "local"), undefined);
-      // Pinned, the same session's smart-router/local routes to the LAN model, and says so.
+      assert.equal(routed(loaded.runtime.route("local", request("direct"))), GLM);
+      assert.equal(brief(loaded, "local"), `${GLM} selected`);
+      // Pinned, the same session's smart-router/local routes to the LAN model too, and says so.
       loaded.session.pin(policyFromRoster(rosterFixture("roster-hera.json")));
       assert.equal(brief(loaded, "local"), `${GLM} selected`);
     });
