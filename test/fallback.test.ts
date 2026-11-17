@@ -550,10 +550,10 @@ describe("a run through the router with a fallback chain", () => {
     assert.deepEqual([routed(runtime.route("auto", request("user", { signal }))), lastHistory(loaded)?.code], [OR_GLM, "fallback:low→openrouter"]);
     await finish(loaded, OR_GLM);
 
-    // Another level is not affected: its own model takes its run.
+    // luna's limit is its account's, so another level goes to the chain as well, without trying sol.
     signal = await prompt(loaded, "review the design #high");
-    assert.equal(routed(runtime.route("auto", request("user", { signal }))), SOL);
-    await finish(loaded, SOL);
+    assert.deepEqual([routed(runtime.route("auto", request("user", { signal }))), lastHistory(loaded)?.code], [OR_GLM, "fallback:high→openrouter"]);
+    await finish(loaded, OR_GLM);
 
     // After cooldownMinutes, luna takes LOW runs again.
     state.clock = NOW + 31 * MINUTE;
@@ -565,7 +565,7 @@ describe("a run through the router with a fallback chain", () => {
     // The first run moved to the chain on its retry, the second was planned onto it.
     assert.deepEqual([first?.tier, first?.ref, first?.fallback], ["low", OR_GLM, true]);
     assert.deepEqual([second?.tier, second?.ref, second?.fallback], ["low", OR_GLM, true]);
-    assert.deepEqual([third?.tier, third?.ref, third?.fallback], ["high", SOL, undefined]);
+    assert.deepEqual([third?.tier, third?.ref, third?.fallback], ["high", OR_GLM, true]);
     assert.deepEqual([fourth?.tier, fourth?.ref, fourth?.fallback], ["low", LUNA, undefined]);
   });
 
@@ -592,9 +592,12 @@ describe("a run through the router with a fallback chain", () => {
     assert.match(message, /^smart-router\/auto: no model can take this request \(work-low: /);
     assert.doesNotMatch(message, /openrouter|omlx-hera|nyx|openai-codex-2/);
     await finish(loaded, WORK_LUNA);
-    // The next work run steps up within the work account, as before.
+    // The limit is the work account's, so the next work run finds every work level cooling and is
+    // refused too: the work scope has no chain, and no other account takes it.
     const next = await prompt(loaded, "rename bar to baz #low");
-    assert.deepEqual([routed(runtime.route("auto", request("user", { signal: next }))), lastHistory(loaded)?.code], [WORK_TERRA, "step-up"]);
+    const again = refusal(() => runtime.route("auto", request("user", { signal: next })));
+    assert.match(again, /^smart-router\/auto: no model can take this request \(work-low: .*step-up work-medium: .*step-up work-high: .*step-up work-super: /);
+    assert.doesNotMatch(again, /openrouter|omlx-hera|nyx|openai-codex-2/);
   });
 
   test("a pinned personal session on smart-router/auto routes to the local role, and smart-router/local is unchanged", async (t) => {

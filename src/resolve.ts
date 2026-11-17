@@ -11,7 +11,9 @@
 //
 // Also the cooldowns: in memory, per router instance, and fed only by the owner session's own
 // error responses. A usage-limit or authentication error cools its model; a content-filter
-// refusal never does, and neither does any error from a local-role model.
+// refusal never does, and neither does any error from a local-role model. On a subscription
+// provider such an error is the account's, so it cools every model of that provider at once
+// (accountScoped): the four personal Codex levels share one ChatGPT account.
 //
 // And the holds, kept the same way but apart from the cooldowns: a local model whose server could
 // not be reached, before any output, is skipped for the roster's unreachableMinutes. A hold applies
@@ -19,7 +21,7 @@
 // role, and comes back after minutes, not after a cooldown.
 import type { Api, Model } from "@earendil-works/pi-ai";
 
-import { checkAccount } from "./accounts.ts";
+import { checkAccount, subscriptionKind } from "./accounts.ts";
 import type { Labels } from "./accounts.ts";
 import { PROVIDER, VIRTUAL_API } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
@@ -104,7 +106,9 @@ export function resolveCandidate(ref: string, rc: ResolveContext): Resolution {
   if (!inLocalRole(rc.roster, ref)) {
     const until = rc.cooldowns.until(ref, rc.now);
     if (until !== undefined) {
-      return refuse(`cooling-until-${clock(until)}`, `cooling down until ${clock(until)} after a usage-limit or authentication error`);
+      // A model that did not fail itself waits for its account: another model of its provider did.
+      const account = rc.cooldowns.ownUntil(ref, rc.now) === undefined ? ` on its account ${parsed.provider}` : "";
+      return refuse(`cooling-until-${clock(until)}`, `cooling down until ${clock(until)} after a usage-limit or authentication error${account}`);
     }
   }
   // A hold is no cooldown: it applies to local-role models too.
@@ -138,6 +142,8 @@ export function resolveCandidate(ref: string, rc: ResolveContext): Resolution {
 /** Cooling refs, or held ones, each with the failed response that cooled or held it, so one response does so once. */
 export class Cooldowns {
   readonly #entries = new Map<string, { readonly until: number; readonly stamp: number }>();
+  /** Cooling accounts, by provider id: every model of the provider waits. */
+  readonly #accounts = new Map<string, { readonly until: number; readonly stamp: number }>();
 
   /** Cool `ref` for `minutes` because of the failed response stamped `stamp`. */
   cool(ref: string, stamp: number, now: number, minutes: number): void {
@@ -145,10 +151,30 @@ export class Cooldowns {
     this.#entries.set(ref, { until: now + minutes * 60_000, stamp });
   }
 
-  /** When `ref` stops cooling, or undefined when it is not cooling at `now`. */
-  until(ref: string, now: number): number | undefined {
+  /** Cool every model of `provider`, its account, for `minutes` because of the failed response stamped `stamp`. */
+  coolAccount(provider: string, stamp: number, now: number, minutes: number): void {
+    if (this.#accounts.get(provider)?.stamp === stamp) return;
+    this.#accounts.set(provider, { until: now + minutes * 60_000, stamp });
+  }
+
+  /** When `ref` stops cooling for a failure of its own, whatever its account does. */
+  ownUntil(ref: string, now: number): number | undefined {
     const entry = this.#entries.get(ref);
     return entry !== undefined && entry.until > now ? entry.until : undefined;
+  }
+
+  /** When `ref` stops cooling, for its own failure or its account's, whichever lasts longer; undefined when it is not cooling at `now`. */
+  until(ref: string, now: number): number | undefined {
+    const own = this.ownUntil(ref, now);
+    const provider = parseRef(ref)?.provider;
+    const account = provider === undefined ? undefined : this.#accounts.get(provider);
+    const shared = account !== undefined && account.until > now ? account.until : undefined;
+    return own === undefined ? shared : shared === undefined ? own : Math.max(own, shared);
+  }
+
+  /** The accounts cooling at `now`, with when each stops. */
+  accounts(now: number): Array<{ readonly provider: string; readonly until: number }> {
+    return [...this.#accounts].filter(([, entry]) => entry.until > now).map(([provider, entry]) => ({ provider, until: entry.until }));
   }
 
   /** Every ref cooling or held at `now`, in the order they were first cooled or held, with when each stops. */
@@ -163,6 +189,8 @@ export type FailureKind = "content-filter" | "limit" | "other";
 const CONTENT_FILTER = /content[ _-]?filter|content[ _-]?policy|moderation|\bflagged\b|\bsafety\b/i;
 const LIMIT_OR_AUTH =
   /usage[ _-]?limit|\bquota\b|insufficient_quota|\bbilling\b|subscription_sharing|resource[ _]?exhausted|(?<![a-z0-9])(?:401|403)(?![a-z0-9])|unauthori[sz]ed|\bforbidden\b|model_not_found|\bmodel\b[^\n]{0,200}?\bnot[ _-]?found\b/i;
+/** The one limit-kind failure that is about a model, not about the account that asked for it. */
+const MODEL_NOT_FOUND = /model_not_found|\bmodel\b[^\n]{0,200}?\bnot[ _-]?found\b/i;
 // Error texts can carry a provider's whole response body; the kind is decided by its start.
 const FAILURE_TEXT_LIMIT = 8 * 1024;
 
@@ -230,6 +258,15 @@ export function holdFrom(
   return ref;
 }
 
+/**
+ * Whether an error text is about the account rather than the one model: a usage limit, a quota,
+ * billing, or an authentication failure (the credential is the provider's). A model that is not
+ * found is the model's own. The router applies this to subscription providers only (coolFrom).
+ */
+export function accountScoped(text: string | undefined): boolean {
+  return failureKind(text) === "limit" && !MODEL_NOT_FOUND.test((text ?? "").slice(0, FAILURE_TEXT_LIMIT));
+}
+
 /** The parts of a failed assistant response the cooldown rules read. */
 export interface FailedResponse {
   readonly provider: string;
@@ -245,11 +282,21 @@ export interface FailedResponse {
  * authentication error cools it for the roster's cooldownMinutes. A router refusal (it names the
  * virtual model), a content-filter refusal and any local-role model are never cooled. Returns the
  * cooled ref.
+ *
+ * When the error is the account's (accountScoped) and the provider is a subscription provider
+ * (openai-codex, anthropic, github-copilot or a Multi-Pass alias of one, each of which is one
+ * account behind one credential), every model of that provider is cooled with it. Other providers
+ * cool the one model, as before: an error text cannot tell an account-wide limit from a limit on
+ * one model, and OpenRouter has both. A provider id is one account, so the work account's cooldown
+ * never touches the personal account's models, nor the other way round.
  */
 export function coolFrom(message: FailedResponse, roster: Roster, cooldowns: Cooldowns, now: number): string | undefined {
   if (message.stopReason !== "error" || message.provider === PROVIDER || message.api === VIRTUAL_API) return undefined;
   const ref = `${message.provider}/${message.model}`;
   if (failureKind(message.errorMessage) !== "limit" || inLocalRole(roster, ref)) return undefined;
   cooldowns.cool(ref, message.timestamp, now, roster.cooldownMinutes);
+  if (accountScoped(message.errorMessage) && subscriptionKind(message.provider) !== undefined) {
+    cooldowns.coolAccount(message.provider, message.timestamp, now, roster.cooldownMinutes);
+  }
   return ref;
 }

@@ -325,9 +325,14 @@ function levelLines(host: CommandHost, ctx: ExtensionContext, roster: RosterV2):
   });
 }
 
-/** The local models skipped now because their servers could not be reached, one line each. */
+/** The accounts cooling now, one line each however many models wait for them, then the local models skipped because their servers could not be reached. */
 function holdLines(rc: ResolveContext): string[] {
-  return (rc.holds?.active(rc.now) ?? []).map(({ ref, until }) => `Unreachable: ${ref} is skipped until ${clock(until)}, since its server could not be reached`);
+  const accounts = rc.cooldowns
+    .accounts(rc.now)
+    .map(({ provider, until }) => `Cooling: the account ${provider}, every model of it, until ${clock(until)} after a usage-limit or authentication error`);
+  return accounts.concat(
+    (rc.holds?.active(rc.now) ?? []).map(({ ref, until }) => `Unreachable: ${ref} is skipped until ${clock(until)}, since its server could not be reached`),
+  );
 }
 
 /** Said when the session's last request on smart-router/auto went to a model of a scope's fallback chain. */

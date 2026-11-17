@@ -164,7 +164,9 @@ describe("status", () => {
     assert.ok(!lines.some((line) => /^Lock:|locked/.test(line)), message);
     assert.ok(lines.includes(`  engineer: ${SOL} cooling-until-${clock(NOW + 30 * 60_000)}`), message);
     assert.ok(lines.includes("Selection: smart-router/local, thinking high"), message);
-    assert.ok(lines.some((line) => new RegExp(`^Last decision: \\d\\d:\\d\\d:\\d\\d smart-router/auto user: architect → ${ASTRA.replace(/\//g, "\\/")} \\(signal:planning, planning:plan-words\\)$`).test(line)), message);
+    // sol's usage limit is its account's, so astra, on the same account, waits too, and the planning run took the architect's fallback.
+    assert.ok(lines.includes(`  architect: ${ASTRA} cooling-until-${clock(NOW + 30 * 60_000)}`), message);
+    assert.ok(lines.some((line) => new RegExp(`^Last decision: \\d\\d:\\d\\d:\\d\\d smart-router/auto user: thinker → ${KIMI.replace(/\//g, "\\/")} \\(fallback:architect→thinker, planning:plan-words\\)$`).test(line)), message);
   });
 
   test("never shows a credential or an account label from Pi's auth status", async (t) => {
