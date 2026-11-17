@@ -202,13 +202,6 @@ describe("in work scope, outside the pin", () => {
 describe("the router's own models, where their policy sends nothing", () => {
   const LOCAL_ATTEMPTS: Attempt[] = [{ role: "worker", exists: true, candidates: [{ ok: false, ref: "openrouter/deepseek/deepseek-v4.1-flash-1017", reason: "not-local", detail: "host openrouter.ai is not a local host" }] }];
 
-  test("smart-router/local in a scope that cannot be read offers a work Codex model, since smart-router/auto refuses that scope too", () => {
-    assert.equal(
-      scopeUnreadable("local", "the latest smart-router.scope entry is not one the router wrote", true).message,
-      "smart-router/local: this session's scope cannot be read (the latest smart-router.scope entry is not one the router wrote). Nothing was sent. Record it again with /smart-router scope work or /smart-router scope personal, or choose a work Codex model with /model.",
-    );
-  });
-
   test("smart-router/auto under the pin names smart-router/local and /smart-router local off; smart-router/local under the pin keeps its words", () => {
     assert.equal(
       unroutable("auto", { attempts: LOCAL_ATTEMPTS }, { localOnly: true, pinned: true }).message,

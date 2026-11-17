@@ -266,7 +266,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
 
   /**
    * The scope a session resolves in. A scope that cannot be read resolves in work scope, the
-   * narrower one, and prepare() refuses smart-router/auto for it.
+   * narrower one: prepare() refuses smart-router/auto for it, and smart-router/local's requests,
+   * which carry no account, go to the local role there as in any scope.
    */
   const resolvedScope = (ctx: ExtensionContext): Scope => {
     const scope = scopeOf(ctx);
@@ -333,23 +334,17 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   };
 
   /**
-   * Why smart-router/local refuses this session's scope, if it does. Local-only requests carry no
-   * account, and selecting smart-router/local is itself the request for local routing, so it
-   * refuses neither scope, pinned or not, whatever scopes the roster serves (John's decision of
-   * 2026-11-16, "Let smart-router/local route in work scope"). Outside the pin it refuses only a
-   * scope that cannot be read, as smart-router/auto does, until the scope is recorded again.
-   */
-  const localRefusal = (ctx: ExtensionContext): RouterError | undefined => {
-    if (pinOf(ctx).on) return undefined;
-    const scope = scopeOf(ctx);
-    return scope.kind === "unreadable" ? scopeUnreadable("local", scope.reason, true) : undefined;
-  };
-
-  /**
    * Why one of the router's models refuses this session for its scope, if it does. prepare() throws
    * the refusal; what pi-cache-optimizer is told and an input's plan follow it.
+   *
+   * Only smart-router/auto has one. Local-only requests carry no account, and selecting
+   * smart-router/local is itself the request for local routing, so it refuses no scope, pinned or
+   * not, whatever scopes the roster serves: neither scope (John's decision of 2026-11-16, "Let
+   * smart-router/local route in work scope"), nor one that cannot be read (his decision of
+   * 2026-11-17, "Let local route there too"). Such a request resolves in work scope
+   * (resolvedScope), where a local model passes every check as it does in work scope itself.
    */
-  const refusalFor = (id: VirtualId, value: Roster, ctx: ExtensionContext): RouterError | undefined => (id === "auto" ? scopeRefusal(value, ctx) : localRefusal(ctx));
+  const refusalFor = (id: VirtualId, value: Roster, ctx: ExtensionContext): RouterError | undefined => (id === "auto" ? scopeRefusal(value, ctx) : undefined);
 
   const prepare = (id: VirtualId, request: ModelRouteRequest, ctx: ExtensionContext): RouteInput => {
     const { sessionManager } = ctx;
@@ -436,7 +431,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       const { ctx } = owner;
       const state = loaded(roster.current());
       if (state.kind !== "ok" || boundedHistory(ctx.sessionManager) === undefined) return undefined;
-      // Neither model has a pick in a scope that prepare() refuses it for.
+      // smart-router/auto has no pick in a scope that prepare() refuses it for.
       if (refusalFor(id, state.value, ctx) !== undefined) return undefined;
       const rc = contextFor(ctx, state.value, id, pinOf(ctx));
       const record = records.get(owner.sessionId) ?? newRecord();

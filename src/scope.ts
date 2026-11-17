@@ -18,7 +18,8 @@
 //
 // The read fails closed. A malformed entry, a custom_message of the type, or a session whose
 // entries cannot be read has an unreadable scope: routing resolves in work scope, the narrower one,
-// and smart-router/auto refuses until a scope is recorded again.
+// and smart-router/auto refuses until a scope is recorded again. smart-router/local, whose requests
+// carry no account, routes to the local role all the same.
 //
 // A fork or /new carries a scope that an entry, the latch or the work directories set, and an
 // unreadable one as work: at session_shutdown the old session leaves it in the slot under the new

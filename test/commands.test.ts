@@ -13,7 +13,7 @@ import { createRouter } from "../src/router.ts";
 import { scopeEntry } from "../src/scope.ts";
 import { ASTRA, DEEPSEEK, FakeCatalog, GLM, GLM_CLOUD, heraModels, KIMI, model, NOW, OPENROUTER, rosterFixture, rosterFixtureV2, SOL, WORK_SOL } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
-import { agentDir, assistant, FakeRuntime, load, request, resetSlot, start } from "./support/pi.ts";
+import { agentDir, assistant, FakeRuntime, load, request, resetSlot, routed, start } from "./support/pi.ts";
 import type { FakeSession, Loaded, LoadOptions } from "./support/pi.ts";
 
 const POLICY = policyFromRoster(rosterFixture("roster-hera.json"));
@@ -886,12 +886,13 @@ describe("local off in work scope", () => {
     }
   });
 
-  test("with a scope that cannot be read, leaves the selection, and says that the router's model refuses until a scope is recorded", async (t) => {
+  test("with a scope that cannot be read, leaves the selection, and says that smart-router/local still routes to the local models and that smart-router/auto refuses until a scope is recorded", async (t) => {
     const UNTIL = "until /smart-router scope work or /smart-router scope personal records it again";
     const WHY = "Its scope cannot be read (the latest smart-router.scope entry is not one the router wrote)";
     const local = await pinnedWork(t, "unreadable", { v: 9 });
     local.session.dialogKeys = [...UNPINS];
-    assert.deepEqual(await answer(local, "local off"), { type: "warning", message: `${STAYS_LOCAL} ${WHY}, so smart-router/local refuses its requests, as smart-router/auto does, ${UNTIL}.` });
+    assert.deepEqual(await answer(local, "local off"), { type: "warning", message: `${STAYS_LOCAL} smart-router/local routes to the local models without the pin in every scope, so its next requests go to them. ${WHY}, so smart-router/auto refuses its requests ${UNTIL}.` });
+    assert.equal(routed(local.runtime.route("local", request("direct"))), GLM, "and its route does as the answer says");
     resetSlot();
     const auto = await pinnedWork(t, "unreadable-auto", { v: 9 });
     await auto.host.choose("smart-router/auto");

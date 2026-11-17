@@ -137,18 +137,13 @@ export function carryFailedNotice(reason: string): string {
 }
 
 /**
- * Both models refuse a session whose scope cannot be read: smart-router/auto always, and
- * smart-router/local outside the pin, though it routes in both scopes when the scope can be read.
- * Neither answers until the scope is recorded again, and such a scope counts as work scope, so the
- * model offered is the one smart-router/auto's refusals offer, never smart-router/auto itself.
- * `work`: whether the session is a work session that is not pinned (chooseModel).
+ * smart-router/auto refuses a session whose scope cannot be read, pinned or not, until the scope
+ * is recorded again: it cannot tell which account the session's requests may use. Such a scope
+ * counts as work scope. smart-router/local refuses no scope. `work`: whether the session is a work
+ * session that is not pinned (chooseModel).
  */
 export function scopeUnreadable(id: VirtualId, reason: string, work = false): RouterError {
-  return refusal(
-    id,
-    `this session's scope cannot be read (${reason})`,
-    `Record it again with /smart-router scope work or /smart-router scope personal, or ${chooseModel("auto", work)}.`,
-  );
+  return refusal(id, `this session's scope cannot be read (${reason})`, `Record it again with /smart-router scope work or /smart-router scope personal, or ${chooseModel(id, work)}.`);
 }
 
 /** A roster that does not serve a scope, as the texts name it: by its version, when that is 1. */
