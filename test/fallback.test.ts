@@ -101,8 +101,9 @@ function cooled(...refs: string[]): Cooldowns {
   return cooldowns;
 }
 
-function plan(rc: ResolveContext, level: LevelInput, options: { last?: LastResponder; text?: string } = {}): Plan {
-  return planUserTurn({ rc, text: options.text ?? "What is the capital of France?", last: options.last, now: rc.now, reserve: 16_384, level });
+function plan(rc: ResolveContext, level: LevelInput, options: { last?: LastResponder; text?: string; held?: string } = {}): Plan {
+  const { held } = options;
+  return planUserTurn({ rc, text: options.text ?? "What is the capital of France?", last: options.last, now: rc.now, reserve: 16_384, level, ...(held === undefined ? {} : { held }) });
 }
 
 const picked = (decision: Decision): readonly [string, string, string] | string =>
@@ -337,7 +338,32 @@ describe("planning with a fallback chain", () => {
     assert.deepEqual(picked(plan(context({ cooldowns, now: NOW + 31 * MINUTE }), { tag: "low" }, { last }).decision), ["low", LUNA, "tag"]);
   });
 
-  test("a fallback model holds no level: the next untagged run goes to its own level's model, inside the idle window too", () => {
+  test("a chain model stands for the level the session held: a lower run inside the idle window stays at that level, and resumes on its own model", () => {
+    const last: LastResponder = { ref: OR_GLM, at: NOW - MINUTE };
+    // The session was at SUPER when the chain took over. A trivial follow-up stays at SUPER.
+    const held = plan(context({ cooldowns: cooled(ASTRA) }), {}, { last, text: "Format this file", held: "super" });
+    assert.deepEqual(picked(held.decision), ["openrouter", OR_GLM, "fallback:super→openrouter"]);
+    assert.deepEqual([held.level?.tier, held.level?.asked, held.level?.start, held.level?.fallback], ["super", "low", "super", true]);
+    // And when astra is back, it is astra that takes it, not luna.
+    assert.deepEqual(picked(plan(context(), {}, { last, text: "Format this file", held: "super" }).decision), ["super", ASTRA, "hold:sticky"]);
+    // The hold ends as any does: once the session has been idle, and at once for a tag.
+    assert.deepEqual(picked(plan(context(), {}, { last: { ref: OR_GLM, at: NOW - 6 * MINUTE }, text: "Format this file", held: "super" }).decision), ["low", LUNA, "reopen:idle"]);
+    assert.deepEqual(picked(plan(context(), { tag: "low" }, { last, held: "super" }).decision), ["low", LUNA, "tag"]);
+    // A role that is no level of the scope holds nothing.
+    assert.deepEqual(picked(plan(context(), {}, { last, text: "Format this file", held: "work-super" }).decision), ["low", LUNA, "keyword"]);
+  });
+
+  test("when no candidate fits and every level would take the same chain model, the run keeps its own level", () => {
+    const usage = { input: 250_000, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 250_000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+    const planned = plan(context({ cooldowns: cooled(LUNA, TERRA, SOL, ASTRA) }), { tag: "low" }, { last: { ref: LUNA, at: NOW - MINUTE, usage } });
+    assert.deepEqual(picked(planned.decision), ["openrouter", OR_GLM, "fallback:low→openrouter"]);
+    assert.deepEqual([planned.level?.tier, planned.level?.steppedUp, planned.level?.fallback, planned.role], ["low", false, true, "low"]);
+    // A higher level whose own model is available and too small still takes the run, as before.
+    const up = plan(context({ cooldowns: cooled(LUNA, TERRA, SOL) }), { tag: "low" }, { last: { ref: LUNA, at: NOW - MINUTE, usage: { ...usage, input: 300_000, totalTokens: 300_000 } } });
+    assert.deepEqual([picked(up.decision), up.level?.tier, up.level?.steppedUp], [["super", ASTRA, "step-up"], "super", true]);
+  });
+
+  test("without a recorded level, a chain model holds none: the next untagged run goes to its own level's model, inside the idle window too", () => {
     for (const ref of CHAIN) {
       const planned = plan(context(), {}, { last: { ref, at: NOW - MINUTE }, text: "Format this file" });
       assert.deepEqual(picked(planned.decision), ["low", LUNA, "keyword"], ref);
@@ -576,6 +602,67 @@ describe("a run through the router with a fallback chain", () => {
     assert.deepEqual([second?.tier, second?.ref, second?.fallback], ["low", OR_GLM, true]);
     assert.deepEqual([third?.tier, third?.ref, third?.fallback], ["high", OR_GLM, true]);
     assert.deepEqual([fourth?.tier, fourth?.ref, fourth?.fallback], ["low", LUNA, undefined]);
+  });
+
+  test("a run that starts without a prompt returns to the level's own model once it is back, and stays on the chain until then", async (t) => {
+    const state = await session(t);
+    const { loaded } = state;
+    const { runtime } = loaded;
+    let signal = await prompt(loaded, "review the design #high");
+    assert.equal(routed(runtime.route("auto", request("user", { signal }))), SOL);
+    await loaded.host.emit("message_end", { message: assistant(SOL, { stopReason: "error", errorMessage: LIMIT, content: [] }) });
+    await loaded.host.emit("agent_settled", { aborted: false });
+    loaded.session.endRun();
+    signal = await prompt(loaded, "review the design #high");
+    assert.equal(routed(runtime.route("auto", request("user", { signal }))), OR_GLM);
+    await finish(loaded, OR_GLM);
+
+    // A goal continuation or a loop's run has no prompt and no plan. While the account cools, it
+    // goes on with the chain; its level is the one the session held.
+    for (const reason of ["continuation", "user"] as const) {
+      state.clock += MINUTE;
+      await loaded.host.emit("before_agent_start", { messageType: "custom" });
+      signal = loaded.session.startRun();
+      const during = runtime.route("auto", request(reason, { signal, previous: previous(runtime, OR_GLM) }));
+      assert.deepEqual([routed(during), lastHistory(loaded)?.code], [OR_GLM, "fallback:high→openrouter"], reason);
+      await finish(loaded, OR_GLM);
+    }
+    // 31 minutes after the fallback, the first request of such a run goes back to sol.
+    for (const reason of ["continuation", "user"] as const) {
+      resetSlot();
+      const later = await session(t);
+      let run = await prompt(later.loaded, "review the design #high");
+      later.loaded.runtime.route("auto", request("user", { signal: run }));
+      assert.equal(routed(later.loaded.runtime.route("auto", request("retry", { signal: run, failed: failure(later.loaded.runtime, SOL, LIMIT) }))), OR_GLM);
+      await finish(later.loaded, OR_GLM);
+      later.clock = NOW + 31 * MINUTE;
+      await later.loaded.host.emit("before_agent_start", { messageType: "custom" });
+      run = later.loaded.session.startRun();
+      const back = later.loaded.runtime.route("auto", request(reason, { signal: run, previous: previous(later.loaded.runtime, OR_GLM) }));
+      assert.deepEqual([routed(back), lastHistory(later.loaded)?.code], [SOL, "return:level"], reason);
+      // The run's own continuations stay on the model it now has.
+      assert.equal(routed(later.loaded.runtime.route("auto", request("continuation", { signal: run, previous: previous(later.loaded.runtime, SOL) }))), SOL);
+      assert.equal(lastHistory(later.loaded)?.code, "stick:previous");
+    }
+  });
+
+  test("a SUPER session answered by the chain stays at SUPER for a trivial follow-up, and a move onto the chain in mid-run is said once", async (t) => {
+    const state = await session(t);
+    const { loaded } = state;
+    const { runtime } = loaded;
+    let signal = await prompt(loaded, "plan the migration #super");
+    assert.equal(routed(runtime.route("auto", request("user", { signal }))), ASTRA);
+    const before = loaded.session.notices.length;
+    assert.equal(routed(runtime.route("auto", request("retry", { signal, failed: failure(runtime, ASTRA, LIMIT) }))), OR_GLM);
+    runtime.route("auto", request("continuation", { signal, previous: previous(runtime, OR_GLM) }));
+    assert.deepEqual(loaded.session.notices.slice(before), [
+      { type: "info", message: "pi-smart-router: gpt-6-astra can no longer take this run, so it goes on with the fallback openrouter (z-ai/glm-5.3-flash)." },
+    ]);
+    await finish(loaded, OR_GLM);
+    state.clock = NOW + MINUTE;
+    signal = await prompt(loaded, "Format this file");
+    assert.equal(loaded.session.statuses.get(LEVEL_KEY), "personal SUPER → z-ai/glm-5.3-flash (keywords; jev unavailable; fallback)");
+    assert.deepEqual([routed(runtime.route("auto", request("user", { signal }))), lastHistory(loaded)?.code], [OR_GLM, "fallback:super→openrouter"]);
   });
 
   test("a refusal names the level's role, then the chain's roles as fallbacks, then the levels above as step-ups", async (t) => {

@@ -39,7 +39,7 @@ import { checkLocal } from "./local.ts";
 import type { LocalPolicy } from "./local.ts";
 import { clock, coolFrom, failureKind, holdFrom, refOf, resolveCandidate } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
-import { autoRoles, excludedBy, excludesFor, isWorkBound, roleOf, scopeSection } from "./roster.ts";
+import { autoRoles, excludedBy, excludesFor, isWorkBound, levelRoles, roleOf, scopeSection } from "./roster.ts";
 
 /** A session's pin as routing sees it. */
 export interface Pin {
@@ -120,6 +120,12 @@ export interface SessionRecord {
    * this a retry went back and forth between two of them.
    */
   readonly limited: Set<string>;
+  /**
+   * The level role the session's last planned version 2 run took. While the session is on a model
+   * of the scope's fallback chain, that model stands for this level: a run that starts without a
+   * prompt picks in it again, and the hold rules compare with it (PlanInput.held).
+   */
+  levelRole: string | undefined;
   last: LastResponder | undefined;
   readonly history: HistoryEntry[];
   /** The planned version 2 run's level, until its record is written. */
@@ -129,7 +135,7 @@ export interface SessionRecord {
 }
 
 export function newRecord(): SessionRecord {
-  return { plan: undefined, runPick: undefined, limited: new Set(), last: undefined, history: [], pendingLevel: undefined, lastInput: undefined };
+  return { plan: undefined, runPick: undefined, limited: new Set(), levelRole: undefined, last: undefined, history: [], pendingLevel: undefined, lastInput: undefined };
 }
 
 /** The fork's bounded session readers. Pi 1.5.0's npm types lack them, so they are detected. */
@@ -274,6 +280,24 @@ function takePlan(record: SessionRecord, id: VirtualId, rc: ResolveContext): Pla
   return undefined;
 }
 
+/**
+ * The level a run that starts without a plan goes back to, if it does: on smart-router/auto under a
+ * version 2 roster, outside the pin, when this is the run's first request, the model it would stay
+ * on is one of the scope's fallback chain, and the session's last planned run took a level of this
+ * scope. Such a run (a goal continuation, a loop's) has no prompt to plan it, and without this it
+ * would stay on the chain model for as long as it kept starting runs, however long ago the level's
+ * own model came back.
+ */
+function levelToReturnTo(rc: ResolveContext, request: ModelRouteRequest, record: SessionRecord): string | undefined {
+  const { levelRole } = record;
+  if (rc.roster.version !== 2 || rc.virtualId !== "auto" || rc.localOnly || record.runPick !== undefined || levelRole === undefined) return undefined;
+  const section = scopeSection(rc.roster, rc.scope);
+  const base = previousRef(request) ?? record.last?.ref;
+  const role = base === undefined ? undefined : roleOf(rc.roster, base)?.name;
+  if (section?.fallback === undefined || role === undefined || !section.fallback.includes(role)) return undefined;
+  return levelRoles(section).includes(levelRole) ? levelRole : undefined;
+}
+
 /** The planned model if it still resolves, else the planned role, then its fallback. */
 function fromPlan(rc: ResolveContext, plan: Plan): Decision {
   if (plan.decision.ok) {
@@ -372,15 +396,15 @@ export function routeOwned(input: RouteInput): ModelRoute {
   const { id, request, rc, record } = input;
   let decision: Decision;
   let plan: Plan | undefined;
-  if (request.reason === "user") {
-    plan = takePlan(record, id, rc);
-    decision = plan === undefined ? stick(rc, previousRef(request), record) : fromPlan(rc, plan);
-  } else if (request.reason === "retry") {
-    decision = retry(rc, request, record);
-  } else {
-    decision = stick(rc, previousRef(request), record);
-  }
+  if (request.reason === "user") plan = takePlan(record, id, rc);
+  const back = plan === undefined && request.reason !== "retry" ? levelToReturnTo(rc, request, record) : undefined;
+  if (plan !== undefined) decision = fromPlan(rc, plan);
+  else if (request.reason === "retry") decision = retry(rc, request, record);
+  else if (back !== undefined) decision = pickInRole(rc, back, { fallback: true, code: "return:level" });
+  else decision = stick(rc, previousRef(request), record);
   const choice = settle(input, decision);
+  // The level a planned run took is the session's until the next planned run.
+  if (plan?.level !== undefined && plan.role !== undefined) record.levelRole = plan.role;
   record.runPick = { id, ref: choice.ref, role: choice.role };
   remember(record, {
     at: rc.now,

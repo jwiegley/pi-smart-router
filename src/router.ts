@@ -40,6 +40,7 @@ import {
   carryFailedNotice,
   directoryFailedNotice,
   directoryNotice,
+  fallbackMoveNotice,
   fallbackNotice,
   firstLine,
   historyNotice,
@@ -631,7 +632,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     // The selected model refuses this scope at the run's first request, so there is no run to plan.
     if (refusalFor(id, state.value, ctx) !== undefined) return undefined;
     const rc = contextFor(ctx, state.value, id, pinOf(ctx));
-    const planned = planUserTurn({ rc, text, last: record.last, now: now(), reserve: reserveFor(pi.getSettings(), id), level });
+    const planned = planUserTurn({ rc, text, last: record.last, now: now(), reserve: reserveFor(pi.getSettings(), id), level, held: record.levelRole });
     record.plan = planned;
     record.planDigest = digest;
     record.plannedToken = token;
@@ -941,7 +942,20 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   };
 
   const api: Router = {
-    routeOwned: (id, request, ctx) => routeOwned(prepare(id, request, ctx)),
+    routeOwned: (id, request, ctx) => {
+      const input = prepare(id, request, ctx);
+      const before = input.record.runPick;
+      const route = routeOwned(input);
+      // A run under way that moves from its model onto the scope's chain says so, where it happens.
+      const after = input.record.runPick;
+      if (id === "auto" && !input.rc.localOnly && before !== undefined && after !== undefined && before.ref !== after.ref) {
+        const { scope } = input.rc;
+        if (!inChain(scope, before.ref) && inChain(scope, after.ref)) {
+          notify(ctx, fallbackMoveNotice(parseRef(before.ref)?.id ?? before.ref, after.role, route.model.id), "info");
+        }
+      }
+      return route;
+    },
     routeOther: (id, request, ctx) => routeOther(prepare(id, request, ctx)),
     heal,
     activeRoute,

@@ -222,6 +222,12 @@ export interface PlanInput {
   readonly reserve: number;
   /** A version 2 run's tag and Jev outcome; version 1 and local-only runs ignore it. */
   readonly level?: LevelInput;
+  /**
+   * The level role the session's last planned run took. A chain model stands for that level: while
+   * the latest response is a chain model's, the hold rules compare with it, so that a session at
+   * SUPER whose account ran out is still at SUPER when the account is back.
+   */
+  readonly held?: string | undefined;
 }
 
 /** The role of a ref that may take this request: the local role when local-only, else for auto a role auto can reach. */
@@ -245,10 +251,15 @@ const FLOOR: Tier = "high";
 const STEP_UP = "step-up";
 const NO_SCOPE = "no-scope";
 
-/** The tier of a scope whose role holds a ref. */
-function tierOf(rc: ResolveContext, section: ScopeSection, ref: string): Tier | undefined {
+/**
+ * The tier of a scope whose role holds a ref; for a model of the scope's fallback chain, the tier of
+ * `held`, the level role the session's last planned run took, when that is a level of the scope.
+ */
+function tierOf(rc: ResolveContext, section: ScopeSection, ref: string, held?: string): Tier | undefined {
   const role = roleOf(rc.roster, ref)?.name;
-  return role === undefined ? undefined : TIERS.find((tier) => section.levels[tier].role === role);
+  if (role === undefined) return undefined;
+  const standsFor = section.fallback?.includes(role) === true ? held : role;
+  return TIERS.find((tier) => section.levels[tier].role === standsFor);
 }
 
 /** Whether a pick ranks before `later` among a tier's candidates: its role's own models, then the scope's chain. */
@@ -268,14 +279,21 @@ function ranksBefore(rc: ResolveContext, section: ScopeSection, tier: Tier, choi
  */
 function climb(p: PlanInput, section: ScopeSection, start: Tier, code: string): { readonly tier: Tier; readonly decision: Decision } {
   const attempts: Attempt[] = [];
-  let highest: { readonly tier: Tier; readonly decision: Decision } | undefined;
+  let first: { readonly tier: Tier; readonly decision: Decision & { readonly ok: true } } | undefined;
+  let highest: { readonly tier: Tier; readonly decision: Decision & { readonly ok: true } } | undefined;
   for (let tier: Tier | undefined = start; tier !== undefined; tier = tierAbove(tier)) {
     const decision = pickInRole(p.rc, section.levels[tier].role, { fallback: true, code: tier === start ? code : STEP_UP });
     // Every tier shares the scope's chain, so its roles' reasons are listed with the first tier's only.
     if (!decision.ok) attempts.push(...decision.attempts.filter((attempt) => !attempts.some((seen) => seen.role === attempt.role)));
     else if (fits(p, decision.choice.model)) return { tier, decision };
-    else highest = { tier, decision };
+    else {
+      highest = { tier, decision };
+      first ??= highest;
+    }
   }
+  // When the highest tier would take the very model the first one would, a chain model that every
+  // tier shares, moving up gains nothing: the run keeps the tier it started at.
+  if (first !== undefined && highest !== undefined && first.decision.choice.ref === highest.decision.choice.ref) return first;
   return highest ?? { tier: start, decision: { ok: false, attempts } };
 }
 
@@ -293,7 +311,7 @@ function planLevel(p: PlanInput, section: ScopeSection, signal: Signal): Pick<Pl
   const own = trigger === undefined ? asked : FLOOR;
   let start = own;
   let code: string = source;
-  const sticky = tag === undefined && last !== undefined ? tierOf(rc, section, last.ref) : undefined;
+  const sticky = tag === undefined && last !== undefined ? tierOf(rc, section, last.ref, p.held) : undefined;
   if (last !== undefined && sticky !== undefined && tierRank(start) < tierRank(sticky)) {
     const idle = p.now - last.at >= rc.roster.stickyIdleMinutes * 60_000;
     if (!idle) {

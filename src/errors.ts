@@ -250,6 +250,11 @@ export function fallbackNotice(tier: Tier, role: string, modelId: string): strin
   return `pi-smart-router: no ${tierLabel(tier)} model can take this run, so it goes to the fallback ${role} (${modelId}).`;
 }
 
+/** Shown once when a run under way moves from its model onto one of its scope's fallback chain: the conversation now goes to that role's vendor or host. */
+export function fallbackMoveNotice(fromModelId: string, role: string, modelId: string): string {
+  return `pi-smart-router: ${fromModelId} can no longer take this run, so it goes on with the fallback ${role} (${modelId}).`;
+}
+
 /** Shown when a version 2 run went to a higher tier than the one its pick started at. */
 export function stepUpNotice(start: Tier, tier: Tier, modelId: string): string {
   return `pi-smart-router: no ${tierLabel(start)} model can take this run, so it goes to ${tierLabel(tier)} (${modelId}).`;
