@@ -93,11 +93,13 @@ export function buildContext(
     used += text.length;
     kept.unshift({ role: candidate.role, text });
   }
+  // John's prompts are redacted like the message: a prompt file can be a link to any file he owns,
+  // and whatever it holds, no secret shape in it reaches Jev. The built-in text has none.
   const criteria: Record<string, string> = {};
-  for (const tier of TIERS) criteria[tier] = descriptions[tier];
+  for (const tier of TIERS) criteria[tier] = redact(descriptions[tier]);
   return {
     state: { message: capped, recent: kept.map(({ role, text }) => ({ role, text })) },
-    questions: { [JEV_QUESTION]: { type: "choice", instructions, criteria } },
+    questions: { [JEV_QUESTION]: { type: "choice", instructions: redact(instructions), criteria } },
   };
 }
 

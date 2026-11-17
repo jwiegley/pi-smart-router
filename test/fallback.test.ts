@@ -714,6 +714,19 @@ describe("a run through the router with a fallback chain", () => {
     assert.doesNotMatch(message, /openrouter|openai-codex/);
   });
 
+  test("smart-router/auto declares the smallest window among every role it reaches, the chain's roles included", async (t) => {
+    const cat = catalog();
+    cat.add(model(OR_GLM, { contextWindow: 64_000, maxTokens: 8_000 }));
+    const loaded = await start({ dir: agentDir(t, { roster: TEXT }), runtime: new FakeRuntime(cat), now: () => NOW });
+    assert.deepEqual(loaded.router?.limits().auto, { contextWindow: 64_000, maxTokens: 8_000 });
+    // Without the chain's first model, its role's next one counts.
+    resetSlot();
+    const without = catalog();
+    without.remove(OR_GLM);
+    const next = await start({ dir: agentDir(t, { roster: TEXT }), runtime: new FakeRuntime(without), now: () => NOW });
+    assert.deepEqual(next.router?.limits().auto, { contextWindow: 131_072, maxTokens: 32_000 });
+  });
+
   test("/smart-router status shows the chain, which roles it reaches, and when the last request was on a fallback", async (t) => {
     const { loaded } = await session(t);
     const { runtime } = loaded;

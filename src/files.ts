@@ -52,6 +52,12 @@ export interface ReadOptions {
   readonly maxBytes: number;
   /** The required owner; `process.getuid()` by default. */
   readonly uid?: number | undefined;
+  /**
+   * Accept a file of any owner. For the standalone checker alone (--no-owner-check), which a build
+   * runs on a roster in the Nix store, where every file is root's. The router never sets it: no
+   * AgentFile takes it. The file must still be writable by its owner only.
+   */
+  readonly anyOwner?: boolean | undefined;
   /** When the file still has this identity, report it unchanged instead of reading it. */
   readonly previous?: Identity | undefined;
   readonly fs?: FileSystem | undefined;
@@ -84,8 +90,10 @@ export function readUserFile(path: string, options: ReadOptions): FileRead {
   try {
     const stat = fs.fstatSync(fd);
     if (!stat.isFile()) return { kind: "unsafe", error: `${path} is not a regular file` };
-    if (uid === undefined) return { kind: "unsafe", error: `${path}: its owner cannot be checked on this platform` };
-    if (stat.uid !== uid) return { kind: "unsafe", error: `${path} is owned by uid ${stat.uid}, not ${uid}` };
+    if (options.anyOwner !== true) {
+      if (uid === undefined) return { kind: "unsafe", error: `${path}: its owner cannot be checked on this platform` };
+      if (stat.uid !== uid) return { kind: "unsafe", error: `${path} is owned by uid ${stat.uid}, not ${uid}` };
+    }
     if ((stat.mode & 0o022) !== 0) {
       const mode = (stat.mode & 0o777).toString(8).padStart(3, "0");
       return { kind: "unsafe", error: `${path} is writable by its group or by others (mode ${mode})` };

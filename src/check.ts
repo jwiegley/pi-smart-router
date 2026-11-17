@@ -149,7 +149,7 @@ export function checkRoster(text: string, read?: PromptReader): CheckReport {
  * as missing or unsafe is reported so. The prompt files it names are looked for where the router
  * would find them were this the roster in use: in the directory smart-router/ beside it.
  */
-export function checkFile(path: string, options: Pick<ReadOptions, "uid" | "fs"> = {}): CheckReport {
+export function checkFile(path: string, options: Pick<ReadOptions, "uid" | "fs" | "anyOwner"> = {}): CheckReport {
   const read = readUserFile(path, { maxBytes: ROSTER_MAX_BYTES, ...options });
   if (read.kind === "read") return checkRoster(read.text, promptReader(dirname(path), options));
   // No previous identity is offered, so the file is never reported unchanged.
@@ -157,20 +157,27 @@ export function checkFile(path: string, options: Pick<ReadOptions, "uid" | "fs">
   return { ok: false, lines: [`${read.kind === "missing" ? "MISSING" : read.kind === "unsafe" ? "UNSAFE" : "INVALID"}: ${error}`] };
 }
 
-export const CHECK_USAGE = "Usage: node src/check-cli.ts <roster.json>\nChecks a pi-smart-router roster without Pi, a session or credentials, and prints what it routes to.";
+export const CHECK_USAGE =
+  "Usage: node src/check-cli.ts [--no-owner-check] <roster.json>\n" +
+  "Checks a pi-smart-router roster without Pi, a session or credentials, and prints what it routes to.\n" +
+  "--no-owner-check accepts a roster and prompt files that another user owns, as in the Nix store; the router itself never does.";
+const NO_OWNER_CHECK = "--no-owner-check";
 
 /**
- * The standalone checker's whole run: one roster path, already absolute. Returns the exit status:
- * 0 for a valid roster, 1 for one the router would refuse, 2 for a wrong invocation.
+ * The standalone checker's whole run: one roster path, already absolute, and before it, if at all,
+ * --no-owner-check. Returns the exit status: 0 for a valid roster, 1 for one the router would
+ * refuse, 2 for a wrong invocation.
  */
-export function runCheck(paths: readonly string[], print: (line: string) => void): number {
-  const [path, ...rest] = paths;
+export function runCheck(args: readonly string[], print: (line: string) => void, options: Pick<ReadOptions, "uid" | "fs"> = {}): number {
+  const anyOwner = args[0] === NO_OWNER_CHECK;
+  const [path, ...rest] = anyOwner ? args.slice(1) : args;
   if (path === undefined || rest.length > 0 || path.startsWith("-")) {
     print(CHECK_USAGE);
     return 2;
   }
-  const report = checkFile(path);
+  const report = checkFile(path, { ...options, anyOwner });
   print(`${path}`);
+  if (anyOwner) print("Checked without the owner check: the router itself reads only files you own.");
   for (const line of report.lines) print(line);
   return report.ok ? 0 : 1;
 }

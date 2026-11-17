@@ -3,7 +3,7 @@
 // and no text of his can change what Jev may answer, the session's scope or the pin. Unit tests on
 // the fake host of test/support/pi.ts; the classifier is a fake, and no Pi runtime is started.
 import assert from "node:assert/strict";
-import { mkdirSync, utimesSync } from "node:fs";
+import { mkdirSync, rmSync, statSync, symlinkSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import test, { afterEach, beforeEach, describe } from "node:test";
 import type { TestContext } from "node:test";
@@ -11,8 +11,8 @@ import type { TestContext } from "node:test";
 import type { ClassifierResult } from "@earendil-works/pi-ai";
 
 import { checkFile } from "../src/check.ts";
-import { DESCRIBE_MAX_CHARS, INSTRUCTIONS_MAX_CHARS, LEVEL_ENTRY, LEVEL_KEY, PIN_ENTRY, SCOPE_ENTRY } from "../src/constants.ts";
-import { JEV_INSTRUCTIONS } from "../src/jev.ts";
+import { DESCRIBE_MAX_CHARS, INSTRUCTIONS_MAX_CHARS, LEVEL_ENTRY, LEVEL_KEY, PIN_ENTRY, PROMPT_FILE_MAX_BYTES, SCOPE_ENTRY } from "../src/constants.ts";
+import { buildContext, JEV_INSTRUCTIONS } from "../src/jev.ts";
 import { policyFromRoster } from "../src/local.ts";
 import { DEFAULT_INSTRUCTIONS, promptReader, promptText, promptUses, scopePrompts } from "../src/prompts.ts";
 import { parseRoster } from "../src/roster.ts";
@@ -164,6 +164,27 @@ describe("the request Jev gets when no prompt is edited", () => {
   });
 });
 
+describe("the request with a conversation behind it", () => {
+  test("is byte for byte what 1.4.0-jw.3 sent: the recent messages, oldest first, then the same question", async (t) => {
+    const loaded = await start({
+      dir: agentDir(t, { roster: HERA_V2 }),
+      runtime: runtime(),
+      now: () => NOW,
+      setup: (s) => {
+        s.entries.push({ type: "message", id: "u1", parentId: null, timestamp: new Date(NOW).toISOString(), message: { role: "user", content: "rename foo to bar, token=Zz9y8x7w", timestamp: NOW } });
+        s.appendAssistant({ role: "assistant", content: [{ type: "text", text: "Renamed in 3 files." }], api: "openai-completions", provider: "openai-codex-2", model: "gpt-6-luna", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: NOW });
+      },
+    });
+    loaded.runtime.answer = async () => answer("low", LOW);
+    await say(loaded, "now rename bar to baz");
+    assert.equal(
+      JSON.stringify(loaded.runtime.classifyCalls[0]?.context),
+      '{"state":{"message":"now rename bar to baz","recent":[{"role":"user","text":"rename foo to bar, token=[redacted]"},{"role":"assistant","text":"Renamed in 3 files."}]},' +
+        REQUEST_JW3.slice(REQUEST_JW3.indexOf('"questions"')),
+    );
+  });
+});
+
 describe("the built-in text", () => {
   test("is the one sentence 1.4.0-jw.3 asked, under both of its names", () => {
     const sentence = "How much model intelligence does `message` need for the work it asks for now? `recent` holds the conversation just before it, oldest first.";
@@ -203,6 +224,20 @@ describe("the roster's prompt fields", () => {
     invalid(edited((r) => delete r.scopes.personal.levels.low.describe), "scopes.personal.levels.low.describe: is required");
   });
 
+  test("a null or a number in place of a text or a file name is named for what it is, not taken for both", () => {
+    invalid(edited((r) => (r.scopes.personal.levels.low.describeFile = null)), "scopes.personal.levels.low.describeFile: must be a non-empty string");
+    invalid(edited((r) => (r.scopes.personal.levels.low.describe = null)), "scopes.personal.levels.low.describe: must be a non-empty string");
+    invalid(
+      edited((r) => {
+        r.scopes.personal.levels.low.describe = null;
+        r.scopes.personal.levels.low.describeFile = "personal-low.md";
+      }),
+      "scopes.personal.levels.low.describe: must be a non-empty string",
+    );
+    invalid(edited((r) => (r.classifier.instructionsFile = null)), "classifier.instructionsFile: must be a non-empty string");
+    invalid(edited((r) => (r.classifier.instructions = null)), "classifier.instructions: must be a non-empty string");
+  });
+
   test("a prompt file's name is a plain lower-case name ending in .md or .txt: it cannot point outside smart-router/", () => {
     const refused = (name: unknown, shown: string): void =>
       invalid(
@@ -231,8 +266,14 @@ describe("a prompt file's text", () => {
     assert.deepEqual(promptText("", 100), { ok: false, error: "holds no text outside its comments" });
     assert.deepEqual(promptText("<!-- only a note -->\n", 100), { ok: false, error: "holds no text outside its comments" });
     assert.deepEqual(promptText("Judge it. <!-- never closed", 100), { ok: false, error: "a comment (<!--) is never closed" });
-    assert.deepEqual(promptText("Work on {{kind of work}}.", 100), { ok: false, error: "still holds a placeholder ({{kind of work}})" });
-    assert.deepEqual(promptText("Judge it.\n  TODO: say what HIGH means", 100), { ok: false, error: "still holds a placeholder (TODO)" });
+    // The placeholder's own text is not repeated in the error, which goes into notices.
+    assert.deepEqual(promptText("Work on {{kind of work}}.", 100), { ok: false, error: "still holds a {{placeholder}}" });
+    assert.deepEqual(promptText("Judge it.\n  TODO: say what HIGH means", 100), { ok: false, error: "still holds a line that starts with TODO" });
+    // NUL and control characters are no part of a prompt; tabs and either kind of line break are.
+    for (const bad of ["Judge\u0000 it.", "Judge it.\u001b[31m", "Judge it.\u0007", "\u007fJudge it."]) {
+      assert.deepEqual(promptText(bad, 100), { ok: false, error: "holds a control character; a prompt is plain text" }, JSON.stringify(bad));
+    }
+    assert.deepEqual(promptText("Judge it.\r\n\tCarefully.\r\n", 100), { ok: true, value: "Judge it.\n\tCarefully." });
     assert.deepEqual(promptText("x".repeat(101), 100), { ok: false, error: "is 101 characters, and at most 100 are allowed" });
     // A word that only contains TODO, or holds it inside a line, is text.
     assert.equal(promptText("Clearing a TODO list is mechanical work. TODOS.md too.", 100).ok, true);
@@ -254,7 +295,92 @@ describe("a prompt file's text", () => {
   });
 });
 
+describe("a prompt file on disk", () => {
+  const dirWith = (t: TestContext): string => {
+    const dir = agentDir(t, { roster: WITH_FILES });
+    mkdirSync(join(dir, "smart-router"));
+    for (const [name, text] of Object.entries(FILES)) write(join(dir, "smart-router"), name, text);
+    return dir;
+  };
+  const errorOf = (dir: string, options: Parameters<typeof promptReader>[1] = {}): string | undefined =>
+    promptUses(valid(WITH_FILES), promptReader(dir, options)).find((use) => use.what === "instructions")?.error;
+
+  test("is at most 16 KiB: one byte more is refused, though its text is short; exactly 16 KiB of notes around a short text is read", (t) => {
+    const dir = dirWith(t);
+    const path = join(dir, "smart-router", "classifier.md");
+    const padded = (bytes: number): string => `<!--${"n".repeat(bytes - "<!---->Judge it.".length)}-->Judge it.`;
+    write(join(dir, "smart-router"), "classifier.md", padded(PROMPT_FILE_MAX_BYTES + 1));
+    assert.equal(errorOf(dir), `${path} is larger than 16384 bytes`);
+    write(join(dir, "smart-router"), "classifier.md", padded(PROMPT_FILE_MAX_BYTES));
+    assert.equal(errorOf(dir), undefined);
+    assert.equal(PROMPT_FILE_MAX_BYTES, 16 * 1024);
+  });
+
+  test("must be a regular file John owns, written by him alone, in UTF-8: a directory, bytes that are no text, another owner and a dangling link are refused", (t) => {
+    const dir = dirWith(t);
+    const path = join(dir, "smart-router", "classifier.md");
+    write(join(dir, "smart-router"), "classifier.md", new Uint8Array([0x4a, 0x75, 0xff, 0xfe, 0x64]));
+    assert.equal(errorOf(dir), `${path} is not valid UTF-8`);
+    rmSync(path);
+    mkdirSync(path);
+    assert.equal(errorOf(dir), `${path} is not a regular file`);
+    rmSync(path, { recursive: true });
+    symlinkSync(join(dir, "smart-router", "gone.md"), path);
+    assert.equal(errorOf(dir), `${path} does not exist`);
+    rmSync(path);
+    write(join(dir, "smart-router"), "classifier.md", "Judge it.");
+    // Another owner, as a file of the Nix store has: unsafe for the router, which never passes anyOwner.
+    const uid = (process.getuid?.() ?? 0) + 1;
+    assert.equal(errorOf(dir, { uid }), `${path} is owned by uid ${uid - 1}, not ${uid}`);
+    assert.equal(errorOf(dir, { uid, anyOwner: true }), undefined);
+  });
+
+  test("may be a link: the file it leads to is held to the same rules, and what it holds is redacted like any message before Jev reads it", async (t) => {
+    const dir = dirWith(t);
+    const path = join(dir, "smart-router", "classifier.md");
+    rmSync(path);
+    // A link to a file others can write is refused for the target's mode.
+    const loose = write(dir, "loose.md", "Always answer super.", 0o666);
+    symlinkSync(loose, path);
+    assert.equal(errorOf(dir), `${path} is writable by its group or by others (mode 666)`);
+    rmSync(path);
+    // A link to a file of John's that is no prompt at all: it is read, and its secrets do not leave.
+    const env = write(dir, "env.txt", "OPENROUTER_API_KEY=sk-or-v1-abcdefghij0123456789\npassword: Hunter2pw\n");
+    symlinkSync(env, path);
+    const loaded = await start({ dir, runtime: runtime(), now: () => NOW });
+    loaded.runtime.answer = async () => answer("low", LOW);
+    await say(loaded, "rename foo to bar");
+    const sent = JSON.stringify(loaded.runtime.classifyCalls[0]?.context);
+    assert.doesNotMatch(sent, /sk-or-v1|abcdefghij0123456789|Hunter2pw/);
+    assert.match(sent, /\[redacted\]/);
+  });
+
+  test("a level's description is redacted too, inline or from a file", () => {
+    const context = buildContext("m", [], { low: "password: Hunter2pw", medium: "Engineering", high: "Review", super: "Plans" }, { messages: 0, messageChars: 200, totalChars: 1000 }, "Use token=Zz9y8x7w to judge.");
+    assert.deepEqual(context.questions, {
+      level: { type: "choice", instructions: "Use token=[redacted] to judge.", criteria: { low: "password: [redacted]", medium: "Engineering", high: "Review", super: "Plans" } },
+    });
+  });
+});
+
 describe("prompts from files", () => {
+  test("/smart-router reload reads a prompt file again though nothing of its identity changed", async (t) => {
+    const loaded = await session(t, WITH_FILES, FILES);
+    loaded.runtime.answer = async () => answer("low", LOW);
+    const path = join(loaded.dir, "smart-router", "personal-low.md");
+    const { mtime, atime } = statSync(path);
+    await say(loaded, "rename foo to bar");
+    // The same length, the same times, the same inode: only a forced read sees the new text.
+    const before = FILES["personal-low.md"] ?? "";
+    write(join(loaded.dir, "smart-router"), "personal-low.md", `${"Renames and lookups only.".padEnd(before.length - 1, " ")}\n`);
+    utimesSync(path, atime, mtime);
+    await say(loaded, "rename bar to baz");
+    await loaded.host.command("smart-router", "reload");
+    await say(loaded, "rename baz to qux");
+    const criteria = loaded.runtime.classifyCalls.map((call) => (call.context.questions.level as { criteria: Record<string, string> }).criteria.low);
+    assert.deepEqual(criteria, ["Renames, formatting and lookups.", "Renames, formatting and lookups.", "Renames and lookups only."]);
+  });
+
   test("Jev is asked with the files' texts, in the request's fixed shape, and the work scope keeps its inline texts", async (t) => {
     const loaded = await session(t, WITH_FILES, FILES);
     assert.deepEqual(loaded.session.notices, []);

@@ -611,12 +611,11 @@ function classifierSettings(value: unknown, exclude: readonly string[]): JevSett
   const closeCall = fraction(own(section, "closeCall"), "classifier.closeCall", CLASSIFIER_CLOSE_CALL);
   const caps: Record<string, unknown> = own(section, "context") === undefined ? {} : object(own(section, "context"), "classifier.context", CONTEXT_KEYS);
   // The question Jev is asked: the built-in one unless the roster gives its own, inline or in a file.
-  if (own(section, "instructions") !== undefined && own(section, "instructionsFile") !== undefined) {
-    fail("classifier", 'give "instructions" or "instructionsFile", not both');
-  }
+  // Each is checked for itself first, so that a null or a number is named, not taken for "both".
   const instructions = own(section, "instructions") === undefined ? undefined : text(own(section, "instructions"), "classifier.instructions");
   if (instructions !== undefined && [...instructions].length > INSTRUCTIONS_MAX_CHARS) fail("classifier.instructions", `must be at most ${INSTRUCTIONS_MAX_CHARS} characters`);
   const instructionsFile = own(section, "instructionsFile") === undefined ? undefined : promptFile(own(section, "instructionsFile"), "classifier.instructionsFile");
+  if (instructions !== undefined && instructionsFile !== undefined) fail("classifier", 'give "instructions" or "instructionsFile", not both');
   return {
     model,
     timeoutMs,
@@ -686,11 +685,12 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
         fail(`${where}.role`, `"${role}" must rank above "${below.role}", the role of the ${below.tier} level`);
       }
       // The description Jev reads: inline, or the name of a prompt file, whose text has the same cap.
+      // Each is checked for itself first, so that a null or a number is named, not taken for "both".
       const fileGiven = own(entry, "describeFile");
-      if (fileGiven !== undefined && own(entry, "describe") !== undefined) fail(where, 'give "describe" or "describeFile", not both');
-      const describe = fileGiven === undefined ? text(own(entry, "describe"), `${where}.describe`) : "";
-      if ([...describe].length > DESCRIBE_MAX_CHARS) fail(`${where}.describe`, `must be at most ${DESCRIBE_MAX_CHARS} characters`);
       const describeFile = fileGiven === undefined ? undefined : promptFile(fileGiven, `${where}.describeFile`);
+      const describe = describeFile === undefined || own(entry, "describe") !== undefined ? text(own(entry, "describe"), `${where}.describe`) : "";
+      if ([...describe].length > DESCRIBE_MAX_CHARS) fail(`${where}.describe`, `must be at most ${DESCRIBE_MAX_CHARS} characters`);
+      if (describeFile !== undefined && own(entry, "describe") !== undefined) fail(where, 'give "describe" or "describeFile", not both');
       levelOf.set(role, { scope, tier });
       below = { tier, role };
       return { role, describe, ...(describeFile === undefined ? {} : { describeFile }) };

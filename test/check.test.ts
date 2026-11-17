@@ -176,6 +176,22 @@ describe("checking a roster file", () => {
       1,
       [bad, 'INVALID: scopes.personal.fallback[1]: "cloud" is not a role', "Both smart-router/auto and smart-router/local refuse every request while the roster is invalid."],
     ]);
+    // A roster another user owns, as in the Nix store: unsafe as the router reads it, and checked
+    // only when the caller says so, which the report then states.
+    const other = (process.getuid?.() ?? 0) + 1;
+    const as = (...args: string[]): readonly [number, string[]] => {
+      const out: string[] = [];
+      return [runCheck(args, (line) => out.push(line), { uid: other }), out];
+    };
+    assert.deepEqual(as(good), [1, [good, `UNSAFE: ${good} is owned by uid ${other - 1}, not ${other}`]]);
+    assert.deepEqual(as("--no-owner-check", good), [
+      0,
+      [good, "Checked without the owner check: the router itself reads only files you own.", "OK: a valid version 2 roster.", "", ...JOHN_ROUTING],
+    ]);
+    // The mode check stays: a file others can write is unsafe whoever owns it.
+    const loose = write(dir, "loose.json", JOHN, 0o666);
+    assert.deepEqual(as("--no-owner-check", loose)[1][2], `UNSAFE: ${loose} is writable by its group or by others (mode 666)`);
+    assert.deepEqual(as(good, "--no-owner-check"), [2, [CHECK_USAGE]]);
     assert.deepEqual(run(), [2, [CHECK_USAGE]]);
     assert.deepEqual(run(good, bad), [2, [CHECK_USAGE]]);
     assert.deepEqual(run("--help"), [2, [CHECK_USAGE]]);
@@ -203,6 +219,13 @@ describe("checking a roster file", () => {
     // The entry point's whole body is that run: nothing else to test in a child process.
     const cli = readFileSync(join(src, "check-cli.ts"), "utf8");
     assert.match(cli, /process\.exitCode = runCheck\(/);
+    // The router's own readers never take the option that the checker's flag sets.
+    for (const name of ["router.ts", "roster.ts", "accounts.ts"]) assert.doesNotMatch(readFileSync(join(src, name), "utf8"), /anyOwner/, name);
+    assert.doesNotMatch(readFileSync(join(src, "prompts.ts"), "utf8").slice(readFileSync(join(src, "prompts.ts"), "utf8").indexOf("export function promptStore")), /anyOwner/);
+    // The Node floor the checker states is the package's own.
+    const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { engines: { node: string } };
+    assert.equal(manifest.engines.node, ">=22.19.0");
+    assert.match(cli, /Node 22\.19 or later/);
   });
 });
 

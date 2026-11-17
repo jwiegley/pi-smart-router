@@ -15,6 +15,9 @@
 // session's scope, under its account rules and under the pin (src/decide.ts, src/route.ts). No
 // text here is read by anything but Jev.
 //
+// Whatever the source, the text goes through redaction before it is sent (src/jev.ts), as the
+// message does: a prompt file can be a link to any file John owns.
+//
 // A prompt file is read with the roster's own safe reader and refreshed with the roster. In it,
 // HTML comments (<!-- ... -->) are John's notes and are not sent. A file that is missing, unsafe,
 // empty, too long, or still holds a placeholder is an error: Jev is then not asked in the scopes
@@ -34,18 +37,23 @@ export const DEFAULT_INSTRUCTIONS =
 
 const COMMENT = /<!--[\s\S]*?-->/g;
 /** What a template leaves behind when it was not filled in: {{name}}, or a line that starts with TODO. */
-const PLACEHOLDER = /\{\{[^{}\n]*\}\}|^[ \t]*TODO\b/m;
+const PLACEHOLDER = /\{\{[^{}\n]*\}\}/;
+const TODO_LINE = /^[ \t]*TODO\b/m;
+/** NUL and the control characters that are no line break or tab: nothing a prompt is written with. */
+const CONTROL = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
 
 /**
  * A prompt file's text as Jev reads it: without its HTML comments and surrounding space, or why it
  * cannot be used. `maxChars` counts Unicode code points, as a level's inline describe is counted.
  */
 export function promptText(raw: string, maxChars: number): Parsed<string> {
-  const text = raw.replace(COMMENT, "").trim();
+  if (CONTROL.test(raw)) return { ok: false, error: "holds a control character; a prompt is plain text" };
+  const text = raw.replace(/\r\n?/g, "\n").replace(COMMENT, "").trim();
   if (text.includes("<!--")) return { ok: false, error: "a comment (<!--) is never closed" };
   if (text === "") return { ok: false, error: "holds no text outside its comments" };
-  const placeholder = PLACEHOLDER.exec(text);
-  if (placeholder !== null) return { ok: false, error: `still holds a placeholder (${placeholder[0].trim()})` };
+  // The placeholder's own text is not repeated: the error goes into notices, and the file is John's to open.
+  if (PLACEHOLDER.test(text)) return { ok: false, error: "still holds a {{placeholder}}" };
+  if (TODO_LINE.test(text)) return { ok: false, error: "still holds a line that starts with TODO" };
   const length = [...text].length;
   if (length > maxChars) return { ok: false, error: `is ${length} characters, and at most ${maxChars} are allowed` };
   return { ok: true, value: text };
@@ -64,10 +72,13 @@ const located = (path: string, error: string): string => (error.startsWith(path)
  * A reader of the prompt files beside a roster: `<dir>/smart-router/<name>`, read once per call
  * with the safe reader. The checker uses it, with the directory of the roster it was given.
  */
-export function promptReader(dir: string, options: { readonly uid?: number | undefined; readonly fs?: FileSystem | undefined } = {}): PromptReader {
+export function promptReader(
+  dir: string,
+  options: { readonly uid?: number | undefined; readonly fs?: FileSystem | undefined; readonly anyOwner?: boolean | undefined } = {},
+): PromptReader {
   return (name, maxChars) => {
     const path = `${dir}/${PROMPT_DIR}/${name}`;
-    const read = readUserFile(path, { maxBytes: PROMPT_FILE_MAX_BYTES, uid: options.uid, fs: options.fs });
+    const read = readUserFile(path, { maxBytes: PROMPT_FILE_MAX_BYTES, uid: options.uid, fs: options.fs, anyOwner: options.anyOwner });
     if (read.kind !== "read") return { ok: false, path, error: read.kind === "unchanged" ? `${path} was not read` : read.error };
     const parsed = promptText(read.text, maxChars);
     return parsed.ok ? { ok: true, path, value: parsed.value } : { ok: false, path, error: located(path, parsed.error) };

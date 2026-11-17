@@ -6,7 +6,8 @@
 // error with its place. It imports nothing of Pi's, reads the one file named, needs no credentials
 // and sends nothing. Exit status: 0 valid, 1 a roster the router would refuse, 2 a wrong invocation.
 //
-// Node 22.18 or later runs it as it is. A path is taken as the shell gives it, relative to the
+// Node 22.19 or later, the package's own floor, runs it as it is, from any path that is not under a
+// node_modules directory; nix-config installs the package under share/pi-packages, which is not. A path is taken as the shell gives it, relative to the
 // working directory when it is not absolute; that is this command's alone, and the extension's
 // runtime code still reads nothing relative to the working directory.
 import { resolve } from "node:path";
