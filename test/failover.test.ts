@@ -166,7 +166,7 @@ describe("a real usage limit: the run ends, the notice says what to do, and the 
     signal = await prompt(bare.loaded, "rename foo to bar #low");
     bare.loaded.runtime.route("auto", request("user", { signal }));
     assert.deepEqual(await fails(bare.loaded, LUNA, CODEX_LIMIT), [
-      "warning: pi-smart-router: gpt-6-luna could not take this run (the account openai-codex-2 is out of use until HH:MM), and no other model can take it now. Send the request again after HH:MM, or choose a model with /model.",
+      "warning: pi-smart-router: gpt-6-luna could not take this run (the account openai-codex-2 is out of use until HH:MM), and nothing was answered. No other model can take it now: send the request again after HH:MM, or choose a model with /model.",
     ]);
     void cat;
   });
@@ -177,16 +177,68 @@ describe("a real usage limit: the run ends, the notice says what to do, and the 
     assert.equal(routed(loaded.runtime.route("local", request("user", { signal }))), GLM);
     assert.equal(isRetryableAssistantError(assistant(GLM, { stopReason: "error", errorMessage: "read ECONNRESET" })), false);
     assert.deepEqual(await fails(loaded, GLM, "read ECONNRESET"), [
-      `warning: pi-smart-router: GLM-5.3-Flash-oQ4e-mtp could not take this run (its server could not be reached, and it is skipped until HH:MM), and nothing was answered. Send the request again: it goes to ${NYX_QWEN.slice("nyx/".length)}.`,
+      `warning: pi-smart-router: GLM-5.3-Flash-oQ4e-mtp could not take this run (its server could not be reached), and nothing was answered. Send the request again: it goes to ${NYX_QWEN.slice("nyx/".length)}.`,
     ]);
-    const again = await prompt(loaded, "rename foo to bar");
+    let again = await prompt(loaded, "rename foo to bar");
     assert.equal(routed(loaded.runtime.route("local", request("user", { signal: again }))), NYX_QWEN);
+    // The notice names what a fresh run takes, the first model written that is not held, which
+    // need not be the one after the failed model: Hera's Qwen fails, and GLM, held, is passed over.
+    assert.deepEqual(await fails(loaded, NYX_QWEN, "read ECONNRESET"), [
+      `warning: pi-smart-router: ${NYX_QWEN.slice("nyx/".length)} could not take this run (its server could not be reached), and nothing was answered. Send the request again: it goes to Qwen3.8-27B-oQ4e-fp16-mtp.`,
+    ]);
+    again = await prompt(loaded, "rename foo to bar");
+    assert.equal(routed(loaded.runtime.route("local", request("user", { signal: again }))), HERA_QWEN);
+    await answers(loaded, HERA_QWEN);
+  });
+
+  test("a run that had already answered or run tools is told to continue, not to send the request again", async (t) => {
+    const { loaded } = await session(t);
+    const { runtime } = loaded;
+    const signal = await prompt(loaded, "push the branch #low");
+    assert.equal(routed(runtime.route("auto", request("user", { signal }))), LUNA);
+    // luna calls a tool (git push), and the request after the tool result hits the limit.
+    await loaded.host.emit("message_end", { message: assistant(LUNA, { stopReason: "toolUse", content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "git push" } }] }) });
+    assert.equal(routed(runtime.route("auto", request("continuation", { signal, previous: { model: runtime.physical(LUNA), thinkingLevel: "high" } }))), LUNA);
+    const notices = await fails(loaded, LUNA, CODEX_LIMIT);
+    assert.deepEqual(notices, [
+      "warning: pi-smart-router: gpt-6-luna could not go on with this run (the account openai-codex-2 is out of use until HH:MM), and it stopped partway. What it did so far stands: do not send the request again. To go on, say: continue. It goes on with the fallback openrouter (z-ai/glm-5.3-flash).",
+    ]);
+    assert.doesNotMatch(notices.join("\n"), /nothing was answered|Send the request again:/);
+    // "continue" is a new prompt, and goes where the notice said.
+    const next = await prompt(loaded, "continue");
+    assert.equal(routed(runtime.route("auto", request("user", { signal: next }))), OR_GLM);
+
+    // With nothing else to go on with, it says when.
+    resetSlot();
+    const work = await session(t, { setup: (s) => s.appendCustom(SCOPE_ENTRY, scopeEntry("work", "command", NOW - MINUTE)) });
+    const run = await prompt(work.loaded, "push the branch #low");
+    work.loaded.runtime.route("auto", request("user", { signal: run }));
+    await work.loaded.host.emit("message_end", { message: assistant(WORK_LUNA, { stopReason: "toolUse", content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "git push" } }] }) });
+    assert.deepEqual(await fails(work.loaded, WORK_LUNA, CODEX_LIMIT), [
+      "warning: pi-smart-router: gpt-6-luna could not go on with this run (the account openai-codex-3 is out of use until HH:MM), and it stopped partway. What it did so far stands: do not send the request again. No other model can take it now: to go on, say: continue, after HH:MM. Another model picked by hand with /model is sent as it is.",
+    ]);
+  });
+
+  test("a model picked by hand in mid-run, on the model the router had picked, gets no notice", async (t) => {
+    const { loaded } = await session(t);
+    const signal = await prompt(loaded, "rename foo to bar #low");
+    assert.equal(routed(loaded.runtime.route("auto", request("user", { signal }))), LUNA);
+    // The selection is now luna itself, picked by hand: its requests are not the router's.
+    loaded.session.force(LUNA);
+    assert.deepEqual(await fails(loaded, LUNA, CODEX_LIMIT), []);
+    // Nor when the selection moved to the router's other model: the pick was smart-router/auto's, and a resend would not be.
+    resetSlot();
+    const moved = await session(t);
+    const run = await prompt(moved.loaded, "rename foo to bar #low");
+    assert.equal(routed(moved.loaded.runtime.route("auto", request("user", { signal: run }))), LUNA);
+    moved.loaded.session.select("local");
+    assert.deepEqual(await fails(moved.loaded, LUNA, CODEX_LIMIT), []);
   });
 
   test("no notice when Pi will retry the error, when output had started, for another kind of error, or for a model picked by hand", async (t) => {
     const cases: ReadonlyArray<readonly [string, string, string, Partial<AssistantMessage>]> = [
       ["local", GLM, "fetch failed", {}],
-      ["local", GLM, "503 Service Unavailable", {}],
+      ["local", GLM, "502 Bad Gateway", {}],
       ["auto", LUNA, CODEX_LIMIT, { content: [{ type: "text", text: "Half an ans" }] }],
       ["auto", LUNA, "content_filter", {}],
       ["auto", LUNA, "429 Too Many Requests", {}],
@@ -215,8 +267,9 @@ describe("a real usage limit: the run ends, the notice says what to do, and the 
     assert.equal(routed(loaded.runtime.route("auto", request("user", { signal }))), WORK_LUNA);
     const notices = await fails(loaded, WORK_LUNA, CODEX_LIMIT);
     assert.deepEqual(notices, [
-      "warning: pi-smart-router: gpt-6-luna could not take this run (the account openai-codex-3 is out of use until HH:MM), and no other model can take it now. Send the request again after HH:MM, or choose a work Codex model with /model.",
+      "warning: pi-smart-router: gpt-6-luna could not take this run (the account openai-codex-3 is out of use until HH:MM), and nothing was answered. No other model can take it now: send the request again after HH:MM. Another model picked by hand with /model is sent as it is.",
     ]);
+    assert.doesNotMatch(notices.join("\n"), /choose a work Codex model/);
   });
 
   test("a pinned session: a resend stays inside the pin's policy, or waits", async (t) => {
@@ -226,7 +279,7 @@ describe("a real usage limit: the run ends, the notice says what to do, and the 
     const signal = await prompt(loaded, "rename foo to bar #low");
     assert.equal(routed(loaded.runtime.route("auto", request("user", { signal }))), GLM);
     assert.deepEqual(await fails(loaded, GLM, "read ECONNRESET"), [
-      "warning: pi-smart-router: GLM-5.3-Flash-oQ4e-mtp could not take this run (its server could not be reached, and it is skipped until HH:MM), and no other model can take it now. Send the request again after HH:MM, or choose a model with /model.",
+      "warning: pi-smart-router: GLM-5.3-Flash-oQ4e-mtp could not take this run (its server could not be reached), and nothing was answered. No other model can take it now: send the request again, and it is tried again, or choose a model with /model.",
     ]);
   });
 });

@@ -61,8 +61,8 @@ export const MULTI_PASS_MAX_BYTES = 256 * 1024;
 export const STICKY_IDLE_MINUTES = { default: 5, min: 0, max: 1440 } as const;
 export const COOLDOWN_MINUTES = { default: 30, min: 1, max: 1440 } as const;
 /**
- * How long a model is held: a local one whose server could not be reached, or a cloud one that
- * stayed rate-limited. Five minutes by default: long enough
+ * How long a local model whose server could not be reached is held, that is passed over while
+ * another candidate can take the request. Five minutes by default: long enough
  * that a server restarting or loading a model is not tried, and timed out on, by every run
  * meanwhile, and that a session does not flap between two hosts, each move costing a cold prefill
  * on the other; short enough that the preferred server is back in use soon after it returns.

@@ -118,7 +118,7 @@ const status = async (loaded: Loaded): Promise<string[]> => {
 };
 
 describe("what counts as unreachable", () => {
-  test("a refused, reset or unresolved connection, a connect timeout, a TLS failure, and a 502, 503 or 504", () => {
+  test("the connection could not be made: refused, reset, unresolved, no route, a connect timeout, a failed TLS handshake or verification, a bad gateway", () => {
     for (const text of [
       REFUSED,
       "Connection refused",
@@ -142,19 +142,48 @@ describe("what counts as unreachable", () => {
       "unable to verify the first certificate",
       "self-signed certificate in certificate chain",
       "DEPTH_ZERO_SELF_SIGNED_CERT",
+      "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+      "certificate has expired",
+      "CERT_HAS_EXPIRED",
       "ERR_TLS_CERT_ALTNAME_INVALID",
+      "Hostname/IP does not match certificate's altnames",
       "TLS handshake failed",
+      "SSL handshake error",
       "502 Bad Gateway",
-      "503 Service Unavailable",
-      "HTTP 504",
-      "Gateway Timeout",
+      "Bad Gateway",
     ]) {
       assert.equal(isUnreachable(text), true, text);
     }
   });
 
-  test("not a slow or broken answer, a rate limit, a usage limit or a content refusal", () => {
-    for (const text of ["Request timed out", "timeout", "terminated", "stream was interrupted", "connection lost", "500 Internal Server Error", "429 Too Many Requests", "overloaded", LIMIT, "401 Unauthorized", "content_filter: 503", "request id 15021 failed", "", undefined]) {
+  test("not a server that is slow, loading or busy, nor a text that merely mentions a certificate", () => {
+    for (const text of [
+      "Request timed out",
+      "timeout",
+      "read ETIMEDOUT",
+      "ETIMEDOUT",
+      "connection timeout",
+      "504 Gateway Time-out",
+      "HTTP 504",
+      "Gateway Timeout",
+      "503 Service Unavailable",
+      "503 Service Unavailable: model is loading",
+      "service unavailable",
+      "the certificate rotation tool failed its check",
+      "tool result mentions a TLS error in the logs",
+      "terminated",
+      "stream was interrupted",
+      "connection lost",
+      "500 Internal Server Error",
+      "429 Too Many Requests",
+      "overloaded",
+      LIMIT,
+      "401 Unauthorized",
+      "content_filter: 502",
+      "request id 15021 failed",
+      "",
+      undefined,
+    ]) {
       assert.equal(isUnreachable(text), false, String(text));
     }
   });
@@ -177,7 +206,7 @@ describe("what counts as unreachable", () => {
     assert.equal(holds.until(NYX_QWEN, NOW), undefined);
     // Before any output, with empty blocks or none: held for the default five minutes, once per response.
     assert.equal(holdFrom(failed(NYX_QWEN, [{ type: "text", text: "" }]), NYX, ROSTER, holds, NOW), NYX_QWEN);
-    assert.deepEqual(holds.get(NYX_QWEN, NOW), { until: NOW + 5 * MINUTE, kind: "unreachable" });
+    assert.equal(holds.until(NYX_QWEN, NOW), NOW + 5 * MINUTE);
     holdFrom(failed(NYX_QWEN), NYX, ROSTER, holds, NOW + MINUTE);
     assert.equal(holds.until(NYX_QWEN, NOW), NOW + 5 * MINUTE);
     holdFrom(failed(NYX_QWEN, [], 2), NYX, ROSTER, holds, NOW + MINUTE);
@@ -205,7 +234,7 @@ describe("what counts as unreachable", () => {
       }
     }
     const lines = checkRoster(edited((r) => (r.unreachableMinutes = 9))).lines;
-    assert.ok(lines.includes("A local model whose server cannot be reached is skipped for 9 minutes, and the request goes to the next model in the order above."), lines.join("\n"));
+    assert.ok(lines.includes("A local model whose server cannot be reached is passed over for 9 minutes while another model in the order above can take the request."), lines.join("\n"));
   });
 });
 
@@ -228,7 +257,7 @@ describe("smart-router/local when a server cannot be reached", () => {
     const lines = await status(loaded);
     assert.ok(lines.some((line) => line.startsWith(`  local (the local role; a personal fallback; thinking max): ${GLM} not-in-catalog, ${NYX_QWEN} unreachable-until-`)), lines.join("\n"));
     assert.deepEqual(lines.filter((line) => line.startsWith("Unreachable:")).map((line) => line.replace(/\d\d:\d\d/, "HH:MM")), [
-      `Unreachable: ${NYX_QWEN} is skipped until HH:MM, since its server could not be reached`,
+      `Unreachable: ${NYX_QWEN} is passed over until HH:MM, since its server could not be reached; it is tried again sooner if nothing else can take a request`,
     ]);
 
     // After unreachableMinutes, Nyx is first again.
@@ -238,20 +267,47 @@ describe("smart-router/local when a server cannot be reached", () => {
     assert.equal((await status(loaded)).some((line) => line.startsWith("Unreachable:")), false);
   });
 
-  test("each failure moves on to the next model in the written order, once round, and then the request is refused: never a cloud model", async (t) => {
+  test("each failure moves on to the next model written; when every one is held, the retry stays on the model it has, under Pi's backoff: never refused, never a cloud model", async (t) => {
     const { loaded } = await session(t, { select: "local" });
     const { runtime } = loaded;
     const signal = await prompt(loaded, "rename foo to bar");
     assert.equal(routed(runtime.route("local", request("user", { signal }))), GLM);
-    assert.equal(routed(runtime.route("local", request("retry", { signal, failed: dead(loaded, GLM, "503 Service Unavailable") }))), NYX_QWEN);
+    assert.equal(routed(runtime.route("local", request("retry", { signal, failed: dead(loaded, GLM, "502 Bad Gateway") }))), NYX_QWEN);
     assert.equal(routed(runtime.route("local", request("retry", { signal, failed: dead(loaded, NYX_QWEN, REFUSED, NOW + 1) }))), HERA_QWEN);
-    const message = refusal(() => runtime.route("local", request("retry", { signal, failed: dead(loaded, HERA_QWEN, "fetch failed", NOW + 2) })));
-    assert.match(message, /^smart-router\/local: no local model can take this request \(local: /);
-    for (const ref of [GLM, NYX_QWEN, HERA_QWEN]) assert.ok(message.includes(`${ref}: skipped until `), message);
-    assert.match(message, /since its server could not be reached/);
-    assert.doesNotMatch(message, /openrouter|openai-codex/);
-    // A request that does not name a failure is refused as well: every local model is held.
-    refusal(() => runtime.route("local", request("continuation", { signal })));
+    // All three are held now. A hold is a preference: the retry is not refused, it stays where it is.
+    const last = runtime.route("local", request("retry", { signal, failed: dead(loaded, HERA_QWEN, "fetch failed", NOW + 2) }));
+    assert.deepEqual([routed(last), lastCode(loaded)], [HERA_QWEN, "retry:same"]);
+    // A continuation stays on the run's model, and a new run takes the first model in the written order.
+    assert.equal(routed(runtime.route("local", request("continuation", { signal }))), HERA_QWEN, "the run's own pick");
+    await loaded.host.emit("agent_settled", { aborted: false });
+    loaded.session.endRun();
+    const next = await prompt(loaded, "rename bar to baz");
+    assert.deepEqual([routed(runtime.route("local", request("user", { signal: next }))), lastCode(loaded)], [GLM, "local"]);
+    assert.equal((await status(loaded)).filter((line) => line.startsWith("Unreachable:")).length, 3);
+  });
+
+  test("with one usable local model, a blip is ridden out on that model, and a recovered server answers within the hold", async (t) => {
+    const state = await session(t, { select: "local" });
+    const { loaded, cat } = state;
+    const { runtime } = loaded;
+    cat.remove(NYX_QWEN);
+    cat.remove(HERA_QWEN);
+    let signal = await prompt(loaded, "rename foo to bar");
+    assert.equal(routed(runtime.route("local", request("user", { signal }))), GLM);
+    // "Connection error." while the server restarts: Pi backs off and retries, and the router keeps the model.
+    for (const stamp of [1, 2, 3]) {
+      const route = runtime.route("local", request("retry", { signal, failed: dead(loaded, GLM, "Connection error.", NOW + stamp) }));
+      assert.deepEqual([routed(route), lastCode(loaded)], [GLM, "retry:same"], String(stamp));
+    }
+    // It is back and answers: the hold is lifted at once.
+    await finish(loaded, GLM);
+    assert.equal((await status(loaded)).some((line) => line.startsWith("Unreachable:")), false);
+    // Had it stayed down, a new run a minute later is not refused either: it is tried again.
+    await loaded.host.emit("message_end", { message: assistant(GLM, { stopReason: "error", errorMessage: "Connection error.", content: [], timestamp: NOW + 9 }) });
+    state.clock = NOW + MINUTE;
+    signal = await prompt(loaded, "rename bar to baz");
+    assert.equal(routed(runtime.route("local", request("user", { signal }))), GLM);
+    assert.equal((await status(loaded)).filter((line) => line.startsWith("Unreachable:")).length, 1);
   });
 
   test("the next model is the one written after the failed one, not the role's first", async (t) => {
@@ -262,9 +318,9 @@ describe("smart-router/local when a server cannot be reached", () => {
     // The run is on Nyx, the second model, though the first is available.
     assert.equal(routed(runtime.route("local", request("continuation", { signal, previous: previous(runtime, NYX_QWEN) }))), NYX_QWEN);
     assert.equal(routed(runtime.route("local", request("retry", { signal, failed: dead(loaded, NYX_QWEN) }))), HERA_QWEN);
-    // Hera's Qwen is the last: the pass goes round to the first, once.
+    // Hera's Qwen is the last: the pass goes round to the first, once, and then stays.
     assert.equal(routed(runtime.route("local", request("retry", { signal, failed: dead(loaded, HERA_QWEN, REFUSED, NOW + 1) }))), GLM);
-    refusal(() => runtime.route("local", request("retry", { signal, failed: dead(loaded, GLM, REFUSED, NOW + 2) })));
+    assert.deepEqual([routed(runtime.route("local", request("retry", { signal, failed: dead(loaded, GLM, REFUSED, NOW + 2) }))), lastCode(loaded)], [GLM, "retry:same"]);
   });
 
   test("a failure after output had started keeps the model, as every such failure did: nothing is sent to another model, and nothing is held", async (t) => {
@@ -280,6 +336,18 @@ describe("smart-router/local when a server cannot be reached", () => {
     assert.deepEqual([routed(runtime.route("local", request("retry", { signal, failed: dead(loaded, GLM, "Request timed out") }))), lastCode(loaded)], [GLM, "retry:same"]);
   });
 
+  test("a failed response that carries output holds nothing at message_end either", async (t) => {
+    const { loaded } = await session(t, { select: "local" });
+    const signal = await prompt(loaded, "rename foo to bar");
+    loaded.runtime.route("local", request("user", { signal }));
+    await loaded.host.emit("message_end", { message: assistant(GLM, { stopReason: "error", errorMessage: "read ECONNRESET", content: [{ type: "text", text: "Half an ans" }] }) });
+    await loaded.host.emit("agent_settled", { aborted: false });
+    loaded.session.endRun();
+    assert.equal((await status(loaded)).some((line) => line.startsWith("Unreachable:")), false);
+    const next = await prompt(loaded, "rename bar to baz");
+    assert.equal(routed(loaded.runtime.route("local", request("user", { signal: next }))), GLM);
+  });
+
   test("a failed response that Pi does not retry holds the model all the same", async (t) => {
     const { loaded } = await session(t, { select: "local" });
     const signal = await prompt(loaded, "rename foo to bar");
@@ -293,43 +361,46 @@ describe("smart-router/local when a server cannot be reached", () => {
 });
 
 describe("the pin and smart-router/auto when a server cannot be reached", () => {
-  test("a pinned session stays inside its policy: the local models in order, then a refusal", async (t) => {
+  test("a pinned session stays inside its policy: the local models in order, then the model it has, never a cloud model", async (t) => {
     const { loaded } = await session(t, { setup: (s) => s.pin(policyFromRoster(ROSTER)) });
     const { runtime } = loaded;
     const signal = await prompt(loaded, "plan the migration #super");
     assert.equal(routed(runtime.route("auto", request("user", { signal }))), GLM);
     assert.equal(routed(runtime.route("auto", request("retry", { signal, failed: dead(loaded, GLM) }))), NYX_QWEN);
     assert.equal(routed(runtime.route("auto", request("retry", { signal, failed: dead(loaded, NYX_QWEN, REFUSED, NOW + 1) }))), HERA_QWEN);
-    const message = refusal(() => runtime.route("auto", request("retry", { signal, failed: dead(loaded, HERA_QWEN, REFUSED, NOW + 2) })));
-    assert.match(message, /^smart-router\/auto: no local model can take this request while this session is pinned to local models/);
-    assert.doesNotMatch(message, /openrouter|openai-codex/);
+    const last = runtime.route("auto", request("retry", { signal, failed: dead(loaded, HERA_QWEN, REFUSED, NOW + 2) }));
+    assert.deepEqual([routed(last), lastCode(loaded)], [HERA_QWEN, "retry:same"]);
   });
 
   test("on smart-router/auto the chain's local models give way to each other, and never lead back up the chain", async (t) => {
     const { loaded, cat } = await session(t);
     const { runtime } = loaded;
-    for (const ref of [LUNA, OR_GLM]) cat.unavailable.add(ref);
-    cat.unavailable.add(OR_QWEN);
+    for (const ref of [LUNA, OR_GLM, OR_QWEN]) cat.unavailable.add(ref);
     const signal = await prompt(loaded, "rename foo to bar #low");
     assert.deepEqual([routed(runtime.route("auto", request("user", { signal }))), lastCode(loaded)], [GLM, "fallback:low→local"]);
     // OpenRouter is back, but a retry from the local role goes on, not back.
     cat.unavailable.delete(OR_GLM);
     assert.deepEqual([routed(runtime.route("auto", request("retry", { signal, failed: dead(loaded, GLM) }))), lastCode(loaded)], [NYX_QWEN, "retry:unreachable"]);
     assert.equal(routed(runtime.route("auto", request("retry", { signal, failed: dead(loaded, NYX_QWEN, REFUSED, NOW + 1) }))), HERA_QWEN);
-    const message = refusal(() => runtime.route("auto", request("retry", { signal, failed: dead(loaded, HERA_QWEN, REFUSED, NOW + 2) })));
-    assert.match(message, /^smart-router\/auto: no model can take this request \(local: /);
+    assert.deepEqual([routed(runtime.route("auto", request("retry", { signal, failed: dead(loaded, HERA_QWEN, REFUSED, NOW + 2) }))), lastCode(loaded)], [HERA_QWEN, "retry:same"]);
     await loaded.host.emit("agent_settled", { aborted: false });
     loaded.session.endRun();
-    // The next run starts from its level again, and skips the held local models: OpenRouter takes it.
+    // The next run starts from its level again, and prefers what is not held: OpenRouter takes it.
     const next = await prompt(loaded, "rename bar to baz #low");
     assert.equal(routed(runtime.route("auto", request("user", { signal: next }))), OR_GLM);
+    // With OpenRouter gone too, the held local models are all that is left: the first written is tried, not refused.
+    cat.unavailable.add(OR_GLM);
+    await loaded.host.emit("agent_settled", { aborted: false });
+    loaded.session.endRun();
+    const again = await prompt(loaded, "rename baz to qux #low");
+    assert.deepEqual([routed(runtime.route("auto", request("user", { signal: again }))), lastCode(loaded)], [GLM, "fallback:low→local"]);
   });
 
   test("a cloud model's connection failure retries the same model, as before, in personal and in work scope", async (t) => {
     const personal = await session(t);
     let signal = await prompt(personal.loaded, "rename foo to bar #low");
     personal.loaded.runtime.route("auto", request("user", { signal }));
-    for (const text of [REFUSED, "503 Service Unavailable", "fetch failed"]) {
+    for (const text of [REFUSED, "502 Bad Gateway", "fetch failed"]) {
       const route = personal.loaded.runtime.route("auto", request("retry", { signal, failed: dead(personal.loaded, LUNA, text) }));
       assert.deepEqual([routed(route), lastCode(personal.loaded)], [LUNA, "retry:same"], text);
     }

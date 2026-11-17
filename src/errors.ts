@@ -113,26 +113,47 @@ export function promptNotice(problem: string): string {
   return `pi-smart-router: a prompt for the classifier cannot be used: ${problem} smart-router/auto still routes.`;
 }
 
-/** Why a model's request failed before any output, as the notices below word it. */
-export type FailoverCause = { readonly account: string; readonly until: string } | { readonly unreachable: true; readonly until: string };
+/** Why a run's model failed before any output of that request, as the notice below words it. */
+export type FailoverCause = { readonly account: string; readonly until: string } | { readonly unreachable: true };
 
-const failoverCause = (cause: FailoverCause): string =>
-  "account" in cause ? `the account ${cause.account} is out of use until ${cause.until}` : `its server could not be reached, and it is skipped until ${cause.until}`;
-
-/**
- * Shown when a run ends because its model failed before any output, on its account's limit or an
- * unreachable server, and Pi does not retry that error: the request was not answered, and sending
- * it again reaches the model named. The router cannot send it again itself (README, "A fallback
- * chain").
- */
-export function resendNotice(modelId: string, cause: FailoverCause, to: { readonly role: string | undefined; readonly modelId: string }): string {
-  const target = to.role === undefined ? to.modelId : `the fallback ${to.role} (${to.modelId})`;
-  return `pi-smart-router: ${modelId} could not take this run (${failoverCause(cause)}), and nothing was answered. Send the request again: it goes to ${target}.`;
+/** What the notice below is told of the run and of what happens next. */
+export interface ResendFacts {
+  /** The failed model's id. */
+  readonly modelId: string;
+  readonly cause: FailoverCause;
+  /** Whether the run had already answered or run tools: then it stopped partway, and must not be sent again. */
+  readonly partway: boolean;
+  /** What a new run would get; undefined when nothing but the failed model is left. */
+  readonly next: { readonly role: string | undefined; readonly modelId: string } | undefined;
+  /** Whether the session is a work session that is not pinned. */
+  readonly work: boolean;
 }
 
-/** The same when nothing else can take the request either. `work`: whether the session is a work session that is not pinned (chooseModel). */
-export function noResendNotice(id: VirtualId, modelId: string, cause: FailoverCause, work: boolean): string {
-  return `pi-smart-router: ${modelId} could not take this run (${failoverCause(cause)}), and no other model can take it now. Send the request again after ${cause.until}, or ${chooseModel(id, work)}.`;
+/**
+ * Shown when a run ends because its model failed, before any output of that request, on its
+ * account's limit or an unreachable server, with an error Pi does not retry. The router cannot go
+ * on by itself (README, "A fallback chain"), so it says exactly what happened and what to do, and
+ * never something that cannot work:
+ * - a run with nothing done is to be sent again, and the notice names where that goes;
+ * - a run that had answered or run tools stopped partway: what it did stands, so it is to be asked
+ *   to continue, not sent again;
+ * - when nothing else can take it, the notice says when the account is back. In a work session it
+ *   does not offer another work Codex model, which is on the same exhausted account.
+ */
+export function resendNotice(id: VirtualId, facts: ResendFacts): string {
+  const { cause, next, partway } = facts;
+  const why = "account" in cause ? `the account ${cause.account} is out of use until ${cause.until}` : "its server could not be reached";
+  const head = partway
+    ? `pi-smart-router: ${facts.modelId} could not go on with this run (${why}), and it stopped partway. What it did so far stands: do not send the request again.`
+    : `pi-smart-router: ${facts.modelId} could not take this run (${why}), and nothing was answered.`;
+  if (next !== undefined) {
+    const target = next.role === undefined ? next.modelId : `the fallback ${next.role} (${next.modelId})`;
+    return partway ? `${head} To go on, say: continue. It goes on with ${target}.` : `${head} Send the request again: it goes to ${target}.`;
+  }
+  const act = partway ? "to go on, say: continue" : "send the request again";
+  const when = "account" in cause ? `${act}${partway ? "," : ""} after ${cause.until}` : `${act}, and it is tried again`;
+  const other = facts.work && "account" in cause ? ". Another model picked by hand with /model is sent as it is." : `, or ${chooseModel(id, facts.work)}.`;
+  return `${head} No other model can take it now: ${when}${other}`;
 }
 
 const NO_HISTORY = "this Pi has no bounded session history (getLatestCustomEntry and getRecentActiveEntries)";
@@ -306,11 +327,13 @@ export function unroutable(
         ? `Start the local model server and send the prompt again, or ${unpin}.`
         : `See /smart-router status, or ${chooseModel(id, work)}.`;
   // An exhausted account ends by itself: the refusal says when, and that the selection is John's.
-  const wait =
-    context.cooling === undefined || context.localOnly
-      ? ""
-      : ` The account ${context.cooling.provider} is left alone until ${context.cooling.until}; after that this request routes again. A model picked by hand is sent as it is.`;
-  return refusal(id, cause, `${way}${wait}`);
+  // In a work session it does not offer another work Codex model: that is on the same account.
+  if (context.cooling === undefined || context.localOnly) return refusal(id, cause, way);
+  const { provider, until } = context.cooling;
+  if (work) {
+    return refusal(id, cause, `The account ${provider} is left alone until ${until}; send the request again after that, or see /smart-router status. Another model picked by hand with /model is sent as it is.`);
+  }
+  return refusal(id, cause, `${way} The account ${provider} is left alone until ${until}; after that this request routes again. A model picked by hand is sent as it is.`);
 }
 
 export function stale(id: VirtualId): RouterError {

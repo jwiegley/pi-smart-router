@@ -349,6 +349,9 @@ describe("planning with a fallback chain", () => {
     // The hold ends as any does: once the session has been idle, and at once for a tag.
     assert.deepEqual(picked(plan(context(), {}, { last: { ref: OR_GLM, at: NOW - 6 * MINUTE }, text: "Format this file", held: "super" }).decision), ["low", LUNA, "reopen:idle"]);
     assert.deepEqual(picked(plan(context(), { tag: "low" }, { last, held: "super" }).decision), ["low", LUNA, "tag"]);
+    // Only a chain model stands for the held level: a level's own model holds its own level, whatever was held before.
+    assert.deepEqual(picked(plan(context(), {}, { last: { ref: LUNA, at: NOW - MINUTE }, text: "Format this file", held: "super" }).decision), ["low", LUNA, "keyword"]);
+    assert.deepEqual(picked(plan(context(), {}, { last: { ref: SOL, at: NOW - MINUTE }, text: "Format this file", held: "super" }).decision), ["high", SOL, "hold:sticky"]);
     // A role that is no level of the scope holds nothing.
     assert.deepEqual(picked(plan(context(), {}, { last, text: "Format this file", held: "work-super" }).decision), ["low", LUNA, "keyword"]);
   });
@@ -644,6 +647,52 @@ describe("a run through the router with a fallback chain", () => {
       assert.equal(routed(later.loaded.runtime.route("auto", request("continuation", { signal: run, previous: previous(later.loaded.runtime, SOL) }))), SOL);
       assert.equal(lastHistory(later.loaded)?.code, "stick:previous");
     }
+  });
+
+  test("a restored session returns to its level too: the level comes from its latest record, when its scope still has it", async (t) => {
+    /** A session resumed with a HIGH run on record whose last answer came from OpenRouter. */
+    const restored = (record: Record<string, unknown>, extra?: (s: FakeSession) => void) =>
+      session(t, {
+        setup: (s) => {
+          s.appendCustom(LEVEL_ENTRY, { v: 1, at: NOW - 40 * MINUTE, scope: "personal", source: "tag", tier: "high", asked: "high", tag: "high", ref: OR_GLM, fallback: true, ...record });
+          s.appendAssistant(assistant(OR_GLM, { timestamp: NOW - 40 * MINUTE }));
+          extra?.(s);
+        },
+      });
+    const unplanned = async (state: Session): Promise<readonly [string, string | undefined]> => {
+      await state.loaded.host.emit("before_agent_start", { messageType: "custom" });
+      const signal = state.loaded.session.startRun();
+      const route = state.loaded.runtime.route("auto", request("continuation", { signal, previous: previous(state.loaded.runtime, OR_GLM) }));
+      return [routed(route), lastHistory(state.loaded)?.code];
+    };
+    assert.deepEqual(await unplanned(await restored({})), [SOL, "return:level"]);
+    // A correction is a label, not a run's level; a record of another scope, or of no tier, seeds nothing.
+    for (const record of [{ source: "correction", refers: NOW - 50 * MINUTE }, { scope: "work" }, { tier: "ultra" }, { v: 2 }]) {
+      resetSlot();
+      assert.deepEqual(await unplanned(await restored(record)), [OR_GLM, "stick:previous"], JSON.stringify(record));
+    }
+    // Under the pin the run stays in the local role: there is no level to return to.
+    resetSlot();
+    const pinned = await restored({}, (s) => s.pin(policyFromRoster(ROSTER)));
+    await pinned.loaded.host.emit("before_agent_start", { messageType: "custom" });
+    const signal = pinned.loaded.session.startRun();
+    assert.equal(routed(pinned.loaded.runtime.route("auto", request("continuation", { signal, previous: previous(pinned.loaded.runtime, OR_GLM) }))), GLM);
+  });
+
+  test("a run starts with no memory of the models that failed in the run before", async (t) => {
+    const { loaded } = await session(t, { select: "local" });
+    const { runtime } = loaded;
+    let signal = await prompt(loaded, "rename foo to bar");
+    assert.equal(routed(runtime.route("local", request("user", { signal }))), GLM);
+    assert.equal(routed(runtime.route("local", request("retry", { signal, failed: failure(runtime, GLM, LIMIT) }))), NYX_QWEN);
+    assert.equal(routed(runtime.route("local", request("retry", { signal, failed: failure(runtime, NYX_QWEN, LIMIT) }))), HERA_QWEN);
+    refusal(() => runtime.route("local", request("retry", { signal, failed: failure(runtime, HERA_QWEN, LIMIT) })));
+    await loaded.host.emit("agent_settled", { aborted: false });
+    loaded.session.endRun();
+    // The next run's first limit goes on to the second model, as the first run's did.
+    signal = await prompt(loaded, "rename bar to baz");
+    assert.equal(routed(runtime.route("local", request("user", { signal }))), GLM);
+    assert.equal(routed(runtime.route("local", request("retry", { signal, failed: failure(runtime, GLM, LIMIT) }))), NYX_QWEN);
   });
 
   test("a SUPER session answered by the chain stays at SUPER for a trivial follow-up, and a move onto the chain in mid-run is said once", async (t) => {

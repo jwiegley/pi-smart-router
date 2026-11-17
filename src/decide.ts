@@ -31,7 +31,7 @@ import { PROVIDER } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { isRecord, own } from "./files.ts";
 import type { JevOutcome } from "./jev.ts";
-import { resolveCandidate } from "./resolve.ts";
+import { HELD_REASON, resolveCandidate } from "./resolve.ts";
 import type { Resolution, ResolveContext } from "./resolve.ts";
 import { autoRoles, candidatesOf, fallbackAfter, rankOf, roleOf, scopeSection } from "./roster.ts";
 import type { Scope, ScopeSection } from "./roster.ts";
@@ -82,9 +82,15 @@ export interface PickOptions {
   /**
    * The model whose server could not be reached: the role's candidates are tried in the written
    * order starting after it and going round once, so that the next one written takes the request.
-   * It comes last itself, where its hold refuses it.
+   * It comes last itself, where its hold passes it over.
    */
   readonly after?: string | undefined;
+  /**
+   * Leave held candidates out for good: the pick fails when only held ones are left. A retry asks
+   * this way, because it has something better than a held candidate: the model it is on, under Pi's
+   * backoff.
+   */
+  readonly strictHolds?: boolean | undefined;
   /** Whether the role's declared fallback may take over: version 1's one hop, or a version 2 scope's chain on smart-router/auto. Never while local-only. */
   readonly fallback: boolean;
   readonly code: string;
@@ -108,8 +114,20 @@ function fallbackRoles(rc: ResolveContext, roleName: string): readonly string[] 
 /**
  * The first candidate of a role that resolves, else, when allowed, the first that resolves of the
  * roles its fallback goes on to, in order (fallbackRoles). Otherwise every candidate's reason.
+ *
+ * A hold is a preference, never a refusal. When nothing resolves and a hold is among the reasons,
+ * the pick is made again without the holds, in the written order: every cooldown and every check
+ * of the selection, the scope and the pin stays, so the request goes to the first candidate that
+ * only its hold kept out. A server that had a blip is tried again rather than the request refused.
  */
 export function pickInRole(rc: ResolveContext, roleName: string, options: PickOptions): Decision {
+  const first = pickWithHolds(rc, roleName, options);
+  if (first.ok || options.strictHolds === true || rc.holds === undefined) return first;
+  const heldBack = first.attempts.some((attempt) => attempt.candidates.some((candidate) => candidate.reason.startsWith(HELD_REASON)));
+  return heldBack ? pickWithHolds({ ...rc, holds: undefined }, roleName, { ...options, after: undefined }) : first;
+}
+
+function pickWithHolds(rc: ResolveContext, roleName: string, options: PickOptions): Decision {
   const attempts: Attempt[] = [];
   const firstIn = (name: string, prefer: string | undefined, fallback: boolean): (Resolution & { readonly ok: true }) | undefined => {
     const role = rc.roster.roles.find((entry) => entry.name === name);

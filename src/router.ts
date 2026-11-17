@@ -45,7 +45,6 @@ import {
   firstLine,
   historyNotice,
   looksRetryable,
-  noResendNotice,
   promptNotice,
   resendNotice,
   resumeNotice,
@@ -72,8 +71,8 @@ import type { Owner, OwnerRouter, RosterMemory, Slot } from "./owners.ts";
 import { latchEnvPolicy, leaveHandoff, pinOn, readPin, takeHandoff } from "./pin.ts";
 import { promptProblem, promptStore, promptUses, scopePrompts } from "./prompts.ts";
 import type { PinReading } from "./pin.ts";
-import { footerText, levelRecord } from "./records.ts";
-import { clock, coolFrom, Cooldowns, coolsAccount, hasOutput, holdFrom, Holds, resolveContext, throttleFrom } from "./resolve.ts";
+import { footerText, levelRecord, readLevelRecord } from "./records.ts";
+import { clock, coolFrom, Cooldowns, coolsAccount, hasOutput, holdFrom, Holds, resolveContext } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
 import { afterFailure, boundedHistory, newRecord, planApplies, predict, requireBoundedHistory, routeOther, routeOwned } from "./route.ts";
 import type { BoundedHistory, Failover, LastInput, Pin, RouteInput, SessionRecord } from "./route.ts";
@@ -186,7 +185,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   const labels = labelsFile(files);
   const prompts = promptStore(files);
   const cooldowns = new Cooldowns();
-  /** The models skipped for a few minutes: unreachable local ones, local-role ones after a limit, rate-limited cloud ones (src/resolve.ts). */
+  /** The local models passed over for a few minutes because their servers could not be reached (holdFrom in src/resolve.ts). */
   const holds = new Holds();
   const records = new Map<string, Session>();
   const reported = new Set<string>();
@@ -434,6 +433,18 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     return undefined;
   };
 
+  /**
+   * The level role a resumed session held: that of its latest level record's scope and tier, when
+   * the roster still has that scope's section. A correction is a label for a run, not a run's
+   * level, and seeds nothing; neither does an entry the router did not write. The role counts only
+   * in the scope it belongs to (levelToReturnTo, tierOf), so a record of the other scope is inert.
+   */
+  const seedLevel = (view: BoundedHistory, value: Roster): string | undefined => {
+    const record = readLevelRecord(view.getLatestCustomEntry(LEVEL_ENTRY, { scope: "active" }));
+    if (record === undefined || record.source === "correction") return undefined;
+    return scopeSection(value, record.scope)?.levels[record.tier].role;
+  };
+
   // What pi-cache-optimizer reads through the adapter, for the owner's session: the run's plan,
   // else the run's pick, else what a continuation would pick now; nothing when the request would be
   // refused. Only the owner's own loop and its message_end change it.
@@ -566,6 +577,9 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       const view = boundedHistory(sessionManager);
       const last = view === undefined ? undefined : step(() => seed(view));
       if (last !== undefined) recordOf(sessionId).last = last;
+      // A resumed session's level is its latest run's, so that it returns from the chain as a running one does.
+      const held = view === undefined || state?.kind !== "ok" ? undefined : step(() => seedLevel(view, state.value));
+      if (held !== undefined) recordOf(sessionId).levelRole = held;
       const notice = state !== undefined && state.kind !== "ok" ? rosterNotice(state) : view === undefined ? historyNotice() : undefined;
       if (notice !== undefined) notify(ctx, notice, "warning");
       // A prompt file that cannot be used stops no route, so it is said once here; status says it too.
@@ -786,29 +800,36 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   };
 
   /**
-   * A run's own pick failed before any output, on its account's limit or because its server could
-   * not be reached, with an error Pi does not retry: the run ends unanswered. The router cannot
-   * send the request again itself, so it says exactly what happened and what a resend will get, or
-   * when to resend when nothing else can take it. A model picked by hand is no pick of the
-   * router's, and gets no notice.
+   * A run's own pick failed, before any output of that request, on its account's limit or because
+   * its server could not be reached, with an error Pi does not retry: the run ends there. The
+   * router cannot go on by itself, so it says what happened and what to do (resendNotice): send the
+   * request again when nothing was done, ask to continue when the run had already answered or run
+   * tools, and where that goes, which is what a new run's plan would pick now. A model picked by
+   * hand is no pick of the router's, and gets no notice.
    */
   const sayResend = (ctx: ExtensionContext, record: Session, value: Roster, failover: Failover): void => {
     const id = virtualIdOf(ctx.model);
     if (id === undefined || record.runPick?.id !== id || refusalFor(id, value, ctx) !== undefined) return;
     const rc = contextFor(ctx, value, id, pinOf(ctx));
     const parsed = parseRef(failover.ref);
-    const modelId = parsed?.id ?? failover.ref;
-    const cause =
-      failover.kind === "unreachable"
-        ? { unreachable: true as const, until: clock(holds.until(failover.ref, rc.now) ?? rc.now) }
-        : { account: parsed?.provider ?? "", until: clock(cooldowns.until(failover.ref, rc.now) ?? rc.now) };
-    const next = afterFailure(rc, failover, new Set([...record.limited, failover.ref]));
-    if (!next.ok) {
-      notify(ctx, noResendNotice(id, modelId, cause, !rc.pinned && rc.scope === "work"), "warning");
-      return;
-    }
-    const chain = !rc.localOnly && inChain(rc.scope, next.choice.ref) ? next.choice.role : undefined;
-    notify(ctx, resendNotice(modelId, cause, { role: chain, modelId: next.choice.model.id }), "warning");
+    const cause = failover.kind === "unreachable" ? { unreachable: true as const } : { account: parsed?.provider ?? "", until: clock(cooldowns.until(failover.ref, rc.now) ?? rc.now) };
+    // A new run starts in its level's role, the one this run's level had; on smart-router/local and under the pin, in the local role.
+    const section = rc.localOnly ? undefined : scopeSection(value, rc.scope);
+    const tier = record.pendingLevel?.level.tier;
+    const start = section !== undefined && tier !== undefined ? section.levels[tier].role : rc.localOnly ? value.local?.role : undefined;
+    const next = afterFailure(rc, failover, start);
+    const chain = next !== undefined && !rc.localOnly && inChain(rc.scope, next.ref) ? next.role : undefined;
+    notify(
+      ctx,
+      resendNotice(id, {
+        modelId: parsed?.id ?? failover.ref,
+        cause,
+        partway: record.answered !== undefined,
+        next: next === undefined ? undefined : { role: chain, modelId: next.model.id },
+        work: !rc.pinned && rc.scope === "work",
+      }),
+      "warning",
+    );
   };
 
   const messageEnd = (event: MessageEndEvent, ctx: ExtensionContext): void => {
@@ -822,7 +843,6 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         const cooled = coolFrom(message, state.value, cooldowns, now());
         // A failure Pi does not retry holds its model too, so that the next run skips it.
         const held = holdFrom(message, ctx.modelRegistry.find(message.provider, message.model), state.value, holds, now());
-        throttleFrom(message, state.value, holds, now());
         const session = records.get(sessionId);
         const kind = held !== undefined ? "unreachable" : cooled !== undefined && coolsAccount(message.provider, message.errorMessage) ? "limit" : undefined;
         // Pi retries some of these errors, and its retry is routed to the next candidate; the rest end the run.
@@ -832,8 +852,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       }
       return;
     }
-    // A rate-limited model that answers is no longer held.
-    holds.release(ref, "rate");
+    // A held model that answers is no longer held: its server is back.
+    holds.release(ref);
     // The footer names the model that answered a run's level, when the run's own route picked it.
     const record = records.get(sessionId);
     const pick = record?.runPick;

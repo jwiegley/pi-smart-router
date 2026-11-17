@@ -15,10 +15,11 @@
 //                       default role (the local role when local-only) and its fallback
 //   owner retry         a usage-limit or auth failure moves to the role's next candidate, then its
 //                       fallback; a local model whose server could not be reached, before any
-//                       output, gives way to the candidate written after it, round its role once,
-//                       then to the fallback; any other failure, content-filter refusals and
-//                       overflows included, retries the same model; no failure routes as a
-//                       continuation
+//                       output, gives way to the candidate written after it that is not held,
+//                       round its role once, then to the fallback, and keeps its model when
+//                       every other is held; any other failure, content-filter refusals, rate
+//                       limits and overflows included, retries the same model; no failure
+//                       routes as a continuation
 //   direct              previous, else the session's last responder, else the default role
 //   foreign             previous, else the default role
 //
@@ -195,7 +196,13 @@ function stick(rc: ResolveContext, previous: string | undefined, record: Session
     if (role === undefined) continue;
     const base = resolveCandidate(ref, rc);
     if (base.ok) return { ok: true, choice: { role, ref, model: base.model, code: `stick:${source}` } };
-    return pickInRole(rc, role, { fallback: !rc.localOnly, code: "stick:role" });
+    // Another candidate that is not held is better than this one; failing that, this one, though
+    // held, is better than any other held one: the conversation is on it.
+    const other = pickInRole(rc, role, { fallback: !rc.localOnly, code: "stick:role", strictHolds: true });
+    if (other.ok) return other;
+    const anyway = resolveCandidate(ref, { ...rc, holds: undefined });
+    if (anyway.ok) return { ok: true, choice: { role, ref, model: anyway.model, code: `stick:${source}` } };
+    return other;
   }
   return byDefault(rc, "stick:default");
 }
@@ -221,14 +228,19 @@ function retry(rc: ResolveContext, request: ModelRouteRequest, record: SessionRe
     return pickInRole(rc, role, { skip: ref, skipped: record.limited, fallback: !rc.localOnly, code: "retry:next" });
   }
   // A local model whose server could not be reached is held, and gives way to the candidate written
-  // after it. Each such retry holds one more model, so it takes a candidate not yet tried: one pass
-  // over the order, and then a refusal that names every hold. The pick stays where every pick of
-  // this request may go: the role, then what is left of the scope's chain.
+  // after it that is not held. Each such retry holds one more model, so it takes a candidate not
+  // yet tried: one pass over the order. When every other candidate is held too, the retry stays on
+  // the model it has, below, as it always did: Pi has backed off, and a server that is restarting
+  // is ridden out rather than the request refused. The pick stays where every pick of this request
+  // may go: the role, then what is left of the scope's chain.
   const held = rc.holds === undefined ? undefined : holdFrom(failed.message, failed.model, rc.roster, rc.holds, rc.now);
-  if (held !== undefined && role !== undefined) return pickInRole(rc, role, { after: ref, fallback: !rc.localOnly, code: "retry:unreachable" });
+  if (held !== undefined && role !== undefined) {
+    const next = pickInRole(rc, role, { after: ref, fallback: !rc.localOnly, code: "retry:unreachable", strictHolds: true });
+    if (next.ok) return next;
+  }
   if (role !== undefined) {
-    // Pi has backed off before this retry, so a rate-limited model's hold does not stand in its way.
-    const same = resolveCandidate(ref, rc.holds?.get(ref, rc.now)?.kind === "rate" ? { ...rc, holds: undefined } : rc);
+    // Its own hold does not keep a model from its own retry.
+    const same = resolveCandidate(ref, { ...rc, holds: undefined });
     if (same.ok) return { ok: true, choice: { role, ref, model: same.model, code: "retry:same" } };
   }
   // Content a model refused is never sent to another model.
@@ -245,15 +257,17 @@ export interface Failover {
 }
 
 /**
- * What would take the request if it were sent again after such a failure: the candidates after the
- * failed one, in the failed model's role and what is left of the scope's chain, held to the
- * selection, the scope and the pin as any pick is. Pure: it only says what a resend would get.
+ * What would take the request if it were sent again after such a failure, as a new run's plan
+ * would pick it: from `start`, the role the new run starts in (its level's, or the local role),
+ * the first candidate in the written order that is neither cooling nor held, then the scope's
+ * chain; held to the selection, the scope and the pin as any pick is. The failed model is cooling
+ * or held by now. Nothing when only the failed model itself, or nothing, is left. Pure.
  */
-export function afterFailure(rc: ResolveContext, failover: Failover, limited: ReadonlySet<string>): Decision {
-  const { ref, kind } = failover;
-  const role = eligibleRole(rc, ref);
-  if (role === undefined) return { ok: false, attempts: [] };
-  return pickInRole(rc, role, kind === "limit" ? { skip: ref, skipped: limited, fallback: !rc.localOnly, code: "resend" } : { after: ref, fallback: !rc.localOnly, code: "resend" });
+export function afterFailure(rc: ResolveContext, failover: Failover, start: string | undefined): Choice | undefined {
+  const role = start ?? eligibleRole(rc, failover.ref);
+  if (role === undefined) return undefined;
+  const decision = pickInRole(rc, role, { fallback: !rc.localOnly, code: "resend" });
+  return decision.ok && decision.choice.ref !== failover.ref ? decision.choice : undefined;
 }
 
 /**

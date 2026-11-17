@@ -2,7 +2,7 @@
 // why. The checks run in a fixed order and the first failure is the reason reported:
 //
 //   excluded, not-in-catalog, virtual, not-available, no-credentials, account,
-//   cooling-until-HH:MM, a hold (unreachable-until- or rate-limited-until-HH:MM),
+//   cooling-until-HH:MM, a hold (unreachable-until-HH:MM, lifted when nothing else resolves),
 //   not-routable-by-auto (smart-router/auto only),
 //   not-local (local-only requests only).
 //
@@ -16,10 +16,11 @@
 // provider such an error is the account's, so it cools every model of that provider at once
 // (accountScoped): the four personal Codex levels share one ChatGPT account.
 //
-// And the holds, kept the same way but apart from the cooldowns, each for the roster's
-// unreachableMinutes: a local model whose server could not be reached, before any output, and a
-// cloud model that was rate-limited and has not answered since. A hold applies to local-role models, which are never cooled: a
-// server that is down is skipped, whatever its role, and comes back after minutes.
+// And the holds, kept the same way but apart from the cooldowns: a local model whose server could
+// not be reached, before any output, is passed over for the roster's unreachableMinutes. A hold
+// applies to local-role models, which are never cooled. Unlike a cooldown it is a preference: when
+// no candidate of a pick can take a request for any other reason, the held ones are tried again in
+// the written order, so a hold never refuses a request, and an answer from a held model lifts it.
 //
 // Cooldowns and holds are per router instance, which is per session: another session finds an
 // exhausted account or a dead server out for itself, with one failed request.
@@ -63,7 +64,7 @@ export interface ResolveContext {
   /** Multi-Pass's labels; undefined when the roster binds no alias. */
   readonly labels: Loaded<Labels> | undefined;
   readonly cooldowns: Cooldowns;
-  /** The models held for a few minutes (holdFrom, throttleFrom); without it, none is. */
+  /** The models held for a few minutes (holdFrom); without it, none is, which is how a held model is tried after all. */
   readonly holds?: Holds | undefined;
   readonly now: number;
   readonly virtualId: VirtualId;
@@ -116,9 +117,9 @@ export function resolveCandidate(ref: string, rc: ResolveContext): Resolution {
     }
   }
   // A hold is no cooldown: it applies to local-role models too.
-  const held = rc.holds?.get(ref, rc.now);
+  const held = rc.holds?.until(ref, rc.now);
   if (held !== undefined) {
-    const { reason, detail } = describeHold(held);
+    const { reason, detail } = describeHold({ until: held });
     return refuse(reason, detail);
   }
   if (rc.virtualId === "auto") {
@@ -192,13 +193,17 @@ const CONTENT_FILTER = /content[ _-]?filter|content[ _-]?policy|moderation|\bfla
 // The limit kind has three parts, told apart because they are not about the same thing.
 /** About the account: a usage limit, a quota, billing, or a credential that was not accepted. */
 const ACCOUNT_LIMIT =
-  /usage[ _-]?limit|\bquota\b|insufficient_quota|\bbilling\b|subscription_sharing|resource[ _]?exhausted|(?<![a-z0-9])401(?![a-z0-9])|unauthori[sz]ed/i;
+  /usage[ _-]?limit|\bquota\b|insufficient_quota|\bbilling\b|subscription_sharing|resource[ _]?exhausted|(?<![a-z0-9])401(?![a-z0-9])|unauthori[sz]ed|authentication[ _]error|invalid[ _]api[ _]key|incorrect api key/i;
 /** About the account's money: prepaid credit that has run out, as OpenRouter reports it (402). */
 const CREDIT_LIMIT = /(?<![a-z0-9])402(?![a-z0-9])|payment[ _-]?required|insufficient[ _-]?credits?|out of credits?|requires? more credits|credit balance/i;
 /** About the one model: it is not there, or this account may not use it (403). */
 const MODEL_LIMIT = /(?<![a-z0-9])403(?![a-z0-9])|\bforbidden\b|model_not_found|\bmodel\b[^\n]{0,200}?\bnot[ _-]?found\b/i;
-/** A throttle: the model is there and the account is good, but not this fast. */
-const RATE_LIMIT = /(?<![a-z0-9])429(?![a-z0-9])|rate[ _-]?limit|too many requests/i;
+// Whether the account is cooled is decided by narrower forms of the first two: an account error's
+// own words, or its status where an error text begins, so that a number or a word inside an
+// unrelated error body (a tool result quoted back, a token count) cools no account.
+const ACCOUNT_ERROR =
+  /usage[ _-]?limit|insufficient_quota|quota exceeded|exceeded (?:your |the )?(?:current )?quota|billing (?:details|hard limit|(?:is )?not active)|subscription_sharing|resource[ _]?exhausted|^\s*(?:HTTP |error:? ?|status(?: code)?:? ?)?401\b|\b401 unauthori[sz]ed|\bstatus(?: code)?:? ?401\b|^\s*unauthori[sz]ed\b|\bunauthori[sz]ed(?: access| request|[:.]|$)|authentication[ _]error|invalid[ _]api[ _]key|incorrect api key/i;
+const CREDIT_ERROR = /^\s*(?:HTTP |error:? ?|status(?: code)?:? ?)?402\b|\b402 payment required|payment[ _]required|insufficient[ _-]?credits?|out of credits?|requires? more credits|credit balance/i;
 // Error texts can carry a provider's whole response body; the kind is decided by its start.
 const FAILURE_TEXT_LIMIT = 8 * 1024;
 
@@ -214,7 +219,7 @@ export function failureKind(text: string | undefined): FailureKind {
 
 /** Whether a limit-kind error text is about spent credit, which is an account's whatever the provider. */
 export function creditScoped(text: string | undefined): boolean {
-  return failureKind(text) === "limit" && CREDIT_LIMIT.test(headOf(text));
+  return failureKind(text) === "limit" && CREDIT_ERROR.test(headOf(text));
 }
 
 /**
@@ -225,15 +230,11 @@ export function creditScoped(text: string | undefined): boolean {
  */
 export function accountScoped(text: string | undefined): boolean {
   const head = headOf(text);
-  return failureKind(text) === "limit" && (ACCOUNT_LIMIT.test(head) || CREDIT_LIMIT.test(head));
+  return failureKind(text) === "limit" && (ACCOUNT_ERROR.test(head) || CREDIT_ERROR.test(head));
 }
 
-/** Whether an error text is a rate limit and nothing graver. */
-export function isRateLimit(text: string | undefined): boolean {
-  return failureKind(text) === "other" && RATE_LIMIT.test(headOf(text));
-}
-
-const WAIT = /try again in\s*~?\s*(\d+(?:\.\d+)?)\s*(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d)\b/i;
+const WAIT_PART = /^\s*(?:,|and)?\s*~?\s*(\d+(?:\.\d+)?)\s*(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d)\b/i;
+const WAIT_START = /try again in/i;
 /** The longest wait an error text is believed about, in minutes: the roster's own longest cooldown. */
 const WAIT_MAX_MINUTES = 1440;
 
@@ -241,14 +242,22 @@ const WAIT_MAX_MINUTES = 1440;
  * The wait a limit error names ("Try again in ~42 min"), in whole minutes, at least 1 and at most
  * a day; undefined when it names none. The account is then left alone for that long, not for the
  * roster's cooldownMinutes: asking again sooner only fails again, and waiting longer wastes it.
+ * A wait given in several units ("2 hours 30 min") is their sum.
  */
 export function waitMinutes(text: string | undefined): number | undefined {
-  const match = WAIT.exec(headOf(text));
-  if (match === null) return undefined;
-  const unit = (match[2] ?? "").toLowerCase();
-  const perUnit = unit.startsWith("s") ? 1 / 60 : unit.startsWith("m") ? 1 : unit.startsWith("h") ? 60 : 1440;
-  const minutes = Math.ceil(Number(match[1]) * perUnit);
-  return Number.isFinite(minutes) ? Math.min(Math.max(minutes, 1), WAIT_MAX_MINUTES) : undefined;
+  const head = headOf(text);
+  const start = WAIT_START.exec(head);
+  if (start === null) return undefined;
+  let rest = head.slice(start.index + start[0].length);
+  let total: number | undefined;
+  for (let part = WAIT_PART.exec(rest); part !== null; part = WAIT_PART.exec(rest)) {
+    const unit = (part[2] ?? "").toLowerCase();
+    const perUnit = unit.startsWith("s") ? 1 / 60 : unit.startsWith("m") ? 1 : unit.startsWith("h") ? 60 : 1440;
+    total = (total ?? 0) + Number(part[1]) * perUnit;
+    rest = rest.slice(part[0].length);
+  }
+  if (total === undefined || !Number.isFinite(total)) return undefined;
+  return Math.min(Math.max(Math.ceil(total), 1), WAIT_MAX_MINUTES);
 }
 
 /** The parts of a failed assistant response the cooldown rules read. */
@@ -295,69 +304,68 @@ export function coolFrom(message: FailedResponse, roster: Roster, cooldowns: Coo
 
 // ─── Holds ───────────────────────────────────────────────────────────────────
 
-/** Why a model is held: its server could not be reached, or it was rate-limited. */
-export type HoldKind = "unreachable" | "rate";
-
+/** A model held because its server could not be reached, until when. */
 export interface Hold {
   readonly until: number;
-  readonly kind: HoldKind;
 }
 
-/** Held refs, each with why and with the failed response that held it, so one response holds once. */
+/**
+ * Held refs, each with the failed response that held it, so one response holds once. A hold is a
+ * preference, never a refusal: a held model is passed over while another candidate can take the
+ * request, and is tried again when none can (pickInRole). An answer from it lifts its hold.
+ */
 export class Holds {
   readonly #entries = new Map<string, Hold & { readonly stamp: number }>();
 
-  hold(ref: string, kind: HoldKind, stamp: number, now: number, minutes: number): void {
+  hold(ref: string, stamp: number, now: number, minutes: number): void {
     if (this.#entries.get(ref)?.stamp === stamp) return;
-    this.#entries.set(ref, { until: now + minutes * 60_000, kind, stamp });
-  }
-
-  /** The hold on `ref` at `now`. */
-  get(ref: string, now: number): Hold | undefined {
-    const entry = this.#entries.get(ref);
-    return entry !== undefined && entry.until > now ? { until: entry.until, kind: entry.kind } : undefined;
+    this.#entries.set(ref, { until: now + minutes * 60_000, stamp });
   }
 
   /** When `ref` stops being held, or undefined when it is not held at `now`. */
   until(ref: string, now: number): number | undefined {
-    return this.get(ref, now)?.until;
+    const entry = this.#entries.get(ref);
+    return entry !== undefined && entry.until > now ? entry.until : undefined;
   }
 
-  /** Lift a hold of one kind: a rate-limited model that has answered since is no longer held. */
-  release(ref: string, kind: HoldKind): void {
-    if (this.#entries.get(ref)?.kind === kind) this.#entries.delete(ref);
+  /** Lift the hold on a model: it has answered. */
+  release(ref: string): void {
+    this.#entries.delete(ref);
   }
 
   /** Every ref held at `now`, in the order they were first held. */
   active(now: number): Array<Hold & { readonly ref: string }> {
-    return [...this.#entries].filter(([, entry]) => entry.until > now).map(([ref, entry]) => ({ ref, until: entry.until, kind: entry.kind }));
+    return [...this.#entries].filter(([, entry]) => entry.until > now).map(([ref, entry]) => ({ ref, until: entry.until }));
   }
 }
+
+/** The reason code of a candidate passed over for its hold; pickInRole tells a hold from every other reason by it. */
+export const HELD_REASON = "unreachable-until-";
 
 /** A hold as status and refusals word it: the reason code, and the reason in words. */
 export function describeHold(hold: Hold): { readonly reason: string; readonly detail: string } {
   const at = clock(hold.until);
-  switch (hold.kind) {
-    case "unreachable":
-      return { reason: `unreachable-until-${at}`, detail: `skipped until ${at}, since its server could not be reached` };
-    case "rate":
-      return { reason: `rate-limited-until-${at}`, detail: `skipped until ${at} after a rate limit` };
-  }
+  return { reason: `${HELD_REASON}${at}`, detail: `passed over until ${at}, since its server could not be reached` };
 }
 
 /**
- * What an error text says when the model's server could not be reached at all: the connection was
- * refused or reset, the name did not resolve, the host or network was unreachable, the connection
- * or its TLS handshake did not complete, or a gateway in front of the model answered 502, 503 or
- * 504. Deliberately not here: a request that timed out or was cut off without saying how (the
- * server may be slow, or half way through an answer), 500, a rate limit, and "overloaded". The
- * SDK's generic "Connection error." and "fetch failed" are here too, which is safe only because
- * holdFrom applies the rule to local models alone.
+ * What an error text says when a connection to the model's server could not be made at all: it was
+ * refused or reset, the name did not resolve, there was no route to the host or network, the
+ * connect timed out, the TLS handshake or the certificate's verification failed, or the gateway in
+ * front of the model had nothing behind it (502). The SDK's generic "Connection error." and "fetch
+ * failed" are here too, which is safe only because holdFrom applies the rule to local models alone.
+ *
+ * Deliberately not here, because each can mean a server that is there and slow, loading or busy: a
+ * request or a read that timed out (a bare ETIMEDOUT, "timed out", 504, "gateway time-out"), 503
+ * and "service unavailable" (a model that is loading), 500, a stream cut off, a rate limit,
+ * "overloaded"; and any text that merely mentions a certificate or TLS. Hera's models answer behind
+ * HTTPS on hera.lan, where a long cold prefill can trip the proxy's timeout: that must not bounce a
+ * session to another host and back.
  */
 const UNREACHABLE =
-  /ECONNREFUSED|connection[ _-]?refused|ECONNRESET|connection[ _-]?reset|reset before headers|ENOTFOUND|EAI_AGAIN|getaddrinfo|EHOSTUNREACH|ENETUNREACH|EHOSTDOWN|ETIMEDOUT|UND_ERR_CONNECT_TIMEOUT|connect(?:ion)?[ _-]?timeout|connection[ _-]?error|network[ _-]?error|fetch failed|socket hang up|other side closed|socket connection was closed|certificate|\bCERT_|SELF_SIGNED|self[ -]signed|ERR_TLS|\b(?:TLS|SSL)\b[^\n]{0,80}?\b(?:handshake|alert|error|failed)\b|(?<![a-z0-9])(?:502|503|504)(?![a-z0-9])|bad gateway|service unavailable|gateway time-?out/i;
+  /ECONNREFUSED|connection[ _-]?refused|ECONNRESET|connection[ _-]?reset|reset before headers|ENOTFOUND|EAI_AGAIN|getaddrinfo|EHOSTUNREACH|ENETUNREACH|EHOSTDOWN|connect ETIMEDOUT|UND_ERR_CONNECT_TIMEOUT|connect[ _-]?timeout|connection[ _-]?error|network[ _-]?error|fetch failed|socket hang up|other side closed|socket connection was closed|unable to verify the first certificate|UNABLE_TO_VERIFY_LEAF_SIGNATURE|self[- ]signed certificate|SELF_SIGNED_CERT|certificate has expired|CERT_HAS_EXPIRED|ERR_TLS_CERT_ALTNAME_INVALID|does not match certificate|\b(?:TLS|SSL) handshake\b|(?<![a-z0-9])502(?![a-z0-9])|bad gateway/i;
 
-/** Whether an error text says that the model's server could not be reached. A content-filter refusal or a limit never does. */
+/** Whether an error text says that a connection to the model's server could not be made. A content-filter refusal or a limit never does. */
 export function isUnreachable(text: string | undefined): boolean {
   return failureKind(text) === "other" && UNREACHABLE.test(headOf(text));
 }
@@ -374,16 +382,17 @@ export function hasOutput(content: readonly unknown[] | undefined): boolean {
 }
 
 /**
- * Apply the hold rules to one failed response, and return the held ref. Holds last the roster's
- * unreachableMinutes, and are kept per router instance, as cooldowns are: another session finds a
- * dead server out for itself.
+ * Apply the hold rule to one failed response, and return the held ref. A model is held for the
+ * roster's unreachableMinutes when all of these are so. Holds are kept per router instance, as
+ * cooldowns are: another session finds a dead server out for itself.
  *
- * Unreachable: the response is a physical model's error that says its server could not be reached
- * (isUnreachable); it carries no output, since a failure after output has started is the stream's,
- * is retried on the same model as every such failure was, and is never sent on to another; and
- * `model`, the catalog's entry for it, is local by the roster's own local section, one of its local
- * providers on one of its local hosts. A cloud model's connection failure is left to Pi's backoff
- * on the same model: a network blip should not send a conversation to another vendor.
+ * - The response is a physical model's error that says a connection to its server could not be
+ *   made (isUnreachable).
+ * - It carries no output. A failure after output has started is the stream's: it is retried on the
+ *   same model, as every such failure was, and is never sent on to another.
+ * - `model`, the catalog's entry for it, is local by the roster's own local section: one of its
+ *   local providers on one of its local hosts. A cloud model's connection failure is left to Pi's
+ *   backoff on the same model: a network blip should not send a conversation to another vendor.
  */
 export function holdFrom(message: FailedResponse, model: LocalCandidate | undefined, roster: Roster, holds: Holds, now: number): string | undefined {
   if (message.stopReason !== "error" || message.provider === PROVIDER || message.api === VIRTUAL_API) return undefined;
@@ -391,21 +400,6 @@ export function holdFrom(message: FailedResponse, model: LocalCandidate | undefi
   if (model === undefined || `${model.provider}/${model.id}` !== ref) return undefined;
   if (!isUnreachable(message.errorMessage) || hasOutput(message.content)) return undefined;
   if (!checkLocal(model, policyFromRoster(roster), false).ok) return undefined;
-  holds.hold(ref, "unreachable", message.timestamp, now, unreachableMinutesOf(roster));
-  return ref;
-}
-
-/**
- * Hold a cloud model that answered with a rate limit, and return its ref. Pi retries a rate limit
- * on the same model with a backoff, and the router lets it (route.ts, retry); when the model
- * answers, the hold is released. It matters when those retries run out: the runs that follow then
- * skip the model for unreachableMinutes rather than fail on it again. Called for a session's own
- * failed responses only, never from a route.
- */
-export function throttleFrom(message: FailedResponse, roster: Roster, holds: Holds, now: number): string | undefined {
-  if (message.stopReason !== "error" || message.provider === PROVIDER || message.api === VIRTUAL_API) return undefined;
-  const ref = `${message.provider}/${message.model}`;
-  if (!isRateLimit(message.errorMessage) || inLocalRole(roster, ref)) return undefined;
-  holds.hold(ref, "rate", message.timestamp, now, unreachableMinutesOf(roster));
+  holds.hold(ref, message.timestamp, now, unreachableMinutesOf(roster));
   return ref;
 }

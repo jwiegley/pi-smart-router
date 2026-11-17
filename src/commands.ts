@@ -331,7 +331,7 @@ function holdLines(rc: ResolveContext): string[] {
     .accounts(rc.now)
     .map(({ provider, until }) => `Cooling: the account ${provider}, every model of it, until ${clock(until)} after a usage-limit or authentication error`);
   return accounts.concat(
-    (rc.holds?.active(rc.now) ?? []).map((hold) => `${hold.kind === "unreachable" ? "Unreachable" : "Rate-limited"}: ${hold.ref} is ${describeHold(hold).detail}`),
+    (rc.holds?.active(rc.now) ?? []).map((hold) => `Unreachable: ${hold.ref} is ${describeHold(hold).detail}; it is tried again sooner if nothing else can take a request`),
   );
 }
 

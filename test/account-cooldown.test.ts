@@ -14,7 +14,7 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import { checkRoster } from "../src/check.ts";
 import { SCOPE_ENTRY } from "../src/constants.ts";
 import { policyFromRoster } from "../src/local.ts";
-import { accountScoped, coolFrom, Cooldowns, creditScoped, isRateLimit, waitMinutes } from "../src/resolve.ts";
+import { accountScoped, coolFrom, Cooldowns, creditScoped, failureKind, waitMinutes } from "../src/resolve.ts";
 import { parseRoster } from "../src/roster.ts";
 import { scopeEntry } from "../src/scope.ts";
 import { TIERS } from "../src/tiers.ts";
@@ -204,7 +204,9 @@ describe("a usage limit cools the account", () => {
     assert.match(message, /^smart-router\/auto: no model can take this request \(work-super: openai-codex-3\/gpt-6-astra: cooling down until \d\d:\d\d after a usage-limit or authentication error on its account openai-codex-3\)/);
     assert.doesNotMatch(message, /openrouter|omlx-hera|nyx|openai-codex-2/);
     // The refusal says when the account is tried again, and names only the work account's models as a way out.
-    assert.match(message, / Nothing was sent\. See \/smart-router status, or choose a work Codex model with \/model\. The account openai-codex-3 is left alone until \d\d:\d\d; after that this request routes again\. A model picked by hand is sent as it is\.$/);
+    // The refusal says when the account is tried again. It does not offer another work Codex model, which is on the same account.
+    assert.match(message, / Nothing was sent\. The account openai-codex-3 is left alone until \d\d:\d\d; send the request again after that, or see \/smart-router status\. Another model picked by hand with \/model is sent as it is\.$/);
+    assert.doesNotMatch(message, /choose a work Codex model/);
   });
 
   test("a 403 is the model's own: it cools that model and not its account", () => {
@@ -219,6 +221,11 @@ describe("a usage limit cools the account", () => {
     assert.deepEqual(
       [codexText, "Try again in 3 hours", "try again in ~1.5 h", "Try again in 30 seconds", "Try again in 2 days", "Try again in 9 days", "Try again later.", "usage limit", undefined].map(waitMinutes),
       [42, 180, 90, 1, 1440, 1440, undefined, undefined, undefined],
+    );
+    // Several units add up, within the same caps.
+    assert.deepEqual(
+      ["Try again in 2 hours 30 min.", "try again in ~1 h, 5 min and 30 s", "Try again in 1 day 2 hours", "Try again in 20 s 20 s", "Try again in 5 minutes at 14:00"].map(waitMinutes),
+      [150, 66, 1440, 1, 5],
     );
     const cooldowns = new Cooldowns();
     coolFrom(failed(LUNA, codexText), ROSTER, cooldowns, NOW);
@@ -278,36 +285,83 @@ describe("a usage limit cools the account", () => {
     assert.equal(routed(runtime.route("auto", request("user", { signal }))), LUNA);
   });
 
-  test("a rate limit keeps its model while Pi retries it; if it never answers, the runs that follow skip it for a few minutes", async (t) => {
-    for (const text of ["429 Rate limit exceeded", "rate_limit_exceeded", "Too Many Requests"]) assert.equal(isRateLimit(text), true, text);
-    for (const text of [LIMIT, "402 Payment Required", "content_filter 429", "overloaded", undefined]) assert.equal(isRateLimit(text), false, String(text));
+  test("a rate limit moves nothing: Pi retries the same model, and a run that ends on one leaves the next run on that model", async (t) => {
+    for (const text of ["429 Too Many Requests", "429 Rate limit exceeded", "rate_limit_exceeded"]) assert.equal(failureKind(text), "other", text);
     const state = await session(t);
-    const { loaded, cat } = state;
+    const { loaded } = state;
     const { runtime } = loaded;
-    cat.unavailable.add(LUNA);
-    const throttled = assistant(OR_GLM, { stopReason: "error", errorMessage: "429 Rate limit exceeded", content: [] });
     let signal = await prompt(loaded, "rename foo to bar #low");
-    assert.equal(routed(runtime.route("auto", request("user", { signal }))), OR_GLM);
-    // Pi backs off and retries: the same model, as before.
+    assert.equal(routed(runtime.route("auto", request("user", { signal }))), LUNA);
+    const throttled = assistant(LUNA, { stopReason: "error", errorMessage: "429 Too Many Requests", content: [] });
     await loaded.host.emit("message_end", { message: throttled });
-    const retry = runtime.route("auto", request("retry", { signal, failed: failure(runtime, OR_GLM, "429 Rate limit exceeded") }));
-    assert.deepEqual([routed(retry), lastCode(loaded)], [OR_GLM, "retry:same"]);
-    // It answers: nothing is held, and the run's continuations and the next run stay on it.
-    await finish(loaded, OR_GLM);
-    signal = await prompt(loaded, "rename bar to baz #low");
-    assert.equal(routed(runtime.route("auto", request("user", { signal }))), OR_GLM);
-    // This time the retries run out: the run ends on the rate limit.
+    assert.deepEqual([routed(runtime.route("auto", request("retry", { signal, failed: failure(runtime, LUNA, "429 Too Many Requests") }))), lastCode(loaded)], [LUNA, "retry:same"]);
+    // The retries run out, and the run ends on the rate limit.
+    const before = loaded.session.notices.length;
     await loaded.host.emit("message_end", { message: { ...throttled, timestamp: NOW + 1 } });
     await loaded.host.emit("agent_settled", { aborted: false });
     loaded.session.endRun();
-    signal = await prompt(loaded, "rename baz to qux #low");
-    assert.equal(routed(runtime.route("auto", request("user", { signal }))), OR_QWEN);
-    await finish(loaded, OR_QWEN);
+    assert.deepEqual(loaded.session.notices.slice(before), []);
+    // The next run, at once and of any level, goes to its own model: no hold, no cooldown, no fallback.
+    for (const [tag, ref] of [["low", LUNA], ["super", ASTRA]] as const) {
+      signal = await prompt(loaded, `rename bar to baz #${tag}`);
+      assert.deepEqual([routed(runtime.route("auto", request("user", { signal }))), lastCode(loaded)], [ref, "tag"]);
+      await finish(loaded, ref);
+    }
     const lines = await status(loaded);
-    assert.deepEqual(lines.filter((line) => line.startsWith("Rate-limited:")).map((line) => line.replace(/\d\d:\d\d/, "HH:MM")), [`Rate-limited: ${OR_GLM} is skipped until HH:MM after a rate limit`]);
-    assert.deepEqual(lines.filter((line) => line.startsWith("Cooling:")), []);
-    state.clock = NOW + 5 * MINUTE;
-    signal = await prompt(loaded, "rename qux to quux #low");
-    assert.equal(routed(runtime.route("auto", request("user", { signal }))), OR_GLM);
+    assert.deepEqual(lines.filter((line) => /^(Cooling|Rate-limited|Unreachable):/.test(line)), []);
+    // A 429 that carries a usage limit is the account's, as before.
+    assert.equal(accountScoped("429: You have hit your ChatGPT usage limit (plus plan)."), true);
   });
+
+  test("an account is cooled by an account error's own words, not by a number or a word inside an unrelated error", () => {
+    const near = [
+      "400 Bad Request: messages[3].content mentions the quota of 4015 billing rows",
+      "Invalid JSON in tool result: {\"status\": 401, \"note\": \"billing\"}",
+      "400: the tool returned 'got 401 from upstream billing API'",
+      "context length exceeded: 401234 tokens",
+      "400 invalid_request_error: field billing_address is not allowed",
+      "500 Internal error while reading the quota table",
+      "tool output: unauthorized_keys file is missing",
+      "The request was rejected: see https://example.com/docs/402-payment",
+    ];
+    for (const text of near) {
+      assert.equal(accountScoped(text), false, text);
+      assert.equal(creditScoped(text), false, text);
+      const cooldowns = new Cooldowns();
+      coolFrom(failed(LUNA, text), ROSTER, cooldowns, NOW);
+      assert.deepEqual(cooldowns.accounts(NOW), [], text);
+      assert.equal(cooldowns.until(ASTRA, NOW), undefined, text);
+    }
+    for (const text of [
+      "401 Unauthorized",
+      "HTTP 401",
+      "Error: 401 Incorrect API key provided",
+      "status code 401",
+      "Unauthorized",
+      "authentication_error: invalid x-api-key",
+      "You exceeded your current quota, please check your plan and billing details.",
+      "insufficient_quota",
+      "quota exceeded for this key",
+      "billing details required",
+      "Monthly usage_limit reached",
+      "RESOURCE_EXHAUSTED",
+    ]) {
+      assert.equal(accountScoped(text), true, text);
+    }
+    for (const text of ["402 Payment Required", "HTTP 402", "Error: 402 Insufficient credits", "Payment Required"]) assert.equal(creditScoped(text), true, text);
+  });
+
+  test("a model picked by hand that fails with a real account error still cools that account for the router's own picks", async (t) => {
+    const { loaded } = await session(t, { select: LUNA });
+    await loaded.host.emit("input", { text: "rename foo to bar", source: "interactive" });
+    loaded.session.startRun();
+    const before = loaded.session.notices.length;
+    await loaded.host.emit("message_end", { message: assistant(LUNA, { stopReason: "error", errorMessage: "401 Unauthorized", content: [] }) });
+    await loaded.host.emit("agent_settled", { aborted: false });
+    loaded.session.endRun();
+    assert.deepEqual(loaded.session.notices.slice(before), [], "a hand-picked model's failure gets no notice of the router's");
+    const lines = await status(loaded);
+    assert.equal(lines.filter((line) => line.startsWith("Cooling: the account openai-codex-2")).length, 1);
+  });
+
 });
