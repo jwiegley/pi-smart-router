@@ -19,7 +19,7 @@ import type { FakeSession, Loaded, LoadOptions } from "./support/pi.ts";
 const POLICY = policyFromRoster(rosterFixture("roster-hera.json"));
 const AT = new Date(NOW).toISOString();
 const QWEN = "openrouter/qwen/qwen-9-max";
-const USAGE = "Usage: /smart-router [status] | history [n] | local on|off|status | scope [work|personal|status] | was low|medium|high|super | reload";
+const USAGE = "Usage: /smart-router [status] | history [n] | local on|off|status | scope [work|personal|status] | was low|medium|high|super | check | reload";
 const HERA_V2 = fixture("roster-hera-v2.json");
 const POLICY_V2 = policyFromRoster(rosterFixtureV2("roster-hera-v2.json"));
 const LUNA = "openai-codex-2/gpt-6-luna";
@@ -389,7 +389,7 @@ describe("reload", () => {
     for (const args of ["bogus", "status now", "local maybe", "local on now", "reload now", "scope team", "scope work now", "scope Work", "was", "was trivial", "was h", "was high now"]) {
       assert.deepEqual(await answer(loaded, args), { type: "warning", message: USAGE }, args);
     }
-    assert.equal(loaded.host.commands.get("smart-router")?.description, "Smart Router: status, history [n], local on|off|status, scope [work|personal|status], was low|medium|high|super, reload");
+    assert.equal(loaded.host.commands.get("smart-router")?.description, "Smart Router: status, history [n], local on|off|status, scope [work|personal|status], was low|medium|high|super, check, reload");
   });
 });
 

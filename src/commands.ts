@@ -1,5 +1,5 @@
 // /smart-router: status (the default), history [n], local on|off|status, scope
-// [work|personal|status], was low|medium|high|super, and reload. It reports through notices, and
+// [work|personal|status], was low|medium|high|super, check, and reload. It reports through notices, and
 // the only things it writes are the pin's and the scope's session entries and a run's correction.
 //
 // status shows the roster's state, the selection, the pin, the session's scope, each role's
@@ -10,6 +10,10 @@
 // moves a run onto Codex's API from another one. It replaces upstream's doctor, plan, stats, pricing
 // and mode commands.
 //
+// check reads the roster again and prints what it routes to, for each selection and scope and in
+// the order tried, or its first error with its place (src/check.ts). It changes nothing and sends
+// nothing, and the standalone src/check-cli.ts prints the same for any file without a session.
+//
 // One command selects a model: local on, which asks for local routing, selects smart-router/local.
 // No other command moves the selection: scope work and local off change what the router's own
 // models do, and say what the selection John keeps will do next (src/selection.ts).
@@ -17,6 +21,7 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 
 import { checkAccount, subscriptionKind } from "./accounts.ts";
+import { describeRouting } from "./check.ts";
 import type { Labels } from "./accounts.ts";
 import { LEVEL_ENTRY, PIN_ENTRY, PROVIDER, SCOPE_ENTRY, VIRTUAL_API } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
@@ -74,7 +79,7 @@ export interface Answer {
   readonly type: "info" | "warning" | "error";
 }
 
-const USAGE = "Usage: /smart-router [status] | history [n] | local on|off|status | scope [work|personal|status] | was low|medium|high|super | reload";
+const USAGE = "Usage: /smart-router [status] | history [n] | local on|off|status | scope [work|personal|status] | was low|medium|high|super | check | reload";
 const UNPINNED: Pin = Object.freeze({ on: false, policy: EMPTY_POLICY });
 const HISTORY_DEFAULT = 10;
 const CODEX_API = "openai-codex-responses";
@@ -551,6 +556,19 @@ function was(host: CommandHost, ctx: ExtensionContext, tier: Tier): Answer {
   return info(`pi-smart-router: recorded that the last run should have been ${tierLabel(tier)}.`);
 }
 
+/**
+ * The roster as it is on disk now, read back: what each selection and scope routes to, or why the
+ * router refuses it. A check only: nothing is selected, recorded or sent.
+ */
+function check(host: CommandHost): Answer {
+  const { roster } = host.refresh();
+  const head = `pi-smart-router check: ${rosterLine(roster)}`;
+  if (roster.kind !== "ok") {
+    return warning(`${head}\nBoth smart-router/auto and smart-router/local refuse every request until it is fixed. Nothing was changed.`);
+  }
+  return info([head, "", ...describeRouting(roster.value)].join("\n"));
+}
+
 function reload(host: CommandHost, ctx: ExtensionContext): Answer {
   const { roster, labels, limitsChanged } = host.reload(ctx);
   const parts = [`pi-smart-router: reloaded the roster, ${rosterLine(roster)}`];
@@ -582,13 +600,14 @@ export async function run(host: CommandHost, ctx: ExtensionContext, args: string
     const tier = option?.toLowerCase();
     if (isTier(tier)) return was(host, ctx, tier);
   }
+  if (sub === "check" && option === undefined) return check(host);
   if (sub === "reload" && option === undefined) return reload(host, ctx);
   return warning(USAGE);
 }
 
 export function smartRouterCommand(host: CommandHost): Omit<RegisteredCommand, "name" | "sourceInfo"> {
   return {
-    description: "Smart Router: status, history [n], local on|off|status, scope [work|personal|status], was low|medium|high|super, reload",
+    description: "Smart Router: status, history [n], local on|off|status, scope [work|personal|status], was low|medium|high|super, check, reload",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       let answer: Answer;
       try {
