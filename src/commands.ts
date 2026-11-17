@@ -325,6 +325,11 @@ function levelLines(host: CommandHost, ctx: ExtensionContext, roster: RosterV2):
   });
 }
 
+/** The local models skipped now because their servers could not be reached, one line each. */
+function holdLines(rc: ResolveContext): string[] {
+  return (rc.holds?.active(rc.now) ?? []).map(({ ref, until }) => `Unreachable: ${ref} is skipped until ${clock(until)}, since its server could not be reached`);
+}
+
 /** Said when the session's last request on smart-router/auto went to a model of a scope's fallback chain. */
 function onFallbackLine(roster: RosterV2, last: HistoryEntry | undefined): string | undefined {
   if (last === undefined || last.virtual !== "auto") return undefined;
@@ -379,6 +384,7 @@ export function statusText(host: CommandHost, ctx: ExtensionContext): string {
     lines.push("Roles on this host, cheapest first:", ...roleLines(host, ctx, value, pin, auto), ...accountLines(ctx, value, labels, auto.scope));
     if (value.version === 1) lines.push(routingLine(value), ...codexWarnings(host, ctx, value));
     else lines.push(...levelLines(host, ctx, value), classifierLine(value), ...promptStatus(host, value));
+    lines.push(...holdLines(auto));
   }
   const last = session?.history.at(-1);
   lines.push(`Last decision: ${last === undefined ? "none yet" : describeEntry(last)}`);

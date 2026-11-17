@@ -69,7 +69,7 @@ import { latchEnvPolicy, leaveHandoff, pinOn, readPin, takeHandoff } from "./pin
 import { promptProblem, promptStore, promptUses, scopePrompts } from "./prompts.ts";
 import type { PinReading } from "./pin.ts";
 import { footerText, levelRecord } from "./records.ts";
-import { coolFrom, Cooldowns, resolveContext } from "./resolve.ts";
+import { coolFrom, Cooldowns, holdFrom, resolveContext } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
 import { boundedHistory, newRecord, planApplies, predict, requireBoundedHistory, routeOther, routeOwned } from "./route.ts";
 import type { BoundedHistory, LastInput, Pin, RouteInput, SessionRecord } from "./route.ts";
@@ -182,6 +182,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   const labels = labelsFile(files);
   const prompts = promptStore(files);
   const cooldowns = new Cooldowns();
+  /** The local models whose servers could not be reached, each skipped for a few minutes (holdFrom). */
+  const holds = new Cooldowns();
   const records = new Map<string, Session>();
   const reported = new Set<string>();
   let limits = BOTH_DEFAULT;
@@ -285,6 +287,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       catalog: ctx.modelRegistry,
       labels: needsLabels(value) ? labels.current() : undefined,
       cooldowns,
+      holds,
       now: now(),
       virtualId: id,
       localOnly: id === "local" || pin.on,
@@ -783,7 +786,11 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     if (message.role !== "assistant" || message.provider === PROVIDER || message.api === VIRTUAL_API) return;
     if (message.stopReason === "error") {
       const state = roster.current();
-      if (state.kind === "ok") coolFrom(message, state.value, cooldowns, now());
+      if (state.kind === "ok") {
+        coolFrom(message, state.value, cooldowns, now());
+        // A failure Pi does not retry holds its model too, so that the next run skips it.
+        holdFrom(message, ctx.modelRegistry.find(message.provider, message.model), state.value, holds, now());
+      }
       return;
     }
     const sessionId = ctx.sessionManager.getSessionId();

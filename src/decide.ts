@@ -77,6 +77,12 @@ export interface PickOptions {
   readonly prefer?: string | undefined;
   /** Never taken: the model whose request just failed. */
   readonly skip?: string | undefined;
+  /**
+   * The model whose server could not be reached: the role's candidates are tried in the written
+   * order starting after it and going round once, so that the next one written takes the request.
+   * It comes last itself, where its hold refuses it.
+   */
+  readonly after?: string | undefined;
   /** Whether the role's declared fallback may take over: version 1's one hop, or a version 2 scope's chain on smart-router/auto. Never while local-only. */
   readonly fallback: boolean;
   readonly code: string;
@@ -109,7 +115,13 @@ export function pickInRole(rc: ResolveContext, roleName: string, options: PickOp
       attempts.push({ role: name, exists: false, candidates: [], ...(fallback ? { fallback: true as const } : {}) });
       return undefined;
     }
-    const order = prefer !== undefined && role.models.includes(prefer) ? [prefer, ...role.models.filter((ref) => ref !== prefer)] : role.models;
+    const at = options.after === undefined ? -1 : role.models.indexOf(options.after);
+    const order =
+      at >= 0
+        ? [...role.models.slice(at + 1), ...role.models.slice(0, at + 1)]
+        : prefer !== undefined && role.models.includes(prefer)
+          ? [prefer, ...role.models.filter((ref) => ref !== prefer)]
+          : role.models;
     const refused: Array<Resolution & { readonly ok: false }> = [];
     for (const ref of order) {
       const resolution: Resolution =

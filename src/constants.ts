@@ -60,6 +60,8 @@ export const MULTI_PASS_MAX_BYTES = 256 * 1024;
 /** Roster defaults and their allowed ranges, in whole minutes. */
 export const STICKY_IDLE_MINUTES = { default: 5, min: 0, max: 1440 } as const;
 export const COOLDOWN_MINUTES = { default: 30, min: 1, max: 1440 } as const;
+/** How long a local model whose server could not be reached is skipped: short, since a server comes back. */
+export const UNREACHABLE_MINUTES = { default: 2, min: 1, max: 60 } as const;
 
 /**
  * The version 2 classifier's defaults and allowed ranges. The model names a Jev version, so that a

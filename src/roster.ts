@@ -26,6 +26,7 @@ import {
   ROSTER_FILE,
   ROSTER_MAX_BYTES,
   STICKY_IDLE_MINUTES,
+  UNREACHABLE_MINUTES,
   WORK_ALIAS_EXCLUDE,
 } from "./constants.ts";
 import type { Level } from "./constants.ts";
@@ -113,6 +114,8 @@ export interface RosterV1 {
   readonly local?: LocalSection;
   readonly stickyIdleMinutes: number;
   readonly cooldownMinutes: number;
+  /** How long a local model whose server could not be reached is skipped; absent, the default (unreachableMinutesOf). */
+  readonly unreachableMinutes?: number;
 }
 
 export interface RosterV2 {
@@ -125,6 +128,8 @@ export interface RosterV2 {
   readonly local?: LocalSection;
   readonly stickyIdleMinutes: number;
   readonly cooldownMinutes: number;
+  /** As in version 1. */
+  readonly unreachableMinutes?: number;
   /** The scopes the roster serves, at least one. Each level has a role of its own. */
   readonly scopes: Readonly<Partial<Record<Scope, ScopeSection>>>;
   /** Jev's settings, with every default filled in. Without them, Jev is never asked. */
@@ -159,6 +164,11 @@ export function roleOf(roster: Pick<Roster, "roles">, ref: string): Role | undef
 /** A role's position on the ladder, or -1. */
 export function rankOf(roster: Pick<Roster, "roles">, name: string): number {
   return roster.roles.findIndex((role) => role.name === name);
+}
+
+/** How long a roster holds a local model whose server could not be reached: its unreachableMinutes, or the default. */
+export function unreachableMinutesOf(roster: Pick<Roster, "unreachableMinutes">): number {
+  return roster.unreachableMinutes ?? UNREACHABLE_MINUTES.default;
 }
 
 /** A scope's section of a version 2 roster; version 1 has none. */
@@ -263,7 +273,7 @@ export function autoRoles(roster: Roster, scope: Scope): ReadonlySet<string> {
 
 // ─── Validation ──────────────────────────────────────────────────────────────
 
-const TOP_KEYS = ["version", "exclude", "roles", "routing", "accounts", "local", "stickyIdleMinutes", "cooldownMinutes"];
+const TOP_KEYS = ["version", "exclude", "roles", "routing", "accounts", "local", "stickyIdleMinutes", "cooldownMinutes", "unreachableMinutes"];
 const ROLE_KEYS = ["name", "models", "thinking"];
 const ROUTING_KEYS = ["default", "trivial", "complex", "planning", "fallback"];
 const BINDING_KEYS = ["multiPassLabel", "native"];
@@ -346,6 +356,12 @@ function count(value: unknown, path: string, range: Range, unit: string): number
 
 function minutes(value: unknown, path: string, range: Range): number {
   return count(value, path, range, "minutes");
+}
+
+/** The roster's unreachableMinutes, when it gives one: the parsed roster holds the field only then. */
+function unreachableField(root: Record<string, unknown>): { readonly unreachableMinutes?: number } {
+  const given = own(root, "unreachableMinutes");
+  return given === undefined ? {} : { unreachableMinutes: minutes(given, "unreachableMinutes", UNREACHABLE_MINUTES) };
 }
 
 // The checks both versions make, with version 1's messages.
@@ -533,12 +549,13 @@ function validate(value: unknown): Roster {
     ...(local === undefined ? {} : { local }),
     stickyIdleMinutes: minutes(own(root, "stickyIdleMinutes"), "stickyIdleMinutes", STICKY_IDLE_MINUTES),
     cooldownMinutes: minutes(own(root, "cooldownMinutes"), "cooldownMinutes", COOLDOWN_MINUTES),
+    ...unreachableField(root),
   };
 }
 
 // ─── Version 2 ───────────────────────────────────────────────────────────────
 
-const V2_TOP_KEYS = ["version", "exclude", "roles", "scopes", "accounts", "classifier", "local", "stickyIdleMinutes", "cooldownMinutes"];
+const V2_TOP_KEYS = ["version", "exclude", "roles", "scopes", "accounts", "classifier", "local", "stickyIdleMinutes", "cooldownMinutes", "unreachableMinutes"];
 const SCOPE_KEYS: Readonly<Record<Scope, readonly string[]>> = { personal: ["levels", "fallback"], work: ["levels", "directories", "fallback"] };
 const LEVEL_KEYS = ["role", "describe", "describeFile"];
 const SCOPED_BINDING_KEYS = ["multiPassLabel", "native", "scope"];
@@ -735,6 +752,7 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
     ...(local === undefined ? {} : { local }),
     stickyIdleMinutes: minutes(own(root, "stickyIdleMinutes"), "stickyIdleMinutes", STICKY_IDLE_MINUTES),
     cooldownMinutes: minutes(own(root, "cooldownMinutes"), "cooldownMinutes", COOLDOWN_MINUTES),
+    ...unreachableField(root),
     scopes,
     ...(classifier === undefined ? {} : { classifier }),
   };

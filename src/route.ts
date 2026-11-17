@@ -14,8 +14,11 @@
 //                       resolves, else its role, else the role's fallback; with no base, the
 //                       default role (the local role when local-only) and its fallback
 //   owner retry         a usage-limit or auth failure moves to the role's next candidate, then its
-//                       fallback; any other failure, content-filter refusals and overflows
-//                       included, retries the same model; no failure routes as a continuation
+//                       fallback; a local model whose server could not be reached, before any
+//                       output, gives way to the candidate written after it, round its role once,
+//                       then to the fallback; any other failure, content-filter refusals and
+//                       overflows included, retries the same model; no failure routes as a
+//                       continuation
 //   direct              previous, else the session's last responder, else the default role
 //   foreign             previous, else the default role
 //
@@ -34,7 +37,7 @@ import { invariant, noBoundedHistory, unroutable } from "./errors.ts";
 import type { JevOutcome } from "./jev.ts";
 import { checkLocal } from "./local.ts";
 import type { LocalPolicy } from "./local.ts";
-import { coolFrom, failureKind, refOf, resolveCandidate } from "./resolve.ts";
+import { coolFrom, failureKind, holdFrom, refOf, resolveCandidate } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
 import { autoRoles, excludedBy, excludesFor, isWorkBound, roleOf, scopeSection } from "./roster.ts";
 
@@ -202,6 +205,11 @@ function retry(rc: ResolveContext, request: ModelRouteRequest, record: SessionRe
   const role = eligibleRole(rc, ref);
   const kind = failureKind(failed.message.errorMessage);
   if (kind === "limit" && role !== undefined) return pickInRole(rc, role, { skip: ref, fallback: !rc.localOnly, code: "retry:next" });
+  // A server that could not be reached is held, so each such retry takes a candidate not yet tried:
+  // one pass over the order, and then a refusal that names every hold. The pick stays where every
+  // pick of this request may go: the role, then what is left of the scope's chain.
+  const held = rc.holds === undefined ? undefined : holdFrom(failed.message, failed.model, rc.roster, rc.holds, rc.now);
+  if (held !== undefined && role !== undefined) return pickInRole(rc, role, { after: ref, fallback: !rc.localOnly, code: "retry:unreachable" });
   if (role !== undefined) {
     const same = resolveCandidate(ref, rc);
     if (same.ok) return { ok: true, choice: { role, ref, model: same.model, code: "retry:same" } };

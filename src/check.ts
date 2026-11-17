@@ -14,7 +14,7 @@ import { readUserFile } from "./files.ts";
 import type { ReadOptions } from "./files.ts";
 import { promptLines, promptProblem, promptReader, promptUses } from "./prompts.ts";
 import type { PromptReader, PromptUse } from "./prompts.ts";
-import { autoRoles, candidatesOf, parseRoster, SCOPES } from "./roster.ts";
+import { autoRoles, candidatesOf, parseRoster, SCOPES, unreachableMinutesOf } from "./roster.ts";
 import type { Roster, RosterV1, RosterV2, Scope } from "./roster.ts";
 import { tierLabel, TIERS } from "./tiers.ts";
 
@@ -123,6 +123,7 @@ export function describeRouting(roster: Roster, uses: readonly PromptUse[] = [])
     ...promptSection(roster, uses),
     ...accountLines(roster),
     `A usage-limit or authentication error takes a cloud model out of routing for ${roster.cooldownMinutes} minutes; a local-role model is never taken out.`,
+    `A local model whose server cannot be reached is skipped for ${unreachableMinutesOf(roster)} minutes, and the request goes to the next model in the order above.`,
     "This reads the roster alone. Whether each model is in Pi's catalog on this host, available and has credentials is /smart-router status's to say.",
   ];
 }
