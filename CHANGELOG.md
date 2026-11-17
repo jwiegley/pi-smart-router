@@ -23,8 +23,9 @@ These are visible without a roster change:
   are cooling and models that are held; the usage text names `check`.
 - A usage limit on one model of a subscription account now cools the account's other models with
   it, for the time the error names when it names one.
-- A local model whose server cannot be reached gives way to the next one and is skipped for five
-  minutes; a retry that names a limit tries each candidate once per run.
+- A local model whose server cannot be reached gives way to the next one and is passed over for
+  five minutes while another can take the request; a retry that names a limit tries each
+  candidate once per run.
 - A run that ends unanswered on its account's limit shows a notice that says to send it again and
   where it will go.
 - Jev's request is unchanged, byte for byte, unless a prompt is edited.
@@ -54,27 +55,29 @@ A run's record may carry `fallback` or the Jev failure `prompt`, both only under
 - **A local server that cannot be reached gives way.** John's routing ends "Qwen3.8 on Nyx with a
   fallback to Qwen3.8 on Hera", and a connection failure used to retry the same model. Now a
   request to a local model (the roster's local providers on its local hosts) that fails before any
-  output because its server could not be reached goes to the candidate written after it, round its
-  role once, then on along the scope's chain, and the model is held for **`unreachableMinutes`**,
-  a new roster field (1 to 60, default 5). Unreachable: a refused or reset connection, a name that
-  does not resolve, an unreachable host or network, a connect timeout, the SDK's generic connection
-  error, a TLS or certificate failure, a socket closed before an answer, or 502, 503 or 504. Not: a
-  bare timeout, a stream cut off, 500, a rate limit, "overloaded", any failure after output has
-  started (it keeps its model), or a cloud model's connection failure (it keeps its model under
-  Pi's backoff). Holds are apart from cooldowns and apply to local-role models too.
-  `smart-router/local` and the pin stay in the local role and its policy. Each failure holds its
-  model, so a request makes one pass and is then refused with every hold named. Status shows
-  `unreachable-until-HH:MM` and an `Unreachable:` line. Five minutes, not less, so that a session
-  does not flap between two hosts, each move a cold prefill.
+  output because a connection to its server could not be made holds that model for
+  **`unreachableMinutes`**, a new roster field (1 to 60, default 5), and goes to the candidate
+  written after it that is not held, round its role once, then on along the scope's chain.
+  - A hold is a preference, never a refusal: when every candidate is held, a retry stays on the
+    model it has under Pi's backoff, a new run takes the first held model in the written order,
+    and an answer from a held model lifts its hold. With one local model, nothing changes.
+  - Unreachable: a refused or reset connection, a name that does not resolve, no route, a connect
+    timeout, the SDK's generic connection error, a failed TLS handshake or certificate
+    verification, a socket closed before an answer, or 502. Not: a request or read that timed out,
+    503, 504, 500, a stream cut off, a rate limit, "overloaded", any failure after output has
+    started, or a cloud model's connection failure. Those keep their model.
+  - Holds are apart from cooldowns and apply to local-role models too. `smart-router/local` and
+    the pin stay in the local role and its policy. Status shows `unreachable-until-HH:MM` and an
+    `Unreachable:` line. Five minutes, not less, so that a session does not flap between two
+    hosts, each move a cold prefill.
 - **A notice when a run ends on its account's limit.** Pi does not retry Codex's usage-limit text
-  or a spent credit, so the request that hits the limit fails, and must be sent again. The router
-  says so at that moment, with the cause and what a resend gets, or when to resend when nothing
-  else can take it. It does not resend by itself: the hook Pi 1.5.2 offers for that,
-  `agent_before_settle`, was built and removed, because registering it stopped Pi's cache warming
-  in the behaviour suite and makes Pi rebuild a session's context at every run's end.
-- **A rate-limited model that never answers is held** for `unreachableMinutes` once its run has
-  ended, so the runs that follow skip it. Pi's retries on the same model are unchanged, and an
-  answer lifts the hold.
+  or a spent credit, so the request that hits the limit fails. The router says so at that moment:
+  a run with nothing done is to be sent again, and the notice names where that goes; a run that
+  had already answered or run tools stopped partway, and is to be asked to continue, not sent
+  again; and when nothing else can take it, the notice says when the account is back. It does not
+  resend by itself: the hook Pi 1.5.2 offers for that, `agent_before_settle`, was built and
+  removed, because registering it stopped Pi's cache warming in the behaviour suite and makes Pi
+  rebuild a session's context at every run's end.
 - **`--no-owner-check`** for the standalone checker, for a build-time check of a roster in the Nix
   store. The router itself never reads a file another user owns.
 - **`/smart-router check`** and the standalone **`node src/check-cli.ts <roster.json>`**: the
@@ -103,18 +106,21 @@ A run's record may carry `fallback` or the Jev failure `prompt`, both only under
   Spent credit (402, "payment required", "insufficient credits"), which was not recognised at all,
   cools every model of the provider id on any provider, so OpenRouter out of credit no longer
   blocks the way to the local models. A 403 and a model that is not found cool the one model. A
-  limit that names its wait ("Try again in ~42 min") cools for that long, at most a day; others
-  for `cooldownMinutes`. A provider id is one account, so the work and personal accounts never
+  limit that names its wait ("Try again in ~42 min", "2 hours 30 min") cools for that long, at
+  most a day; others for `cooldownMinutes`. The account is cooled only by an account error's own
+  words, or by 401 or 402 where the error text begins, not by a number or a word inside an
+  unrelated error. A provider id is one account, so the work and personal accounts never
   cool each other. In a work session, a limit on one work model now refuses the other work levels
   for that time, where a run stepped up to another model of the same exhausted account; the
-  refusal says when the account is tried again. Status shows one `Cooling:` line for an account.
+  refusal says when the account is tried again, and does not offer another work Codex model. Status shows one `Cooling:` line for an account.
 - **A retry that names a limit tries each candidate once per run.** Local-role models are never
   cooled, and such a retry went back and forth between two of them.
 - **A session keeps its level on the chain, and returns from it.** A chain model stands for the
   level the session's last planned run took, so a session at SUPER stays at SUPER through the
   sticky window and resumes there. A run that starts without a prompt (a goal continuation, a
   loop's) now goes back to that level's own model at its first request once the model is
-  available; it stayed on the chain model for as long as such runs kept starting.
+  available; it stayed on the chain model for as long as such runs kept starting. A resumed
+  session takes its level from its latest level record.
 - **A run keeps its level when no candidate fits** and every level would take the same chain
   model; it was recorded at SUPER, stepped up.
 - **Jev's prompts are redacted** like the message, whatever their source, since a prompt file can
@@ -142,8 +148,10 @@ A run's record may carry `fallback` or the Jev failure `prompt`, both only under
   follow-up. Its request has one question whose choices are exactly the four levels; no prompt can
   add a label, name a model, change the scope or lift the pin.
 - A model picked by hand is never changed, reverted, refused or locked.
-- Local-role models are never cooled. A cloud model's connection failure, a bare timeout, a rate
-  limit and a failure after output has started still retry the same model.
+- Local-role models are never cooled. A cloud model's connection failure, a timeout, and a failure
+  after output has started still retry the same model.
+- A rate limit (429, "too many requests") still cools nothing, holds nothing and triggers no
+  fallback: Pi retries the same model, and the next run goes to the same model.
 - Cooldowns and holds are kept per router instance, that is per session, in memory.
 
 ## [1.4.0-jw.3] - 2026-11-17

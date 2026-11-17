@@ -222,7 +222,7 @@ session that fell back to coder returns to sol at its next complex run once sol 
 | `local` | no | `role` (the local role), `providers` (every provider of the local role, and nothing qualifies as local unless it is listed) and `hosts` (base-URL host names). Without it, `smart-router/local` and the pin always refuse. |
 | `stickyIdleMinutes` | no | 0 to 1440, default 5. How long a session must be idle before a run may move down the ladder. |
 | `cooldownMinutes` | no | 1 to 1440, default 30. How long a usage-limit or authentication error takes a model out of routing, and with it every model of the same subscription account. |
-| `unreachableMinutes` | no | 1 to 60, default 5. How long a model is held: a local one whose server could not be reached, or a cloud one that stayed rate-limited. |
+| `unreachableMinutes` | no | 1 to 60, default 5. How long a local model whose server could not be reached is passed over while another model can take the request. |
 
 A ref splits at its first `/`: `openrouter/deepseek/deepseek-v4.1-flash-1017` is provider `openrouter`,
 model `deepseek/deepseek-v4.1-flash-1017`. Every ref is compared whole, so
@@ -443,6 +443,11 @@ How the chain works:
   says so at that moment and tells you what to do: "gpt-6-luna could not take this run (the
   account openai-codex-2 is out of use until 14:42), and nothing was answered. Send the request
   again: it goes to the fallback openrouter (z-ai/glm-5.3-flash)." Send it again, and it does.
+  A run that had already answered or run tools before the limit is told otherwise: "it stopped
+  partway. What it did so far stands: do not send the request again. To go on, say: continue. It
+  goes on with the fallback openrouter (…)." When nothing else can take the request, the notice
+  says when the account is back; in a work session it does not offer another work Codex model,
+  which is on the same account, and says that another model picked by hand is sent as it is.
   That failed run is the whole cost of a cooldown window: the account cools as one, for the time
   the error names, so every level's next run goes straight to the chain.
   The router does not send the request again itself. Pi 1.5.2 has a hook that could
@@ -451,8 +456,8 @@ How the chain works:
   of every run.
 - **The session returns to the level's own model** as soon as it can take requests again: each new
   run starts from its level's first model, and so does the first request of a run that starts
-  without a prompt, such as a goal continuation or a loop's. A run under way stays on the model it
-  has. A cooled account is tried again when its time is up; if it is still out of tokens, that one
+  without a prompt, such as a goal continuation or a loop's, in a resumed session too, which
+  takes its level from its latest level record. A run under way stays on the model it has. A cooled account is tried again when its time is up; if it is still out of tokens, that one
   request fails and the account cools again.
 - **The session keeps its level meanwhile.** A chain model stands for the level the session held:
   a session at SUPER whose account ran out stays at SUPER for a trivial follow-up inside the
@@ -487,14 +492,16 @@ How the chain works:
 Three things to know:
 
 - **A local server that is down gives way.** When Nyx cannot be reached, the request goes to
-  Hera's Qwen, and Nyx is skipped for `unreachableMinutes`, 5 by default
-  ([Routing in detail](#routing-in-detail)). A server that accepts the connection and then answers
-  slowly or not at all is not skipped: a bare timeout retries the same model.
+  Hera's Qwen, and Nyx is passed over for `unreachableMinutes`, 5 by default
+  ([Routing in detail](#routing-in-detail)). A hold is a preference: when Hera's Qwen cannot take
+  the request either, Nyx is tried again rather than the request refused. A server that accepts
+  the connection and then answers slowly or not at all is not passed over: a timeout, a 503 while
+  a model loads and a 504 retry the same model.
 - **The whole Codex account cools together.** The four personal levels share one ChatGPT account,
   so a usage limit on any of them sends every level to the chain until the account's time is up.
   In work scope, which has no chain, a limit on one work model refuses the other work levels for
-  that time; the refusal says when the account is tried again, and that a model picked by hand is
-  sent as it is.
+  that time; the refusal says when the account is tried again, and that another model picked by
+  hand is sent as it is.
 - **The local role has one `thinking` setting**, so the three local models share it.
 
 ### Fields in version 2
@@ -544,7 +551,7 @@ the check, and the next prompt of every running session uses it: no restart, no 
 | How Jev judges a message | `classifier.instructions`, or the file `classifier.instructionsFile` names. |
 | How readily a close call goes to the higher level | `classifier.closeCall`. |
 | How long an exhausted account is left alone | `cooldownMinutes` (30). |
-| How long a local server that could not be reached, or a model that stayed rate-limited, is skipped | `unreachableMinutes` (5). |
+| How long a local server that could not be reached is passed over | `unreachableMinutes` (5). |
 
 Roles are named, rather than a level listing its models inline, because the role is what a model
 has exactly one of: it gives the model its `thinking`, its place on the ladder, its line in
@@ -572,8 +579,8 @@ before OpenRouter:
 ```
 
 With `local` first, OpenRouter is reached only when no local model can take the request: a
-local-role model is never cooled, so it is passed over only while Pi does not offer it or while
-it is held because its server could not be reached. Deleting the `fallback` line removes the
+local-role model is never cooled, so it is passed over only while Pi does not offer it, and a
+held one is tried again when nothing else is left. Deleting the `fallback` line removes the
 chain; deleting `"local"` from it keeps `smart-router/auto` off the LAN models.
 
 **Change the local set.** Drop Nyx, and prefer Hera's Qwen to its GLM:
@@ -701,31 +708,45 @@ These are version 1's rules. Version 2 keeps them, comparing levels rather than 
 
   A provider id is one account: the work account's cooldown never touches the personal account's
   models, nor the other way round. `/smart-router status` shows one `Cooling:` line for an
-  account, however many of its models wait.
-- **How long.** A limit that names its wait ("Try again in ~42 min") cools for that long, at least
-  a minute and at most a day; any other cools for `cooldownMinutes`. When the time is up, the
-  first run tries its level's own model again.
-- **Rate limits** (429, "rate limit", "too many requests") cool nothing: Pi backs off and retries
-  the same model, and the router lets it. If the run ends on the rate limit all the same, the
-  model is held for `unreachableMinutes`, so the runs that follow skip it instead of failing on
-  it again; an answer from it lifts the hold. `status` shows a `Rate-limited:` line.
-- **A local server that cannot be reached is skipped.** When a request to a local model (one of
-  `local.providers` on one of `local.hosts`) fails before any output because its server could not
-  be reached, the retry goes to the model written after it, round its role once, and then on along
-  the fallback chain, and the model is held for `unreachableMinutes`, so the runs that follow do
-  not wait on it again. This applies to local-role models too, which are never cooled. It never
-  leaves what the selection may use: `smart-router/local` and the pin stay in the local role and
-  its policy. Each failure holds its model, so a request tries each candidate at most once and is
-  then refused, with every hold named. `status` shows a held model as `unreachable-until-HH:MM`,
-  with an `Unreachable:` line.
-  - *Unreachable* means the error text says: connection refused or reset (`ECONNREFUSED`,
+  account, however many of its models wait. Whether an error is the account's is decided by an
+  account error's own words ("usage limit", "insufficient_quota", "quota exceeded", "billing
+  details", "unauthorized", "authentication_error") or by 401 or 402 where the error text
+  begins, so a number or a word inside an unrelated error, such as a tool result quoted back,
+  cools no account. A model picked by hand that fails with such an error cools its account for
+  the router's own picks too: the account is out of use whoever asked.
+- **How long.** A limit that names its wait ("Try again in ~42 min", "2 hours 30 min") cools for
+  that long, at least a minute and at most a day; any other cools for `cooldownMinutes`. When the
+  time is up, the first run tries its level's own model again.
+- **A rate limit moves nothing.** A 429, "rate limit" or "too many requests" is a throttle, not
+  an account out of tokens: Pi backs off and retries the same model, and the router lets it. It
+  cools nothing, holds nothing and triggers no fallback, so a run that ends on one leaves the next
+  run on the same model. (A 429 whose text is a usage limit or a quota is the account's, above.)
+- **A local server that cannot be reached is passed over.** When a request to a local model (one
+  of `local.providers` on one of `local.hosts`) fails before any output because a connection to
+  its server could not be made, the model is held for `unreachableMinutes`, and the retry goes to
+  the model written after it that is not held, round its role once, and then on along the
+  fallback chain. The runs that follow pass a held model over in the same way. This applies to
+  local-role models too, which are never cooled. It never leaves what the selection may use:
+  `smart-router/local` and the pin stay in the local role and its policy. `status` shows a held
+  model as `unreachable-until-HH:MM`, with an `Unreachable:` line.
+  - *A hold is a preference, never a refusal.* When every candidate that could take the request
+    is held, the hold gives way: a retry stays on the model it has, under Pi's backoff, as it
+    always did, so a server that is restarting is ridden out; a new run takes the first held
+    model in the written order. With one local model, a blip changes nothing. An answer from a
+    held model lifts its hold at once.
+  - *Unreachable* means the connection could not be made: refused or reset (`ECONNREFUSED`,
     `ECONNRESET`, "reset before headers"); the name did not resolve (`ENOTFOUND`, `EAI_AGAIN`,
-    `getaddrinfo`); host or network unreachable (`EHOSTUNREACH`, `ENETUNREACH`, `EHOSTDOWN`); the
-    connection timed out (`ETIMEDOUT`, a connect timeout); the SDK's "connection error", "network
-    error" or "fetch failed", "socket hang up", "other side closed", a closed socket; a TLS or
-    certificate failure; or HTTP 502, 503 or 504.
-  - *Not unreachable:* a request that merely timed out or was cut off, 500, a rate limit and
-    "overloaded". Those retry the same model.
+    `getaddrinfo`); no route (`EHOSTUNREACH`, `ENETUNREACH`, `EHOSTDOWN`); the connect timed out
+    (`connect ETIMEDOUT`, `UND_ERR_CONNECT_TIMEOUT`, "connect timeout"); the SDK's "connection
+    error", "network error" or "fetch failed", "socket hang up", "other side closed", a closed
+    socket; a TLS handshake or certificate verification that failed (unable to verify, self-signed,
+    expired, name mismatch); or 502, "bad gateway".
+  - *Not unreachable,* because the server may be there and slow, loading or busy: a request or a
+    read that timed out (a bare `ETIMEDOUT`, "timed out", 504, "gateway time-out"), 503 and
+    "service unavailable", 500, a stream cut off, a rate limit, "overloaded", and a text that
+    merely mentions a certificate. Those retry the same model. Hera's models answer behind HTTPS,
+    where a long cold prefill can trip the proxy's timeout; that must not move a session to Nyx
+    and back.
   - *Not after output has started.* A failure of a response that already carries text, thinking or
     a tool call retries the same model, as every such failure always has; a half-answered request
     is never sent on to another model.
@@ -733,10 +754,9 @@ These are version 1's rules. Version 2 keeps them, comparing levels rather than 
     error." included, retries the same model under Pi's backoff, so a network blip does not send
     the conversation to another vendor.
   - *Five minutes by default.* A server that is restarting or loading a model takes minutes, and
-    every run that tried it meanwhile would wait on it; and a session that moved to the other
-    host has paid a cold prefill there, so moving back at once, and again at the next hiccup,
-    would pay it twice more. Five minutes bounds that to one move each way per outage, and puts
-    the preferred server back in use soon after it returns.
+    a session that moved to the other host has paid a cold prefill there, so moving back at once,
+    and again at the next hiccup, would pay it twice more. Five minutes bounds that to one move
+    each way per outage, and puts the preferred server back in use soon after it returns.
 - **Cooldowns and holds are per session.** Each router instance keeps its own, in memory: another
   session finds an exhausted account or a dead server out for itself, with one failed request,
   and a restarted session starts with none.
@@ -1400,7 +1420,7 @@ reads no other session and does not write the roster.
 
 | Command | Does |
 |---|---|
-| `/smart-router` or `/smart-router status` | The roster's path and state; the selection and its thinking level; the pin; the session's scope and what set it, under a version 2 roster or whenever `smart-router/auto` refuses the scope; every role's models on this host with `ok` or the reason they cannot route, and catalog prices; the accounts cooling and the models held as unreachable or rate-limited; account bindings, checked in the session's scope, and auth sources; a version 1 roster's routing table and fallbacks, or a version 2 roster's levels and fallback chain in each scope, its classifier and the source of each of Jev's prompts; the last decision, and whether it went to a fallback chain's model; what can still leave the machine, a model picked by hand first and then the classifier when `smart-router/auto` may ask it; and a warning for any fallback that would move a run onto Codex's API from another one. |
+| `/smart-router` or `/smart-router status` | The roster's path and state; the selection and its thinking level; the pin; the session's scope and what set it, under a version 2 roster or whenever `smart-router/auto` refuses the scope; every role's models on this host with `ok` or the reason they cannot route, and catalog prices; the accounts cooling and the local models held as unreachable; account bindings, checked in the session's scope, and auth sources; a version 1 roster's routing table and fallbacks, or a version 2 roster's levels and fallback chain in each scope, its classifier and the source of each of Jev's prompts; the last decision, and whether it went to a fallback chain's model; what can still leave the machine, a model picked by hand first and then the classifier when `smart-router/auto` may ask it; and a warning for any fallback that would move a run onto Codex's API from another one. |
 | `/smart-router history [n]` | The last `n` routing decisions (10 by default, at most 50), with reason codes, and on a version 2 run's first request its scope, level and what decided the level. Model ids and codes only, never prompt text. |
 | `/smart-router local on`, `off`, `status` | The pin. `on` selects `smart-router/local`, the only selection any command makes; `off` leaves the selection as it is. |
 | `/smart-router scope [work\|personal\|status]` | The session's scope and what set it: `latch`, `entry`, `directory` or `default`. `work` records work scope at once; `personal` asks first in work scope, and is refused under `PI_SMART_ROUTER_SCOPE=work`. Neither changes the selection. |
