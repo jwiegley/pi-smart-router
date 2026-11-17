@@ -5,6 +5,47 @@ All notable changes to this fork are recorded here, in the form of
 the base is the latest upstream release merged into the fork's history, and `jw.<n>` counts the
 fork's releases on that base. Releases are signed tags; nothing is published to npm.
 
+## [1.4.0-jw.2] - 2026-11-16
+
+`smart-router/local` routes in work scope without the pin. On 2026-11-16 John decided "Let
+smart-router/local route in work scope": selecting `smart-router/local` is itself the request for
+local routing, so a work session on it routes to the local role's models exactly as a pinned one
+does.
+
+Upgrading from 1.4.0-jw.1: no roster change is needed. One thing behaves differently, and John
+accepted it with the decision: in a work session that is not pinned, on the shared work machines
+too, `smart-router/local` now sends the conversation to the roster's local models, which are not
+the work account, where it sent nothing before.
+
+### Changed
+
+- In work scope, outside the pin, `smart-router/local` routes to the roster's local role: the run's
+  first request, continuations, retries, compactions and summaries, and requests of sessions that
+  share the route. It plans the run and tells pi-cache-optimizer of its pick as it does in personal
+  scope. It did refuse: "smart-router/local: this session is in work scope, where
+  smart-router/local answers only while the session is pinned to local models. Nothing was sent.
+  ...". That refusal and its text are removed.
+- This holds whatever scopes the roster serves. Under a version 1 roster, or a version 2 roster
+  without a work scope, a work session's `smart-router/local` routes to the local role too, while
+  `smart-router/auto` still refuses that session.
+- `/smart-router scope work` with `smart-router/local` selected, and `/smart-router local off` in a
+  work session on it, now say "In work scope smart-router/local routes to the local models without
+  the pin, so its next requests go to them, not to the work account." The first is an information
+  notice now, unless `smart-router/auto` refuses the scope; it was a warning.
+- The package version is `1.4.0-jw.2`.
+
+### Unchanged
+
+- `smart-router/local` never routes to a model outside the local role and the roster's local
+  policy, in any scope: with no local model it refuses, "smart-router/local: no local model can
+  take this request (...). Nothing was sent. Start the local model server and send the prompt
+  again, or choose smart-router/auto or a work Codex model with /model."
+- Outside the pin, `smart-router/local` still refuses a session whose scope cannot be read, as
+  `smart-router/auto` does, until a scope is recorded again.
+- `smart-router/auto` in work scope still goes only to the work-bound Codex account.
+- A model picked by hand is never changed, reverted, refused or locked, and the router selects a
+  model only at `/smart-router local on`. Selecting `smart-router/local` does not pin.
+
 ## [1.4.0-jw.1] - 2026-11-16
 
 The fork's 1.3.0-jw.3 carried onto upstream v1.4.0. Upstream's v1.4.0 tag (`54bee53d`) is merged
@@ -348,6 +389,7 @@ directories, its ONNX models and its SQLite database are not read, and can be de
 - Tests run offline in an isolated root with a network and process tripwire, and the behaviour
   suite runs only in a sandbox.
 
+[1.4.0-jw.2]: https://github.com/jwiegley/pi-smart-router/compare/v1.4.0-jw.1...v1.4.0-jw.2
 [1.4.0-jw.1]: https://github.com/jwiegley/pi-smart-router/compare/v1.3.0-jw.3...v1.4.0-jw.1
 [1.3.0-jw.3]: https://github.com/jwiegley/pi-smart-router/compare/v1.3.0-jw.2...v1.3.0-jw.3
 [1.3.0-jw.2]: https://github.com/jwiegley/pi-smart-router/compare/v1.3.0-jw.1...v1.3.0-jw.2
