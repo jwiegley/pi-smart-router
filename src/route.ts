@@ -202,7 +202,8 @@ function stick(rc: ResolveContext, previous: string | undefined, record: Session
     if (other.ok) return other;
     const anyway = resolveCandidate(ref, { ...rc, holds: undefined });
     if (anyway.ok) return { ok: true, choice: { role, ref, model: anyway.model, code: `stick:${source}` } };
-    return other;
+    // The base is out for another reason, and only held candidates are left: they are tried, in the written order.
+    return pickInRole(rc, role, { fallback: !rc.localOnly, code: "stick:role" });
   }
   return byDefault(rc, "stick:default");
 }

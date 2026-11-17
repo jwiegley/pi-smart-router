@@ -396,6 +396,23 @@ describe("the pin and smart-router/auto when a server cannot be reached", () => 
     assert.deepEqual([routed(runtime.route("auto", request("user", { signal: again }))), lastCode(loaded)], [GLM, "fallback:low→local"]);
   });
 
+  test("a continuation whose model is cooling, with only held candidates left, goes to the first of them rather than being refused", async (t) => {
+    const { loaded, cat } = await session(t);
+    const { runtime } = loaded;
+    cat.unavailable.add(LUNA);
+    cat.unavailable.add(OR_QWEN);
+    const signal = await prompt(loaded, "rename foo to bar #low");
+    assert.equal(routed(runtime.route("auto", request("user", { signal }))), OR_GLM);
+    // Every local model is held, and then OpenRouter runs out of credit.
+    for (const [ref, base] of [[GLM, HERA_LAN], [NYX_QWEN, "https://nyx.lan/v1"], [HERA_QWEN, HERA_LAN]] as const) {
+      void base;
+      await loaded.host.emit("message_end", { message: assistant(ref, { stopReason: "error", errorMessage: REFUSED, content: [], timestamp: NOW + ref.length }) });
+    }
+    await loaded.host.emit("message_end", { message: assistant(OR_GLM, { stopReason: "error", errorMessage: "402 Insufficient credits", content: [], timestamp: NOW + 99 }) });
+    const next = runtime.route("auto", request("continuation", { signal, previous: previous(runtime, OR_GLM) }));
+    assert.deepEqual([routed(next), lastCode(loaded)], [GLM, "fallback:openrouter→local"]);
+  });
+
   test("a cloud model's connection failure retries the same model, as before, in personal and in work scope", async (t) => {
     const personal = await session(t);
     let signal = await prompt(personal.loaded, "rename foo to bar #low");
