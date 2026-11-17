@@ -113,6 +113,28 @@ export function promptNotice(problem: string): string {
   return `pi-smart-router: a prompt for the classifier cannot be used: ${problem} smart-router/auto still routes.`;
 }
 
+/** Why a model's request failed before any output, as the notices below word it. */
+export type FailoverCause = { readonly account: string; readonly until: string } | { readonly unreachable: true; readonly until: string };
+
+const failoverCause = (cause: FailoverCause): string =>
+  "account" in cause ? `the account ${cause.account} is out of use until ${cause.until}` : `its server could not be reached, and it is skipped until ${cause.until}`;
+
+/**
+ * Shown when a run ends because its model failed before any output, on its account's limit or an
+ * unreachable server, and Pi does not retry that error: the request was not answered, and sending
+ * it again reaches the model named. The router cannot send it again itself (README, "A fallback
+ * chain").
+ */
+export function resendNotice(modelId: string, cause: FailoverCause, to: { readonly role: string | undefined; readonly modelId: string }): string {
+  const target = to.role === undefined ? to.modelId : `the fallback ${to.role} (${to.modelId})`;
+  return `pi-smart-router: ${modelId} could not take this run (${failoverCause(cause)}), and nothing was answered. Send the request again: it goes to ${target}.`;
+}
+
+/** The same when nothing else can take the request either. `work`: whether the session is a work session that is not pinned (chooseModel). */
+export function noResendNotice(id: VirtualId, modelId: string, cause: FailoverCause, work: boolean): string {
+  return `pi-smart-router: ${modelId} could not take this run (${failoverCause(cause)}), and no other model can take it now. Send the request again after ${cause.until}, or ${chooseModel(id, work)}.`;
+}
+
 const NO_HISTORY = "this Pi has no bounded session history (getLatestCustomEntry and getRecentActiveEntries)";
 
 export function noBoundedHistory(id: VirtualId): RouterError {

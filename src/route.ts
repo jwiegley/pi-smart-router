@@ -232,6 +232,24 @@ function retry(rc: ResolveContext, request: ModelRouteRequest, record: SessionRe
   return stick(rc, previousRef(request), record);
 }
 
+/** A failed response of a run's own pick, before any output: its model, and whether the account ran out or the server could not be reached. */
+export interface Failover {
+  readonly ref: string;
+  readonly kind: "limit" | "unreachable";
+}
+
+/**
+ * What would take the request if it were sent again after such a failure: the candidates after the
+ * failed one, in the failed model's role and what is left of the scope's chain, held to the
+ * selection, the scope and the pin as any pick is. Pure: it only says what a resend would get.
+ */
+export function afterFailure(rc: ResolveContext, failover: Failover, limited: ReadonlySet<string>): Decision {
+  const { ref, kind } = failover;
+  const role = eligibleRole(rc, ref);
+  if (role === undefined) return { ok: false, attempts: [] };
+  return pickInRole(rc, role, kind === "limit" ? { skip: ref, skipped: limited, fallback: !rc.localOnly, code: "resend" } : { after: ref, fallback: !rc.localOnly, code: "resend" });
+}
+
 /**
  * Whether a run's plan applies to a request as the session is now: the same model, local-only or
  * not, and on auto, the roster version it was made for: a version 1 plan has no level, and a

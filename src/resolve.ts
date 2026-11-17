@@ -278,14 +278,18 @@ export interface FailedResponse {
  * from a limit on one model, and OpenRouter has both. A provider id is one account, so the work
  * account's cooldown never touches the personal account's models, nor the other way round.
  */
+/** Whether a limit-kind error cools its provider's whole account, by the two cases coolFrom gives. */
+export function coolsAccount(provider: string, text: string | undefined): boolean {
+  return creditScoped(text) || (accountScoped(text) && subscriptionKind(provider) !== undefined);
+}
+
 export function coolFrom(message: FailedResponse, roster: Roster, cooldowns: Cooldowns, now: number): string | undefined {
   if (message.stopReason !== "error" || message.provider === PROVIDER || message.api === VIRTUAL_API) return undefined;
   const ref = `${message.provider}/${message.model}`;
   if (failureKind(message.errorMessage) !== "limit" || inLocalRole(roster, ref)) return undefined;
   const minutes = waitMinutes(message.errorMessage) ?? roster.cooldownMinutes;
   cooldowns.cool(ref, message.timestamp, now, minutes);
-  const account = creditScoped(message.errorMessage) || (accountScoped(message.errorMessage) && subscriptionKind(message.provider) !== undefined);
-  if (account) cooldowns.coolAccount(message.provider, message.timestamp, now, minutes);
+  if (coolsAccount(message.provider, message.errorMessage)) cooldowns.coolAccount(message.provider, message.timestamp, now, minutes);
   return ref;
 }
 

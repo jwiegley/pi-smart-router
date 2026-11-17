@@ -43,7 +43,10 @@ import {
   fallbackNotice,
   firstLine,
   historyNotice,
+  looksRetryable,
+  noResendNotice,
   promptNotice,
+  resendNotice,
   resumeNotice,
   rosterNotice,
   rosterRefusal,
@@ -69,10 +72,10 @@ import { latchEnvPolicy, leaveHandoff, pinOn, readPin, takeHandoff } from "./pin
 import { promptProblem, promptStore, promptUses, scopePrompts } from "./prompts.ts";
 import type { PinReading } from "./pin.ts";
 import { footerText, levelRecord } from "./records.ts";
-import { coolFrom, Cooldowns, holdFrom, Holds, resolveContext, throttleFrom } from "./resolve.ts";
+import { clock, coolFrom, Cooldowns, coolsAccount, hasOutput, holdFrom, Holds, resolveContext, throttleFrom } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
-import { boundedHistory, newRecord, planApplies, predict, requireBoundedHistory, routeOther, routeOwned } from "./route.ts";
-import type { BoundedHistory, LastInput, Pin, RouteInput, SessionRecord } from "./route.ts";
+import { afterFailure, boundedHistory, newRecord, planApplies, predict, requireBoundedHistory, routeOther, routeOwned } from "./route.ts";
+import type { BoundedHistory, Failover, LastInput, Pin, RouteInput, SessionRecord } from "./route.ts";
 import { autoRoles, parseRef, roleOf, rosterFile, SCOPES, scopeSection, servesScope } from "./roster.ts";
 import type { Roster, RosterV2, Scope } from "./roster.ts";
 import { readScope, scopeEntry, workDirectoryOf } from "./scope.ts";
@@ -781,21 +784,53 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     return role !== undefined && (scopeSection(state.value, scope)?.fallback?.includes(role) ?? false);
   };
 
+  /**
+   * A run's own pick failed before any output, on its account's limit or because its server could
+   * not be reached, with an error Pi does not retry: the run ends unanswered. The router cannot
+   * send the request again itself, so it says exactly what happened and what a resend will get, or
+   * when to resend when nothing else can take it. A model picked by hand is no pick of the
+   * router's, and gets no notice.
+   */
+  const sayResend = (ctx: ExtensionContext, record: Session, value: Roster, failover: Failover): void => {
+    const id = virtualIdOf(ctx.model);
+    if (id === undefined || record.runPick?.id !== id || refusalFor(id, value, ctx) !== undefined) return;
+    const rc = contextFor(ctx, value, id, pinOf(ctx));
+    const parsed = parseRef(failover.ref);
+    const modelId = parsed?.id ?? failover.ref;
+    const cause =
+      failover.kind === "unreachable"
+        ? { unreachable: true as const, until: clock(holds.until(failover.ref, rc.now) ?? rc.now) }
+        : { account: parsed?.provider ?? "", until: clock(cooldowns.until(failover.ref, rc.now) ?? rc.now) };
+    const next = afterFailure(rc, failover, new Set([...record.limited, failover.ref]));
+    if (!next.ok) {
+      notify(ctx, noResendNotice(id, modelId, cause, !rc.pinned && rc.scope === "work"), "warning");
+      return;
+    }
+    const chain = !rc.localOnly && inChain(rc.scope, next.choice.ref) ? next.choice.role : undefined;
+    notify(ctx, resendNotice(modelId, cause, { role: chain, modelId: next.choice.model.id }), "warning");
+  };
+
   const messageEnd = (event: MessageEndEvent, ctx: ExtensionContext): void => {
     const { message } = event;
     if (message.role !== "assistant" || message.provider === PROVIDER || message.api === VIRTUAL_API) return;
+    const sessionId = ctx.sessionManager.getSessionId();
+    const ref = `${message.provider}/${message.model}`;
     if (message.stopReason === "error") {
       const state = roster.current();
       if (state.kind === "ok") {
-        coolFrom(message, state.value, cooldowns, now());
+        const cooled = coolFrom(message, state.value, cooldowns, now());
         // A failure Pi does not retry holds its model too, so that the next run skips it.
-        holdFrom(message, ctx.modelRegistry.find(message.provider, message.model), state.value, holds, now());
+        const held = holdFrom(message, ctx.modelRegistry.find(message.provider, message.model), state.value, holds, now());
         throttleFrom(message, state.value, holds, now());
+        const session = records.get(sessionId);
+        const kind = held !== undefined ? "unreachable" : cooled !== undefined && coolsAccount(message.provider, message.errorMessage) ? "limit" : undefined;
+        // Pi retries some of these errors, and its retry is routed to the next candidate; the rest end the run.
+        if (session !== undefined && kind !== undefined && session.runPick?.ref === ref && !hasOutput(message.content) && !looksRetryable(message.errorMessage ?? "")) {
+          sayResend(ctx, session, state.value, { ref, kind });
+        }
       }
       return;
     }
-    const sessionId = ctx.sessionManager.getSessionId();
-    const ref = `${message.provider}/${message.model}`;
     // A rate-limited model that answers is no longer held.
     holds.release(ref, "rate");
     // The footer names the model that answered a run's level, when the run's own route picked it.
