@@ -158,6 +158,19 @@ export function forgetCaches(ledger: Ledger): void {
   if (run !== undefined) ledger.run = { ...run, first: 0, last: 0, before: run.requests };
 }
 
+/**
+ * A move in the session tree to another leaf: no model has that branch cached, and the runs and
+ * prompts, which are counted on the branch, start afresh. Whether a provider reports cache writes is
+ * a fact about the provider, and stays.
+ */
+export function forgetBranch(ledger: Ledger): void {
+  ledger.seen.clear();
+  ledger.latest = undefined;
+  ledger.runs.length = 0;
+  ledger.needs.length = 0;
+  ledger.run = undefined;
+}
+
 function median(values: readonly number[]): number {
   const sorted = [...values].sort((a, b) => a - b);
   const middle = sorted.length >> 1;

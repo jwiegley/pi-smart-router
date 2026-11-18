@@ -25,7 +25,7 @@ import { tierLabel, TIERS } from "../src/tiers.ts";
 import type { Tier } from "../src/tiers.ts";
 import { ASTRA, CHATGPT, FakeCatalog, GLM, HERA_LAN, model, NOW, SOL, WORK_SOL } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
-import { agentDir, assistant, FakeRuntime, request, resetSlot, routed, start } from "./support/pi.ts";
+import { agentDir, assistant, FakeRuntime, previous, request, resetSlot, routed, start } from "./support/pi.ts";
 import type { Loaded, LoadOptions } from "./support/pi.ts";
 
 const ROSTER = fixture("roster-hera-v2-fallback.json");
@@ -75,6 +75,9 @@ function catalog(...replaced: Model<Api>[]): FakeCatalog {
 
 const ANSWER_SUPER: Record<Tier, number> = { low: 0, medium: 0, high: 0, super: 1 };
 const ANSWER_MEDIUM: Record<Tier, number> = { low: 0, medium: 1, high: 0, super: 0 };
+const ANSWER_LOW: Record<Tier, number> = { low: 1, medium: 0, high: 0, super: 0 };
+/** A move in the session tree to another leaf, as Pi's session_tree event reports one. */
+const TO_ANOTHER_LEAF = { newLeafId: "e-other", oldLeafId: "e-here" } as const;
 
 function jevAnswer(probabilities: Record<Tier, number>): ClassifierResult {
   const choice = [...TIERS].sort((a, b) => probabilities[b] - probabilities[a])[0] ?? "medium";
@@ -226,11 +229,102 @@ describe("the ledger's feed", () => {
     for (const event of ["session_compact", "session_tree"]) {
       await run(state, `go on ${event}`, ANSWER_MEDIUM);
       assert.ok(recordOf(state).ledger.seen.size > 0, `a model's cache is known before ${event}`);
-      await state.loaded.host.emit(event, {});
+      await state.loaded.host.emit(event, event === "session_tree" ? TO_ANOTHER_LEAF : {});
       assert.equal(recordOf(state).ledger.seen.size, 0, `${event} forgets every model's cache`);
       assert.equal(recordOf(state).ledger.latest, undefined, `${event} forgets the latest answer`);
-      assert.ok(recordOf(state).ledger.runs.length > 0, `${event} keeps the runs`);
+      assert.equal(
+        recordOf(state).ledger.runs.length > 0,
+        event === "session_compact",
+        event === "session_compact" ? "a compaction keeps the branch's runs" : "a move to another leaf starts the branch's runs afresh: runs are counted on the branch",
+      );
     }
+  });
+
+  test("after a compaction the conversation's size is unknown until the next answer: the next prompt is not priced, and the run goes to the needed level", async (t) => {
+    const state = await session(t);
+    await threeSuperRuns(state);
+    await state.loaded.host.emit("session_compact", {});
+    assert.equal(recordOf(state).last?.ref, ASTRA, "the last responder is kept");
+    assert.equal(recordOf(state).last?.usage, undefined, "its usage, the size before the compaction, is dropped");
+    const level = await say(state, "go on", ANSWER_MEDIUM);
+    assert.deepEqual(level.cost, { outcome: "unknown", why: "no usage yet" }, "a size the conversation no longer has is no usage: a missing figure is said");
+    assert.equal(footer(state), `personal MEDIUM → gpt-6.1-terra (${demandNote(level)}; cost unknown)`, "the needed level's own model, and a missing figure is said: cost unknown");
+    assert.equal(routed(await route(state, "go on")), TERRA, "the run goes to the needed level's own model");
+    await answer(state, TERRA, 30_000);
+    const next = await say(state, "go on again", ANSWER_MEDIUM);
+    assert.notEqual(next.cost?.outcome, "unknown", `after the next answer the prompt is priced again: ${JSON.stringify(next.cost)}`);
+  });
+
+  test("a move to another leaf of the tree does the same and starts the branch's runs and needs afresh; a move to the same leaf changes nothing", async (t) => {
+    const same = await session(t, { id: "same" });
+    await threeSuperRuns(same);
+    const before = recordOf(same);
+    const seen = new Map(before.ledger.seen);
+    const runs = [...before.ledger.runs];
+    const needs = [...before.ledger.needs];
+    const last = before.last;
+    await same.loaded.host.emit("session_tree", { newLeafId: "e-here", oldLeafId: "e-here" });
+    assert.deepEqual(
+      [recordOf(same).ledger.seen, recordOf(same).ledger.runs, recordOf(same).ledger.needs, recordOf(same).last],
+      [seen, runs, needs, last],
+      "the leaf did not change: the caches, runs, needs and size are kept",
+    );
+
+    const moved = await session(t, { id: "moved" });
+    await threeSuperRuns(moved);
+    const writes = new Set(recordOf(moved).ledger.writes);
+    await moved.loaded.host.emit("session_tree", TO_ANOTHER_LEAF);
+    const { ledger } = recordOf(moved);
+    assert.deepEqual([ledger.seen.size, ledger.runs, ledger.needs, ledger.run], [0, [], [], undefined], "another leaf: no cache, and the branch's runs and needs start afresh");
+    assert.deepEqual(ledger.writes, writes, "the providers' cache writes are facts about the providers, and stay");
+    assert.deepEqual([recordOf(moved).last?.ref, recordOf(moved).last?.usage], [ASTRA, undefined], "the size is unknown until the next answer");
+    const level = await say(moved, "go on", ANSWER_MEDIUM);
+    assert.deepEqual(level.cost, { outcome: "unknown", why: "no usage yet" }, "a size the conversation no longer has is no usage: a missing figure is said");
+    assert.equal(routed(await route(moved, "go on")), TERRA, "the run goes to the needed level's own model");
+  });
+
+  test("a session started right after a compaction, as Pi's context usage says, is seeded without a size or a cache", async (t) => {
+    const state = await session(t, {
+      setup: (s) => {
+        s.appendAssistant(assistant(ASTRA, { usage: usageOf(150_000), timestamp: NOW - 90_000, thinkingLevel: "high" }), new Date(NOW - 30_000).toISOString());
+        // Pi's sign for "right after compaction, before the next response".
+        (s.ctx as unknown as Record<string, unknown>).getContextUsage = () => ({ tokens: null, contextWindow: 272_000, percent: null });
+      },
+    });
+    assert.equal(recordOf(state).ledger.seen.size, 0, "no answer is seeded into the ledger: no model has the compacted conversation cached");
+    assert.deepEqual([recordOf(state).last?.ref, recordOf(state).last?.usage], [ASTRA, undefined], "the last responder is seeded without its size");
+    const level = await say(state, "go on", ANSWER_MEDIUM);
+    assert.deepEqual(level.cost, { outcome: "unknown", why: "no usage yet" }, "the first prompt's cost is unknown: a missing figure is said");
+  });
+
+  test("a session whose context usage cannot be read is seeded as before", async (t) => {
+    for (const [name, read] of [
+      ["undefined", () => undefined],
+      ["a throw", () => { throw new Error("stale"); }],
+      ["a known size", () => ({ tokens: 150_000, contextWindow: 272_000, percent: 55 })],
+    ] as const) {
+      resetSlot();
+      const state = await session(t, {
+        id: name,
+        setup: (s) => {
+          s.appendAssistant(assistant(ASTRA, { usage: usageOf(150_000), timestamp: NOW - 90_000, thinkingLevel: "high" }), new Date(NOW - 30_000).toISOString());
+          (s.ctx as unknown as Record<string, unknown>).getContextUsage = read;
+        },
+      });
+      assert.equal(recordOf(state).ledger.seen.get(ASTRA)?.tokens, 149_000, `${name}: astra is seeded warm, as before`);
+      assert.ok(recordOf(state).last?.usage !== undefined, `${name}: the last responder keeps its size`);
+    }
+  });
+
+  test("the deep-session floor does not read a size from before a compaction", async (t) => {
+    const state = await session(t);
+    await threeSuperRuns(state);
+    await state.loaded.host.emit("session_compact", {});
+    const level = await say(state, "rename foo to bar", ANSWER_LOW);
+    assert.ok(level.demand !== undefined, "an untagged run has a demand");
+    assert.equal(level.demand.guards.includes("deep-session"), false, "150,000 tokens were compacted away: no deep-session floor");
+    assert.equal(level.need, "low", "Jev's LOW stands");
+    assert.equal(routed(await route(state, "rename foo to bar")), LUNA, "the run goes to LOW's own model");
   });
 
   test("a resumed session keeps its model's cache", async (t) => {
@@ -328,6 +422,36 @@ describe("a planned run", () => {
       assert.equal(ref, outcome === "stayed" ? ASTRA : TERRA, `prompt ${index + 1} goes where the cost said`);
       await answer(state, ref);
     }
+  });
+
+  test("says what it chose when the cost puts a run on a warm stronger model and no candidate answered last", async (t) => {
+    const state = await session(t);
+    await threeSuperRuns(state);
+    // A model of no candidate level answers last: LOW's luna, picked by hand for a moment.
+    await state.loaded.host.emit("message_end", { message: assistant(LUNA, { usage: usageOf(150_000), timestamp: state.clock, thinkingLevel: "high" }) });
+    await state.loaded.host.emit("agent_settled", { aborted: false });
+    const text = "go on";
+    const level = await say(state, text, ANSWER_MEDIUM);
+    const cost = knownCost(level);
+    assert.deepEqual([cost.outcome, cost.current, cost.chosen], ["only", undefined, ASTRA], "luna is no candidate for MEDIUM, and astra's warm cache makes it the cheapest");
+    // With no current model nothing is left behind: no cost of leaving.
+    const expected = expectedCosts({ tokens: 150_000 + promptTokens(text, state.clock), cached: 149_000, shape: ONE_REQUEST, horizon: 1, again: 0 });
+    assert.ok(expected.astra < expected.terra, `astra warm costs less than terra cold: ${JSON.stringify(expected)}`);
+    assert.equal(
+      footer(state),
+      `personal MEDIUM → gpt-6-astra (${demandNote(level)}; chose, ${money(expected.astra)} vs ${money(expected.terra)})`,
+      "a choice by cost with no current candidate names the chosen model's cost against the needed level's own model's",
+    );
+    assert.equal(routed(await route(state, text)), ASTRA, "the request goes to astra");
+  });
+
+  test("says nothing of the cost when no candidate answered last and the needed level's own model is chosen", async (t) => {
+    const state = await session(t);
+    assert.equal(await run(state, "go on", ANSWER_MEDIUM), TERRA, "the first MEDIUM run goes to terra");
+    const level = await say(state, "design the whole thing", ANSWER_SUPER);
+    const cost = knownCost(level);
+    assert.deepEqual([cost.outcome, cost.chosen], ["only", ASTRA], "terra is below SUPER: astra, the needed level's own model, is the only candidate");
+    assert.equal(footer(state), `personal SUPER → gpt-6-astra (${demandNote(level)})`, "the needed level's own model chosen with no current candidate: no note");
   });
 
   test("says the cost is unknown on a session's first prompt", async (t) => {
@@ -455,12 +579,18 @@ describe("what the session records and shows", () => {
     assert.ok(!json.includes(MARK), json);
   });
 
-  test("/smart-router status shows the terms of the last decision", async (t) => {
+  test("/smart-router status shows the terms of the latest decision, after the run's continuations too", async (t) => {
     const state = await session(t);
     await threeSuperRuns(state);
     const text = "go on";
     const level = await say(state, text, ANSWER_MEDIUM);
     await route(state, text);
+    // A continuation of the run: its history entry carries no level.
+    const { runtime } = state.loaded;
+    const signal = state.loaded.session.controller?.signal;
+    assert.ok(signal !== undefined, "the run is under way");
+    runtime.route("auto", request("continuation", { signal, previous: previous(runtime, ASTRA) }));
+    assert.equal(recordOf(state).history.at(-1)?.level, undefined, "the last history entry is the continuation's, without a level");
     await state.loaded.host.command("smart-router", "status");
     const status = state.loaded.session.notices.at(-1)?.message ?? "";
     const lines = status.split("\n");
@@ -474,10 +604,10 @@ describe("what the session records and shows", () => {
     const terms = [
       `  Demand ${demand.value.toFixed(2)} → ${tierLabel(level.need)}: Jev ${demand.jev.value.toFixed(2)} at ${Math.round(demand.jev.confidence * 100)}%, heuristics ${demand.heuristics.value.toFixed(2)} (${demand.heuristics.top
         .map(([signal, share]) => `${signal} ${share.toFixed(2)}`)
-        .join(", ")})${demand.guards.includes("deep-session") ? "; floors: deep-session" : ""}.`,
+        .join(", ")})${demand.guards.length > 0 ? `; guards: ${demand.guards.join(", ")}` : ""}.`,
       `  Cost of 1 request, horizon 1: gpt-6-astra ${money(expected.astra)} (149,000 cached, 97%); gpt-6.1-sol ${money(expected.sol)} (nothing cached; leaving gpt-6-astra ${money(leaving)}); gpt-6.1-terra ${money(expected.terra)} (nothing cached; leaving gpt-6-astra ${money(leaving)}).`,
     ];
-    assert.deepEqual(lines.slice(at + 1, at + 3), terms, "the demand's terms and each candidate's cost, the stronger first, under the last decision");
+    assert.deepEqual(lines.slice(at + 1, at + 3), terms, "the latest decision's demand terms and each candidate's cost, the stronger first, though a continuation came after it");
     assert.deepEqual(decisionLines(level), terms, "decisionLines gives the same two lines");
   });
 
@@ -495,5 +625,26 @@ describe("what the session records and shows", () => {
     const tagged = recordOf(state).pendingLevel?.level;
     assert.ok(tagged !== undefined && tagged.source === "tag", "a tagged level");
     assert.deepEqual(decisionLines(tagged), [], "a tagged level gives no lines");
+  });
+
+  test("the demand line names every guard that applied, in the order applied, and none when none did", () => {
+    const base: PlanLevel = {
+      scope: "personal",
+      need: "high",
+      tier: "high",
+      source: "jev",
+      steppedUp: false,
+      returnedToFirst: false,
+      demand: { value: 1.42, tier: "high", jev: { value: 1.3, confidence: 0.7 }, heuristics: { value: 1.9, score: 0.37, top: [["turn_type", 0.09]] }, guards: ["close-call"] },
+    };
+    assert.deepEqual(
+      decisionLines(base),
+      ["  Demand 1.42 → HIGH: Jev 1.30 at 70%, heuristics 1.90 (turn_type 0.09); guards: close-call."],
+      "a close call alone is named: any guard that applied",
+    );
+    const both: PlanLevel = { ...base, source: "floor", demand: { ...base.demand!, guards: ["close-call", "risky"] } };
+    assert.match(decisionLines(both)[0] ?? "", /; guards: close-call, risky\.$/, "every guard, in the order the demand applied them");
+    const none: PlanLevel = { ...base, demand: { ...base.demand!, guards: [] } };
+    assert.match(decisionLines(none)[0] ?? "", /\(turn_type 0\.09\)\.$/, "no guard applied: nothing is said of guards");
   });
 });

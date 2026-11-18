@@ -69,7 +69,7 @@ import { isRecord, own } from "./files.ts";
 import type { FileSystem, Loaded } from "./files.ts";
 import { askJev, buildContext, jevAsk, recentMessages } from "./jev.ts";
 import type { JevAsk, JevOutcome } from "./jev.ts";
-import { answerOf, forgetCaches, noteAnswer, noteRunEnd, seedAnswer } from "./ledger.ts";
+import { answerOf, forgetBranch, forgetCaches, noteAnswer, noteRunEnd, seedAnswer } from "./ledger.ts";
 import type { Ledger } from "./ledger.ts";
 import { policyFromRoster } from "./local.ts";
 import { healDisplaced, isLive, isLiveOwner, join, leave, leaveScopeHandoff, ownerBySignal, rememberedRoster, rememberRoster, scopeLatched, sessionHash, takeScopeHandoff } from "./owners.ts";
@@ -183,6 +183,25 @@ function seededAnswer(entry: unknown, usage: Usage): Parameters<typeof answerOf>
     ...(typeof providerThinkingLevel === "string" ? { providerThinkingLevel } : {}),
   };
 }
+
+/**
+ * Whether Pi says the conversation's size is unknown: `ctx.getContextUsage()` gives `tokens: null`
+ * right after a compaction, before the next response. A context without the call, one whose call
+ * throws, and one that gives anything else say nothing.
+ */
+function sizeUnknown(ctx: ExtensionContext): boolean {
+  try {
+    const { getContextUsage } = ctx as { readonly getContextUsage?: unknown };
+    if (typeof getContextUsage !== "function") return false;
+    const usage: unknown = getContextUsage.call(ctx);
+    return isRecord(usage) && own(usage, "tokens") === null;
+  } catch {
+    return false;
+  }
+}
+
+/** The last responder without its usage: the conversation it measured is no longer the one sent. */
+const withoutSize = (last: LastResponder | undefined): LastResponder | undefined => (last === undefined ? undefined : { ref: last.ref, at: last.at });
 
 /** The smallest known window and output budget among the picks, else the defaults. */
 function smallest(decisions: readonly Decision[]): Limits {
@@ -449,9 +468,10 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
    * The latest successful physical response on the branch, from a bounded read. The same entries,
    * oldest first, seed the ledger: each one's cache, at its entry's time, so that a resumed
    * session's warm model is priced warm. A response before a smaller prompt of the same model is
-   * forgotten there, as the ledger forgets any rewritten conversation (seedAnswer).
+   * forgotten there, as the ledger forgets any rewritten conversation (seedAnswer). Without a
+   * ledger, nothing is seeded into one.
    */
-  const seed = (view: BoundedHistory, ledger: Ledger, ctx: ExtensionContext): LastResponder | undefined => {
+  const seed = (view: BoundedHistory, ledger: Ledger | undefined, ctx: ExtensionContext): LastResponder | undefined => {
     const entries = view.getRecentActiveEntries({ type: "message", messageRole: "assistant", limit: SEED_ENTRIES });
     let last: LastResponder | undefined;
     for (const entry of entries) {
@@ -459,7 +479,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       if (found === undefined) continue;
       last = found;
       const answered = found.usage === undefined ? undefined : seededAnswer(entry, found.usage);
-      if (answered !== undefined) seedAnswer(ledger, answerOf(answered, ctx.modelRegistry.find(answered.provider, answered.model), found.at));
+      if (answered !== undefined && ledger !== undefined) seedAnswer(ledger, answerOf(answered, ctx.modelRegistry.find(answered.provider, answered.model), found.at));
     }
     return last;
   };
@@ -621,8 +641,11 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     }
     step(() => registerModels(ctx));
     const view = boundedHistory(sessionManager);
-    const last = view === undefined ? undefined : step(() => seed(view, recordOf(sessionId).ledger, ctx));
-    if (last !== undefined) recordOf(sessionId).last = last;
+    // Right after a compaction Pi knows no size yet: no answer on the branch measured the conversation
+    // as it is now, so none seeds a cache, and the last responder has no usage until the next answer.
+    const compacted = sizeUnknown(ctx);
+    const last = view === undefined ? undefined : step(() => seed(view, compacted ? undefined : recordOf(sessionId).ledger, ctx));
+    if (last !== undefined) recordOf(sessionId).last = compacted ? withoutSize(last) : last;
     // A resumed session's level is its latest run's, so that it returns from the chain as a running one does.
     const need = view === undefined || state?.kind !== "ok" ? undefined : step(() => seedLevel(view, state.value, resolvedScope(ctx)));
     if (need !== undefined) recordOf(sessionId).need = need;
@@ -1138,9 +1161,24 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       // their summary may route through, and return nothing.
       target.on("session_before_compact", (_event, ctx) => guarded("session_before_compact", ctx, () => void heal(ctx)));
       target.on("session_before_tree", (_event, ctx) => guarded("session_before_tree", ctx, () => void heal(ctx)));
-      // After either, no model has the conversation cached as it is now.
-      target.on("session_compact", (_event, ctx) => guarded("session_compact", ctx, () => forgetCaches(recordOf(ctx.sessionManager.getSessionId()).ledger)));
-      target.on("session_tree", (_event, ctx) => guarded("session_tree", ctx, () => forgetCaches(recordOf(ctx.sessionManager.getSessionId()).ledger)));
+      // After a compaction, or a move to another leaf of the tree, no model has the conversation
+      // cached as it is now, and its size is unknown until the next answer measures it.
+      target.on("session_compact", (_event, ctx) =>
+        guarded("session_compact", ctx, () => {
+          const record = recordOf(ctx.sessionManager.getSessionId());
+          forgetCaches(record.ledger);
+          record.last = withoutSize(record.last);
+        }),
+      );
+      target.on("session_tree", (event, ctx) =>
+        guarded("session_tree", ctx, () => {
+          if (event.newLeafId === event.oldLeafId) return;
+          const record = recordOf(ctx.sessionManager.getSessionId());
+          // The branch's runs and prompts are another branch's now: they start afresh.
+          forgetBranch(record.ledger);
+          record.last = withoutSize(record.last);
+        }),
+      );
       target.on("session_shutdown", (event, ctx) => guarded("session_shutdown", ctx, () => shutdown(event, ctx)));
       target.registerCommand(COMMAND, smartRouterCommand(commandHost));
     },

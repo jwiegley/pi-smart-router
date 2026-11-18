@@ -10,6 +10,7 @@
 // it and what the cost rule compared; and the terms behind it, which /smart-router status shows.
 import type { RiskyTrigger, Signal } from "./classify.ts";
 import { LEVEL_ENTRY } from "./constants.ts";
+import type { Priced } from "./cost.ts";
 import type { CostTerms, LevelSource, PlanLevel } from "./decide.ts";
 import type { Demand } from "./demand.ts";
 import { isRecord, own } from "./files.ts";
@@ -193,17 +194,24 @@ const money = (value: number): string => `$${value.toFixed(2)}`;
 const thousands = (value: number): string => String(Math.round(value)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 
 /** A model's id, without its provider. */
-const modelId = (ref: string): string => parseRef(ref)?.id ?? ref;
+const idOfRef = (ref: string): string => parseRef(ref)?.id ?? ref;
 
 /**
  * What the cost rule compared, after the demand: "; stayed, $0.10 vs $0.16" (the current model
  * against the cheapest other), "; moved, $0.63 vs $2.00" (the chosen model against the current one),
- * "; cost unknown", or nothing: for a run it did not price, one with no current model among the
+ * "; chose, $0.14 vs $0.16" (with no current model among the candidates, a stronger model chosen
+ * against the needed level's own one, the lowest level priced), "; cost unknown", or nothing: for a
+ * run it did not price, one that took the needed level's own model with no current one among the
  * candidates, and one that stayed where there was no other.
  */
 export function costNote(cost: CostTerms | undefined): string {
   if (cost === undefined) return "";
   if (cost.outcome === "unknown") return "; cost unknown";
+  if (cost.outcome === "only") {
+    const chosen = cost.priced.find((entry) => entry.ref === cost.chosen);
+    const needed = cost.priced.reduce<Priced | undefined>((lowest, entry) => (lowest === undefined || tierRank(entry.tier) < tierRank(lowest.tier) ? entry : lowest), undefined);
+    return chosen === undefined || needed === undefined || chosen === needed ? "" : `; chose, ${money(chosen.cost)} vs ${money(needed.cost)}`;
+  }
   const current = cost.priced.find((entry) => entry.ref === cost.current);
   if (current === undefined) return "";
   if (cost.outcome === "moved") {
@@ -233,10 +241,10 @@ export function levelNote(level: PlanLevel): string {
 
 /**
  * The terms behind an untagged level, for /smart-router status: the demand line (the blend, Jev's
- * term or why there was none, the heuristics with their three largest signals, and the floors that
- * applied), then, when the cost rule was asked, the cost line (the run priced, and each candidate,
- * the stronger first, with its expected cost, its cache and what leaving the current model adds),
- * or why the cost was unknown. A tagged level gives none.
+ * term or why there was none, the heuristics with their three largest signals, and every guard
+ * that applied, in the order applied), then, when the cost rule was asked, the cost line (the run
+ * priced, and each candidate, the stronger first, with its expected cost, its cache and what
+ * leaving the current model adds), or why the cost was unknown. A tagged level gives none.
  */
 export function decisionLines(level: PlanLevel): string[] {
   const { demand, cost } = level;
@@ -246,24 +254,24 @@ export function decisionLines(level: PlanLevel): string[] {
       ? `Jev ${demand.jev.value.toFixed(2)} at ${Math.round(demand.jev.confidence * 100)}%`
       : `no Jev answer${level.jev?.kind === "failure" ? ` (${level.jev.failure})` : ""}`;
   const top = demand.heuristics.top.map(([signal, share]) => `${signal} ${share.toFixed(2)}`).join(", ");
-  const floors = demand.guards.filter((guard) => guard === "risky" || guard === "deep-session");
+
   const lines = [
     `  Demand ${demand.value.toFixed(2)} → ${tierLabel(level.need)}: ${jev}, heuristics ${demand.heuristics.value.toFixed(2)}${top === "" ? "" : ` (${top})`}${
-      floors.length === 0 ? "" : `; floors: ${floors.join(", ")}`
+      demand.guards.length === 0 ? "" : `; guards: ${demand.guards.join(", ")}`
     }.`,
   ];
   if (cost === undefined) return lines;
   if (cost.outcome === "unknown") return [...lines, `  Cost unknown: ${cost.why}.`];
   const { requests, horizon } = cost.workload;
   const count = Number.isInteger(requests) ? String(requests) : requests.toFixed(1);
-  const leaving = cost.current === undefined ? "" : modelId(cost.current);
+  const leaving = cost.current === undefined ? "" : idOfRef(cost.current);
   const rows = [...cost.priced]
     .sort((a, b) => tierRank(b.tier) - tierRank(a.tier))
     .map((entry) => {
       const cached = entry.cached > 0 ? `${thousands(entry.cached)} cached, ${Math.round(entry.survival * 100)}%` : "nothing cached";
       const compacts = entry.compacts ? ", after a compaction" : "";
       const left = entry.leaving > 0 ? `; leaving ${leaving} ${money(entry.leaving)}` : "";
-      return `${modelId(entry.ref)} ${money(entry.cost)} (${cached}${compacts}${left})`;
+      return `${idOfRef(entry.ref)} ${money(entry.cost)} (${cached}${compacts}${left})`;
     });
   return [...lines, `  Cost of ${count} request${requests === 1 ? "" : "s"}, horizon ${horizon}: ${rows.join("; ")}.`];
 }

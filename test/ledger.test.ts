@@ -7,6 +7,7 @@ import {
   againChance,
   answerOf,
   effortOf,
+  forgetBranch,
   forgetCaches,
   horizonFor,
   newLedger,
@@ -104,6 +105,22 @@ describe("a model's cache", () => {
     assert.deepEqual(ledger.runs, runs, "runs unchanged");
     assert.deepEqual(ledger.needs, needs, "prompts unchanged");
     assert.deepEqual(ledger.writes, writes, "writes unchanged");
+  });
+
+  test("is forgotten with the branch's runs, needs and open run by forgetBranch, which keeps the providers' cache writes", () => {
+    const ledger = newLedger();
+    noteAnswer(ledger, { ...answer("p/a", { tokens: 150_000 }), usage: usageOf({ input: 150_000, cacheWrite: 5 }) });
+    noteRunEnd(ledger);
+    notePrompt(ledger, "medium", "super");
+    noteAnswer(ledger, answer("q/b", { tokens: 10_000 }));
+    const writes = new Set(ledger.writes);
+    forgetBranch(ledger);
+    assert.deepEqual(
+      [ledger.seen.size, ledger.latest, ledger.runs, ledger.needs, ledger.run],
+      [0, undefined, [], [], undefined],
+      "a move to another leaf: no cache, and the runs and needs, counted on the branch, start afresh",
+    );
+    assert.deepEqual(ledger.writes, writes, "whether a provider reports cache writes is a fact about the provider, and stays");
   });
 
   test("records a provider's cache writes, and ignores an answer without usage", () => {

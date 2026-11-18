@@ -7,7 +7,7 @@
 // candidates on this host with the resolver's verdict and the catalog price, the account bindings
 // checked in the session's scope, with each provider's auth source (never a credential), a version 1
 // roster's routing table or a version 2 roster's levels and fallback chain in each scope and its
-// classifier, the last decision with the terms behind its level, whether the last request went to a fallback chain's model, what can still send data off the machine, and a warning for any version 1 fallback that
+// classifier, the last decision with the terms behind the latest planned level, whether the last request went to a fallback chain's model, what can still send data off the machine, and a warning for any version 1 fallback that
 // moves a run onto Codex's API from another one. It replaces upstream's doctor, plan, stats, pricing
 // and mode commands.
 //
@@ -25,6 +25,7 @@ import { describeRouting } from "./check.ts";
 import type { Labels } from "./accounts.ts";
 import { LEVEL_ENTRY, PROVIDER, SCOPE_ENTRY } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
+import type { PlanLevel } from "./decide.ts";
 import { firstLine, PIN_REMOVED, rosterNamed } from "./errors.ts";
 import type { Loaded } from "./files.ts";
 import { promptLines, promptProblem, promptUses } from "./prompts.ts";
@@ -349,6 +350,15 @@ function classifierOf(roster: Loaded<Roster>): string | undefined {
   return roster.kind === "ok" && roster.value.version === 2 ? roster.value.classifier?.model : undefined;
 }
 
+/** The level of the latest history entry that has one. */
+function latestLevel(history: readonly HistoryEntry[]): PlanLevel | undefined {
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const level = history[index]?.level;
+    if (level !== undefined) return level;
+  }
+  return undefined;
+}
+
 export function statusText(host: CommandHost, ctx: ExtensionContext): string {
   const { roster, labels } = host.refresh();
   const session = host.session(ctx);
@@ -369,8 +379,10 @@ export function statusText(host: CommandHost, ctx: ExtensionContext): string {
   }
   const last = session?.history.at(-1);
   lines.push(`Last decision: ${last === undefined ? "none yet" : describeEntry(last)}`);
-  // The terms behind it, when it planned a level: the demand, and what each candidate would cost.
-  if (last?.level !== undefined) lines.push(...decisionLines(last.level));
+  // The terms behind the latest decision that planned a level: the demand, and what each candidate
+  // would cost. A run's continuations and direct requests carry none, so they do not hide it.
+  const decided = latestLevel(session?.history ?? []);
+  if (decided !== undefined) lines.push(...decisionLines(decided));
   const onFallback = roster.kind === "ok" && roster.value.version === 2 ? onFallbackLine(roster.value, last) : undefined;
   if (onFallback !== undefined) lines.push(onFallback);
   lines.push(egress(host.pi, classifierOf(roster)));
