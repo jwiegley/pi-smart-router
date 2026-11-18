@@ -4,24 +4,32 @@ Design for John Wiegley's fork of pi-smart-router (jwiegley/pi-smart-router, bas
 `8cec10ed`). Written 2026-11-18 from a design conversation with John on 11-17 and 11-18, and from
 six pieces of research on upstream beettlle/pi-smart-router v1.4.0 (`54bee53d`) done the same
 night. Choices John made are stated as his, in his words. Choices the designer made are marked
-**(designer's call)**; John can override them. Decisions that are still his to make come first.
+**(designer's call)**; John can override them. What he decided on the design itself comes first.
 
-## Decisions still open
+## Decided on 2026-11-18
 
-Each has a default, which is what the rest of this document describes.
+John answered the five decisions that the first two revisions left open, and approved the design
+for building on a local branch:
 
-1. **Requests that follow a tool call.** Default: they stay on the model the run started on.
-   Upstream's code sends each of them to the cheapest model of its economical tier, whatever the
-   task was rated. See "Requests inside a run".
-2. **How Jev joins "the 13-stage process".** Default: Jev is one weighted term beside upstream's
+1. **Requests that follow a tool call** stay on the model the run started on. Upstream's code
+   sends each of them to the cheapest model of its economical tier, whatever the task was rated.
+   See "Requests inside a run".
+2. **Jev joins "the 13-stage process" as a weight.** Jev is one weighted term beside upstream's
    own heuristics, in upstream's own weighting function, and the roster then maps the result to a
    model. Upstream's deciding cascade is not run. See "Why not run upstream's pipeline as it is".
-3. **The local-only pin is removed.** John asked for that on 11-17, before he was reminded that
-   the pin was his own choice of 11-08. Default: removed.
-4. **Escalation when a run is stuck.** Default: adopted from upstream, as one level up after three
-   identical failed tool calls in a row.
-5. **Thinking effort by turn type** (upstream's "adaptive reasoning"). Default: left out of this
-   release, so that one thing changes at a time.
+3. **The local-only pin is removed.** He first asked for that on 11-17, before he was reminded
+   that the pin was his own choice of 11-08, and confirmed it on 11-18.
+4. **A stuck run moves up:** one level, after three identical failed tool calls in a row.
+5. **Thinking effort by turn type** (upstream's "adaptive reasoning"): "Yes, as upstream does",
+   where the designer's default was to leave it for a later release.
+
+## One decision is open again
+
+Decision 5 was taken before a fact that designing it turned up: on John's ChatGPT-account models,
+a change of thinking effort between two requests discards that model's whole prompt cache, and
+upstream's rule changes effort from turn to turn. "Thinking effort" below has the evidence and
+his three choices. Nothing else in this document depends on it. That part is built last, on his
+word, and until then the release leaves thinking effort as it is today.
 
 ## Intent
 
@@ -131,6 +139,9 @@ Reports and evidence are in the session of 2026-11-17/18; the points this design
   session logs, 17,610 pairs of consecutive requests to one model: still cached after under 1
   minute 97%; 1 to 5 minutes 92%; 5 to 20 minutes 87%; 20 to 30 minutes 79%; 30 to 60 minutes 66%;
   1 to 2 hours 50%; 2 to 6 hours 38%; 6 to 24 hours 11%. Samples beyond 30 minutes are small.
+- **A change of thinking effort discards the cache on John's account models.** OpenAI documents
+  the miss as `reasoning_effort_changed`; Pi can avoid it only with an API key; and in Hera's logs
+  all five such changes found no cache. See "Thinking effort".
 - **Catalog prices** as Pi reports them on Hera, dollars per million tokens (input, cached input,
   output): astra 6.2 8 / 0.4 / 40; sol 6.2 2 / 0.1 / 10; terra 6.1 1 / 0.05 / 5; luna 6
   0.1 / 0.01 / 0.5. Cache writes are listed at 1.25 times input. Above 272K input tokens a second
@@ -149,8 +160,8 @@ Reports and evidence are in the session of 2026-11-17/18; the points this design
     the routed model's window less the reserve in Pi's settings (`fits` in `src/decide.ts`
     mirrors that rule);
   - asks the router which model writes a summary (reason `direct`);
-  - carries `usage` (input, cached read, cache write, output) and a timestamp on every assistant
-    message, and each catalog model's `cost`, tiers included;
+  - carries `usage` (input, cached read, cache write, output), a timestamp and the thinking level
+    on every assistant message, and each catalog model's `cost`, tiers included;
   - offers `classify` with several questions of type choice, score or bool in one request, and
     discards the whole answer when any one of them is missing or of the wrong type.
 - **Hosted Jev** has a 1 s limit here, and has answered the fork's one level question in
@@ -244,7 +255,8 @@ reporting cache writes.
 
 - `T` is the conversation's size in tokens, from the latest usage figures.
 - `W` is how much of it X has cached: the size X last saw on this branch since the last
-  compaction or context edit, or zero.
+  compaction or context edit, or zero. It is also zero when the thinking effort X would be sent
+  now is not the effort of its last answer (see "Thinking effort").
 - `p` is the chance that cache still exists: the survival table at the time since X's last
   answer. It applies to the current model too.
 - `n`, `o`, `g` and `d` are the expected requests in a run, output tokens per request, tokens
@@ -295,7 +307,8 @@ The table is a setting, `switching.cacheSurvival`: pairs of idle seconds and a c
 to the measured Codex figures. The chance for an idle time is that of the first pair whose seconds
 are not less than it; past the last pair it is zero. A model whose catalog entry states a cache
 lifetime uses 1 up to that lifetime and zero after it. After a compaction or a context edit, every
-model's cached size is zero.
+model's cached size is zero. A change of thinking effort zeroes the cached size of the model it is
+sent to.
 
 ### A conversation larger than the candidate's window
 
@@ -329,7 +342,61 @@ Upstream also sends tool-result requests to a cheap model. Its author's reasonin
 result is a "small structured payload" and so light work, and he limits it in words to small
 results on the same provider. His code applies no size or provider limit. In agentic coding the
 request after a tool result is where the model decides what to do next, and Jev never rates those
-requests, so this design leaves them where the task put them. This is open decision 1.
+requests, so this design leaves them where the task put them. John chose this on 11-18.
+
+### Thinking effort
+
+**What upstream does.** Its "adaptive reasoning" sets the thinking effort of each request from the
+kind of turn: `minimal` for a request that follows a tool result, `low` for an ordinary turn,
+`medium` for a planning turn, and `high` for a request on its strongest tier or after a loop
+escalation. It does so only while the session's level is Pi's default, `medium`. Any other level
+is taken as the operator's own choice and is never lowered. A request on a pinned session keeps
+the session's level unless the turn's class is higher. Two settings bound what the policy derives,
+a floor and a ceiling, and a third turns it off.
+
+**What John chose.** On 11-18: "Yes, as upstream does."
+
+**What was found afterwards, the same day.** On John's models, a change of thinking effort between
+two requests to one model discards that model's prompt cache:
+
+- **OpenAI documents it.** Its cache diagnostics name the miss `reasoning_effort_changed` and
+  advise keeping the effort constant across requests that should share a cache. GPT-6 models
+  accept a `configuration_update` item that changes effort and keeps the cache.
+- **Pi sends that item only with an API key.** Its source says a changing effort "would
+  invalidate the prompt cache", and that "Sign in with ChatGPT rejects configuration_update
+  items". Every level of John's roster is a ChatGPT sign-in account.
+- **Hera's logs agree.** Of 294,779 pairs of consecutive requests to one Codex model at one
+  effort, 1.4% found no cache. Effort changed between the two requests in four pairs, and in one
+  more on OpenRouter; all five found none.
+
+Upstream's rule changes effort inside a session by design. Here that means a full-price read of
+the conversation whenever a planning prompt follows an ordinary one on the same model, or the
+reverse: for 150,000 tokens on astra, $1.20 where the cached read costs $0.06. That is the
+repeated cache miss John most wants to avoid, and the question put to him did not mention it.
+
+Two more facts bear on the choice. On these models Pi sends `minimal` as `low`, so upstream's
+first two rows are one effort. And in the last two weeks 92% of John's Codex requests ran at a
+level he or his launcher had set (`max` 65%, `high` 27%), where upstream's rule changes nothing;
+8% ran at `medium`.
+
+**So this part is held for John's word**, and is built last. Until he rules, the release sends
+the thinking level as today: the selected one, or the level the roster fixes for the role. His
+choices:
+
+1. **Leave effort alone in this release** (the designer's recommendation). The roster can already
+   fix an effort per level, for example `high` for the SUPER role, and a fixed effort never costs
+   a cache.
+2. **Upstream's table, applied only where it costs no cache.** While the session is at `medium`
+   and the role fixes no level: when a model starts with nothing cached (its first request on the
+   branch, or its first after a compaction or a context edit), its effort is `medium` for a
+   planning prompt, `high` on a SUPER model or after an escalation, and `low` otherwise. It keeps
+   that effort until the next compaction. Upstream's floor, ceiling and off switch come with it.
+3. **Exactly as upstream:** effort follows each request's turn type, with the cache losses above.
+
+**What this release does whichever he chooses.** The cost figures treat a change of effort as the
+loss it is. A model's cached size counts only when the effort about to be sent is the effort of
+its last answer, compared after the model's own mapping of levels. So when John changes
+`/thinking` in a session, the next choice prices the current model as cold, which it is.
 
 ### What is removed
 
@@ -432,7 +499,8 @@ and corrections, is part of this work; running it on his sessions waits for his 
   replaced by a short note; "Changing the routing" gains the two sections. CHANGELOG entry.
 - Unit tests, table-driven: the blend and every guard; the cost formula with the worked examples;
   survival lookup at, between, before and after its points; run-shape medians; the horizon;
-  missing figures.
+  missing figures; a cached size that a change of thinking effort zeroes, and one that two levels
+  with the same effort on that model leave alone.
 - Sequence tests on the modelled cost: for alternating, long-low and one-off-low sequences, the
   rule's total is never above always staying on the higher model, and never above always following
   the level by more than the margin.
@@ -459,10 +527,12 @@ Every push and every activation needs John's word at that time.
 - The exact post-compaction size estimate from Pi's settings.
 - The module layout, and how `planLevel` and `climb` in `src/decide.ts` are reshaped.
 - The footer's exact wording within the forms above.
+- How the effort of a model's last answer is read: from the thinking level Pi records on the
+  assistant message, through that model's map of levels.
 
 ## Still to be supplied by John
 
-- Answers to the five open decisions.
+- His ruling on thinking effort, with the cache finding before him.
 - His word before a review script reads his sessions.
 - The word for each push and activation.
 
@@ -480,7 +550,9 @@ Every push and every activation needs John's word at that time.
 - With compaction disabled in Pi, a model the conversation does not fit is still passed over.
 - Version 1 rosters keep working, without a hold and without the cost rule.
 - The defaults ship without a calibration on John's sessions; tuning is a later review.
-- Thinking effort is left alone in this release.
+- Thinking effort stays as it is until John rules on it with the cache finding before him; the
+  designer recommends leaving it alone in this release.
+- A change of thinking effort counts as a lost cache in the cost figures.
 - The roster keeps version 2; the new sections are optional.
 
 ## Checked by an independent reader
@@ -488,3 +560,7 @@ Every push and every activation needs John's word at that time.
 A builder check of the first draft (2026-11-18) raised five questions and found eleven statements
 about the code or upstream that were wrong. This revision answers the questions in the text and
 corrects the statements. None of them needed a decision from John beyond the five listed first.
+
+The third revision (2026-11-18) records John's five answers and his approval, and adds the
+finding on thinking effort. It was not sent to a second builder check; the plan's review covers
+it.
