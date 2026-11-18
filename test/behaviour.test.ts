@@ -18,7 +18,8 @@
 // The L tests are the four levels' scenarios, the behaviour-suite list of the Jev-levels design, on
 // version 2 rosters shaped like Hera's: both Codex accounts, OpenRouter and a local model, with
 // Jev faked by a classifier provider registered through Pi's provider `classifiers` hook. L9
-// checks that a version 1 roster's texts did not change.
+// checks that a version 1 roster's texts did not change. The C tests run the weighted demand and
+// the cost rule in Pi's own runtime, on level models priced as John's are.
 import "./support/sandboxed.ts";
 
 import assert from "node:assert/strict";
@@ -28,17 +29,21 @@ import test from "node:test";
 import type { TestContext } from "node:test";
 
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
+import { estimateTokens, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 
 import type { RoutingRegistry } from "../src/cache-optimizer.ts";
-import { ENV_SCOPE, LEVEL_ENTRY, LEVEL_KEY, ROUTING_REGISTRY_KEY, SCOPE_ENTRY, SLOT_KEY, VIRTUAL_IDS } from "../src/constants.ts";
+import { ENV_SCOPE, LEVEL_ENTRY, LEVEL_KEY, PIN_ENTRY, ROUTING_REGISTRY_KEY, SCOPE_ENTRY, SLOT_KEY, VIRTUAL_IDS } from "../src/constants.ts";
+import { runCost } from "../src/cost.ts";
+import type { Rates, Workload } from "../src/cost.ts";
 import type { Owner, Slot } from "../src/owners.ts";
 import type { Limits, Router } from "../src/router.ts";
+import type { SurvivalTable } from "../src/settings.ts";
 import { TIERS } from "../src/tiers.ts";
 import type { Tier } from "../src/tiers.ts";
 import { keepsSystemPrompt } from "./support/co.ts";
+import { fixture } from "./support/fixtures.ts";
 import type { Snapshot } from "./support/co.ts";
 import {
   auditorSession,
@@ -56,7 +61,7 @@ import {
   withoutBoundedReaders,
   World,
 } from "./support/host.ts";
-import type { FauxCall, FauxSpec, JevCall, Pi, RosterJsonV2, WorldOptions } from "./support/host.ts";
+import type { Faux, FauxCall, FauxSpec, JevCall, Pi, RosterJsonV2, WorldOptions } from "./support/host.ts";
 
 const TIMEOUT = { timeout: 60_000 };
 
@@ -1691,4 +1696,634 @@ test("1. under a version 2 roster, both models declare limits from every level o
   assert.deepEqual(declared(pi), expected, "in a work session, by a fresh load of the router");
   await pi.command("reload");
   assert.doesNotMatch(notice(pi, /^pi-smart-router: reloaded/), /registered both models again/, "and reading the roster again changes nothing");
+});
+
+// ─── Demand and cost switching, in Pi's runtime ──────────────────────────────
+//
+// The C tests run the weighted demand and the cost rule in Pi's own runtime. Their level models
+// carry John's prices (pricedLevelsFleet), and the faux replies report the usage a scenario scripts
+// (response's `usage`), so that a footer's two costs can be worked out here, with runCost and the
+// spec's leaving term, from the scenario's own figures: the conversation's size, what each model
+// has cached, the run's shape, the horizon and the chance the current level is needed again. A
+// model that answered within the last minute keeps its cache with the default table's first chance,
+// 97%; the default run of 120 seconds, idle time included, falls in its second, 92%. A demand value
+// comes from the heuristics as well as Jev, and is matched by its form only.
+
+/** John's prices on the level models, dollars per million tokens (test/choose.test.ts). */
+const PRICES: Readonly<Record<Tier, Model<Api>["cost"]>> = {
+  low: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
+  medium: { input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25 },
+  high: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
+  super: { input: 8, output: 40, cacheRead: 0.4, cacheWrite: 10 },
+};
+
+/** The level of each Codex model id. */
+function tierOfId(id: string): Tier {
+  const index = (CODEX_IDS as readonly string[]).indexOf(id);
+  const tier = TIERS[index];
+  if (tier === undefined) throw new Error(`no level model ${id}`);
+  return tier;
+}
+
+/**
+ * levelsFleet, with John's prices on the personal and work level models, which reason, as Codex
+ * models do, so that a thinking level reaches them as it is; windows of 272,000 unless `limits`
+ * gives a model another.
+ */
+function pricedLevelsFleet(limits: Readonly<Record<string, Partial<Limits>>> = {}): FauxSpec[] {
+  return levelsFleet(limits).map((spec): FauxSpec => {
+    if (spec.provider !== "openai-codex-2" && spec.provider !== "openai-codex-3") return spec;
+    const models = (spec.models ?? []).map((entry) => (typeof entry === "string" ? entry : { ...entry, cost: PRICES[tierOfId(entry.id)] }));
+    return { ...spec, reasoning: true, models };
+  });
+}
+
+/** The default cache survival table (switching.cacheSurvival), which no roster here changes. */
+const SURVIVAL: SurvivalTable = [
+  [60, 0.97],
+  [300, 0.92],
+  [1200, 0.87],
+  [1800, 0.79],
+  [3600, 0.66],
+  [7200, 0.5],
+  [21600, 0.38],
+  [86400, 0.11],
+];
+
+/** The run's shape with fewer than three runs measured: 5 requests, 800 output tokens, 1,500 tokens of growth, 120 seconds. */
+const DEFAULT_SHAPE = { requests: 5, output: 800, growth: 1_500, seconds: 120 } as const;
+
+const perToken = (tier: Tier): Rates => ({ input: PRICES[tier].input / 1e6, cacheRead: PRICES[tier].cacheRead / 1e6, output: PRICES[tier].output / 1e6 });
+
+/** runCost for a level's model with `cached` tokens of the conversation, answered within the last minute (`warm`) or not since its cache was last forgotten. */
+function expectedRun(tier: Tier, cached: number, warm: boolean, workload: Workload): number {
+  return runCost({ ref: tier, tier, rates: perToken(tier), cached, idle: warm ? 1 : undefined, compacts: false }, workload, SURVIVAL);
+}
+
+/** What leaving the current model adds to another candidate (the spec): q · (1 − s) · Wc · (in_c − cr_c). */
+function expectedLeaving(current: Tier, cached: number, again: number, survives: number): number {
+  const rates = perToken(current);
+  return again * (1 - survives) * cached * (rates.input - rates.cacheRead);
+}
+
+/** Dollars to the cent, as the footer writes them. */
+const money = (dollars: number): string => `$${dollars.toFixed(2)}`;
+
+/** Pi's estimate of a prompt, which the router adds to the conversation's size for a planned run. */
+const promptSize = (text: string): number => estimateTokens({ role: "user", content: [{ type: "text", text }], timestamp: 0 });
+
+/** A scripted reply that reports `cacheRead` tokens read from the cache, `input` tokens not, and `output`; no cache writes. */
+function reply(codex: Faux, usage: { readonly input?: number; readonly cacheRead?: number; readonly output: number }): AssistantMessage {
+  return response(codex, { usage: { input: usage.input ?? 0, cacheRead: usage.cacheRead ?? 0, cacheWrite: 0, output: usage.output } });
+}
+
+/** The footer, which must open with `head` followed by a demand: what it says after the demand. */
+function afterDemand(pi: Pi, head: string): string {
+  const footer = pi.ui.status(LEVEL_KEY) ?? "";
+  const match = /^(.*) \(demand \d\.\d(.*)\)$/.exec(footer);
+  assert.ok(match !== null && match[1] === head, `the footer "${footer}" opens with "${head} (demand"`);
+  return match[2] ?? "";
+}
+
+/** The cost terms of the latest run's record. */
+const costOf = (pi: Pi): Record<string, unknown> => (runRecords(pi).at(-1)?.cost ?? {}) as Record<string, unknown>;
+
+/** The tokens of the conversation astra caches in the warm sessions, and the output of every scripted answer. */
+const WARM = 150_000;
+const OUT = 300;
+
+/** A priced session whose three SUPER prompts astra answered, one request each, reading 150,000 tokens from its cache and writing 300. */
+async function threeSuper(world: World): Promise<Pi> {
+  const pi = await world.start({ select: "smart-router/auto" });
+  const codex = world.faux("openai-codex-2");
+  for (const text of ["Survey the options for the session store", "Survey the options for the queue", "Survey the options for the index"]) {
+    world.jev.answer(JEV.super);
+    codex.respond(reply(codex, { cacheRead: WARM, output: OUT }));
+    await pi.prompt(text);
+    assert.equal(answered(pi), PERSONAL.super, `three SUPER prompts first: "${text}"`);
+  }
+  return pi;
+}
+
+/** One measured run of one request, `horizon` runs deep: the shape three such runs give. */
+const shortRuns = (tokens: number, horizon: number): Workload => ({ tokens, requests: 1, output: OUT, growth: 0, seconds: 0, horizon });
+
+test("C1 a heavier prompt moves up at once", TIMEOUT, async (t) => {
+  const world = levelsWorld(t, { fleet: pricedLevelsFleet() });
+  const codex = world.faux("openai-codex-2");
+  const pi = await world.start({ select: "smart-router/auto" });
+  world.jev.answer(JEV.low);
+  codex.respond(reply(codex, { input: 2_000, output: OUT }));
+  await pi.prompt("Rename the helper");
+  assert.equal(answered(pi), PERSONAL.low);
+  world.jev.answer(JEV.super);
+  await pi.prompt("Survey the options for the session store");
+  assert.equal(answered(pi), PERSONAL.super, "a heavier prompt moves up at once: SUPER's model answers the prompt right after LOW's");
+  assert.equal(afterDemand(pi, "personal SUPER → gpt-6-astra"), "", "a heavier prompt moves up at once: the needed level's own model, with no current model among the candidates, compares nothing");
+  const moved = { outcome: "only", chosen: PERSONAL.super, current: undefined };
+  assert.deepEqual(fields(costOf(pi), moved), moved, "a heavier prompt moves up at once: luna, below the need, is no candidate");
+  assert.deepEqual(world.refCounts(), { [PERSONAL.low]: 1, [PERSONAL.super]: 1 });
+});
+
+test("C2 a lighter prompt stays on the warm stronger model when runs are short, and the footer shows the two costs", TIMEOUT, async (t) => {
+  const world = levelsWorld(t, { fleet: pricedLevelsFleet() });
+  const pi = await threeSuper(world);
+  const codex = world.faux("openai-codex-2");
+  const text = "Check the error paths";
+  world.jev.answer(JEV.medium);
+  codex.respond(reply(codex, { cacheRead: WARM, output: OUT }));
+  await pi.prompt(text);
+  assert.equal(answered(pi), PERSONAL.super, "a lighter prompt stays on the warm stronger model when runs are short");
+  // Three runs of one request each are measured, so the run is one request; every prompt so far
+  // needed SUPER, so astra's level is needed again for sure (q = 1).
+  const workload = shortRuns(WARM + OUT + promptSize(text), 1);
+  const stay = expectedRun("super", WARM, true, workload);
+  const leaving = expectedLeaving("super", WARM, 1, 0.97);
+  const cheapestOther = Math.min(expectedRun("medium", 0, false, workload), expectedRun("high", 0, false, workload)) + leaving;
+  assert.equal(afterDemand(pi, "personal MEDIUM → gpt-6-astra"), `; stayed, ${money(stay)} vs ${money(cheapestOther)}`, "the footer shows the two costs: astra's, and the cheapest move's");
+  const terms = { outcome: "stayed", chosen: PERSONAL.super, current: PERSONAL.super, requests: 1, horizon: 1, again: 1 };
+  assert.deepEqual(fields(costOf(pi), terms), terms, "a lighter prompt stays on the warm stronger model when runs are short");
+  assert.deepEqual(world.refCounts(), { [PERSONAL.super]: 4 });
+});
+
+test("C3 lighter prompts in a row move down, and the session then stays down", TIMEOUT, async (t) => {
+  const world = levelsWorld(t, { fleet: pricedLevelsFleet() });
+  const pi = await threeSuper(world);
+  const codex = world.faux("openai-codex-2");
+  const medium = async (text: string, usage: Parameters<typeof reply>[1]): Promise<number> => {
+    world.jev.answer(JEV.medium);
+    codex.respond(reply(codex, usage));
+    await pi.prompt(text);
+    return promptSize(text);
+  };
+  // The first lighter prompt is priced one run deep, the second two, the third three (the horizon);
+  // the chance SUPER is needed again falls from 3/3 to 3/4 and 3/5.
+  const expectations: Array<[number, number]> = [
+    [1, 1],
+    [2, 0.75],
+    [3, 0.6],
+  ];
+  const texts = ["Check the error paths", "Review the retry loop", "Tidy the parser notes"];
+  for (const [index, [horizon, again]] of expectations.entries()) {
+    const text = texts[index] ?? "";
+    const moves = index === 2;
+    const size = await medium(text, moves ? { input: WARM + 1_000, output: OUT } : { cacheRead: WARM, output: OUT });
+    const workload = shortRuns(WARM + OUT + size, horizon);
+    const stay = expectedRun("super", WARM, true, workload);
+    const leaving = expectedLeaving("super", WARM, again, 0.97);
+    const terra = expectedRun("medium", 0, false, workload) + leaving;
+    const sol = expectedRun("high", 0, false, workload) + leaving;
+    if (moves) {
+      assert.equal(answered(pi), PERSONAL.medium, "lighter prompts in a row move down: the third, priced three runs deep, goes to terra");
+      assert.equal(afterDemand(pi, "personal MEDIUM → gpt-6.1-terra"), `; moved, ${money(terra)} vs ${money(stay)}`, "the third lighter prompt moves down");
+    } else {
+      assert.equal(answered(pi), PERSONAL.super, `lighter prompt ${index + 1} of three stays on astra`);
+      assert.equal(afterDemand(pi, "personal MEDIUM → gpt-6-astra"), `; stayed, ${money(stay)} vs ${money(Math.min(terra, sol))}`, `lighter prompt ${index + 1} stays`);
+    }
+    const terms = { requests: 1, horizon, again };
+    assert.deepEqual(fields(costOf(pi), terms), terms, `lighter prompt ${index + 1}: its horizon and q`);
+  }
+  // The session then stays down: terra, warm, against sol cold and astra warm, both with what
+  // leaving terra costs. Every prompt so far needed MEDIUM or more (q = 1), and the last one took
+  // its own level, so the horizon is 1 again.
+  const terraCached = WARM + 1_000;
+  const size = await medium("Then fix the parser notes", { cacheRead: terraCached, output: OUT });
+  assert.equal(answered(pi), PERSONAL.medium, "the session then stays down");
+  const workload = shortRuns(terraCached + OUT + size, 1);
+  const leaving = expectedLeaving("medium", terraCached, 1, 0.97);
+  const stay = expectedRun("medium", terraCached, true, workload);
+  const others = Math.min(expectedRun("high", 0, false, workload) + leaving, expectedRun("super", WARM, true, workload) + leaving);
+  assert.equal(afterDemand(pi, "personal MEDIUM → gpt-6.1-terra"), `; stayed, ${money(stay)} vs ${money(others)}`, "the session then stays down");
+  assert.deepEqual(world.refCounts(), { [PERSONAL.super]: 5, [PERSONAL.medium]: 2 });
+});
+
+test("C4 a tag goes to its level whatever the costs", TIMEOUT, async (t) => {
+  const world = levelsWorld(t, { fleet: pricedLevelsFleet() });
+  // The session C2 starts from, where an untagged MEDIUM prompt stays on astra.
+  const pi = await threeSuper(world);
+  await pi.prompt("Check the error paths #medium");
+  assert.equal(answered(pi), PERSONAL.medium, "a tag goes to its level whatever the costs");
+  assert.equal(pi.ui.status(LEVEL_KEY), "personal MEDIUM → gpt-6.1-terra (tag)", "a tagged run is never priced");
+  const tagged = { source: "tag", tag: "medium", need: "medium", tier: "medium", cost: undefined, ref: PERSONAL.medium };
+  assert.deepEqual(fields(runRecords(pi).at(-1), tagged), tagged, "a tag goes to its level whatever the costs");
+  // Back at SUPER by tag, the run goes to astra, though terra answered last.
+  await pi.prompt("Survey the options once more #super");
+  assert.equal(answered(pi), PERSONAL.super);
+  assert.equal(pi.ui.status(LEVEL_KEY), "personal SUPER → gpt-6-astra (tag)");
+});
+
+test("C5 a conversation too large for the cheaper model is compacted before the move", TIMEOUT, async (t) => {
+  const world = levelsWorld(t, { fleet: pricedLevelsFleet({ [PERSONAL.medium]: { contextWindow: 128_000 } }) });
+  const codex = world.faux("openai-codex-2");
+  const history200k = history(world, "smart-router/auto", [["Load the fixtures", response(codex, { id: "gpt-6-astra", tokens: 200_000 })]]);
+  const pi = await world.start({ sessionManager: history200k });
+  const text = "Check the error paths";
+  world.jev.answer(JEV.medium);
+  const mark = world.trace.length;
+  await pi.prompt(text);
+  assert.deepEqual(
+    requestsOf(traceFrom(world, mark)),
+    [
+      [PERSONAL.super, "summary"],
+      [PERSONAL.medium, "run"],
+    ],
+    "a conversation too large for the cheaper model is compacted before the move: the summary on astra, then the run on terra",
+  );
+  assert.deepEqual(
+    pi.eventsOf("compaction_start").map((event) => event.reason),
+    ["threshold"],
+    "exactly one compaction",
+  );
+  assert.equal(answered(pi), PERSONAL.medium);
+  // Nothing measured yet: the default shape, q = 0.5, horizon 1. terra's cost is astra's summary
+  // (its first request and 4,000 tokens of output) and the run on what is left, 1 token kept and
+  // the 4,000-token summary, with nothing cached; leaving astra costs q times that size at its
+  // uncached premium.
+  const tokens = 200_000 + promptSize(text);
+  const workload: Workload = { tokens, ...DEFAULT_SHAPE, horizon: 1 };
+  const stay = expectedRun("super", 200_000, true, workload);
+  const after = 1 + 4_000;
+  const summary = expectedRun("super", 200_000, true, { tokens, requests: 1, output: 0, growth: 0, seconds: 0, horizon: 1 }) + 4_000 * perToken("super").output;
+  const astra = perToken("super");
+  const terra = summary + expectedRun("medium", 0, false, { ...workload, tokens: after }) + 0.5 * after * (astra.input - astra.cacheRead);
+  assert.equal(afterDemand(pi, "personal MEDIUM → gpt-6.1-terra"), `; moved, ${money(terra)} vs ${money(stay)}`, "the move is priced with its compaction");
+  const candidates = (costOf(pi).candidates ?? []) as Array<Record<string, unknown>>;
+  assert.deepEqual(
+    candidates.map((row) => [row.ref, row.compacts]),
+    [
+      [PERSONAL.medium, true],
+      [PERSONAL.high, false],
+      [PERSONAL.super, false],
+    ],
+    "only terra compacts first",
+  );
+  assert.deepEqual(pi.ui.saw(/can take this run/), [], "no step-up");
+});
+
+test("C6 with compaction disabled there is no such move: the run goes to the first level that fits", TIMEOUT, async (t) => {
+  const world = levelsWorld(t, { fleet: pricedLevelsFleet({ [PERSONAL.medium]: { contextWindow: 128_000 } }), compaction: { enabled: false } });
+  const codex = world.faux("openai-codex-2");
+  const history200k = history(world, "smart-router/auto", [["Load the fixtures", response(codex, { id: "gpt-6-astra", tokens: 200_000 })]]);
+  const pi = await world.start({ sessionManager: history200k });
+  world.jev.answer(JEV.medium);
+  const mark = world.trace.length;
+  await pi.prompt("Check the error paths");
+  assert.deepEqual(requestsOf(traceFrom(world, mark)), [[PERSONAL.high, "run"]], "with compaction disabled there is no such move: nothing is summarized, and HIGH's model takes the run");
+  assert.deepEqual(pi.eventsOf("compaction_start"), [], "compaction is disabled");
+  assert.equal(answered(pi), PERSONAL.high);
+  assert.equal(notice(pi, /can take this run/), "pi-smart-router: no MEDIUM model can take this run, so it goes to HIGH (gpt-6.1-sol).");
+  assert.equal(afterDemand(pi, "personal MEDIUM → gpt-6.1-sol"), "", "a run that steps up is not priced");
+  const record = { need: "medium", tier: "high", steppedUp: true, cost: undefined, ref: PERSONAL.high };
+  assert.deepEqual(fields(runRecords(pi).at(-1), record), record, "with compaction disabled the run goes to the first level that fits");
+});
+
+/** A run of three tool calls that read `paths` in turn, then an answer. */
+function readsThenAnswer(paths: readonly string[]): AssistantMessage[] {
+  return [
+    ...paths.map((path, index) => fauxAssistantMessage([fauxToolCall("read", { path }, { id: `read-${index + 1}` })], { stopReason: "toolUse" })),
+    fauxAssistantMessage("done"),
+  ];
+}
+
+/** The failed tool results of a session, as [tool, failed]. */
+const toolResults = (pi: Pi): unknown[][] =>
+  pi.session.messages.flatMap((message) => (message.role === "toolResult" ? [[message.toolName, message.isError]] : []));
+
+test("C7 three identical failed tool calls move the run up one level, with a notice", TIMEOUT, async (t) => {
+  const world = levelsWorld(t);
+  const codex = world.faux("openai-codex-2");
+  const pi = await world.start({ select: "smart-router/auto", tools: ["read"] });
+  world.jev.answer(JEV.medium);
+  codex.respond(...readsThenAnswer(["missing.txt", "missing.txt", "missing.txt"]));
+  await pi.prompt("Tidy the zebra notes");
+  assert.deepEqual(
+    toolResults(pi),
+    [
+      ["read", true],
+      ["read", true],
+      ["read", true],
+    ],
+    "Pi ran each read and it failed",
+  );
+  assert.deepEqual(
+    codex.calls.map((call) => call.ref),
+    [PERSONAL.medium, PERSONAL.medium, PERSONAL.medium, PERSONAL.high],
+    "three identical failed tool calls move the run up one level: the fourth request goes to HIGH's model",
+  );
+  assert.equal(answered(pi), PERSONAL.high);
+  assert.equal(count(pi, "pi-smart-router: this run's last three tool calls failed the same way, so it moves up from MEDIUM to HIGH (gpt-6.1-sol)."), 1, "with a notice, once");
+  assert.equal(pi.ui.status(LEVEL_KEY), "personal MEDIUM → gpt-6.1-sol (demand 1.0; escalated)", "the footer follows the run up: the blend of 80% MEDIUM and the heuristics is 1.01 (L7)");
+  assert.equal(await lastDecision(pi), "smart-router/auto continuation: high → openai-codex-2/gpt-6.1-sol (escalate)");
+  const record = { need: "medium", tier: "medium", escalated: true, ref: PERSONAL.high };
+  assert.deepEqual(fields(runRecords(pi).at(-1), record), record, "one record, which says the run escalated");
+  assert.equal(runRecords(pi).length, 1);
+});
+
+test("C8 three different failures do not", TIMEOUT, async (t) => {
+  const world = levelsWorld(t);
+  const codex = world.faux("openai-codex-2");
+  const pi = await world.start({ select: "smart-router/auto", tools: ["read"] });
+  world.jev.answer(JEV.medium);
+  codex.respond(...readsThenAnswer(["missing-1.txt", "missing-2.txt", "missing-3.txt"]));
+  await pi.prompt("Tidy the zebra notes");
+  assert.deepEqual(toolResults(pi), [
+    ["read", true],
+    ["read", true],
+    ["read", true],
+  ]);
+  assert.deepEqual(codex.calls.map((call) => call.ref), [PERSONAL.medium, PERSONAL.medium, PERSONAL.medium, PERSONAL.medium], "three different failures do not move the run");
+  assert.deepEqual(pi.ui.saw(/failed the same way/), [], "three different failures do not: no notice");
+  assert.equal(pi.ui.status(LEVEL_KEY), "personal MEDIUM → gpt-6.1-terra (demand 1.0; cost unknown)", "three different failures do not: the footer is the plan's; these fakes carry no prices");
+  assert.equal(runRecords(pi).at(-1)?.escalated, undefined);
+});
+
+test("C9 a version 2 roster without demand or switching routes with the defaults", TIMEOUT, async (t) => {
+  const text = fixture("roster-hera-v2.json");
+  const parsed = JSON.parse(text) as Record<string, unknown>;
+  assert.deepEqual([parsed.version, "demand" in parsed, "switching" in parsed], [2, false, false], "the fixture has neither section");
+  const world = new World(t, {
+    roster: text,
+    multiPass: LABELS,
+    fleet: pricedLevelsFleet(),
+    settings: { ...BASE_SETTINGS, defaultProvider: "smart-router", defaultModel: "auto" },
+  });
+  const codex = world.faux("openai-codex-2");
+  const pi = await world.start({ sessionManager: history(world, "smart-router/auto", [["Load the fixtures", response(codex, { id: "gpt-6-astra", tokens: 60_000 })]]) });
+  await pi.command("check");
+  const check = notice(pi, /^pi-smart-router check/).split("\n");
+  for (const line of [
+    "Demand: Jev's answer counts 4 and the heuristics 1 at full confidence; under 60% confidence the heuristics can only raise the level.",
+    "  LOW under 0.75, MEDIUM under 1.5, HIGH under 2.25, SUPER from there; within 0.1 under a cut takes the level above.",
+    "Switching: a move must cost at least 15% less than staying; lighter prompts in a row are priced up to 5 runs ahead.",
+    "  A model's cache is taken to survive 97% up to 1 min, 92% up to 5 min, 87% up to 20 min, 79% up to 30 min, 66% up to 1 h, 50% up to 2 h, 38% up to 6 h, 11% up to 24 h, and not after.",
+  ]) {
+    assert.ok(check.includes(line), `the defaults are in effect: ${line}`);
+  }
+  // The fixture's classifier is not in this runtime: the heuristics decide alone, and the cost rule
+  // prices with the default figures.
+  // Nothing measured yet: the default run of five requests, q = 0.5, horizon 1. Over five requests
+  // astra's output outweighs its warm cache, and terra is cheaper by more than the default margin.
+  const prompt = PROMPTS.plain;
+  await pi.prompt(prompt);
+  const workload: Workload = { tokens: 60_000 + promptSize(prompt), ...DEFAULT_SHAPE, horizon: 1 };
+  const stay = expectedRun("super", 60_000, true, workload);
+  const terra = expectedRun("medium", 0, false, workload) + expectedLeaving("super", 60_000, 0.5, 0.92);
+  assert.ok(terra < stay * (1 - 0.15), `terra, ${terra}, is cheaper than astra, ${stay}, by more than 15%`);
+  assert.equal(answered(pi), PERSONAL.medium, "routed with the defaults: the move pays");
+  assert.equal(afterDemand(pi, "personal MEDIUM → gpt-6.1-terra"), `, jev unavailable; moved, ${money(terra)} vs ${money(stay)}`, "routed with the defaults");
+  const terms = { outcome: "moved", current: PERSONAL.super, requests: DEFAULT_SHAPE.requests, horizon: 1, again: 0.5 };
+  assert.deepEqual(fields(costOf(pi), terms), terms, "routed with the defaults");
+});
+
+test("C10 a version 1 roster moves at every prompt its keywords say to, with no hold", TIMEOUT, async (t) => {
+  // stickyIdleMinutes, the removed hold's setting, is accepted and ignored.
+  const world = new World(t, { roster: { ...ROSTER, stickyIdleMinutes: 5 } });
+  const pi = await world.start({ select: "smart-router/auto" });
+  const answers: string[] = [];
+  for (const text of [PROMPTS.complex, PROMPTS.plain, PROMPTS.complex, PROMPTS.trivial, PROMPTS.planning, PROMPTS.plain]) {
+    await pi.prompt(text);
+    const message = pi.lastAssistant();
+    answers.push(`${message?.provider}/${message?.model}`);
+  }
+  assert.deepEqual(
+    answers,
+    ["cloud-a/m", "cloud-b/m", "cloud-a/m", "cloud-b/m", "codex-like/m", "cloud-b/m"],
+    "a version 1 roster moves at every prompt its keywords say to, with no hold: each lighter prompt leaves the stronger model at once",
+  );
+  await pi.command("history 6");
+  assert.deepEqual(
+    notice(pi, /routing decisions/)
+      .split("\n")
+      .slice(1)
+      .map((line) => /\((signal:\w+)/.exec(line)?.[1]),
+    ["signal:complex", "signal:default", "signal:complex", "signal:trivial", "signal:planning", "signal:default"],
+  );
+  assert.deepEqual(entriesOf(pi, LEVEL_ENTRY), [], "a version 1 run has no level");
+  assert.deepEqual(world.jev.calls, []);
+});
+
+test("C11 a work session never leaves the work account", TIMEOUT, async (t) => {
+  const world = levelsWorld(t);
+  const work = world.faux("openai-codex-3");
+  const pi = await world.start({ select: "smart-router/auto", tools: ["read"] });
+  await pi.command("scope work");
+  world.jev.answer(JEV.low);
+  await pi.prompt("Rename the helper");
+  assert.equal(answered(pi), WORK.low);
+  world.jev.answer(JEV.super);
+  await pi.prompt("Survey the options for the session store");
+  assert.equal(answered(pi), WORK.super);
+  world.jev.answer(JEV.medium);
+  work.respond(...readsThenAnswer(["missing.txt", "missing.txt", "missing.txt"]));
+  await pi.prompt("Tidy the zebra notes");
+  assert.equal(answered(pi), WORK.high, "the escalation stays on the work account");
+  assert.equal(count(pi, "pi-smart-router: this run's last three tool calls failed the same way, so it moves up from MEDIUM to HIGH (gpt-6.1-sol)."), 1);
+  assert.match(pi.ui.status(LEVEL_KEY) ?? "", /^work MEDIUM → gpt-6\.1-sol \(demand \d\.\d; escalated\)$/);
+  assert.deepEqual(called(world.counts()), { "openai-codex-3": 6 }, "a work session never leaves the work account: a LOW, a SUPER and an escalated run of four requests");
+  assert.deepEqual(
+    work.calls.map((call) => call.ref),
+    [WORK.low, WORK.super, WORK.medium, WORK.medium, WORK.medium, WORK.high],
+  );
+});
+
+test("C12 no request is added to a prompt: one Jev call and one model call per planned one-request run", TIMEOUT, async (t) => {
+  const world = levelsWorld(t, { fleet: pricedLevelsFleet() });
+  const codex = world.faux("openai-codex-2");
+  const pi = await world.start({ select: "smart-router/auto" });
+  const requests = (): number => Object.values(world.counts()).reduce((sum, value) => sum + value, 0);
+  const prompts: Array<[Tier, string]> = [
+    ["low", "Rename the helper"],
+    ["super", "Survey the options for the session store"],
+    ["medium", "Check the error paths"],
+    ["high", "Review the retry loop"],
+  ];
+  for (const [index, [tier, text]] of prompts.entries()) {
+    const before = [world.jev.calls.length, requests()];
+    world.jev.answer(JEV[tier]);
+    codex.respond(reply(codex, { input: 10_000 * (index + 1), output: OUT }));
+    await pi.prompt(text);
+    assert.deepEqual([world.jev.calls.length, requests()], [(before[0] ?? 0) + 1, (before[1] ?? 0) + 1], `no request is added to the ${tier} prompt: one Jev call and one model call`);
+  }
+  assert.deepEqual(
+    runRecords(pi).map((record) => (record.cost as { readonly outcome?: unknown } | undefined)?.outcome !== "unknown"),
+    [false, true, true, true],
+    "the runs after the first were priced, and pricing sent nothing",
+  );
+});
+
+test("C13 a session an earlier version pinned routes by level, with one notice", TIMEOUT, async (t) => {
+  const world = levelsWorld(t);
+  const codex = world.faux("openai-codex-2");
+  const pinned = history(world, "smart-router/auto", [["Load the fixtures", response(codex, { id: "gpt-6.1-terra", tokens: 1_000 })]]);
+  pinned.appendCustomEntry(PIN_ENTRY, { v: 1, on: true, at: Date.now() - 60_000, local: { refs: ["local-a/m"], providers: ["local-a"], hosts: ["localhost"] } });
+  const pi = await world.start({ sessionManager: pinned });
+  world.jev.answer(JEV.low);
+  await pi.prompt("Rename the helper");
+  assert.equal(answered(pi), PERSONAL.low, "a session an earlier version pinned routes by level");
+  world.jev.answer(JEV.super);
+  await pi.prompt("Survey the options for the session store");
+  assert.equal(answered(pi), PERSONAL.super);
+  const PIN_NOTICE =
+    "pi-smart-router: an earlier version pinned this session to local models. The pin has been removed and is ignored: smart-router/auto routes by level here. Select smart-router/local to route locally.";
+  assert.equal(count(pi, PIN_NOTICE), 1, "with one notice");
+  assert.equal(world.faux("local-a").callCount, 0, "nothing went to the local model");
+  assert.equal(world.jev.calls.length, 2, "Jev was asked for each prompt");
+});
+
+test("C14 right after a compaction the next prompt's cost is unknown, and the one after is priced again", TIMEOUT, async (t) => {
+  const world = levelsWorld(t, { fleet: pricedLevelsFleet() });
+  const codex = world.faux("openai-codex-2");
+  const pi = await world.start({ select: "smart-router/auto" });
+  world.jev.answer(JEV.super);
+  codex.respond(reply(codex, { cacheRead: WARM, output: OUT }));
+  await pi.prompt("Survey the options for the session store");
+  assert.equal(answered(pi), PERSONAL.super);
+  // Pi's own compaction, as /compact runs it: astra writes the summary.
+  const mark = world.trace.length;
+  await pi.session.compact();
+  assert.deepEqual(requestsOf(traceFrom(world, mark)), [[PERSONAL.super, "summary"]]);
+  assert.equal(pi.eventsOf("compaction_start").length, 1);
+
+  world.jev.answer(JEV.medium);
+  const compacted = 5_000;
+  codex.respond(reply(codex, { input: compacted, output: OUT }));
+  await pi.prompt("Check the error paths");
+  assert.equal(answered(pi), PERSONAL.medium, "right after a compaction the needed level's own model answers");
+  assert.equal(afterDemand(pi, "personal MEDIUM → gpt-6.1-terra"), "; cost unknown", "right after a compaction the next prompt's cost is unknown");
+  assert.deepEqual(costOf(pi), { outcome: "unknown", why: "no usage yet" }, "the conversation's size is unknown until the next answer");
+
+  // The one after is priced again: two runs measured, so the default shape; q = 0.5; astra's cache
+  // went with the compaction.
+  const text = "Review the retry loop";
+  world.jev.answer(JEV.medium);
+  codex.respond(reply(codex, { cacheRead: compacted, output: OUT }));
+  await pi.prompt(text);
+  assert.equal(answered(pi), PERSONAL.medium);
+  const workload: Workload = { tokens: compacted + OUT + promptSize(text), ...DEFAULT_SHAPE, horizon: 1 };
+  const stay = expectedRun("medium", compacted, true, workload);
+  const leaving = expectedLeaving("medium", compacted, 0.5, 0.92);
+  const others = Math.min(expectedRun("high", 0, false, workload), expectedRun("super", 0, false, workload)) + leaving;
+  assert.equal(afterDemand(pi, "personal MEDIUM → gpt-6.1-terra"), `; stayed, ${money(stay)} vs ${money(others)}`, "the prompt after that is priced again");
+});
+
+/** One route request Pi's runtime made for a virtual model, and what the router returned. */
+interface Routed {
+  readonly reason: string;
+  readonly thinkingLevel: string;
+  readonly messages: ReadonlyArray<readonly [string, string]>;
+  readonly ref: string;
+  readonly routedLevel: string | undefined;
+}
+
+/** The text of a message's content. */
+function contentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((block: unknown) => (typeof block === "object" && block !== null && "text" in block && typeof block.text === "string" ? block.text : "")).join("\n");
+}
+
+/** Record every route request the session's runtime resolves from now on: its reason, level and messages as [role, text], and the route. */
+function routesOf(pi: Pi): Routed[] {
+  const runtime = pi.session.modelRuntime;
+  const resolve = runtime.resolveModel.bind(runtime);
+  const seen: Routed[] = [];
+  runtime.resolveModel = async (model, messages, options) => {
+    const route = await resolve(model, messages, options);
+    seen.push({
+      reason: options.reason,
+      thinkingLevel: options.thinkingLevel,
+      messages: messages.map((message) => [message.role, contentText(message.content)] as const),
+      ref: `${route.model.provider}/${route.model.id}`,
+      routedLevel: route.thinkingLevel,
+    });
+    return route;
+  };
+  return seen;
+}
+
+test("C15 a run an extension starts without a prompt takes the level the session last needed", TIMEOUT, async (t) => {
+  const world = levelsWorld(t, { fleet: pricedLevelsFleet() });
+  const codex = world.faux("openai-codex-2");
+  const pi = await world.start({ select: "smart-router/auto" });
+  world.jev.answer(JEV.high);
+  const size = 20_000;
+  codex.respond(reply(codex, { input: size, output: OUT }));
+  await pi.prompt("Review the retry loop");
+  assert.equal(answered(pi), PERSONAL.high);
+  assert.equal(runRecords(pi).length, 1);
+  const routes = routesOf(pi);
+  const mark = codex.calls.length;
+  await pi.custom("continue the review");
+  // What Pi's runtime gives the router for such a run: a continuation, whose messages end with the
+  // extension's message as a user message.
+  assert.deepEqual(
+    routes.map((route) => [route.reason, route.messages.at(-1)]),
+    [["continuation", ["user", "continue the review"]]],
+    "Pi routes a run an extension starts as a continuation, with the extension's message last, as a user message",
+  );
+  assert.equal(world.jev.calls.length, 1, "Jev is not asked for a run without a prompt");
+  assert.equal(await lastDecision(pi), "smart-router/auto continuation: high → openai-codex-2/gpt-6.1-sol (run:need)", "the run takes the level the session last needed");
+  // HIGH: sol, warm, against astra cold with what leaving sol costs. One run measured, so the
+  // default shape, and q = 0.5; no prompt is added to the conversation.
+  const workload: Workload = { tokens: size + OUT, ...DEFAULT_SHAPE, horizon: 1 };
+  const stay = expectedRun("high", size, true, workload);
+  const astra = expectedRun("super", 0, false, workload) + expectedLeaving("high", size, 0.5, 0.92);
+  assert.equal(pi.ui.status(LEVEL_KEY), `personal HIGH → gpt-6.1-sol (run; stayed, ${money(stay)} vs ${money(astra)})`, "the run's footer");
+  assert.deepEqual(
+    codex.calls.slice(mark).map((call) => call.ref),
+    [PERSONAL.high],
+    "the request really goes to the model the footer names",
+  );
+  assert.equal(routes[0]?.ref, PERSONAL.high);
+  assert.equal(runRecords(pi).length, 1, "no second level record is written");
+});
+
+test("C16 a request carries the thinking level its price assumed", TIMEOUT, async (t) => {
+  const world = levelsWorld(t, { fleet: pricedLevelsFleet() });
+  const codex = world.faux("openai-codex-2");
+  const pi = await world.start({ select: "smart-router/auto" });
+  pi.session.setThinkingLevel("high");
+  world.jev.answer(JEV.high);
+  const size = 20_000;
+  codex.respond(reply(codex, { input: size, output: OUT }));
+  await pi.prompt("Review the retry loop");
+  assert.equal(answered(pi), PERSONAL.high);
+  assert.equal(pi.lastAssistant()?.thinkingLevel, "high", "sol answered at high");
+  // Another level, which sol is sent as another effort: its cache does not count.
+  pi.session.setThinkingLevel("medium");
+  const routes = routesOf(pi);
+  const mark = codex.calls.length;
+  const text = "Tidy the zebra notes";
+  world.jev.answer(JEV.medium);
+  codex.respond(reply(codex, { input: size + 1_000, output: OUT }));
+  await pi.prompt(text);
+  const candidates = (costOf(pi).candidates ?? []) as Array<Record<string, unknown>>;
+  assert.deepEqual(
+    candidates.map((row) => [row.ref, row.cached]),
+    [
+      [PERSONAL.medium, 0],
+      [PERSONAL.high, 0],
+      [PERSONAL.super, 0],
+    ],
+    "a request carries the thinking level its price assumed: sol, the current model, is priced with nothing cached at the new effort",
+  );
+  assert.equal(costOf(pi).current, PERSONAL.high);
+  assert.equal(answered(pi), PERSONAL.medium);
+  const workload: Workload = { tokens: size + OUT + promptSize(text), ...DEFAULT_SHAPE, horizon: 1 };
+  assert.equal(
+    afterDemand(pi, "personal MEDIUM → gpt-6.1-terra"),
+    `; moved, ${money(expectedRun("medium", 0, false, workload))} vs ${money(expectedRun("high", 0, false, workload))}`,
+    "with nothing cached on sol, leaving it costs nothing",
+  );
+  assert.deepEqual(
+    routes.map((route) => [route.thinkingLevel, route.ref, route.routedLevel]),
+    [["medium", PERSONAL.medium, "medium"]],
+    "the router returned the level the request carried",
+  );
+  assert.deepEqual(
+    codex.calls.slice(mark).map((call) => [call.ref, call.reasoning]),
+    [[PERSONAL.medium, "medium"]],
+    "a request carries the thinking level its price assumed: the faux provider received medium",
+  );
+  assert.equal(pi.lastAssistant()?.thinkingLevel, "medium");
 });

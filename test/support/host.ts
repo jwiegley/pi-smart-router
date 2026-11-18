@@ -21,8 +21,11 @@
 // with the payload it would send, as Pi's real chat APIs do, and records what it would have sent,
 // so the payload barrier can be observed; a provider marked `ignoresAbort` also streams on after
 // an abort, as Codex's reused WebSocket does. A provider serves one model, or several, as a Codex
-// account does. Every call is appended to the world's trace, next to what a
-// pi-cache-optimizer-shaped probe resolved through the routing registry at the same hooks.
+// account does, each with a price of its own if given. A scripted reply that response() gave a
+// usage reports that usage, where pi-ai's faux core would report its estimate from the request's
+// text, so that a scenario sets the sizes the cost rule prices. Every call is appended to the
+// world's trace, next to what a pi-cache-optimizer-shaped probe resolved through the routing
+// registry at the same hooks.
 //
 // Jev is faked too: a classifier provider, jev-fake, registered with every ModelRuntime after the
 // faux providers through pi-ai's provider `classifiers` hook, so the router reaches it as it reaches
@@ -38,6 +41,7 @@ import { createFauxCore, createProvider, fauxAssistantMessage } from "@earendil-
 import type {
   Api,
   AssistantMessage,
+  AssistantMessageEvent,
   AssistantMessageEventStream,
   ClassifierAnswer,
   ClassifierApi,
@@ -47,9 +51,11 @@ import type {
   ClassifierResult,
   FauxResponseFactory,
   Model,
+  ModelThinkingLevel,
   Provider,
   SimpleStreamOptions,
   TranscriptContext,
+  Usage,
 } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
@@ -146,12 +152,14 @@ installBoundedReaders();
 
 // ─── Faux providers ──────────────────────────────────────────────────────────
 
-/** A model of a faux provider that serves several: its id, and limits of its own. */
+/** A model of a faux provider that serves several: its id, and limits and a price of its own. */
 export interface FauxModel {
   readonly id: string;
   /** The spec's limits unless given. */
   readonly contextWindow?: number;
   readonly maxTokens?: number;
+  /** The spec's price unless given. */
+  readonly cost?: Model<Api>["cost"];
 }
 
 export interface FauxSpec {
@@ -214,6 +222,8 @@ export class Faux {
   readonly calls: FauxCall[] = [];
   readonly #core: ReturnType<typeof createFauxCore>;
   readonly #callOf = new WeakMap<object, FauxCall>();
+  /** The usage a call's scripted reply reports in place of the core's estimate (response's `usage`). */
+  readonly #usageOf = new WeakMap<FauxCall, Usage>();
 
   constructor(spec: FauxSpec, trace: TraceEntry[]) {
     this.spec = spec;
@@ -227,7 +237,7 @@ export class Faux {
         reasoning: spec.reasoning ?? false,
         contextWindow: entry.contextWindow ?? spec.contextWindow ?? 128_000,
         maxTokens: entry.maxTokens ?? spec.maxTokens ?? 16_384,
-        ...(spec.cost === undefined ? {} : { cost: spec.cost }),
+        ...((entry.cost ?? spec.cost) === undefined ? {} : { cost: entry.cost ?? spec.cost }),
       })),
     });
     const models = this.#core.models as Array<Model<Api>>;
@@ -263,7 +273,7 @@ export class Faux {
       const forwarded: SimpleStreamOptions = spec.ignoresAbort === true || signal === undefined ? rest : { ...rest, signal };
       this.#callOf.set(forwarded, call);
       if (this.#core.getPendingResponseCount() === 0) this.respond(fauxAssistantMessage(`ok from ${call.ref}`));
-      return this.#core.stream(requestModel, context, forwarded);
+      return this.#reporting(call, this.#core.stream(requestModel, context, forwarded));
     };
     this.provider = createProvider({
       id: spec.provider,
@@ -277,6 +287,31 @@ export class Faux {
     return this.#core.state.callCount;
   }
 
+  /**
+   * The core's stream, except that a reply whose usage was scripted (response's `usage`) reports
+   * that usage, in every event and in the result, where the core would report its estimate from
+   * the request's text.
+   */
+  #reporting(call: FauxCall, stream: AssistantMessageEventStream): AssistantMessageEventStream {
+    const keep = (message: AssistantMessage): void => {
+      const usage = this.#usageOf.get(call);
+      if (usage !== undefined) message.usage = { ...usage, cost: { ...usage.cost } };
+    };
+    const push = stream.push.bind(stream);
+    const end = stream.end.bind(stream);
+    stream.push = (event: AssistantMessageEvent): void => {
+      if (event.type === "done") keep(event.message);
+      else if (event.type === "error") keep(event.error);
+      else keep(event.partial);
+      push(event);
+    };
+    stream.end = (result?: AssistantMessage): void => {
+      if (result !== undefined) keep(result);
+      end(result);
+    };
+    return stream;
+  }
+
   /** Queue scripted replies, which any of its models' requests take in turn. Each sends its payload first; once they run out, the provider says "ok from <ref>". */
   respond(...steps: FauxStep[]): void {
     this.#core.appendResponses(
@@ -285,11 +320,17 @@ export class Faux {
         const payload = { model: model.id, messages: context.messages.length, max_output_tokens: options?.maxTokens, input: call?.lastUser };
         const replaced = options?.onPayload === undefined ? undefined : await options.onPayload(payload, model);
         if (call !== undefined) call.payload = replaced === undefined ? payload : replaced;
-        if (typeof step !== "function") return step;
+        if (typeof step !== "function") return this.#scripted(call, step);
         if (call === undefined) throw new Error(`${this.ref}: a reply without its call`);
-        return step(call);
+        return this.#scripted(call, await step(call));
       }),
     );
+  }
+
+  /** A scripted reply, whose usage, when response() was given one, the call reports. */
+  #scripted(call: FauxCall | undefined, message: AssistantMessage): AssistantMessage {
+    if (call !== undefined && KEPT_USAGE.has(message)) this.#usageOf.set(call, message.usage);
+    return message;
   }
 
   /** The calls of session requests (not summaries) of a session. */
@@ -957,24 +998,51 @@ function userMessage(text: string, timestamp = Date.now()): { role: "user"; cont
   return { role: "user", content: [{ type: "text", text }], timestamp };
 }
 
-/** An assistant response from a faux provider's first model, or its model `id`, with a context of `tokens` input tokens. */
+/** The replies response() built with a usage of their own: a faux provider that sends one reports that usage, not its estimate. */
+const KEPT_USAGE = new WeakSet<AssistantMessage>();
+
+/**
+ * An assistant response from a faux provider's first model, or its model `id`, with a context of
+ * `tokens` input tokens, or the `usage` given, whose fields replace those (its total is their sum
+ * unless given). With `usage`, a faux provider that sends it as a scripted reply reports that usage
+ * in place of its own estimate. `thinkingLevel` is the level the agent loop requested, as Pi records
+ * it on a response.
+ */
 export function response(
   faux: Faux,
-  init: { readonly id?: string; readonly tokens?: number; readonly stopReason?: AssistantMessage["stopReason"]; readonly text?: string; readonly timestamp?: number } = {},
+  init: {
+    readonly id?: string;
+    readonly tokens?: number;
+    readonly usage?: Partial<Omit<Usage, "cost">>;
+    readonly thinkingLevel?: ModelThinkingLevel;
+    readonly stopReason?: AssistantMessage["stopReason"];
+    readonly text?: string;
+    readonly timestamp?: number;
+  } = {},
 ): AssistantMessage {
-  const tokens = init.tokens ?? 100;
   const model = init.id === undefined ? faux.model : faux.models.get(init.id);
   if (model === undefined) throw new Error(`faux provider ${faux.spec.provider} serves no model ${init.id ?? ""}`);
-  return {
+  const { input, output, cacheRead, cacheWrite, totalTokens } = { input: init.tokens ?? 100, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: undefined, ...init.usage };
+  const message: AssistantMessage = {
     role: "assistant",
     content: [{ type: "text", text: init.text ?? `earlier answer from ${model.provider}/${model.id}` }],
     api: model.api,
     provider: model.provider,
     model: model.id,
-    usage: { input: tokens, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: tokens, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    usage: {
+      input,
+      output,
+      cacheRead,
+      cacheWrite,
+      totalTokens: totalTokens ?? input + output + cacheRead + cacheWrite,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    ...(init.thinkingLevel === undefined ? {} : { thinkingLevel: init.thinkingLevel }),
     stopReason: init.stopReason ?? "stop",
     timestamp: init.timestamp ?? Date.now(),
   };
+  if (init.usage !== undefined) KEPT_USAGE.add(message);
+  return message;
 }
 
 /** An in-memory session that already holds a conversation: a selection, then user and assistant turns. */
