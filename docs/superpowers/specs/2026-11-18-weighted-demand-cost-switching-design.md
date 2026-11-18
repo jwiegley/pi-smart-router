@@ -207,18 +207,24 @@ have no input here: the requirement vector, which upstream takes from its embedd
 the cluster match. Their weights are zero, so that a missing input does not read as "easy"
 **(designer's call)**.
 
-**The blend.** `demand = (wJ·c·dJ + wH·dH) / (wJ·c + wH)`, with `wJ = 3` and `wH = 1` by default
-**(designer's call)**. A confident Jev carries three quarters of the result; an unsure one carries
-less; without Jev the heuristics decide alone, which replaces today's keyword mapping.
+**The blend.** `demand = (wJ·c·dJ + wH·dH) / (wJ·c + wH)`, with `wJ = 4` and `wH = 1` by default
+**(designer's call)**. A fully confident Jev carries four fifths of the result; an unsure one
+carries less; without Jev the heuristics decide alone, which replaces today's keyword mapping.
+The first three revisions said `wJ = 3`. Pinning the test values showed that with 3, an answer of
+80% SUPER to a short prompt in a new session came out HIGH (2.13, where SUPER starts at 2.15 with
+the close-call allowance), against the intent stated under "Defaults and tuning". With 4 it is
+2.23, and each of the four levels survives an 80% answer on a neutral prompt.
 
 **Guards**, from upstream's plan and John's earlier decisions:
 
 - **Low confidence raises only.** Below `minConfidence` (0.6, upstream's default), the result is
   the higher of `dH` and the blend.
 - **Risky operations get at least HIGH**, by today's keyword triggers, unchanged.
-- **A very deep session gets at least MEDIUM**: more than 100,000 tokens or 1,000 messages. This
-  is upstream's planned floor for the terse "continue" in a long session, which no classifier
-  rates well **(designer's call to include it)**.
+- **A very deep session gets at least MEDIUM**: more than 100,000 tokens, or more than 1,000
+  entries on the branch (Pi counts entries without a read; they stand in for upstream's 1,000
+  messages). This is upstream's planned floor for the terse "continue" in a long session, which
+  no classifier rates well **(designer's call to include it)**. With this default, a conversation
+  over 100,000 tokens never routes to LOW; `deepSessionFloor: "low"` turns the floor off.
 - **Close calls go higher.** A demand within `demand.closeCall` (0.1) below a cut point takes the
   level above it. Today's `classifier.closeCall` compares the probabilities of Jev's two likeliest
   levels; the expected value already carries that, so the old setting is accepted and ignored.
@@ -296,7 +302,9 @@ leaving astra.
 | LOW, a run of one request | $0.13 | luna: $0.02 + $0.05 = $0.06 | moves |
 | MEDIUM, one request, the third such prompt in a row (horizon 3) | $0.33 | terra: $0.18 + $0.05 = $0.23 | moves |
 
-These are test cases; the figures are rounded to cents from exact ones the plan restates.
+These are test cases; the figures are rounded to cents from exact ones the plan restates. The
+LOW row tests the arithmetic: with the default deep-session floor, a 150,000-token conversation
+is never rated LOW.
 
 **When figures are missing** (no usage yet, no price for a model, a clock that went backwards),
 the run takes the needed level's own model, and the record says the cost was unknown.
@@ -421,7 +429,7 @@ John has stays valid.
 
 ```json
 "demand": {
-  "jevWeight": 3, "heuristicsWeight": 1, "minConfidence": 0.6, "closeCall": 0.1,
+  "jevWeight": 4, "heuristicsWeight": 1, "minConfidence": 0.6, "closeCall": 0.1,
   "cuts": [0.75, 1.5, 2.25], "deepSessionFloor": "medium",
   "weights": { "triage_verdict": 0.18, "turn_type": 0.18, "…": "upstream's signals, each optional" }
 },
@@ -538,7 +546,8 @@ Every push and every activation needs John's word at that time.
 
 ## Calls the designer made, for John to check
 
-- Jev's weight is three times the heuristics' at full confidence.
+- Jev's weight is four times the heuristics' at full confidence (three in the first revisions; see
+  "The blend").
 - Jev is still asked one question; upstream's five other questions wait for a later release.
 - The planning signal comes from the fork's own detection, not upstream's file.
 - Signals without an input count for nothing, instead of counting as "easy".
@@ -564,3 +573,6 @@ corrects the statements. None of them needed a decision from John beyond the fiv
 The third revision (2026-11-18) records John's five answers and his approval, and adds the
 finding on thinking effort. It was not sent to a second builder check; the plan's review covers
 it.
+
+The fourth revision (2026-11-18) comes from writing the plan: Jev's default weight is 4, not 3;
+the deep-session floor counts entries; and the LOW worked example is marked as arithmetic.
