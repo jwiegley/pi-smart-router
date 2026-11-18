@@ -8,7 +8,8 @@ import { DEFAULT_DEMAND } from "../src/settings.ts";
 const PATH = new URL("./fixtures/session-review.jsonl", import.meta.url);
 const TEXT = readFileSync(PATH, "utf8");
 const LINES = TEXT.split("\n").filter((line) => line !== "");
-const BASE = 1_700_000_000_000;
+// The fixture's runs are planned 100 ms before Pi appends their prompts, as the router's `at` is.
+const BASE = 1_793_523_599_900;
 
 // Every text the fixture holds, read from the fixture so that a new one is covered too.
 const fixtureTexts = LINES.flatMap((line) => {
@@ -77,6 +78,50 @@ describe("reviewSession", () => {
   });
 });
 
+// A run that John steered in mid-run: the opening prompt, a reply, a steer, a reply, then the record,
+// which the router writes when the agent settles. Appended to the fixture's chain.
+const OPENING = "Design the architecture for the lantern scheduling service and plan its migration across three teams";
+const STEER = "Yes, go ahead";
+const message = (id: string, parentId: string, timestamp: string, role: string, text: string) =>
+  JSON.stringify({ id, parentId, timestamp, type: "message", message: { role, content: [{ type: "text", text }], ...(role === "assistant" ? { usage: { totalTokens: 4000 } } : {}) } });
+const steered = (at: number) => [
+  message("s01", "e10", "2026-11-01T09:20:00.000Z", "user", OPENING),
+  message("s02", "s01", "2026-11-01T09:20:30.000Z", "assistant", "Drafting the plan."),
+  message("s03", "s02", "2026-11-01T09:21:00.000Z", "user", STEER),
+  message("s04", "s03", "2026-11-01T09:21:40.000Z", "assistant", "Done."),
+  JSON.stringify({
+    id: "s05",
+    parentId: "s04",
+    type: "custom",
+    customType: "smart-router.level",
+    data: { v: 1, at, scope: "main", source: "tag", tier: "super", tag: "super" },
+  }),
+];
+const OPENING_AT = Date.parse("2026-11-01T09:20:00.000Z") - 100;
+
+describe("reviewSession, the rated prompt", () => {
+  test("replays the opening prompt of a run that was steered in mid-run, not the steer", () => {
+    const row = reviewSession([...LINES, ...steered(OPENING_AT)], DEFAULT_DEMAND).rows.find((r) => r.at === OPENING_AT);
+    assert.equal(row?.heuristics, "high", "the planning prompt the router rated, not the steer, which names no work and rates lower");
+    assert.equal(row?.truth, "super", "the tag is the run's truth");
+  });
+
+  test("takes the first user message planned at or after the run's time, within two seconds", () => {
+    const early = reviewSession([...LINES, ...steered(OPENING_AT + 1_900)], DEFAULT_DEMAND).rows.find((r) => r.at === OPENING_AT + 1_900);
+    assert.equal(early?.heuristics, "high", "a prompt 1.9 s before `at` is still within the two seconds");
+  });
+
+  test("falls back to the latest user message when none has a time at or after the run's", () => {
+    const late = reviewSession([...LINES, ...steered(OPENING_AT + 3_600_000)], DEFAULT_DEMAND).rows.find((r) => r.at === OPENING_AT + 3_600_000);
+    assert.notEqual(late?.heuristics, "high", "every message is before the record's time, so the latest user message, the steer, stands in");
+  });
+
+  test("falls back to the latest user message when the entries carry no usable time", () => {
+    const untimed = LINES.map((line) => line.replace(/"timestamp":"[^"]*",/, '"timestamp":"not a time",'));
+    assert.deepEqual(reviewSession(untimed, DEFAULT_DEMAND), reviewSession(LINES, DEFAULT_DEMAND), "the fixture's prompts are the latest user messages, so the fallback agrees with the time rule");
+  });
+});
+
 describe("formatReport", () => {
   const review = reviewSession(LINES, DEFAULT_DEMAND);
   const report = formatReport([{ name: "session-review.jsonl", review }]).join("\n");
@@ -88,6 +133,22 @@ describe("formatReport", () => {
     assert.match(report, /blend\s+1\/2\s+50%/, "the blend's rate");
     assert.ok(fixtureTexts.length >= 6, "the fixture holds prompt and reply texts to look for");
     for (const text of fixtureTexts) assert.ok(!report.includes(text), `the report holds the fixture text ${JSON.stringify(text.slice(0, 20))}`);
+  });
+
+  test("counts the runs Jev answered, apart from the runs it did not, for all, tagged and corrected runs", () => {
+    const lines = report.split("\n");
+    const group = (title: RegExp) => lines.slice(lines.findIndex((line) => title.test(line)) + 1, lines.findIndex((line) => title.test(line)) + 4).join("\n");
+    const all = group(/^ {2}all judged: 2 runs/);
+    assert.match(all, /heuristics\s+0\/2\s+0%/, "all: the heuristics matched none of two");
+    assert.match(all, /jev\s+1\/1\s+100%\s+\(answered 1 of 2 runs\)/, "all: Jev's rate is over the one run it answered, not over both");
+    assert.match(all, /blend\s+1\/2\s+50%\s+\(1 run without a Jev answer equals the heuristics\)/, "all: the blend's runs include one that had no Jev answer");
+    const tagged = group(/^ {2}tagged: 1 run/);
+    assert.match(tagged, /heuristics\s+0\/1\s+0%/, "tagged: the heuristics' count");
+    assert.match(tagged, /jev\s+0\/0\s+n\/a\s+\(answered 0 of 1 run\)/, "tagged: a rate over no run is n/a, not 0% or NaN");
+    assert.match(tagged, /blend\s+0\/1\s+0%\s+\(1 run without a Jev answer equals the heuristics\)/, "tagged: the blend equals the heuristics here");
+    const corrected = group(/^ {2}corrected: 1 run/);
+    assert.match(corrected, /jev\s+1\/1\s+100%\s+\(answered 1 of 1 run\)/, "corrected: Jev answered and matched");
+    assert.match(corrected, /blend\s+1\/1\s+100%\s+\(0 runs without a Jev answer equal the heuristics\)/, "corrected: every blend run had a Jev answer");
   });
 
   test("adds a total over several files", () => {
@@ -102,6 +163,7 @@ describe("formatReport", () => {
   test("says so when nothing was judged", () => {
     const empty = formatReport([{ name: "none.jsonl", review: reviewSession([], DEFAULT_DEMAND) }]).join("\n");
     assert.match(empty, /judged 0/, "a count of none");
-    assert.doesNotMatch(empty, /NaN/, "and no rate of nothing");
+    assert.doesNotMatch(empty, /NaN|0%/, "and no rate of nothing");
+    assert.match(empty, /jev\s+0\/0\s+n\/a/, "which reads n/a");
   });
 });

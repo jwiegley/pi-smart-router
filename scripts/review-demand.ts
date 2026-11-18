@@ -7,9 +7,12 @@
 // files named on its command line and nothing else: there is no default directory. It contacts
 // nothing, and what it prints is counts, levels, rates and file names, never a prompt's text.
 //
-// A run's record sits on the session's entry tree after the run's own messages. The prompt is the
-// latest user message before the record on the record's chain of parents; the facts the heuristics
-// read are the latest assistant usage before that prompt, the roles of up to HEURISTIC_MESSAGES
+// A run's record sits on the session's entry tree after the run's own messages, because the router
+// writes it when the agent settles. The prompt is the first user message on the record's chain of
+// parents dated at or after the record's `at` less two seconds (`at` is when the run was planned,
+// just before Pi appends the prompt), so a steer or follow-up in mid-run is not mistaken for it;
+// with no user message dated that late, it is the latest user message before the record. The facts
+// the heuristics read, taken before that prompt, are the latest assistant usage before that prompt, the roles of up to HEURISTIC_MESSAGES
 // messages before it and the number of entries before it on the chain. The record's own `tier` is
 // the level the run took. The truth is the record's `tag`, or the level of a correction that
 // refers to the run's `at`, and a correction made after the tag wins. The script reads the record
@@ -137,10 +140,41 @@ function chainOf(entry: Entry, byId: ReadonlyMap<string, Entry>): Entry[] {
   return chain.reverse();
 }
 
-/** The prompt of the run whose record ends `chain`, with the facts the heuristics read before it. */
-function replayInput(chain: readonly Entry[]): Omit<DemandInput, "jev"> | undefined {
-  let index = chain.length - 2;
-  while (index >= 0 && messageOf(chain[index] as Entry)?.["role"] !== "user") index -= 1;
+/** An entry's time in milliseconds, from its ISO `timestamp`; undefined when it has none or none that parses. */
+function timeOf(entry: Entry): number | undefined {
+  const stamp = own(entry.fields, "timestamp");
+  const time = typeof stamp === "string" ? Date.parse(stamp) : Number.NaN;
+  return Number.isFinite(time) ? time : undefined;
+}
+
+/**
+ * How long before a record's `at` its prompt's entry may be dated. The router stamps `at` when it
+ * plans the run, a moment before Pi appends the prompt's entry, so the entry is at or after it;
+ * the margin absorbs clock granularity.
+ */
+const PROMPT_MARGIN_MS = 2000;
+
+/**
+ * Where the rated prompt sits on `chain`, whose last entry is the run's record: the first user
+ * message dated at or after the run's `at` less the margin, because the router writes the record when
+ * the agent settles, after any steer or follow-up of the run. When no user message has a usable time
+ * that late, the latest user message before the record.
+ */
+function promptIndex(chain: readonly Entry[], at: number): number {
+  let latest = -1;
+  for (let index = 0; index < chain.length - 1; index += 1) {
+    const entry = chain[index] as Entry;
+    if (messageOf(entry)?.["role"] !== "user") continue;
+    latest = index;
+    const time = timeOf(entry);
+    if (time !== undefined && time >= at - PROMPT_MARGIN_MS) return index;
+  }
+  return latest;
+}
+
+/** The rated prompt of the run whose record ends `chain`, with the facts the heuristics read before it. */
+function replayInput(chain: readonly Entry[], at: number): Omit<DemandInput, "jev"> | undefined {
+  const index = promptIndex(chain, at);
   if (index < 0) return undefined;
   const prompt = messageOf(chain[index] as Entry);
   if (prompt === undefined) return undefined;
@@ -213,7 +247,7 @@ export function reviewSession(lines: Iterable<string>, settings: DemandSettings)
     const scope = own(own(run.entry.fields, "data") as Record<string, unknown>, "scope");
     const later = corrections.filter((c) => c.refers === run.at && c.scope === scope).sort((a, b) => a.at - b.at).at(-1);
     const truth = later?.tier ?? run.tag;
-    const input = truth === undefined ? undefined : replayInput(chainOf(run.entry, byId));
+    const input = truth === undefined ? undefined : replayInput(chainOf(run.entry, byId), run.at);
     if (truth === undefined || input === undefined) {
       unjudged += 1;
       continue;
@@ -254,17 +288,30 @@ export function totalOf(reviews: readonly Review[]): Review {
   };
 }
 
-const rate = (agree: number, judged: number) => (judged === 0 ? "-" : `${Math.round((agree / judged) * 100)}%`);
+const rate = (agree: number, of: number) => (of === 0 ? "n/a" : `${Math.round((agree / of) * 100)}%`);
+const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`;
+
+/** One group's lines. Jev's rate is over the runs it answered; the blend's and the heuristics' are over all the group's runs. */
+function group(title: string, rows: readonly ReviewRow[]): string[] {
+  const answered = rows.filter((row) => row.jev !== undefined);
+  const line = (label: string, matched: number, of: number, note = "") =>
+    `    ${label.padEnd(11)} ${`${matched}/${of}`.padEnd(7)} ${rate(matched, of).padEnd(5)}${note === "" ? "" : ` ${note}`}`.trimEnd();
+  const unanswered = rows.length - answered.length;
+  return [
+    `  ${title}: ${plural(rows.length, "run")}`,
+    line("heuristics", rows.filter((row) => row.heuristics === row.truth).length, rows.length),
+    line("jev", answered.filter((row) => row.jev === row.truth).length, answered.length, `(answered ${answered.length} of ${plural(rows.length, "run")})`),
+    line("blend", rows.filter((row) => row.blend === row.truth).length, rows.length, `(${plural(unanswered, "run")} without a Jev answer ${unanswered === 1 ? "equals" : "equal"} the heuristics)`),
+  ];
+}
 
 function section(name: string, review: Review): string[] {
-  const { judged, agree } = review;
-  const line = (label: string, count: number) => `  ${label.padEnd(11)} ${`${count}/${judged}`.padEnd(8)} ${rate(count, judged)}`;
-  const byTag = review.rows.filter((row) => row.truthFrom === "tag").length;
+  const { rows } = review;
   return [
-    `${name}: judged ${judged} (${byTag} by tag, ${judged - byTag} by correction), unjudged ${review.unjudged}`,
-    line("heuristics", agree.heuristics),
-    line("jev", agree.jev),
-    line("blend", agree.blend),
+    `${name}: judged ${review.judged}, unjudged ${review.unjudged}`,
+    ...group("all judged", rows),
+    ...group("tagged", rows.filter((row) => row.truthFrom === "tag")),
+    ...group("corrected", rows.filter((row) => row.truthFrom === "correction")),
   ];
 }
 
