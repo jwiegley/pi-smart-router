@@ -26,7 +26,8 @@ beettlle/pi-smart-router to the virtual models of Pi 1.5. `CLAUDE.md` is a link 
 - Runtime code keeps no prompt text: a plan is bound to its message by a keyed digest, and no entry
   the router writes holds text or a digest.
 - Runtime code never reads a session's whole history: no `getEntries()` or `getBranch()`. It uses
-  the bounded readers `getLatestCustomEntry` and `getRecentActiveEntries`.
+  the bounded readers `getLatestCustomEntry` and `getRecentActiveEntries`, and Pi's
+  `getHistoryMetrics` where Pi has it.
 - Runtime code does no I/O relative to the working directory or HOME, and it writes no files: its
   session entries (the scope's and the level records) go through `pi.appendEntry`. It
   reads only the roster, Multi-Pass's subscription labels and the prompt files the roster names in
@@ -39,6 +40,10 @@ beettlle/pi-smart-router to the virtual models of Pi 1.5. `CLAUDE.md` is a link 
   it. It may take a path relative to the working directory and write to standard output. It and
   everything it imports stay free of Pi's packages (`test/check.test.ts` walks its imports), so
   that it runs without Pi and without credentials.
+- `scripts/` holds development scripts. None of them runs in a session: `index.ts` and `src/`
+  never import them, and the package does not ship them. `scripts/review-demand.ts` reads only the
+  session files named on its command line, and sends and prints no prompt text; running it on
+  John's sessions, which are under Pi's agent directory, needs his word.
 - Signed commits only (`git commit -S`), one logical change each, with explicit paths staged.
   Never bypass hooks, and never stash, reset or rewrite published history.
 - Pushing, tagging and creating remotes need John's explicit authorization.

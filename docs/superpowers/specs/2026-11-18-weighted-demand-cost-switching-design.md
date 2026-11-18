@@ -576,3 +576,86 @@ it.
 
 The fourth revision (2026-11-18) comes from writing the plan: Jev's default weight is 4, not 3;
 the deep-session floor counts entries; and the LOW worked example is marked as arithmetic.
+
+## Decided during the build
+
+The build met cases this design did not settle, and one of its own sentences that could not hold.
+Each line below is the designer's call, made on 2026-11-18 while the plan was executed, and is for
+John to confirm or overrule. Where a line differs from the text above, the line is what was built.
+
+### The demand
+
+- **The messages the heuristics count.** They count the conversation as Pi would send it to the
+  model: a tool result as a tool message, an assistant message as itself, and anything else as a
+  user message, which is how Pi sends a `!` shell run. A `!!` shell run, which Pi keeps out of the
+  model's context, is not counted. The live router and the review script share one function for
+  this, so a replay sees what the router saw.
+- **A conversation that cannot be read.** When the one bounded read of the conversation fails, Jev
+  is not asked, its outcome is the failure `error` (the footer says `jev error`), and the
+  heuristics decide alone. This is what happened before, when Jev's own read failed.
+
+### The cost choice
+
+- **"No usage yet" is about the history alone.** The cost is unknown when the session has no last
+  response, no usage on it, or a usage of 0 tokens, whatever the size of the new prompt.
+- **A missing figure is always said.** Every untagged run that is priced and lacks a figure says
+  `cost unknown` in its footer, a session's first prompt included.
+- **After a compaction, the size of the conversation is unknown.** After a compaction, after a
+  move to another leaf of the session tree, and in a session that starts right after a compaction,
+  no answer has measured the conversation as it now is. Until the next answer, the cost is unknown
+  and the run takes the needed level's own model. The caches are forgotten at the same moment.
+- **A move to another leaf starts that branch's figures afresh.** The run shapes and the count of
+  lighter prompts in a row are counted on the branch, so a move to another leaf clears them.
+  Whether a provider reports cache writes is a fact about the provider and stays, and so does the
+  level the session last needed.
+- **A compaction in the middle of a run.** The run's requests, output and seconds count whole; its
+  growth per request is measured only over the answers after the compaction.
+- **A candidate is priced at the size it will be sent.** A candidate that fits is priced at the
+  conversation's size. A candidate that Pi compacts for first is priced at the size the compaction
+  leaves, which matters for a catalog price that steps up with the size of the request.
+- **A choice by cost when the current model cannot take the run.** When the current model is not
+  adequate for the needed level, or is not one of the scope's level models, the cheapest adequate
+  model takes the run. When that is a warm stronger model and not the needed level's own, the
+  footer says `chose, $X vs $Y`: the chosen model against the needed level's own.
+
+### Runs without a prompt, and a stuck run
+
+- **A prompt whose plan cannot be matched to its run** (another extension changed its text, or Pi
+  expanded it while two messages were pending) is treated as a run without a prompt: it takes the
+  level the session last needed, through the same choice. Before, such a run stayed on the model
+  used last.
+- **pi-cache-optimizer is told the same choice.** Before a run starts, the router tells
+  pi-cache-optimizer which model the run will reach, and that extension decides from the answer
+  whether to rewrite the system prompt. For a run without a prompt the answer is now the choice the
+  route will make, computed without side effects, and not the model used last.
+- **Where a stuck run goes.** It moves to the first available model starting one level up. When
+  the level above has only its fallback chain, it goes to the chain; when the level above has
+  nothing, it goes on to the next level, as any step-up does. One notice says so, and names the
+  level and the model the run reached.
+- **What counts as the run under way.** The three failed tool calls are looked for after the
+  latest user message of the request. Pi sends an extension's own message to the model as a user
+  message, so a run an extension starts is bounded in the same way.
+
+### What John sees
+
+- **Footer forms.** A planned run: `personal MEDIUM → gpt-6.1-terra (demand 1.3; moved, $0.63 vs
+  $2.00)`, `(demand 1.2; stayed, $0.10 vs $0.16)`, `(demand 1.8; chose, $0.14 vs $0.31)`,
+  `(demand 1.0; cost unknown)`. A run without a prompt has a footer of its own:
+  `personal MEDIUM → gpt-6.1-terra (run; moved, $0.23 vs $0.33)`, `(run; cost unknown)`, `(run)`.
+  After an escalation the footer says `escalated` in place of the cost phrase. The router moves
+  only when the other model is cheaper by more than the margin, so two figures that look equal are
+  a stay inside the margin.
+- **`/smart-router status`** shows the terms of the run the last decision belongs to, and none
+  when that run was not planned by level (a hand-picked model, a run without a prompt). Its demand
+  line names every guard that applied: `guards: close-call, risky`.
+- **Records.** The level record of a planned run that escalated carries `escalated: true`. A run
+  without a prompt writes no level record.
+
+### Rosters and the review script
+
+- **A version 1 roster with compaction disabled** sends a request that is too large for its model
+  as it is: version 1 has no fit logic left. All six of John's rosters are version 2.
+- **The pin entry of an earlier version** is looked for once per session, across the whole
+  session, and not at every prompt.
+- **The review script** replays, for each rated run, the first user message at or after the
+  record's time, and falls back to the latest one before it.
