@@ -22,6 +22,9 @@ const HANDLERS = [
   "agent_settled",
   "session_before_compact",
   "session_before_tree",
+  // After a compaction or a move in the tree, no model has the conversation cached: the ledger forgets every cache.
+  "session_compact",
+  "session_tree",
   "session_shutdown",
 ];
 /**
@@ -65,7 +68,11 @@ test("both models are registered first, and every handler is wired once, after t
   });
   assert.ok(built, "the router was built");
   assert.deepEqual(order, ["registerVirtualModel:auto", "registerVirtualModel:local", "build"]);
-  assert.deepEqual(host.calls.slice(2), [...HANDLERS.map((event) => `on:${event}`), "registerCommand:smart-router"]);
+  assert.deepEqual(
+    host.calls.slice(2),
+    [...HANDLERS.map((event) => `on:${event}`), "registerCommand:smart-router"],
+    "every handler once, with session_compact and session_tree, after which the ledger forgets every cache",
+  );
   for (const event of HANDLERS) assert.equal(host.count(event), 1, event);
   for (const event of NEVER_HANDLED) assert.equal(host.count(event), 0, `${event}: the router empties no payload, stops no warming and blocks no tools (Q7)`);
 });
@@ -162,7 +169,7 @@ test("the factory works through nix-config's staging proxy, which returns nothin
   }) as ExtensionAPI;
   install(api, (pi, options) => createRouter(pi, { ...options, agentDir: () => dir }));
   assert.deepEqual(host.calls, [], "everything was staged");
-  assert.equal(staged.length, 2 + HANDLERS.length + 1, "both models, every handler and the command");
+  assert.equal(staged.length, 2 + HANDLERS.length + 1, "both models, every handler (session_compact and session_tree, after which the ledger forgets every cache, included) and the command");
   live = true;
   for (const register of staged) register();
   host.bind();
@@ -243,7 +250,7 @@ describe("a session_start step that fails leaves the others to run", () => {
     readonly breaks: (loaded: Loaded) => void;
     readonly options?: Partial<LoadOptions>;
     readonly roster?: string | null;
-    /** The level role session_start seeds after the last responder, when the row's session holds one (heldHigh). */
+    /** The level session_start seeds as the session's need after the last responder, when the row's session holds one (heldHigh). */
     readonly held?: string;
     /** The failure reported, or undefined when no notice can be shown at all. */
     readonly failure: string | undefined;
@@ -354,7 +361,7 @@ describe("a session_start step that fails leaves the others to run", () => {
         assert.equal(loaded.runtime.find("smart-router", "local")?.contextWindow, (row.rosterRead ? limits : { local: DEFAULT_LIMITS }).local.contextWindow, "with the limits the roster gave");
       }
       assert.equal(loaded.router?.record(loaded.session.id)?.last?.ref, row.seeded ? DEEPSEEK : undefined, row.seeded ? "the last responder was seeded" : "the seed read failed");
-      if (row.held !== undefined) assert.equal(loaded.router?.record(loaded.session.id)?.levelRole, row.held, "the step after the failed seed still ran: the session's level was seeded");
+      if (row.held !== undefined) assert.equal(loaded.router?.record(loaded.session.id)?.need, row.held, "the step after the failed seed still ran: the session's level was seeded, as its need (levelRole became need)");
       assert.deepEqual([`${loaded.session.model?.provider}/${loaded.session.model?.id}`, loaded.host.selections.length], [row.restored, 0], "the selection the session started on is left as it is");
     });
   }

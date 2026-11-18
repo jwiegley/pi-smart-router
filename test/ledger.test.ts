@@ -203,6 +203,37 @@ describe("the run shape", () => {
     assert.ok(seeded.writes.has("q"), "and the provider's writes");
   });
 
+  test("a compaction or a move in the tree in mid-run counts the run whole, and measures its growth only after the event", () => {
+    const ledger = newLedger();
+    noteAnswer(ledger, answer("p/m", { tokens: 100_000, output: 100, startedAt: T, at: T + 1_000 }));
+    noteAnswer(ledger, answer("p/m", { tokens: 110_000, output: 200, startedAt: T, at: T + 2_000 }));
+    forgetCaches(ledger);
+    for (const [index, tokens] of [30_000, 31_000, 32_000].entries()) {
+      noteAnswer(ledger, answer("p/m", { tokens, output: 300, startedAt: T, at: T + (3 + index) * 1_000 }));
+    }
+    noteRunEnd(ledger);
+    assert.deepEqual(
+      ledger.runs[0],
+      { requests: 5, output: 240, growth: 1_000, seconds: 5 },
+      "five requests, their output and seconds counted whole; growth 2,000 tokens over the two steps after the event, not across it",
+    );
+
+    const few = newLedger();
+    noteAnswer(few, answer("p/m", { tokens: 100_000 }));
+    noteAnswer(few, answer("p/m", { tokens: 110_000 }));
+    forgetCaches(few);
+    noteAnswer(few, answer("p/m", { tokens: 30_000 }));
+    noteRunEnd(few);
+    assert.deepEqual([few.runs[0]?.requests, few.runs[0]?.growth], [3, 0], "one answer after the event: three requests, and no growth measured");
+
+    const none = newLedger();
+    noteAnswer(none, answer("p/m", { tokens: 100_000 }));
+    noteAnswer(none, answer("p/m", { tokens: 110_000 }));
+    forgetCaches(none);
+    noteRunEnd(none);
+    assert.deepEqual([none.runs[0]?.requests, none.runs[0]?.growth], [2, 0], "no answer after the event: two requests, and no growth measured");
+  });
+
   test("growth is never negative", () => {
     const ledger = newLedger();
     noteAnswer(ledger, answer("p/m", { tokens: 9_000 }));

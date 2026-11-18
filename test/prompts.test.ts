@@ -433,7 +433,7 @@ describe("prompts from files", () => {
     assert.deepEqual(loaded.session.notices, [{ type: "warning", message: `pi-smart-router: a prompt for the classifier cannot be used: ${problem} smart-router/auto still routes.` }]);
     await say(loaded, "Format this file");
     assert.equal(loaded.runtime.classifyCalls.length, 0, "nothing is sent to Jev");
-    assert.equal(loaded.session.statuses.get(LEVEL_KEY), "personal LOW → gpt-6-luna (demand 0.5, jev prompt)", "without Jev the heuristics alone rate a trivial prompt LOW: 0.51");
+    assert.equal(loaded.session.statuses.get(LEVEL_KEY), "personal LOW → gpt-6-luna (demand 0.5, jev prompt; cost unknown)", "without Jev the heuristics alone rate a trivial prompt LOW: 0.51; with no usage yet, a missing figure is said: cost unknown");
     assert.equal(firstRequest(loaded), "openai-codex-2/gpt-6-luna");
     await loaded.host.emit("agent_settled", { aborted: false });
     const record = loaded.session.entries.find((entry) => entry.customType === LEVEL_ENTRY)?.data as { jev?: unknown; source?: string };
@@ -524,7 +524,7 @@ describe("a hostile prompt changes nothing but what Jev reads", () => {
       assert.equal(question.instructions, HOSTILE);
       assert.deepEqual(Object.keys(question.criteria), ["low", "medium", "high", "super"]);
       // The answer is malformed, so the heuristics decide alone: a trivial message goes to the personal LOW model.
-      assert.equal(loaded.session.statuses.get(LEVEL_KEY), "personal LOW → gpt-6-luna (demand 0.5, jev malformed)", "without an answer the heuristics alone rate a trivial prompt LOW: 0.51");
+      assert.equal(loaded.session.statuses.get(LEVEL_KEY), "personal LOW → gpt-6-luna (demand 0.5, jev malformed; cost unknown)", "without an answer the heuristics alone rate a trivial prompt LOW: 0.51; with no usage yet, a missing figure is said: cost unknown");
       assert.equal(firstRequest(loaded), "openai-codex-2/gpt-6-luna");
       await loaded.host.emit("agent_settled", { aborted: false });
       loaded.session.endRun();

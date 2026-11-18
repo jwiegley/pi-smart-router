@@ -373,14 +373,19 @@ describe("an untagged message", () => {
     const pending = recordOf(loaded)?.pendingLevel;
     const demand = pending?.level.demand;
     close(demand?.value, 0.39, "the blend of 80% LOW and the heuristics for a trivial rename");
-    const level = { scope: "personal", need: "low", tier: "low", source: "jev", demand, steppedUp: false, returnedToFirst: false, jev };
+    // The untagged run is priced with the session's figures; with no usage yet a missing figure is said: cost unknown.
+    const level = { scope: "personal", need: "low", tier: "low", source: "jev", demand, steppedUp: false, returnedToFirst: false, jev, cost: { outcome: "unknown", why: "no usage yet" } };
     assert.equal(typeof pending?.token, "number");
     // The message's text is held as a digest, the same one the last input holds.
     assert.match(pending?.digest ?? "", /^[A-Za-z0-9+/]{43}=$/);
     assert.equal(recordOf(loaded)?.lastInput?.digest, pending?.digest);
-    assert.deepEqual(pending && { ...pending, token: 0, digest: "" }, { token: 0, digest: "", level, keyword: { signal: "trivial", reason: "triage:keyword_economical" }, at: NOW, jev, started: false });
+    assert.deepEqual(
+      pending && { ...pending, token: 0, digest: "" },
+      { token: 0, digest: "", level, keyword: { signal: "trivial", reason: "triage:keyword_economical" }, at: NOW, jev, started: false },
+      "the pending level, its cost unknown: a missing figure is said (no usage yet)",
+    );
     assert.equal(firstRequest(loaded), LUNA);
-    assert.deepEqual(recordOf(loaded)?.history.at(-1)?.level, level);
+    assert.deepEqual(recordOf(loaded)?.history.at(-1)?.level, level, "the history's level, its cost unknown: a missing figure is said (no usage yet)");
   });
 
   test("goes where Jev says, not where the keywords would", async (t) => {
@@ -405,8 +410,17 @@ describe("an untagged message", () => {
       assert.equal(firstRequest(loaded), TERRA, name);
       assert.deepEqual(
         withoutDemand(recordOf(loaded)?.history.at(-1)?.level),
-        { scope: "personal", need: "medium", tier: "medium", source: "heuristics", steppedUp: false, returnedToFirst: false, jev: { kind: "failure", model: JEV, failure, ms: 0 } },
-        `${name}: without an answer the heuristics decide alone, and rate "go ahead" MEDIUM`,
+        {
+          scope: "personal",
+          need: "medium",
+          tier: "medium",
+          source: "heuristics",
+          steppedUp: false,
+          returnedToFirst: false,
+          jev: { kind: "failure", model: JEV, failure, ms: 0 },
+          cost: { outcome: "unknown", why: "no usage yet" },
+        },
+        `${name}: without an answer the heuristics decide alone, and rate "go ahead" MEDIUM; with no usage yet a missing figure is said: cost unknown`,
       );
     }
   });
@@ -516,8 +530,8 @@ describe("Jev's request", () => {
 
   test("a branch of more than 1,000 entries, as Pi's history metrics count them, needs at least MEDIUM", async (t) => {
     for (const [entries, footer] of [
-      [1_000, "personal LOW → gpt-6-luna (demand 0.5)"],
-      [1_001, "personal MEDIUM → gpt-6.1-terra (demand 0.5, floor)"],
+      [1_000, "personal LOW → gpt-6-luna (demand 0.5; cost unknown)"],
+      [1_001, "personal MEDIUM → gpt-6.1-terra (demand 0.5, floor; cost unknown)"],
     ] as const) {
       resetSlot();
       const loaded = await hera(t, { id: `entries-${entries}` });
@@ -525,7 +539,11 @@ describe("Jev's request", () => {
       (loaded.session.ctx.sessionManager as unknown as Record<string, unknown>).getHistoryMetrics = () => ({ session_active_entries: entries });
       loaded.runtime.answer = async () => jevAnswer(LOW);
       await say(loaded, "go ahead");
-      assert.equal(loaded.session.statuses.get(LEVEL_KEY), footer, `${entries} entries: a very deep session gets at least MEDIUM, from more than 1,000 entries`);
+      assert.equal(
+        loaded.session.statuses.get(LEVEL_KEY),
+        footer,
+        `${entries} entries: a very deep session gets at least MEDIUM, from more than 1,000 entries; with no usage yet a missing figure is said: cost unknown`,
+      );
     }
   });
 
@@ -613,7 +631,7 @@ describe("Jev's request", () => {
     const level = recordOf(loaded)?.plan?.level;
     assert.deepEqual(level?.jev, { kind: "failure", model: JEV, failure: "error", ms: 0 }, "Jev fails as an error, as when its own read threw");
     assert.deepEqual([level?.source, level?.need, level?.demand?.jev], ["heuristics", "medium", undefined], "without an answer the heuristics decide alone: 0.89, MEDIUM");
-    assert.equal(loaded.session.statuses.get(LEVEL_KEY), "personal MEDIUM → gpt-6.1-terra (demand 0.9, jev error)");
+    assert.equal(loaded.session.statuses.get(LEVEL_KEY), "personal MEDIUM → gpt-6.1-terra (demand 0.9, jev error; cost unknown)", "with no usage yet a missing figure is said: cost unknown");
     assert.deepEqual(loaded.session.notices, [], "no failure is reported beyond the footer");
     // A tagged run does not use the shared window: it goes to its tag's level at once.
     await finish(loaded, await runPrompt(loaded, "go ahead"));
@@ -1483,9 +1501,10 @@ describe("a run's record", () => {
         need: "low",
         keyword: { signal: "trivial", reason: "triage:keyword_economical" },
         jev: { model: JEV, choice: "low", probabilities: LOW, confidence: 0.8, ms: 0 },
+        cost: { outcome: "unknown", why: "no usage yet" },
         ref: LUNA,
       },
-    ]);
+    ], "the run's record, with its cost: with no usage yet a missing figure is said, cost unknown");
     assert.ok(
       loaded.session.entries.filter((entry) => entry.customType === LEVEL_ENTRY).every((entry) => entry.type === "custom"),
       "a custom entry, which no model sees",
@@ -1580,9 +1599,10 @@ describe("a run's record", () => {
         need: "low",
         keyword: { signal: "default", reason: "triage:no_fast_path" },
         jev: { model: JEV, choice: "low", probabilities: LOW, confidence: 0.8, ms: 0 },
+        cost: { outcome: "unknown", why: "no usage yet" },
         ref: GLM,
       },
-    ]);
+    ], "the planned level's record, with its cost: with no usage yet a missing figure is said, cost unknown");
   });
 
   test("is not written for a level a custom message's run dropped: neither that run nor the message's own run, started after it, leaves an entry", async (t) => {
@@ -1911,7 +1931,7 @@ describe("a run's record", () => {
     const entry = loaded.session.entries.find((candidate) => candidate.customType === LEVEL_ENTRY);
     assert.deepEqual(readLevelRecord(entry), { v: 1, at: NOW, scope: "personal", source: "keyword", tier: "high", need: "high" }, "an earlier record's need is its tier");
     assert.equal(readLevelRecord({ ...entry, data: { ...earlier, need: "ultra" } }), undefined, "a need that is no level is no record the router wrote");
-    assert.equal(recordOf(loaded)?.levelRole, "high", "a resumed session's level is its earlier record's tier");
+    assert.equal(recordOf(loaded)?.need, "high", "a resumed session's level is its earlier record's tier, read as its need (levelRole became need)");
     await loaded.host.command("smart-router", "was low");
     assert.deepEqual(levelEntries(loaded).at(-1), { v: 1, at: NOW, scope: "personal", source: "correction", tier: "low", refers: NOW }, "/smart-router was corrects the run of the earlier record");
   });
@@ -1970,18 +1990,22 @@ describe("the footer", () => {
     const loaded = await hera(t);
     loaded.runtime.answer = async () => jevFailure("Request timed out after 1000ms");
     await say(loaded, "go ahead");
-    assert.equal(footer(loaded), "personal MEDIUM → gpt-6.1-terra (demand 0.9, jev timeout)", "without an answer the heuristics decide alone: 0.89, MEDIUM");
+    assert.equal(footer(loaded), "personal MEDIUM → gpt-6.1-terra (demand 0.9, jev timeout; cost unknown)", "without an answer the heuristics decide alone: 0.89, MEDIUM; with no usage yet a missing figure is said: cost unknown");
   });
 
   test("names the demand, rounded to one decimal, which an unsure answer pulls less than a sure one", async (t) => {
     const loaded = await hera(t);
     loaded.runtime.answer = async () => jevAnswer({ low: 0.05, medium: 0.1, high: 0.824, super: 0.026 });
     await say(loaded, "go ahead");
-    assert.equal(footer(loaded), "personal HIGH → gpt-6.1-sol (demand 1.6)", "the blend of 82% HIGH and the heuristics is 1.61, HIGH");
+    assert.equal(footer(loaded), "personal HIGH → gpt-6.1-sol (demand 1.6; cost unknown)", "the blend of 82% HIGH and the heuristics is 1.61, HIGH; with no usage yet a missing figure is said: cost unknown");
     // An unsure Jev no longer takes the higher of two close leaders: the blend is 1.31, MEDIUM.
     loaded.runtime.answer = async () => jevAnswer({ low: 0.05, medium: 0.45, high: 0.4, super: 0.1 });
     await say(loaded, "go ahead again");
-    assert.equal(footer(loaded), "personal MEDIUM → gpt-6.1-terra (demand 1.3)", "an unsure Jev no longer takes the higher of two close leaders: the blend is 1.31");
+    assert.equal(
+      footer(loaded),
+      "personal MEDIUM → gpt-6.1-terra (demand 1.3; cost unknown)",
+      "an unsure Jev no longer takes the higher of two close leaders: the blend is 1.31; with no usage yet a missing figure is said: cost unknown",
+    );
   });
 
   test("after a step-up, names the level the run needs and its demand, while history names the level that took it; after a higher run, a lower answer moves down", async (t) => {
@@ -2002,7 +2026,11 @@ describe("the footer", () => {
     // The latest response came from HIGH a moment ago; the run goes to LOW all the same.
     down.runtime.answer = async () => jevAnswer(LOW);
     await say(down, "and the docs");
-    assert.equal(footer(down), "personal LOW → gpt-6-luna (demand 0.5)", "nothing holds a session by time: the blend of 80% LOW and the heuristics is 0.50 with the last response's 1,000 tokens");
+    assert.equal(
+      footer(down),
+      "personal LOW → gpt-6-luna (demand 0.5; cost unknown)",
+      "nothing holds a session by time: the blend of 80% LOW and the heuristics is 0.50 with the last response's 1,000 tokens; this catalog has no prices, so a missing figure is said: cost unknown",
+    );
   });
 
   test("names the heuristics' demand without a classifier, the floor that raised a run, and work scope in a work session", async (t) => {
@@ -2010,15 +2038,15 @@ describe("the footer", () => {
     delete roster.classifier;
     const none = await hera(t, { id: "none", roster: JSON.stringify(roster) });
     await say(none, "go ahead");
-    assert.equal(footer(none), "personal MEDIUM → gpt-6.1-terra (demand 0.9)", "without a classifier the heuristics decide alone: 0.89, MEDIUM");
+    assert.equal(footer(none), "personal MEDIUM → gpt-6.1-terra (demand 0.9; cost unknown)", "without a classifier the heuristics decide alone: 0.89, MEDIUM; with no usage yet a missing figure is said: cost unknown");
     const floor = await hera(t, { id: "floor" });
     floor.runtime.answer = async () => jevAnswer(LOW);
     await say(floor, "force push the branch");
-    assert.equal(footer(floor), "personal HIGH → gpt-6.1-sol (demand 0.7, floor)", "the demand of 0.67 is raised to HIGH by the risky floor");
+    assert.equal(footer(floor), "personal HIGH → gpt-6.1-sol (demand 0.7, floor; cost unknown)", "the demand of 0.67 is raised to HIGH by the risky floor; with no usage yet a missing figure is said: cost unknown");
     const work = await hera(t, { id: "work", setup: (session) => session.appendCustom(SCOPE_ENTRY, scopeEntry("work", "command", NOW)) });
     work.runtime.answer = async () => jevAnswer(LOW);
     await say(work, "go ahead");
-    assert.equal(footer(work), "work LOW → gpt-6-luna (demand 0.5)", "the blend of 80% LOW and the heuristics is 0.48, LOW");
+    assert.equal(footer(work), "work LOW → gpt-6-luna (demand 0.5; cost unknown)", "the blend of 80% LOW and the heuristics is 0.48, LOW; with no usage yet a missing figure is said: cost unknown");
   });
 
   test("at message_end, names the model that answered for the run's route; a model the route did not pick changes nothing", async (t) => {

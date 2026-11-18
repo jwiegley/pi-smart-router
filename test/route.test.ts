@@ -680,8 +680,15 @@ describe("a version 2 run's plan", () => {
       code: "heuristics",
       foreign: false,
       // This runtime's registry has no Jev, so the heuristics decided alone, and the level says why.
-      level: { scope: "personal", ...HEURISTICS_MEDIUM, jev: { kind: "failure", model: "openrouter/typesafe/jev-1.14", failure: "unavailable", ms: 0 } },
-    });
+      // The router priced the untagged run with the session's figures, and with no usage yet a
+      // missing figure is said: cost unknown.
+      level: {
+        scope: "personal",
+        ...HEURISTICS_MEDIUM,
+        jev: { kind: "failure", model: "openrouter/typesafe/jev-1.14", failure: "unavailable", ms: 0 },
+        cost: { outcome: "unknown", why: "no usage yet" },
+      },
+    }, "the run's level, with its cost unknown: a missing figure is said (no usage yet)");
   });
 
   test("is used only in the scope it was made in", () => {

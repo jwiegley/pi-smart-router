@@ -1,11 +1,12 @@
 // One instance of the router: the session whose extension runtime loaded it, the files it reads
 // (the roster, Multi-Pass's labels and the prompt files the roster names), its per-session records
-// and cooldowns, the limits both models declare, the session's scope with its handoffs and work
-// directories, the refusals of its own two models for a scope their policy does not serve, a
-// message's tag and Jev's request, each planned run's level record and the footer item that shows
-// its level, the notices that the removed local-only pin's switch and entries are ignored, the
-// /smart-router command, what it tells pi-cache-optimizer, and the handlers wire() registers. No
-// handler changes or blocks what is selected (src/selection.ts).
+// (each with the ledger its session's answers feed, which prices a planned run) and cooldowns, the
+// limits both models declare, the session's scope with its handoffs and work directories, the
+// refusals of its own two models for a scope their policy does not serve, a message's tag and Jev's
+// request, each planned run's level record and the footer item that shows its level, the notices
+// that the removed local-only pin's switch and entries are ignored, the /smart-router command, what
+// it tells pi-cache-optimizer, and the handlers wire() registers. No handler changes or blocks what
+// is selected (src/selection.ts).
 //
 // createRouter only builds closures. It makes no pi.on, registration or command call, so a throw
 // while it is built leaves only the two refusing models index.ts registered, and wire() makes
@@ -15,7 +16,7 @@
 // No message text is kept: a keyed digest of it binds a plan to its message's run.
 import { createHmac, randomBytes } from "node:crypto";
 
-import type { Api, Model, Usage } from "@earendil-works/pi-ai";
+import type { Api, Model, ModelThinkingLevel, Usage } from "@earendil-works/pi-ai";
 import { calculateContextTokens } from "@earendil-works/pi-coding-agent";
 import type {
   ExtensionAPI,
@@ -33,10 +34,10 @@ import { registerAdapter, unregisterAdapter } from "./cache-optimizer.ts";
 import type { ActiveRoute } from "./cache-optimizer.ts";
 import { smartRouterCommand } from "./commands.ts";
 import type { CommandHost, Files } from "./commands.ts";
-import { COMMAND, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, LEVEL_ENTRY, LEVEL_KEY, PIN_ENTRY, PROVIDER, SCOPE_ENTRY, VIRTUAL_API, VIRTUAL_IDS } from "./constants.ts";
+import { ALL_LEVELS, COMMAND, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, LEVEL_ENTRY, LEVEL_KEY, PIN_ENTRY, PROVIDER, SCOPE_ENTRY, VIRTUAL_API, VIRTUAL_IDS } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { compactionFor, pickInRole, planUserTurn } from "./decide.ts";
-import type { Decision, LastResponder, LevelInput, Plan } from "./decide.ts";
+import type { CostFigures, Decision, LastResponder, LevelInput, Plan } from "./decide.ts";
 import { HEURISTIC_MESSAGES, rolesOf } from "./demand.ts";
 import type { PromptFacts } from "./demand.ts";
 import {
@@ -68,6 +69,8 @@ import { isRecord, own } from "./files.ts";
 import type { FileSystem, Loaded } from "./files.ts";
 import { askJev, buildContext, jevAsk, recentMessages } from "./jev.ts";
 import type { JevAsk, JevOutcome } from "./jev.ts";
+import { answerOf, forgetCaches, noteAnswer, noteRunEnd, seedAnswer } from "./ledger.ts";
+import type { Ledger } from "./ledger.ts";
 import { policyFromRoster } from "./local.ts";
 import { healDisplaced, isLive, isLiveOwner, join, leave, leaveScopeHandoff, ownerBySignal, rememberedRoster, rememberRoster, scopeLatched, sessionHash, takeScopeHandoff } from "./owners.ts";
 import type { Owner, OwnerRouter, RosterMemory, Slot } from "./owners.ts";
@@ -156,6 +159,29 @@ const virtualIdOf = (model: Model<Api> | undefined): VirtualId | undefined =>
 
 function isUsage(value: unknown): value is Usage {
   return isRecord(value) && ["input", "output", "cacheRead", "cacheWrite", "totalTokens"].every((key) => typeof value[key] === "number");
+}
+
+const THINKING_LEVELS: ReadonlySet<string> = new Set(ALL_LEVELS);
+const isThinkingLevel = (value: unknown): value is ModelThinkingLevel => typeof value === "string" && THINKING_LEVELS.has(value);
+
+/** What the ledger reads of a response entry responder() took: its model, usage, start and thinking level, each only when well formed. */
+function seededAnswer(entry: unknown, usage: Usage): Parameters<typeof answerOf>[0] | undefined {
+  const message = isRecord(entry) ? own(entry, "message") : undefined;
+  if (!isRecord(message)) return undefined;
+  const provider = own(message, "provider");
+  const model = own(message, "model");
+  if (typeof provider !== "string" || typeof model !== "string") return undefined;
+  const timestamp = own(message, "timestamp");
+  const thinkingLevel = own(message, "thinkingLevel");
+  const providerThinkingLevel = own(message, "providerThinkingLevel");
+  return {
+    provider,
+    model,
+    usage,
+    ...(typeof timestamp === "number" && Number.isFinite(timestamp) ? { timestamp } : {}),
+    ...(isThinkingLevel(thinkingLevel) ? { thinkingLevel } : {}),
+    ...(typeof providerThinkingLevel === "string" ? { providerThinkingLevel } : {}),
+  };
 }
 
 /** The smallest known window and output budget among the picks, else the defaults. */
@@ -419,26 +445,35 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     return { ref: `${provider}/${model}`, at, usage: isUsage(message.usage) ? message.usage : undefined };
   };
 
-  /** The latest successful physical response on the branch, from a bounded read. */
-  const seed = (view: BoundedHistory): LastResponder | undefined => {
+  /**
+   * The latest successful physical response on the branch, from a bounded read. The same entries,
+   * oldest first, seed the ledger: each one's cache, at its entry's time, so that a resumed
+   * session's warm model is priced warm. A response before a smaller prompt of the same model is
+   * forgotten there, as the ledger forgets any rewritten conversation (seedAnswer).
+   */
+  const seed = (view: BoundedHistory, ledger: Ledger, ctx: ExtensionContext): LastResponder | undefined => {
     const entries = view.getRecentActiveEntries({ type: "message", messageRole: "assistant", limit: SEED_ENTRIES });
-    for (let index = entries.length - 1; index >= 0; index -= 1) {
-      const found = responder(entries[index]);
-      if (found !== undefined) return found;
+    let last: LastResponder | undefined;
+    for (const entry of entries) {
+      const found = responder(entry);
+      if (found === undefined) continue;
+      last = found;
+      const answered = found.usage === undefined ? undefined : seededAnswer(entry, found.usage);
+      if (answered !== undefined) seedAnswer(ledger, answerOf(answered, ctx.modelRegistry.find(answered.provider, answered.model), found.at));
     }
-    return undefined;
+    return last;
   };
 
   /**
-   * The level role of a resumed session's latest run: that of its latest level record's scope and
-   * tier, when the roster still has that scope's section. A correction is a label for a run, not a
-   * run's level, and seeds nothing; neither does an entry the router did not write. The role counts
-   * only in the scope it belongs to (levelToReturnTo), so a record of the other scope is inert.
+   * The level a resumed session's latest run needed: its latest level record's, or an earlier
+   * version's record's tier, when that record is of the session's scope and the roster still serves
+   * it. A correction is a label for a run, not a run's level, and seeds nothing; neither does an
+   * entry the router did not write, nor a record of the other scope.
    */
-  const seedLevel = (view: BoundedHistory, value: Roster): string | undefined => {
+  const seedLevel = (view: BoundedHistory, value: Roster, scope: Scope): Tier | undefined => {
     const record = readLevelRecord(view.getLatestCustomEntry(LEVEL_ENTRY, { scope: "active" }));
-    if (record === undefined || record.source === "correction") return undefined;
-    return scopeSection(value, record.scope)?.levels[record.tier].role;
+    if (record === undefined || record.source === "correction" || record.scope !== scope || scopeSection(value, scope) === undefined) return undefined;
+    return record.need ?? record.tier;
   };
 
   // What pi-cache-optimizer reads through the adapter, for the owner's session: the run's plan,
@@ -586,11 +621,11 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     }
     step(() => registerModels(ctx));
     const view = boundedHistory(sessionManager);
-    const last = view === undefined ? undefined : step(() => seed(view));
+    const last = view === undefined ? undefined : step(() => seed(view, recordOf(sessionId).ledger, ctx));
     if (last !== undefined) recordOf(sessionId).last = last;
     // A resumed session's level is its latest run's, so that it returns from the chain as a running one does.
-    const level = view === undefined || state?.kind !== "ok" ? undefined : step(() => seedLevel(view, state.value));
-    if (level !== undefined) recordOf(sessionId).levelRole = level;
+    const need = view === undefined || state?.kind !== "ok" ? undefined : step(() => seedLevel(view, state.value, resolvedScope(ctx)));
+    if (need !== undefined) recordOf(sessionId).need = need;
     const notice = state !== undefined && state.kind !== "ok" ? rosterNotice(state) : view === undefined ? historyNotice() : undefined;
     if (notice !== undefined) notify(ctx, notice, "warning");
     // A prompt file that cannot be used stops no route, so it is said once here; status says it too.
@@ -666,7 +701,9 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     const rc = contextFor(ctx, state.value, id);
     const usage = record.last?.usage;
     const facts: PromptFacts = { contextTokens: usage === undefined ? undefined : calculateContextTokens(usage), roles, entries: activeEntries(sessionManager) };
-    const planned = planUserTurn({ rc, text, last: record.last, now: now(), compaction: compactionFor(pi.getSettings(), id), level, facts });
+    // The thinking level the run's requests carry: Pi sends the selected one, and the price assumes it too.
+    const figures: CostFigures = { ledger: record.ledger, thinking: pi.getThinkingLevel() };
+    const planned = planUserTurn({ rc, text, last: record.last, now: now(), compaction: compactionFor(pi.getSettings(), id), level, facts, figures });
     record.plan = planned;
     record.planDigest = digest;
     record.plannedToken = token;
@@ -903,7 +940,11 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     }
     if (record !== undefined) record.answered = ref;
     if (message.stopReason === "aborted") return;
-    recordOf(sessionId).last = { ref, at: now(), usage: message.usage };
+    const at = now();
+    const session = recordOf(sessionId);
+    session.last = { ref, at, usage: message.usage };
+    // Whichever selection sent it, a model picked by hand's included: its cache and the run's shape.
+    noteAnswer(session.ledger, answerOf(message, ctx.modelRegistry.find(message.provider, message.model), at));
   };
 
   /**
@@ -920,6 +961,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     record.limited.clear();
     record.pendingLevel = undefined;
     record.answered = undefined;
+    record.runTier = undefined;
+    noteRunEnd(record.ledger);
     if (pending !== undefined) pi.appendEntry(LEVEL_ENTRY, levelRecord(pending, answered, aborted, answered !== undefined && inChain(pending.level.scope, answered)));
   };
 
@@ -1095,6 +1138,9 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       // their summary may route through, and return nothing.
       target.on("session_before_compact", (_event, ctx) => guarded("session_before_compact", ctx, () => void heal(ctx)));
       target.on("session_before_tree", (_event, ctx) => guarded("session_before_tree", ctx, () => void heal(ctx)));
+      // After either, no model has the conversation cached as it is now.
+      target.on("session_compact", (_event, ctx) => guarded("session_compact", ctx, () => forgetCaches(recordOf(ctx.sessionManager.getSessionId()).ledger)));
+      target.on("session_tree", (_event, ctx) => guarded("session_tree", ctx, () => forgetCaches(recordOf(ctx.sessionManager.getSessionId()).ledger)));
       target.on("session_shutdown", (event, ctx) => guarded("session_shutdown", ctx, () => shutdown(event, ctx)));
       target.registerCommand(COMMAND, smartRouterCommand(commandHost));
     },

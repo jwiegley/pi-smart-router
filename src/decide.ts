@@ -328,6 +328,8 @@ export type CostTerms =
   | {
       readonly outcome: "stayed" | "moved" | "only";
       readonly chosen: string;
+      /** The model that answered last, when it is a candidate: the one a run stays on or leaves. */
+      readonly current: string | undefined;
       readonly priced: readonly Priced[];
       readonly workload: Workload;
       readonly again: number;
@@ -442,7 +444,7 @@ export function chooseModel(input: {
     tier: taken.tier,
     decision: { ok: true, choice: taken.choice },
     steppedUp: false,
-    cost: { outcome: choice.outcome, chosen: choice.chosen.ref, priced: choice.priced, workload, again },
+    cost: { outcome: choice.outcome, chosen: choice.chosen.ref, current: current?.ref, priced: choice.priced, workload, again },
   };
 }
 
@@ -482,8 +484,8 @@ function planLevel(p: PlanInput, roster: RosterV2, section: ScopeSection, signal
   });
   const choice = decision.ok ? decision.choice : undefined;
   // The tier's own role, whichever role the pick is in: a chain model's role is not the run's.
-  const levelRole = section.levels[tier].role;
-  const viaChain = choice !== undefined && choice.role !== levelRole;
+  const tierRole = section.levels[tier].role;
+  const viaChain = choice !== undefined && choice.role !== tierRole;
   const level: PlanLevel = {
     scope: rc.scope,
     need,
@@ -498,7 +500,7 @@ function planLevel(p: PlanInput, roster: RosterV2, section: ScopeSection, signal
     ...(cost === undefined ? {} : { cost }),
   };
   // The plan keeps the tier's role, so the run's first request picks among the tier's candidates again.
-  return { role: choice === undefined ? undefined : levelRole, code: choice?.code ?? source, decision, level };
+  return { role: choice === undefined ? undefined : tierRole, code: choice?.code ?? source, decision, level };
 }
 
 export function planUserTurn(p: PlanInput): Plan {

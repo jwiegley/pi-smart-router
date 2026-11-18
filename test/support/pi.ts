@@ -17,7 +17,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { TestContext } from "node:test";
 
-import type { Api, AssistantMessage, ClassifierApi, ClassifierContext, ClassifierModel, ClassifierResult, Model, Usage } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, ClassifierApi, ClassifierContext, ClassifierModel, ClassifierResult, Model, ModelThinkingLevel, Usage } from "@earendil-works/pi-ai";
 import { ExtensionSelectorComponent, initTheme } from "@earendil-works/pi-coding-agent";
 import type {
   ExtensionAPI,
@@ -428,6 +428,8 @@ export class FakeHost {
   readonly definitions: ExtensionVirtualModel[] = [];
   readonly commands = new Map<string, Omit<RegisteredCommand, "name" | "sourceInfo">>();
   settings: Record<string, unknown> = {};
+  /** The session's selected thinking level, as pi.getThinkingLevel() gives it. */
+  thinking: ModelThinkingLevel = "high";
   /** What pi.getCommands() and pi.getAllTools() list. */
   commandList: SlashCommandInfo[] = [];
   tools: ToolInfo[] = [];
@@ -463,7 +465,7 @@ export class FakeHost {
       },
       getCommands: () => host.commandList,
       getAllTools: () => host.tools,
-      getThinkingLevel: () => "high",
+      getThinkingLevel: () => host.thinking,
       setModel: (model: Model<Api>) => host.setModel(model, "set"),
     } as unknown as ExtensionAPI;
   }

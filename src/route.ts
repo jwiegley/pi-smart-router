@@ -36,10 +36,13 @@ import { eligibleRole, NO_LOCAL_SECTION, noScopeSection, pickInRole } from "./de
 import type { Choice, Decision, LastResponder, LevelInput, Plan, PlanLevel } from "./decide.ts";
 import { invariant, noBoundedHistory, unroutable } from "./errors.ts";
 import type { JevOutcome } from "./jev.ts";
+import { newLedger, notePrompt } from "./ledger.ts";
+import type { Ledger } from "./ledger.ts";
 import { checkLocal } from "./local.ts";
 import { clock, coolFrom, failureKind, holdFrom, refOf, resolveCandidate } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
-import { autoRoles, excludedBy, excludesFor, isWorkBound, levelRoles, roleLevel, roleOf, scopeSection } from "./roster.ts";
+import { autoRoles, excludedBy, excludesFor, isWorkBound, roleLevel, roleOf, scopeSection } from "./roster.ts";
+import type { Tier } from "./tiers.ts";
 
 /** The model the owner loop's last route picked in the current run. */
 export interface RunPick {
@@ -113,12 +116,16 @@ export interface SessionRecord {
    * this a retry went back and forth between two of them.
    */
   readonly limited: Set<string>;
+  /** What the session has measured: each model's cache, its runs' shape and its prompts' levels (src/ledger.ts). */
+  readonly ledger: Ledger;
   /**
-   * The level role the session's last planned version 2 run took. While the session is on a model
-   * of the scope's fallback chain, that model stands for this level: a run that starts without a
-   * prompt picks in it again (levelToReturnTo).
+   * The level the session's last planned version 2 run needed. While the session is on a model of
+   * the scope's fallback chain, that model stands for this level: a run that starts without a
+   * prompt picks in its role again (levelToReturnTo).
    */
-  levelRole: string | undefined;
+  need: Tier | undefined;
+  /** The level whose model the run under way took, from its plan; cleared when the agent settles. */
+  runTier: Tier | undefined;
   last: LastResponder | undefined;
   readonly history: HistoryEntry[];
   /** The planned version 2 run's level, until its record is written. */
@@ -128,7 +135,18 @@ export interface SessionRecord {
 }
 
 export function newRecord(): SessionRecord {
-  return { plan: undefined, runPick: undefined, limited: new Set(), levelRole: undefined, last: undefined, history: [], pendingLevel: undefined, lastInput: undefined };
+  return {
+    plan: undefined,
+    runPick: undefined,
+    limited: new Set(),
+    ledger: newLedger(),
+    need: undefined,
+    runTier: undefined,
+    last: undefined,
+    history: [],
+    pendingLevel: undefined,
+    lastInput: undefined,
+  };
 }
 
 /** The fork's bounded session readers. Pi 1.5.0's npm types lack them, so they are detected. */
@@ -306,21 +324,21 @@ function takePlan(record: SessionRecord, id: VirtualId, rc: ResolveContext): Pla
 }
 
 /**
- * The level a run that starts without a plan goes back to, if it does: on smart-router/auto under a
- * version 2 roster, when this is the run's first request, the model it would stay
- * on is one of the scope's fallback chain, and the session's last planned run took a level of this
- * scope. Such a run (a goal continuation, a loop's) has no prompt to plan it, and without this it
+ * The level role a run that starts without a plan goes back to, if it does: on smart-router/auto
+ * under a version 2 roster, when this is the run's first request, the model it would stay on is one
+ * of the scope's fallback chain, and the session's last planned run needed a level: the scope's
+ * role for that level. Such a run (a goal continuation, a loop's) has no prompt to plan it, and without this it
  * would stay on the chain model for as long as it kept starting runs, however long ago the level's
  * own model came back.
  */
 function levelToReturnTo(rc: ResolveContext, request: ModelRouteRequest, record: SessionRecord): string | undefined {
-  const { levelRole } = record;
-  if (rc.roster.version !== 2 || rc.virtualId !== "auto" || rc.localOnly || record.runPick !== undefined || levelRole === undefined) return undefined;
+  const { need } = record;
+  if (rc.roster.version !== 2 || rc.virtualId !== "auto" || rc.localOnly || record.runPick !== undefined || need === undefined) return undefined;
   const section = scopeSection(rc.roster, rc.scope);
   const base = previousRef(request) ?? record.last?.ref;
   const role = base === undefined ? undefined : roleOf(rc.roster, base)?.name;
   if (section?.fallback === undefined || role === undefined || !section.fallback.includes(role)) return undefined;
-  return levelRoles(section).includes(levelRole) ? levelRole : undefined;
+  return section.levels[need].role;
 }
 
 /** The planned model if it still resolves, else the planned role, then its fallback. */
@@ -426,8 +444,14 @@ export function routeOwned(input: RouteInput): ModelRoute {
   else if (back !== undefined) decision = pickInRole(rc, back, { fallback: true, code: "return:level" });
   else decision = stick(rc, previousRef(request), record);
   const choice = settle(input, decision);
-  // The level a planned run took is the session's until the next planned run.
-  if (plan?.level !== undefined && plan.role !== undefined) record.levelRole = plan.role;
+  // A planned run's prompt: its need and the level whose model took it go in the ledger, and the
+  // need is the session's until the next planned run.
+  if (plan?.level !== undefined) {
+    const { need, tier } = plan.level;
+    notePrompt(record.ledger, need, tier);
+    record.need = need;
+    record.runTier = tier;
+  }
   record.runPick = { id, ref: choice.ref, role: choice.role };
   remember(record, {
     at: rc.now,

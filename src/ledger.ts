@@ -43,8 +43,14 @@ export interface Ledger {
   readonly writes: Set<string>;
   readonly runs: RunStat[];
   readonly needs: PromptNeed[];
-  /** The run under way: its first request's start, its requests and output so far, its first and latest prompt sizes, its latest answer's time. */
-  run: { readonly startedAt: number; requests: number; output: number; readonly first: number; last: number; endedAt: number } | undefined;
+  /**
+   * The run under way: its first request's start, its requests and output so far, its first and
+   * latest prompt sizes, its latest answer's time, and how many of its requests came before the
+   * last compaction or move in the tree (its growth is measured only over the answers after one).
+   */
+  run:
+    | { readonly startedAt: number; requests: number; output: number; readonly first: number; last: number; endedAt: number; readonly before: number }
+    | undefined;
   /** The latest answer, any model's. */
   latest: { readonly ref: string; readonly tokens: number } | undefined;
 }
@@ -104,7 +110,7 @@ function remember(ledger: Ledger, answer: Answer): number {
 export function noteAnswer(ledger: Ledger, answer: Answer): void {
   const tokens = remember(ledger, answer);
   // A run whose first answers reported no usage takes its first prompt size from the first that did.
-  const open = ledger.run ?? { startedAt: answer.startedAt, requests: 0, output: 0, first: tokens, last: tokens, endedAt: answer.at };
+  const open = ledger.run ?? { startedAt: answer.startedAt, requests: 0, output: 0, first: tokens, last: tokens, endedAt: answer.at, before: 0 };
   ledger.run = {
     startedAt: open.startedAt,
     requests: open.requests + 1,
@@ -112,6 +118,7 @@ export function noteAnswer(ledger: Ledger, answer: Answer): void {
     first: open.first === 0 ? tokens : open.first,
     last: tokens > 0 ? tokens : open.last,
     endedAt: answer.at,
+    before: open.before,
   };
 }
 
@@ -125,10 +132,11 @@ export function noteRunEnd(ledger: Ledger): void {
   if (run === undefined) return;
   ledger.run = undefined;
   if (run.requests < 1) return;
+  const steps = run.requests - run.before - 1;
   ledger.runs.push({
     requests: run.requests,
     output: run.output / run.requests,
-    growth: run.requests > 1 ? Math.max(0, (run.last - run.first) / (run.requests - 1)) : 0,
+    growth: steps > 0 ? Math.max(0, (run.last - run.first) / steps) : 0,
     seconds: Math.max(0, (run.endedAt - run.startedAt) / 1_000),
   });
   if (ledger.runs.length > RUNS_KEPT) ledger.runs.splice(0, ledger.runs.length - RUNS_KEPT);
@@ -139,10 +147,15 @@ export function notePrompt(ledger: Ledger, need: Tier, took: Tier): void {
   if (ledger.needs.length > RUNS_KEPT) ledger.needs.splice(0, ledger.needs.length - RUNS_KEPT);
 }
 
-/** A compaction or a move in the session tree: no model has the conversation cached. */
+/**
+ * A compaction or a move in the session tree: no model has the conversation cached. A run under way
+ * keeps its requests, output and time, and measures its growth again from the next answer.
+ */
 export function forgetCaches(ledger: Ledger): void {
   ledger.seen.clear();
   ledger.latest = undefined;
+  const { run } = ledger;
+  if (run !== undefined) ledger.run = { ...run, first: 0, last: 0, before: run.requests };
 }
 
 function median(values: readonly number[]): number {

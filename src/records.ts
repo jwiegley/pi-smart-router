@@ -6,18 +6,18 @@
 // user message sits earlier in the same session, which is where a training review reads both, on
 // the host that made them.
 //
-// Also the words the footer and history use for a run's level: its scope, its level, and what
-// decided it.
+// Also the words the footer and history use for a run's level: its scope, its level, what decided
+// it and what the cost rule compared; and the terms behind it, which /smart-router status shows.
 import type { RiskyTrigger, Signal } from "./classify.ts";
 import { LEVEL_ENTRY } from "./constants.ts";
-import type { LevelSource, PlanLevel } from "./decide.ts";
+import type { CostTerms, LevelSource, PlanLevel } from "./decide.ts";
 import type { Demand } from "./demand.ts";
 import { isRecord, own } from "./files.ts";
 import type { JevFailure } from "./jev.ts";
 import type { PendingLevel } from "./route.ts";
-import { isScope } from "./roster.ts";
+import { isScope, parseRef } from "./roster.ts";
 import type { Scope } from "./roster.ts";
-import { isTier, tierLabel } from "./tiers.ts";
+import { isTier, tierLabel, tierRank } from "./tiers.ts";
 import type { Tier } from "./tiers.ts";
 
 /** Jev's part in a record: its answer, its failure, or, for a tagged run, that its opinion had not come when the run settled. */
@@ -32,6 +32,31 @@ export type JevRecord =
     }
   | { readonly model: string; readonly failure: JevFailure; readonly ms: number }
   | { readonly late: true };
+
+/** What the cost rule decided for a run, as its record keeps it: model refs, numbers, level names and outcome names. */
+export type CostRecord =
+  | { readonly outcome: "unknown"; readonly why: string }
+  | {
+      readonly outcome: "stayed" | "moved" | "only";
+      readonly chosen: string;
+      /** The model that answered last, when it was a candidate. */
+      readonly current?: string;
+      /** The run's expected requests, before the horizon. */
+      readonly requests: number;
+      readonly horizon: number;
+      /** The chance the current model's level is needed again. */
+      readonly again: number;
+      /** One row per candidate, lowest level first: its expected cost, leaving included, and what it had cached. */
+      readonly candidates: ReadonlyArray<{
+        readonly ref: string;
+        readonly tier: Tier;
+        readonly cost: number;
+        readonly leaving: number;
+        readonly cached: number;
+        readonly survival: number;
+        readonly compacts: boolean;
+      }>;
+    };
 
 /** One `smart-router.level` entry: a run's level, or a correction of one. Never prompt text. */
 export interface LevelRecord {
@@ -58,6 +83,8 @@ export interface LevelRecord {
   readonly keyword?: { readonly signal: Signal; readonly reason: string };
   /** Absent when Jev was not asked for the run. */
   readonly jev?: JevRecord;
+  /** What the cost rule decided; absent for a run it did not price (a tagged one, or one on the scope's chain or stepped up). */
+  readonly cost?: CostRecord;
   /**
    * The model of the run's last assistant message that ended without an error, whichever route or
    * selection sent it; absent when no model answered, as for a run refused or ended on an error.
@@ -74,6 +101,20 @@ export interface LevelRecord {
   readonly refers?: number;
 }
 
+function costRecord(cost: CostTerms | undefined): CostRecord | undefined {
+  if (cost === undefined) return undefined;
+  if (cost.outcome === "unknown") return { outcome: "unknown", why: cost.why };
+  return {
+    outcome: cost.outcome,
+    chosen: cost.chosen,
+    ...(cost.current === undefined ? {} : { current: cost.current }),
+    requests: cost.workload.requests,
+    horizon: cost.workload.horizon,
+    again: cost.again,
+    candidates: cost.priced.map(({ ref, tier, cost: dollars, leaving, cached, survival, compacts }) => ({ ref, tier, cost: dollars, leaving, cached, survival, compacts })),
+  };
+}
+
 function jevRecord(jev: PendingLevel["jev"]): JevRecord | undefined {
   if (jev === undefined) return undefined;
   if (jev === "pending") return { late: true };
@@ -88,6 +129,7 @@ function jevRecord(jev: PendingLevel["jev"]): JevRecord | undefined {
 export function levelRecord(pending: PendingLevel, answeringRef: string | undefined, aborted: boolean, fallback = false): LevelRecord {
   const { level, keyword } = pending;
   const jev = jevRecord(pending.jev);
+  const cost = costRecord(level.cost);
   return {
     v: 1,
     at: pending.at,
@@ -100,6 +142,7 @@ export function levelRecord(pending: PendingLevel, answeringRef: string | undefi
     ...(level.demand === undefined ? {} : { demand: level.demand }),
     keyword: { signal: keyword.signal, reason: keyword.reason },
     ...(jev === undefined ? {} : { jev }),
+    ...(cost === undefined ? {} : { cost }),
     ...(answeringRef === undefined ? {} : { ref: answeringRef }),
     ...(level.steppedUp ? { steppedUp: true as const } : {}),
     ...(level.returnedToFirst ? { returnedToFirst: true as const } : {}),
@@ -143,19 +186,86 @@ export function readLevelRecord(entry: unknown): LevelRecord | undefined {
   return isTime(refers) ? { v: 1, at, scope, source, tier, refers } : undefined;
 }
 
+/** Dollars, to the cent. */
+const money = (value: number): string => `$${value.toFixed(2)}`;
+
+/** A whole number with a comma between each group of three digits. */
+const thousands = (value: number): string => String(Math.round(value)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+
+/** A model's id, without its provider. */
+const modelId = (ref: string): string => parseRef(ref)?.id ?? ref;
+
+/**
+ * What the cost rule compared, after the demand: "; stayed, $0.10 vs $0.16" (the current model
+ * against the cheapest other), "; moved, $0.63 vs $2.00" (the chosen model against the current one),
+ * "; cost unknown", or nothing: for a run it did not price, one with no current model among the
+ * candidates, and one that stayed where there was no other.
+ */
+export function costNote(cost: CostTerms | undefined): string {
+  if (cost === undefined) return "";
+  if (cost.outcome === "unknown") return "; cost unknown";
+  const current = cost.priced.find((entry) => entry.ref === cost.current);
+  if (current === undefined) return "";
+  if (cost.outcome === "moved") {
+    const chosen = cost.priced.find((entry) => entry.ref === cost.chosen);
+    return chosen === undefined ? "" : `; moved, ${money(chosen.cost)} vs ${money(current.cost)}`;
+  }
+  if (cost.outcome !== "stayed") return "";
+  const others = cost.priced.filter((entry) => entry !== current).map((entry) => entry.cost);
+  return others.length === 0 ? "" : `; stayed, ${money(current.cost)} vs ${money(Math.min(...others))}`;
+}
+
 /**
  * What decided a run's level, in a few words: "tag"; else its demand to one decimal, then
  * ", jev timeout" (or another failure) when Jev was asked and gave no answer, then ", floor" when a
- * floor raised the level.
+ * floor raised the level, then what the cost rule compared (costNote).
  */
 export function levelNote(level: PlanLevel): string {
   if (level.source === "tag") return "tag";
   const { jev, demand } = level;
-  return [
+  const decided = [
     demand === undefined ? "demand unknown" : `demand ${demand.value.toFixed(1)}`,
     ...(jev?.kind === "failure" ? [`jev ${jev.failure}`] : []),
     ...(level.source === "floor" ? ["floor"] : []),
   ].join(", ");
+  return `${decided}${costNote(level.cost)}`;
+}
+
+/**
+ * The terms behind an untagged level, for /smart-router status: the demand line (the blend, Jev's
+ * term or why there was none, the heuristics with their three largest signals, and the floors that
+ * applied), then, when the cost rule was asked, the cost line (the run priced, and each candidate,
+ * the stronger first, with its expected cost, its cache and what leaving the current model adds),
+ * or why the cost was unknown. A tagged level gives none.
+ */
+export function decisionLines(level: PlanLevel): string[] {
+  const { demand, cost } = level;
+  if (level.source === "tag" || demand === undefined) return [];
+  const jev =
+    demand.jev !== undefined
+      ? `Jev ${demand.jev.value.toFixed(2)} at ${Math.round(demand.jev.confidence * 100)}%`
+      : `no Jev answer${level.jev?.kind === "failure" ? ` (${level.jev.failure})` : ""}`;
+  const top = demand.heuristics.top.map(([signal, share]) => `${signal} ${share.toFixed(2)}`).join(", ");
+  const floors = demand.guards.filter((guard) => guard === "risky" || guard === "deep-session");
+  const lines = [
+    `  Demand ${demand.value.toFixed(2)} → ${tierLabel(level.need)}: ${jev}, heuristics ${demand.heuristics.value.toFixed(2)}${top === "" ? "" : ` (${top})`}${
+      floors.length === 0 ? "" : `; floors: ${floors.join(", ")}`
+    }.`,
+  ];
+  if (cost === undefined) return lines;
+  if (cost.outcome === "unknown") return [...lines, `  Cost unknown: ${cost.why}.`];
+  const { requests, horizon } = cost.workload;
+  const count = Number.isInteger(requests) ? String(requests) : requests.toFixed(1);
+  const leaving = cost.current === undefined ? "" : modelId(cost.current);
+  const rows = [...cost.priced]
+    .sort((a, b) => tierRank(b.tier) - tierRank(a.tier))
+    .map((entry) => {
+      const cached = entry.cached > 0 ? `${thousands(entry.cached)} cached, ${Math.round(entry.survival * 100)}%` : "nothing cached";
+      const compacts = entry.compacts ? ", after a compaction" : "";
+      const left = entry.leaving > 0 ? `; leaving ${leaving} ${money(entry.leaving)}` : "";
+      return `${modelId(entry.ref)} ${money(entry.cost)} (${cached}${compacts}${left})`;
+    });
+  return [...lines, `  Cost of ${count} request${requests === 1 ? "" : "s"}, horizon ${horizon}: ${rows.join("; ")}.`];
 }
 
 /**

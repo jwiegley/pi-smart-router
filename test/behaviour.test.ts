@@ -981,8 +981,8 @@ test("L1 an untagged run rated lower moves down at once; a tag routes at once, n
   assert.equal(answered(pi), PERSONAL.high, "nothing holds a session by time");
   assert.equal(
     await lastDecision(pi),
-    "smart-router/auto user: high → openai-codex-2/gpt-6.1-sol (jev, triage:no_fast_path) [personal HIGH (demand 1.6)]",
-    "nothing holds a session by time: the blend of 80% HIGH and the heuristics is 1.6",
+    "smart-router/auto user: high → openai-codex-2/gpt-6.1-sol (jev, triage:no_fast_path) [personal HIGH (demand 1.6; cost unknown)]",
+    "nothing holds a session by time: the blend of 80% HIGH and the heuristics is 1.6; these fakes carry no prices, so a missing figure is said: cost unknown",
   );
 
   // A tagged message goes to HIGH at once. Jev's opinion of it is asked, and the run does not wait for it.
@@ -1093,17 +1093,17 @@ test("L3 untagged runs follow the blend with Jev; an unsure close call stays low
   world.jev.fail("System One API error (500): upstream connect error");
   await pi.prompt(PROMPTS.trivial);
   assert.equal(answered(pi), PERSONAL.low);
-  assert.equal(footer(), "personal LOW → gpt-6-luna (demand 0.5, jev error)", "without an answer the heuristics decide alone: a trivial prompt is LOW");
+  assert.equal(footer(), "personal LOW → gpt-6-luna (demand 0.5, jev error; cost unknown)", "without an answer the heuristics decide alone: a trivial prompt is LOW; with no usage yet a missing figure is said: cost unknown");
   // pi-ai has no refusal branch: OpenRouter's refusal reaches the router as an error.
   world.jev.fail('System One API error (403): {"error":{"message":"The request was refused"}}');
   await pi.prompt(PROMPTS.plain);
   assert.equal(answered(pi), PERSONAL.medium);
-  assert.equal(footer(), "personal MEDIUM → gpt-6.1-terra (demand 0.9, jev error)", "without an answer the heuristics decide alone: a plain prompt is MEDIUM");
+  assert.equal(footer(), "personal MEDIUM → gpt-6.1-terra (demand 0.9, jev error; cost unknown)", "without an answer the heuristics decide alone: a plain prompt is MEDIUM; these fakes carry no prices, so a missing figure is said: cost unknown");
   // MEDIUM leads HIGH by little: an unsure Jev no longer takes the higher of two close leaders.
   world.jev.answer({ low: 0.05, medium: 0.45, high: 0.4, super: 0.1 });
   await pi.prompt("Walk me through the cache layer");
   assert.equal(answered(pi), PERSONAL.medium, "an unsure Jev no longer takes the higher of two close leaders: the blend is 1.34, MEDIUM");
-  assert.equal(footer(), "personal MEDIUM → gpt-6.1-terra (demand 1.3)", "an unsure Jev no longer takes the higher of two close leaders: the blend is 1.34");
+  assert.equal(footer(), "personal MEDIUM → gpt-6.1-terra (demand 1.3; cost unknown)", "an unsure Jev no longer takes the higher of two close leaders: the blend is 1.34; these fakes carry no prices, so a missing figure is said: cost unknown");
   // A classifier that answers nothing: the run goes on with the heuristics' level once timeoutMs passes.
   world.jev.hang();
   const started = Date.now();
@@ -1111,17 +1111,17 @@ test("L3 untagged runs follow the blend with Jev; an unsure close call stays low
   const waited = Date.now() - started;
   assert.ok(waited < 1_500, `the run went on after ${waited} ms`);
   assert.equal(answered(pi), PERSONAL.high);
-  assert.equal(footer(), "personal HIGH → gpt-6.1-sol (demand 1.8, jev timeout)", "without an answer the heuristics decide alone: a complex prompt here is HIGH, 1.77");
+  assert.equal(footer(), "personal HIGH → gpt-6.1-sol (demand 1.8, jev timeout; cost unknown)", "without an answer the heuristics decide alone: a complex prompt here is HIGH, 1.77; these fakes carry no prices, so a missing figure is said: cost unknown");
   // A sure answer carries four fifths of the blend, where the heuristics alone would say MEDIUM.
   world.jev.answer(JEV.super);
   await pi.prompt("Hello again");
   assert.equal(answered(pi), PERSONAL.super);
-  assert.equal(footer(), "personal SUPER → gpt-6-astra (demand 2.3)", "the blend of 80% SUPER and the heuristics is 2.25, SUPER");
+  assert.equal(footer(), "personal SUPER → gpt-6-astra (demand 2.3; cost unknown)", "the blend of 80% SUPER and the heuristics is 2.25, SUPER; these fakes carry no prices, so a missing figure is said: cost unknown");
   // A choice outside the four tiers is a failure too.
   world.jev.answer(JEV.low, "other");
   await pi.prompt(PROMPTS.planning);
   assert.equal(answered(pi), PERSONAL.high, "the heuristics alone rate a planning prompt HIGH, not SUPER: 1.81");
-  assert.equal(footer(), "personal HIGH → gpt-6.1-sol (demand 1.8, jev malformed)", "the heuristics alone rate a planning prompt HIGH, not SUPER: 1.81");
+  assert.equal(footer(), "personal HIGH → gpt-6.1-sol (demand 1.8, jev malformed; cost unknown)", "the heuristics alone rate a planning prompt HIGH, not SUPER: 1.81; these fakes carry no prices, so a missing figure is said: cost unknown");
 
   // Every request reached the classifier with the roster's deadline and no retries.
   assert.deepEqual(
@@ -1211,7 +1211,7 @@ test("L4 no classifier call on local, for a steer, or without a classifier; PI_S
     const pi = await world.start({ select: "smart-router/auto" });
     await pi.prompt(PROMPTS.plain);
     assert.equal(answered(pi), PERSONAL.medium);
-    assert.equal(pi.ui.status(LEVEL_KEY), "personal MEDIUM → gpt-6.1-terra (demand 0.9)", "without a classifier the heuristics decide alone: 0.89, MEDIUM");
+    assert.equal(pi.ui.status(LEVEL_KEY), "personal MEDIUM → gpt-6.1-terra (demand 0.9; cost unknown)", "without a classifier the heuristics decide alone: 0.89, MEDIUM; with no usage yet a missing figure is said: cost unknown");
     await pi.prompt("Fix the parser #high");
     assert.equal(answered(pi), PERSONAL.high);
     assert.deepEqual(world.jev.calls, []);
@@ -1445,11 +1445,12 @@ test("L7 one smart-router.level record per run; /smart-router was appends a corr
     need: "medium",
     keyword: { signal: "default", reason: "triage:no_fast_path" },
     jev: { model: JEV_MODEL, choice: "medium", probabilities: JEV.medium, confidence: 0.8, ms },
+    cost: { outcome: "unknown", why: "no usage yet" },
     ref: PERSONAL.medium,
-  });
+  }, "run A's record, with its cost; with no usage yet a missing figure is said: cost unknown");
   const value = (demand as { readonly value?: unknown } | undefined)?.value;
   assert.ok(typeof value === "number" && Math.abs(value - 1.01) < 0.01, `the record holds the run's demand, the blend of 80% MEDIUM and the heuristics: ${String(value)}`);
-  assert.equal(pi.ui.status(LEVEL_KEY), "personal MEDIUM → gpt-6.1-terra (demand 1.0)", "the blend of 80% MEDIUM and the heuristics is 1.01");
+  assert.equal(pi.ui.status(LEVEL_KEY), "personal MEDIUM → gpt-6.1-terra (demand 1.0; cost unknown)", "the blend of 80% MEDIUM and the heuristics is 1.01; with no usage yet a missing figure is said: cost unknown");
   // A command and a run without a level of its own add none, and that run shows no level.
   await pi.command("status");
   await pi.custom();
@@ -1546,7 +1547,7 @@ test("L8 the risky floor raises a Jev LOW to HIGH, and a tag overrides it", TIME
   world.jev.answer(JEV.low);
   await pi.prompt(risky);
   assert.equal(answered(pi), PERSONAL.high);
-  assert.equal(pi.ui.status(LEVEL_KEY), "personal HIGH → gpt-6.1-sol (demand 0.7, floor)", "the blend of 80% LOW and the heuristics, 0.7, is raised to HIGH by the risky floor");
+  assert.equal(pi.ui.status(LEVEL_KEY), "personal HIGH → gpt-6.1-sol (demand 0.7, floor; cost unknown)", "the blend of 80% LOW and the heuristics, 0.7, is raised to HIGH by the risky floor; with no usage yet a missing figure is said: cost unknown");
   const floor = { source: "floor", trigger: "destructive-git", need: "high", tier: "high" };
   assert.deepEqual(fields(runRecords(pi).at(-1), floor), floor);
   assert.equal((runRecords(pi).at(-1)?.jev as { readonly choice?: unknown } | undefined)?.choice, "low", "Jev said LOW");
