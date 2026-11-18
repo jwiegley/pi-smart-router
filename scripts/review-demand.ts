@@ -13,7 +13,7 @@
 // just before Pi appends the prompt), so a steer or follow-up in mid-run is not mistaken for it;
 // with no user message dated that late, it is the latest user message before the record. The facts
 // the heuristics read, taken before that prompt, are the latest assistant usage before that prompt, the roles of up to HEURISTIC_MESSAGES
-// messages before it and the number of entries before it on the chain. The record's own `tier` is
+// messages before it, by the live router's own rule (rolesOf), and the number of entries before it on the chain. The record's own `tier` is
 // the level the run took. The truth is the record's `tag`, or the level of a correction that
 // refers to the run's `at`, and a correction made after the tag wins. The script reads the record
 // forms of both the earlier and the later version of the router: it needs only `tag`, `tier`,
@@ -24,7 +24,7 @@ import { pathToFileURL } from "node:url";
 
 import { classify, riskyTrigger } from "../src/classify.ts";
 import { LEVEL_ENTRY } from "../src/constants.ts";
-import { demandOf, HEURISTIC_MESSAGES } from "../src/demand.ts";
+import { demandOf, rolesOf } from "../src/demand.ts";
 import type { DemandInput, PromptFacts } from "../src/demand.ts";
 import { isRecord, own } from "../src/files.ts";
 import type { JevOutcome } from "../src/jev.ts";
@@ -185,12 +185,7 @@ function replayInput(chain: readonly Entry[], at: number): Omit<DemandInput, "je
     const message = messageOf(before[back] as Entry);
     if (message !== undefined && own(message, "role") === "assistant") contextTokens = tokensOf(message);
   }
-  const roles = before
-    .flatMap((entry) => {
-      const role = messageOf(entry)?.["role"];
-      return role === "user" || role === "assistant" ? [role] : role === "toolResult" ? ["tool"] : [];
-    })
-    .slice(-HEURISTIC_MESSAGES);
+  const roles = rolesOf(before.map(messageOf));
   const facts: PromptFacts = { contextTokens, roles, entries: before.length };
   return { text, planning: classify(text).signal === "planning", risky: riskyTrigger(text) !== undefined, facts };
 }

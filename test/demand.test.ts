@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test, { describe } from "node:test";
 
 import { capText, classify } from "../src/classify.ts";
-import { demandOf, HEURISTIC_MESSAGES, tierOfDemand } from "../src/demand.ts";
+import { demandOf, HEURISTIC_MESSAGES, rolesOf, tierOfDemand } from "../src/demand.ts";
 import type { Demand, DemandInput, PromptFacts } from "../src/demand.ts";
 import type { JevOutcome } from "../src/jev.ts";
 import { DEFAULT_DEMAND, SIGNALS } from "../src/settings.ts";
@@ -225,5 +225,30 @@ describe("tierOfDemand", () => {
     ] as const) {
       assert.deepEqual(tierOfDemand(value, DEFAULT_DEMAND), { tier, closeCall }, `a demand of ${value}`);
     }
+  });
+});
+
+describe("the roles the heuristics see", () => {
+  test("are the roles of the messages Pi would send the model: a tool result is tool, and any other non-assistant role is the user's", () => {
+    assert.deepEqual(rolesOf([{ role: "toolResult" }]), ["tool"], "a tool result is a tool message");
+    assert.deepEqual(rolesOf([{ role: "assistant" }]), ["assistant"], "an assistant message is the assistant's");
+    assert.deepEqual(rolesOf([{ role: "user" }]), ["user"], "a user message is the user's");
+    assert.deepEqual(rolesOf([{ role: "bashExecution", command: "ls" }]), ["user"], "Pi sends a ! shell run as a user message");
+    assert.deepEqual(rolesOf([{ role: "custom" }]), ["user"], "any other role Pi sends goes as the user's");
+  });
+
+  test("leave out what Pi keeps out of the model's context, and what is no message", () => {
+    assert.deepEqual(rolesOf([{ role: "bashExecution", excludeFromContext: true }]), [], "Pi keeps a !! shell run out of the model's context");
+    assert.deepEqual(rolesOf([{ content: "no role" }, { role: 7 }, "user", 42, null, undefined]), [], "a message without a string role, a non-object and undefined are not counted");
+    assert.deepEqual(rolesOf([{ role: "user" }, undefined, { role: "toolResult" }]), ["user", "tool"], "the rest still count");
+  });
+
+  test("are the latest twenty, oldest first", () => {
+    const messages = Array.from({ length: 25 }, (_, i) => ({ role: i % 5 === 4 ? "toolResult" : i % 2 === 0 ? "user" : "assistant" }));
+    const roles = rolesOf(messages);
+    assert.equal(roles.length, HEURISTIC_MESSAGES, "at most HEURISTIC_MESSAGES");
+    assert.deepEqual(roles, rolesOf(messages.slice(5)), "the last twenty of twenty-five");
+    assert.deepEqual(roles.slice(0, 3), ["assistant", "user", "assistant"], "oldest first: messages 5, 6 and 7");
+    assert.equal(roles.at(-1), "tool", "message 24, a tool result, is last");
   });
 });

@@ -37,7 +37,7 @@ import { COMMAND, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, LEVEL_ENTRY, LEVEL
 import type { VirtualId } from "./constants.ts";
 import { compactionFor, pickInRole, planUserTurn } from "./decide.ts";
 import type { Decision, LastResponder, LevelInput, Plan } from "./decide.ts";
-import { HEURISTIC_MESSAGES } from "./demand.ts";
+import { HEURISTIC_MESSAGES, rolesOf } from "./demand.ts";
 import type { PromptFacts } from "./demand.ts";
 import {
   directoryFailedNotice,
@@ -174,19 +174,10 @@ function smallest(decisions: readonly Decision[]): Limits {
   };
 }
 
-/**
- * What the heuristics read of a window of the conversation: the roles of its latest
- * HEURISTIC_MESSAGES messages, oldest first, with a tool result as "tool". Never their text.
- */
-function rolesOf(window: readonly unknown[]): string[] {
-  const roles: string[] = [];
-  for (const entry of window) {
-    const message = isRecord(entry) ? own(entry, "message") : undefined;
-    const role = isRecord(message) ? own(message, "role") : undefined;
-    if (typeof role === "string") roles.push(role === "toolResult" ? "tool" : role);
-  }
-  return roles.slice(-HEURISTIC_MESSAGES);
-}
+/** A shared window read that threw (demandWindow). */
+const UNREAD = Symbol("unread");
+/** The conversation an untagged input read for its demand and Jev, or UNREAD. */
+type Window = readonly unknown[] | typeof UNREAD;
 
 const sameLimits = (a: Readonly<Record<VirtualId, Limits>>, b: Readonly<Record<VirtualId, Limits>>): boolean =>
   VIRTUAL_IDS.every((id) => a[id].contextWindow === b[id].contextWindow && a[id].maxTokens === b[id].maxTokens);
@@ -628,16 +619,18 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
    * and the conversation before it (the message is not in the session yet), both redacted and then
    * cut to the classifier's caps, with the instructions and the scope's descriptions as the roster
    * gives them, inline or from its prompt files (src/prompts.ts). An untagged message's conversation
-   * is `window`, the one read its demand's heuristics share (planInput); a tagged message's opinion
-   * reads its own. Never rejects: a prompt file that cannot be used fails as `prompt`, and a request
+   * is `window`, the one read its demand's heuristics share (planInput), and when that read threw,
+   * Jev fails as an error without a request; a tagged message's opinion reads its own. Never rejects: a prompt file that cannot be used fails as `prompt`, and a request
    * that cannot be built, such as for text too long to redact, as an error, both before anything is
    * sent.
    */
-  const askFor = (ctx: ExtensionContext, ask: JevAsk, text: string, value: RosterV2, scope: Scope, window?: readonly unknown[]): Promise<JevOutcome> => {
+  const askFor = (ctx: ExtensionContext, ask: JevAsk, text: string, value: RosterV2, scope: Scope, window?: Window): Promise<JevOutcome> => {
     const { settings, history } = ask;
     try {
       const given = scopePrompts(value, scope, prompts.read);
       if (!given.ok) return Promise.resolve<JevOutcome>({ kind: "failure", model: settings.model, failure: "prompt", ms: 0 });
+      // The conversation could not be read: nothing is sent, as when Jev's own read threw.
+      if (window === UNREAD) return Promise.resolve<JevOutcome>({ kind: "failure", model: settings.model, failure: "error", ms: 0 });
       const descriptions: Record<Tier, string> = given.descriptions;
       const { messages } = settings.context;
       const entries = messages === 0 ? [] : (window ?? history.getRecentActiveEntries({ type: "message", limit: messages * 4 }));
@@ -736,10 +729,10 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
    * The one bounded window of the conversation an untagged idle input on smart-router/auto reads,
    * under a version 2 roster, in a scope that reads and that the roster serves: the latest
    * HEURISTIC_MESSAGES messages, or four for each message Jev reads when that is more. Undefined
-   * where nothing is planned by level; empty when the read fails, so that the heuristics and Jev
-   * see no conversation rather than the input failing.
+   * where nothing is planned by level; UNREAD when the read throws, so that Jev fails as an error
+   * without a request, as it did when its own read threw, and the heuristics see no conversation.
    */
-  const demandWindow = (ctx: ExtensionContext, id: VirtualId | undefined, value: Roster | undefined, scope: ScopeState): readonly unknown[] | undefined => {
+  const demandWindow = (ctx: ExtensionContext, id: VirtualId | undefined, value: Roster | undefined, scope: ScopeState): Window | undefined => {
     const history = boundedHistory(ctx.sessionManager);
     if (!ctx.isIdle() || id !== "auto" || value?.version !== 2 || scope.kind !== "ok" || history === undefined) return undefined;
     if (scopeSection(value, scope.scope) === undefined) return undefined;
@@ -747,7 +740,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     try {
       return history.getRecentActiveEntries({ type: "message", limit });
     } catch {
-      return [];
+      return UNREAD;
     }
   };
 
@@ -826,7 +819,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       if (records.get(sessionId) !== record || record.plannedToken > token) return;
       level = { jev };
     }
-    const planned = plan(ctx, record, text, digest, level, token, window === undefined ? [] : rolesOf(window));
+    const planned = plan(ctx, record, text, digest, level, token, window === undefined || window === UNREAD ? [] : rolesOf(window.map((entry) => (isRecord(entry) ? own(entry, "message") : undefined))));
     const planLevel = planned?.level;
     if (planned === undefined || planLevel === undefined || planned.signal === "local") return;
     record.pendingLevel = { token, digest, level: planLevel, keyword: { signal: planned.signal, reason: planned.reason }, at: now(), jev: opinion ? "pending" : level.jev, started: false };

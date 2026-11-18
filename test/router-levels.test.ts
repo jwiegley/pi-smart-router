@@ -210,6 +210,11 @@ async function finish(loaded: Loaded, ref: string, init: Parameters<typeof assis
   loaded.session.endRun();
 }
 
+/** A message entry on the branch, as Pi records one. */
+function messageEntry(session: Loaded["session"], message: Record<string, unknown>): void {
+  session.entries.push({ type: "message", id: `e${session.entries.length}`, parentId: null, timestamp: new Date(NOW).toISOString(), message });
+}
+
 /** A user message on the branch, as Pi records one. */
 function userEntry(session: Loaded["session"], text: string): void {
   session.entries.push({ type: "message", id: `e${session.entries.length}`, parentId: null, timestamp: new Date(NOW).toISOString(), message: { role: "user", content: text, timestamp: NOW } });
@@ -524,6 +529,59 @@ describe("Jev's request", () => {
     }
   });
 
+  test("the roles of the window reach the demand: a tool result in it marks tools in play", async (t) => {
+    const roster = JSON.parse(HERA_V2);
+    delete roster.classifier;
+    const demandWith = async (id: string, last: Record<string, unknown>) => {
+      resetSlot();
+      const loaded = await hera(t, {
+        id,
+        roster: JSON.stringify(roster),
+        setup: (session) => {
+          userEntry(session, "the first question");
+          session.appendAssistant(assistant(SOL, { content: [{ type: "text", text: "the first answer" }] }));
+          messageEntry(session, last);
+        },
+      });
+      await say(loaded, "go ahead");
+      return recordOf(loaded)?.plan?.level?.demand;
+    };
+    const tool = await demandWith("tool", { role: "toolResult", toolCallId: "c1", toolName: "read", content: [{ type: "text", text: "a file" }], isError: false, timestamp: NOW });
+    const user = await demandWith("user", { role: "user", content: "the second question", timestamp: NOW });
+    assert.ok(tool !== undefined && user !== undefined, "both runs have a demand");
+    assert.ok(
+      tool.heuristics.value > user.heuristics.value,
+      `a tool result marks tools in play, which raises the heuristics' value (no_tool_context): ${tool.heuristics.value} > ${user.heuristics.value}`,
+    );
+  });
+
+  test("a ! shell run in the window counts as the user's message, and a !! one does not count", async (t) => {
+    const roster = JSON.parse(HERA_V2);
+    delete roster.classifier;
+    const demandWith = async (id: string, extra: readonly Record<string, unknown>[]) => {
+      resetSlot();
+      const loaded = await hera(t, {
+        id,
+        roster: JSON.stringify(roster),
+        setup: (session) => {
+          userEntry(session, "the first question");
+          session.appendAssistant(assistant(SOL, { content: [{ type: "text", text: "the first answer" }] }));
+          for (const message of extra) messageEntry(session, message);
+        },
+      });
+      await say(loaded, "go ahead");
+      return recordOf(loaded)?.plan?.level?.demand;
+    };
+    const bash = { role: "bashExecution", command: "ls", output: "a b", exitCode: 0, cancelled: false, truncated: false, timestamp: NOW };
+    const without = await demandWith("without", []);
+    const shell = await demandWith("shell", [bash]);
+    const user = await demandWith("user", [{ role: "user", content: "ls", timestamp: NOW }]);
+    const hidden = await demandWith("hidden", [{ ...bash, excludeFromContext: true }]);
+    assert.notDeepEqual(shell, without, "a ! shell run is a message the model sees, so it counts");
+    assert.deepEqual(shell, user, "Pi sends a ! shell run as a user message");
+    assert.deepEqual(hidden, without, "Pi keeps a !! shell run out of the model's context, so it does not count");
+  });
+
   test("a tagged run reads no window", async (t) => {
     // Without a classifier no opinion is asked either, so whatever is read for a tagged run is the demand's.
     const roster = JSON.parse(HERA_V2);
@@ -538,6 +596,32 @@ describe("Jev's request", () => {
     mark = loaded.session.boundedReads.length;
     await say(loaded, "y");
     assert.deepEqual(messageReads(mark), [{ type: "message", limit: HEURISTIC_MESSAGES }], "an untagged run without a classifier reads the heuristics' twenty");
+  });
+
+  test("is not sent when the conversation cannot be read: Jev fails as an error, and the heuristics decide alone", async (t) => {
+    const loaded = await hera(t);
+    // The session's index fails for the message read once the session has started.
+    const manager = loaded.session.ctx.sessionManager as unknown as Record<string, unknown>;
+    const read = manager.getRecentActiveEntries as (filter?: { type?: string }) => unknown[];
+    manager.getRecentActiveEntries = (filter: { type?: string } = {}) => {
+      if (filter.type === "message") throw new Error("the session index is locked");
+      return read(filter);
+    };
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    assert.deepEqual(await say(loaded, "go ahead"), [undefined], "nothing throws out of the input handler");
+    assert.equal(calls(loaded), 0, "no request is sent to Jev");
+    const level = recordOf(loaded)?.plan?.level;
+    assert.deepEqual(level?.jev, { kind: "failure", model: JEV, failure: "error", ms: 0 }, "Jev fails as an error, as when its own read threw");
+    assert.deepEqual([level?.source, level?.need, level?.demand?.jev], ["heuristics", "medium", undefined], "without an answer the heuristics decide alone: 0.89, MEDIUM");
+    assert.equal(loaded.session.statuses.get(LEVEL_KEY), "personal MEDIUM → gpt-6.1-terra (demand 0.9, jev error)");
+    assert.deepEqual(loaded.session.notices, [], "no failure is reported beyond the footer");
+    // A tagged run does not use the shared window: it goes to its tag's level at once.
+    await finish(loaded, await runPrompt(loaded, "go ahead"));
+    await say(loaded, "x #high");
+    await settled();
+    assert.deepEqual([recordOf(loaded)?.plan?.level?.source, recordOf(loaded)?.plan?.level?.need], ["tag", "high"], "the tag decides");
+    assert.equal(loaded.session.statuses.get(LEVEL_KEY), "personal HIGH → gpt-6.1-sol (tag)");
+    assert.equal(calls(loaded), 0, "its opinion's own read fails before anything is sent, as before");
   });
 
   test("reads the work scope's descriptions in a work session", async (t) => {

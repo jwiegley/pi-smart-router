@@ -69,9 +69,9 @@ function chosen(decision: Decision): Choice {
   return decision.choice;
 }
 
-function expectPlan(result: Plan, ref: string, code: string): void {
+function expectPlan(result: Plan, ref: string, code: string, rule?: string): void {
   const choice = chosen(result.decision);
-  assert.deepEqual([choice.ref, choice.code], [ref, code], JSON.stringify(result));
+  assert.deepEqual([choice.ref, choice.code], [ref, code], rule === undefined ? JSON.stringify(result) : `${rule}: ${JSON.stringify(result)}`);
 }
 
 function contextWith(catalog: FakeCatalog, overrides: Partial<Omit<ResolveContext, "available" | "catalog">> = {}): ResolveContext {
@@ -707,11 +707,11 @@ describe("v2 levels", () => {
     catalog.unavailable.add(KIMI);
     const MEDIUM = { need: "medium", tier: "medium", source: "heuristics", steppedUp: false, returnedToFirst: false } as const;
     const work = planV2(FRANCE, { rc: v2(catalog, { cooldowns, scope: "work" }), last: last(WORK_ASTRA, MINUTE) });
-    expectPlan(work, WORK_TERRA, "heuristics");
-    assert.deepEqual(levelOf(work), { scope: "work", ...MEDIUM });
+    expectPlan(work, WORK_TERRA, "heuristics", "without Jev the heuristics decide alone: a plain question is MEDIUM, 0.89");
+    assert.deepEqual(levelOf(work), { scope: "work", ...MEDIUM }, "without Jev the heuristics decide alone: a plain question is MEDIUM, 0.89");
     const personal = planV2(FRANCE, { rc: v2(catalog, { cooldowns }), last: last(ASTRA, MINUTE) });
-    expectPlan(personal, TERRA, "heuristics");
-    assert.deepEqual(levelOf(personal), { scope: "personal", ...MEDIUM });
+    expectPlan(personal, TERRA, "heuristics", "without Jev the heuristics decide alone: a plain question is MEDIUM, 0.89");
+    assert.deepEqual(levelOf(personal), { scope: "personal", ...MEDIUM }, "without Jev the heuristics decide alone: a plain question is MEDIUM, 0.89");
     // Luna is too small for the conversation. With compaction enabled the run takes it, and Pi compacts.
     const small = v2Catalog().add(codex(LUNA, { contextWindow: 128_000 }));
     small.unavailable.add(KIMI);
@@ -733,8 +733,8 @@ describe("v2 levels", () => {
     const catalog = v2Catalog();
     for (const ref of [TERRA, DEEPSEEK, SOL, GLM_CLOUD, ASTRA, KIMI]) catalog.unavailable.add(ref);
     const result = planV2(FRANCE, { rc: v2(catalog), last: last(ASTRA, MINUTE) });
-    assert.deepEqual([result.role, result.code], [undefined, "heuristics"]);
-    assert.deepEqual(levelOf(result), { scope: "personal", need: "medium", tier: "medium", source: "heuristics", steppedUp: false, returnedToFirst: false });
+    assert.deepEqual([result.role, result.code], [undefined, "heuristics"], "without Jev the heuristics decide alone: a plain question is MEDIUM, 0.89");
+    assert.deepEqual(levelOf(result), { scope: "personal", need: "medium", tier: "medium", source: "heuristics", steppedUp: false, returnedToFirst: false }, "without Jev the heuristics decide alone: a plain question is MEDIUM, 0.89");
     assert.ok(!result.decision.ok, JSON.stringify(result.decision));
     // Low's candidates are available, but a run never goes below its own tier.
     assert.deepEqual(result.decision.attempts.map((attempt) => attempt.role), ["medium", "high", "super"]);
@@ -789,8 +789,8 @@ describe("v2 levels", () => {
 
   test("a work-scope run takes its tier's work-account model", () => {
     const result = planV2(FRANCE, { rc: v2(v2Catalog(), { scope: "work" }) });
-    expectPlan(result, WORK_TERRA, "heuristics");
-    assert.deepEqual([result.role, levelOf(result)], ["work-medium", { scope: "work", need: "medium", tier: "medium", source: "heuristics", steppedUp: false, returnedToFirst: false }]);
+    expectPlan(result, WORK_TERRA, "heuristics", "without Jev the heuristics decide alone: a plain question is MEDIUM, 0.89");
+    assert.deepEqual([result.role, levelOf(result)], ["work-medium", { scope: "work", need: "medium", tier: "medium", source: "heuristics", steppedUp: false, returnedToFirst: false }], "without Jev the heuristics decide alone: a plain question is MEDIUM, 0.89");
   });
 
   test("the need is where the upward pick began, after the floor", () => {
@@ -937,6 +937,8 @@ describe("v2 levels", () => {
         assert.ok(planned !== undefined && planned.scope === scope, where);
         // The run's own level, which nothing lowers: its need, after the floors.
         const own: Tier = planned.need;
+        // The tag path's own oracle: a tagged run needs exactly its tag, whatever the plan does.
+        if (level.tag !== undefined) assert.equal(planned.need, level.tag, `${where}: a tagged run needs its tag's level`);
         if (planned.trigger !== undefined) assert.ok(tierRank(own) >= tierRank("high"), `${where}: a risky run needs at least HIGH`);
         const available = (tier: Tier): boolean => pickInRole(rc, section.levels[tier].role, { fallback: false, code: "t" }).ok;
         const from = (tier: Tier): readonly Tier[] => TIERS.slice(tierRank(tier));

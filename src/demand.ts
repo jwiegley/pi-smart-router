@@ -25,6 +25,26 @@ export interface PromptFacts {
   readonly entries: number | undefined;
 }
 
+/**
+ * The roles the heuristics read of the conversation's latest messages, oldest first, at most
+ * HEURISTIC_MESSAGES. The heuristics score the model's context, so a message counts as the message
+ * Pi would send the model (its convertToLlm): a tool result as "tool", an assistant message as
+ * "assistant", and any other role as "user", as Pi sends a ! shell run (bashExecution) or a custom
+ * message. A message Pi keeps out of the context (`excludeFromContext`, a !! shell run) is not
+ * counted, nor is anything without a string role. The live router and the review script both use
+ * this, so that a replay sees the roles the router saw.
+ */
+export function rolesOf(messages: readonly unknown[]): string[] {
+  const roles: string[] = [];
+  for (const message of messages) {
+    if (typeof message !== "object" || message === null) continue;
+    const { role, excludeFromContext } = message as { readonly role?: unknown; readonly excludeFromContext?: unknown };
+    if (typeof role !== "string" || excludeFromContext === true) continue;
+    roles.push(role === "toolResult" ? "tool" : role === "assistant" ? "assistant" : "user");
+  }
+  return roles.slice(-HEURISTIC_MESSAGES);
+}
+
 export type DemandGuard = "low-confidence" | "close-call" | "risky" | "deep-session";
 
 export interface Demand {
