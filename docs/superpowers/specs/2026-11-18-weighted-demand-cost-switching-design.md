@@ -16,9 +16,10 @@ Each has a default, which is what the rest of this document describes.
 2. **How Jev joins "the 13-stage process".** Default: Jev is one weighted term beside upstream's
    own heuristics, in upstream's own weighting function, and the roster then maps the result to a
    model. Upstream's deciding cascade is not run. See "Why not run upstream's pipeline as it is".
-3. **The local-only pin stays removed.** John asked for that on 11-17, before he was reminded that
+3. **The local-only pin is removed.** John asked for that on 11-17, before he was reminded that
    the pin was his own choice of 11-08. Default: removed.
-4. **Escalation after repeated tool failures.** Default: adopted from upstream, as one level up.
+4. **Escalation when a run is stuck.** Default: adopted from upstream, as one level up after three
+   identical failed tool calls in a row.
 5. **Thinking effort by turn type** (upstream's "adaptive reasoning"). Default: left out of this
    release, so that one thing changes at a time.
 
@@ -31,8 +32,10 @@ model for each of four levels on each account, and the safety rules that keep th
 writing, downloading or connecting on its own.
 
 Two things are wrong today. The level comes from Jev alone, or from keywords when Jev fails. And
-a session that has moved up stays up for five idle-free minutes, whatever the work that follows
-costs there; John removed that rule on 11-17 and nothing has replaced it.
+the code holds a session that has moved up there for five idle-free minutes, whatever the work
+that follows costs. John asked for that rule to go on 11-17 and his rosters now set it to zero,
+so on his hosts nothing weighs the cost of a move at all. The code for the rule, and for the pin,
+is still in `8cec10ed`.
 
 ## Goals
 
@@ -128,9 +131,11 @@ Reports and evidence are in the session of 2026-11-17/18; the points this design
   session logs, 17,610 pairs of consecutive requests to one model: still cached after under 1
   minute 97%; 1 to 5 minutes 92%; 5 to 20 minutes 87%; 20 to 30 minutes 79%; 30 to 60 minutes 66%;
   1 to 2 hours 50%; 2 to 6 hours 38%; 6 to 24 hours 11%. Samples beyond 30 minutes are small.
-- **Catalog prices**, dollars per million tokens (input, cached input, output): astra 6.2
-  8 / 0.4 / 40; sol 6.2 2 / 0.1 / 10; terra 6.1 1 / 0.05 / 5; luna 6 0.1 / 0.01 / 0.5. Cache
-  writes are listed at 1.25 times input, and prices double above 272K input tokens.
+- **Catalog prices** as Pi reports them on Hera, dollars per million tokens (input, cached input,
+  output): astra 6.2 8 / 0.4 / 40; sol 6.2 2 / 0.1 / 10; terra 6.1 1 / 0.05 / 5; luna 6
+  0.1 / 0.01 / 0.5. Cache writes are listed at 1.25 times input. Above 272K input tokens a second
+  tier applies: input and cache prices double and output rises by half. The two 6.2 models reach
+  Pi through nix-config's catalog additions, not Pi's own data.
 
 ## Constraints
 
@@ -140,13 +145,16 @@ Reports and evidence are in the session of 2026-11-17/18; the points this design
   `ctx.modelRegistry.classify`.
 - **Pi 1.5.2 as John runs it** (jwiegley/pi `092190aa5`):
   - asks the router before every request, with a reason: `user`, `continuation`, `retry`, `direct`;
-  - compacts by itself when the routed model's window is exceeded, before sending;
+  - compacts by itself before sending, when compaction is enabled and the conversation exceeds
+    the routed model's window less the reserve in Pi's settings (`fits` in `src/decide.ts`
+    mirrors that rule);
   - asks the router which model writes a summary (reason `direct`);
   - carries `usage` (input, cached read, cache write, output) and a timestamp on every assistant
-    message, and each catalog model's `cost`;
-  - offers `classify` with several questions of type choice, score or bool in one request.
-- **Hosted Jev** has a 1 s limit here. Whether `jev-1.14` on OpenRouter answers score and bool
-  questions, and several questions inside that limit, is not known. The plan's first task finds out.
+    message, and each catalog model's `cost`, tiers included;
+  - offers `classify` with several questions of type choice, score or bool in one request, and
+    discards the whole answer when any one of them is missing or of the wrong type.
+- **Hosted Jev** has a 1 s limit here, and has answered the fork's one level question in
+  production since 11-12. Whether it answers more questions inside that limit is not known.
 - **Pi's catalog has no cache lifetime for Codex models**, so the survival table above is the
   router's own setting.
 
@@ -171,19 +179,22 @@ A tag skips steps 3 and 4: the run takes the tagged level's first available mode
 with the scope's descriptions. Its probabilities give an expected value on the 0 to 3 scale,
 `dJ`, and its top probability is the confidence `c`.
 
-**The heuristics' term.** Upstream's `buildTierFeatures` and `scoreLowIntensity` are vendored
-unchanged with their default weights. They take:
+**The heuristics' term.** Upstream's `buildTierFeatures` and `scoreLowIntensity`
+(`src/domain/routing/tier-features.ts`) are vendored with their default weights. They take:
 
-- the turn type from upstream's turn envelope (a planning prompt or an ordinary one);
+- the turn type, `planning` or `main_loop`. Upstream's Pi extension sets it from the words plan,
+  architect and design in the user's message; the fork's planning detection in `src/classify.ts`
+  is the same idea with file names blanked out and the text capped, and is what feeds the score
+  here **(designer's call)**;
 - the triage engine's verdict, its trivial and complex keyword hits and its complexity score (the
   engine is already in the fork);
 - the prompt's length, the conversation's size and depth, whether tools are in play, and how much
-  of the prompt is code;
-- the requirement vector, taken from Jev's answers when the extra questions below were answered.
+  of the prompt is code.
 
-The score is 1 for the lightest work, so `dH = 3 × (1 − score)`. The weights of a signal that has
-no input (the requirement vector without Jev, clusters always) are set to zero for that prompt, so
-that a missing input does not read as "easy" **(designer's call)**.
+The score is 1 for the lightest work, so `dH = 3 × (1 − score)`. Two of upstream's twelve signals
+have no input here: the requirement vector, which upstream takes from its embedding model, and
+the cluster match. Their weights are zero, so that a missing input does not read as "easy"
+**(designer's call)**.
 
 **The blend.** `demand = (wJ·c·dJ + wH·dH) / (wJ·c + wH)`, with `wJ = 3` and `wH = 1` by default
 **(designer's call)**. A confident Jev carries three quarters of the result; an unsure one carries
@@ -191,27 +202,31 @@ less; without Jev the heuristics decide alone, which replaces today's keyword ma
 
 **Guards**, from upstream's plan and John's earlier decisions:
 
-- **Low confidence raises only.** Below `minConfidence` (0.5), the result is the higher of `dH` and
-  the blend.
-- **Risky operations get at least HIGH**, by today's keyword triggers, and by Jev's `destructive`
-  answer when it is asked.
+- **Low confidence raises only.** Below `minConfidence` (0.6, upstream's default), the result is
+  the higher of `dH` and the blend.
+- **Risky operations get at least HIGH**, by today's keyword triggers, unchanged.
 - **A very deep session gets at least MEDIUM**: more than 100,000 tokens or 1,000 messages. This
   is upstream's planned floor for the terse "continue" in a long session, which no classifier
   rates well **(designer's call to include it)**.
-- **Close calls go higher**, as today: within `closeCall` (0.15) of a cut point.
+- **Close calls go higher.** A demand within `demand.closeCall` (0.1) below a cut point takes the
+  level above it. Today's `classifier.closeCall` compares the probabilities of Jev's two likeliest
+  levels; the expected value already carries that, so the old setting is accepted and ignored.
 
-**Level.** Cut points 0.75, 1.5 and 2.25 divide the scale into the four levels. Before release
-the weights and cut points are calibrated on John's own sessions; see "Calibration".
+**Level.** Cut points 0.75, 1.5 and 2.25 divide the scale into the four levels. See "Defaults and
+tuning".
 
 ### The Jev request
 
-One request per prompt, as today. If the first task of the plan shows that hosted Jev answers
-several typed questions inside the limit, the request also asks upstream's `task_kind`,
-`needs_deep_reasoning`, `code_gen`, `tool_use` and `destructive`. They feed the requirement
-vector and the risky floor, and a `task_kind` of plan, review or debug at 0.8 or more sets a floor
-of HIGH, as upstream's T5 proposes. If it does not, the request stays as it is today and those
-inputs are absent **(designer's call)**. The protocol stays fixed in code; the texts stay John's
-to edit.
+Unchanged in this release: one request per prompt, one question, the four levels with the scope's
+descriptions, redaction first, 1 s. The protocol stays fixed in code and the texts stay John's to
+edit. What changes is the use of the answer: all four probabilities are kept, not only the top
+choice.
+
+Upstream asks its judge five more questions (the kind of task, deep reasoning, code generation,
+tool use, destructiveness). They are left for a later release **(designer's call)**. Pi discards a
+whole answer when one question in it fails, so each added question puts the level answer at risk
+on every prompt; nothing here has measured hosted Jev with six questions inside 1 s; and
+upstream's question texts refer to its own request fields and would need rewriting.
 
 ### Choosing the model: need sets the floor, cost picks above it
 
@@ -222,18 +237,23 @@ level is such a level, today's resolution applies (its chain, then a step up).
 **The current model** is the model of the latest assistant message on the branch that ended
 without an error, if it is one of the candidates.
 
-**Expected cost of the coming work on a model X** uses, per token, X's catalog prices: input
-`in`, cached input `cr`, output `out`; uncached input counts at the cache-write price when this
-session's usage shows that provider reporting cache writes.
+**Expected cost of the coming work on a model X** uses the prices Pi's registry reports for X,
+per token: input `in`, cached input `cr`, output `out`, at the tier that `T` falls in. Uncached
+input counts at `in`, or at the cache-write price when this session's usage shows X's provider
+reporting cache writes.
 
 - `T` is the conversation's size in tokens, from the latest usage figures.
 - `W` is how much of it X has cached: the size X last saw on this branch since the last
   compaction or context edit, or zero.
-- `p` is the chance that cache still exists, from the survival table and the time since X's last
-  answer.
+- `p` is the chance that cache still exists: the survival table at the time since X's last
+  answer. It applies to the current model too.
 - `n`, `o`, `g` and `d` are the expected requests in a run, output tokens per request, tokens
   added per request and seconds per run, each the median of the last ten runs on the branch.
   With fewer than three runs: 5 requests, 800 tokens, 1,500 tokens, 120 seconds.
+- The horizon `h` is 1, plus the number of consecutive earlier prompts on this branch that needed
+  this level or less and stayed on a higher model, capped at `horizonCap` (5) **(designer's
+  call)**. Without it, a session that keeps asking for lighter work would be kept on the stronger
+  model one cheap-looking prompt at a time. `N = n·h` requests are priced.
 
 ```
 first request   p·(W·cr + (T − W)·in) + (1 − p)·T·in
@@ -241,62 +261,69 @@ later requests  for i = 2..N:  (T + (i − 2)·g)·cr + g·in
 output          N·o·out
 ```
 
-`N` is `n` times the horizon: 1, plus the number of consecutive earlier prompts on this branch
-that needed this level or less and stayed on a higher model, capped at 5 **(designer's call)**.
-Without it, a session that keeps asking for lighter work would be kept on the stronger model one
-cheap-looking prompt at a time.
-
 **Leaving the current model costs something more.** Any candidate other than the current model
 carries `q · (1 − s) · Wc · (in_c − cr_c)`: the current model's cached size at its uncached
 premium, times the chance `1 − s` that its cache is gone when this work ends (the survival table
-at its idle time plus `d`), times the chance `q` that its level is needed again (the share of the
-last ten prompts that needed it or more; 0.5 with fewer than three; never under 0.2).
+at its idle time plus `d·h`), times the chance `q` that its level is needed again (the share of
+the last ten prompts that needed it or more; 0.5 with fewer than three; never under 0.2).
 
 **The choice.** The cheapest candidate takes the run. The current model keeps it unless another
 is cheaper by `margin` (15%). When the current model is below the needed level it is not a
 candidate, so the run moves up at once, to the cheapest adequate model. That is usually the needed
 level's own model, but a stronger model whose cache is warm can cost less than a cold one.
 
-**Worked examples**, with a 150K-token conversation warm on astra, 1,000 output tokens per request,
-no growth, and astra taken as certain to be needed again (`q = 1`). The second figure under
-"Move" is the cost of leaving astra:
+**Worked examples.** A 150,000-token conversation, all of it cached on astra, whose last answer
+was 30 seconds ago; 1,000 output tokens per request; no growth; 60 seconds per run; `q = 0.5`;
+uncached input at the input price; the default survival table. "Move" includes the cost of
+leaving astra.
 
 | Prompt | Stay on astra | Move | Result |
 |---|---|---|---|
-| MEDIUM, one request, about a minute | $0.10 | terra, cold: $0.16, plus $0.03 | stays |
-| MEDIUM, 20 requests over 20 minutes | $2.00 | terra: $0.39, plus $0.24 | moves |
-| LOW, one request, about a minute | $0.10 | luna, cold: $0.02, plus $0.03 | moves |
-| MEDIUM, one request, the third such prompt in a row | $0.30 over a horizon of 3 | terra: $0.18, plus $0.03 | moves |
+| MEDIUM, a run of one request | $0.13 | terra: $0.16 + $0.05 = $0.20 | stays |
+| MEDIUM, a run of 20 requests over 20 minutes | $2.03 | terra: $0.39 + $0.12 = $0.51 | moves |
+| LOW, a run of one request | $0.13 | luna: $0.02 + $0.05 = $0.06 | moves |
+| MEDIUM, one request, the third such prompt in a row (horizon 3) | $0.33 | terra: $0.18 + $0.05 = $0.23 | moves |
 
-These are test cases. The plan restates each with its exact inputs.
+These are test cases; the figures are rounded to cents from exact ones the plan restates.
 
 **When figures are missing** (no usage yet, no price for a model, a clock that went backwards),
 the run takes the needed level's own model, and the record says the cost was unknown.
 
 ### Cache survival
 
-The table is a setting, `switching.cacheSurvival`: pairs of idle seconds and the chance the cache
-is still there, defaulting to the measured Codex figures. A model whose catalog entry states a
-cache lifetime uses a step at that lifetime instead. After a compaction or a context edit, every
+The table is a setting, `switching.cacheSurvival`: pairs of idle seconds and a chance, defaulting
+to the measured Codex figures. The chance for an idle time is that of the first pair whose seconds
+are not less than it; past the last pair it is zero. A model whose catalog entry states a cache
+lifetime uses 1 up to that lifetime and zero after it. After a compaction or a context edit, every
 model's cached size is zero.
 
 ### A conversation larger than the candidate's window
 
-Size removes no candidate and holds no session. When `T` exceeds 90% of a candidate's window, its
-cost adds one summary request on the current model and uses the size Pi's settings will leave
-after compaction. If that candidate wins, the router returns it; Pi compacts first, and the router
-names the current model to write the summary, as it does today for every summary. The fit hold
-and the step-up for fit are removed.
+With compaction enabled in Pi's settings, size removes no candidate and holds no session. When
+the conversation does not fit a candidate by Pi's own rule (`fits`), that candidate's cost adds
+one summary request on the current model and uses the size Pi's settings will leave after
+compaction. If it wins, the router returns it; Pi compacts first, and the router names the current
+model to write the summary, as it does today for every summary. The fit hold goes, and so does the
+step-up for fit.
+
+With compaction disabled, Pi would send an oversize request as it is. There a model the
+conversation does not fit is not a candidate, and today's step-up for fit stays
+**(designer's call)**.
 
 ### Requests inside a run
 
 Tool continuations, steers and follow-ups stay on the run's model. A run that starts without a
 prompt takes the level its session last needed and goes through the same choice.
 
-**Escalation**, from upstream: when three consecutive tool calls of a run fail, its next request
-moves to the first available model one level up, once per run, with a notice. The detection is
-upstream's `loop-escalation.ts`, vendored; the consequence is the fork's **(designer's call:
-one level, per run, where upstream goes to its top tier once per session)**.
+**Escalation**, from upstream: when a run's last three tool calls in a row failed in the same way
+(the same tool and the same error text, compared as upstream does by a hash of its first 256
+characters), its next request moves to the first available model one level up, once per run, with
+a notice. Any failure does not count: in Pi every shell command that exits non-zero is a failed
+call, and three of those in a row is ordinary work. Upstream applies this "identical failures"
+rule to its strongest tier and looser ones below; here it is the rule at every level, and the
+move is one level per run where upstream goes to its top tier once per session
+**(designer's call)**. Upstream's `loop-escalation.ts` is bound to its pin and tiers, so the
+counter is the fork's own code, about sixty lines.
 
 Upstream also sends tool-result requests to a cheap model. Its author's reasoning is that a tool
 result is a "small structured payload" and so light work, and he limits it in words to small
@@ -311,9 +338,14 @@ requests, so this design leaves them where the task put them. This is open decis
   notice in a session on `smart-router/auto`. The environment switch is ignored, with one notice
   at session start so that nobody believes it still keeps traffic local. `/smart-router local …`
   answers that the pin is gone and that `/model smart-router/local` routes locally.
-- **The five-minute rule.** `stickyIdleMinutes` is still accepted in a roster, since all six of
-  John's rosters now carry it, and is ignored; the checker says so.
-- **The fit hold** and the step-up for fit.
+- **The five-minute rule**, in both roster versions. `stickyIdleMinutes` is still accepted, since
+  all six of John's rosters now carry it, and is ignored; the checker says so.
+- **The fit hold**, and with compaction enabled the step-up for fit.
+
+**Version 1 rosters** keep working: keywords pick the role, as today. They lose the hold with
+the rest and get no cost rule, so a version 1 session moves at every prompt its keywords say to.
+All six of John's hosts are on version 2; retiring version 1 is left for later
+**(designer's call)**.
 
 ### Roster additions
 
@@ -322,9 +354,9 @@ John has stays valid.
 
 ```json
 "demand": {
-  "jevWeight": 3, "heuristicsWeight": 1, "minConfidence": 0.5,
+  "jevWeight": 3, "heuristicsWeight": 1, "minConfidence": 0.6, "closeCall": 0.1,
   "cuts": [0.75, 1.5, 2.25], "deepSessionFloor": "medium",
-  "weights": { "triage_verdict": 0.18, "turn_type": 0.18, "…": "upstream's twelve, each optional" }
+  "weights": { "triage_verdict": 0.18, "turn_type": 0.18, "…": "upstream's signals, each optional" }
 },
 "switching": {
   "margin": 0.15, "horizonCap": 5,
@@ -332,9 +364,10 @@ John has stays valid.
 }
 ```
 
-`classifier.closeCall` keeps its meaning. `pi-smart-router-check` and `/smart-router check` read
-both sections back in plain words, and refuse weights that are negative or all zero, cut points
-that do not ascend, and a survival table that does not fall.
+The checker (`src/check-cli.ts`, which nix-config installs as `pi-smart-router-check`) and
+`/smart-router check` read both sections back in plain words. They refuse weights that are
+negative or all zero, cut points that do not ascend, and a survival table whose seconds do not
+rise or whose chances rise. They note `stickyIdleMinutes` and `classifier.closeCall` as ignored.
 
 ### What John sees
 
@@ -349,11 +382,15 @@ that do not ascend, and a survival table that does not fall.
 
 ### Upstream code that is vendored
 
-`tier-features.ts`, `turn-envelope.ts` and `loop-escalation.ts` join the triage engine under
-`src/upstream/`, byte for byte apart from import paths, each with upstream's MIT notice and the
-commit it came from. A development script compares them with upstream at that commit and at a
-newer one, so that taking upstream's later changes to these heuristics is a diff to review, not a
-rewrite. They are pure functions; the source scan covers them.
+`tier-features.ts` joins the triage engine in `src/triage/`, with upstream's MIT notice and the
+commit it came from. Its code is upstream's; its imports of upstream's types point at a small
+types file written for the fork. It is pure: no I/O and no clock. A development script compares
+the vendored files with upstream at that commit and at a newer one, so that taking upstream's
+later changes to these heuristics is a diff to review, not a rewrite. The source scan covers them.
+
+Upstream's `turn-envelope.ts` and `loop-escalation.ts` are not vendored. The first is not what
+upstream's own extension uses, and it reads more than the user's message; the second is bound to
+upstream's pin and tiers. The fork follows their rules in its own code, as described above.
 
 ### Why not run upstream's pipeline as it is
 
@@ -364,34 +401,47 @@ rewrite. They are pure functions; the source scan covers them.
 - **Its lock and timer** are what John has just removed.
 - **Its provider and store** break the safety rules and the other extensions.
 
-What it does offer, this design takes: its heuristics and their weights, its judge questions and
-guards, and its failure-streak detection. Of the thirteen stages on its project page, turn
-envelope, typed judgment, the low-intensity gate, triage and loop escalation contribute directly;
-the context-fit gate and the session pin are replaced by the compaction rule and the cost rule;
-the matcher's requirement vector is fed by Jev while its model choice is the roster's; the
-hardware probe, the local zero tier, the two cloud defaults and the overflow fallback serve fleets
-the roster does not have.
+What it does offer, this design takes: its heuristics and their weights, the guards it plans for
+its judge, and its rule for a stuck run. Of the thirteen stages on its project page:
 
-### Calibration
+- **Five contribute:** the turn envelope's planning signal, typed judgment (as the fork's level
+  question), the low-intensity gate (its weighting function), triage, and loop escalation.
+- **Two are replaced by something stronger:** the context-fit gate by the compaction rule, and
+  the session pin by the cost rule.
+- **One is the roster's job:** the matcher's choice of model. Its requirement vector has no input
+  in this release.
+- **Five serve fleets the roster does not have:** the hardware probe, the local zero tier, the
+  two cloud defaults and the overflow fallback.
 
-Before release, a script replays the user prompts of John's recent sessions on Hera, locally and
-without printing them. For each it computes the heuristics' value and reads the level Jev gave and
-any tag or correction from the session's records. It reports how often heuristics alone, Jev
-alone and the blend match John's own labels, and proposes weights and cut points. John approves
-the defaults from that report. The same script is the tool for later training reviews.
+### Defaults and tuning
+
+The release ships the defaults above. They are chosen so that a confident Jev keeps the level it
+gives when the heuristics are neutral, and the heuristics can move a borderline case one level.
+Unit tests pin that with a fixed set of example prompts, and pin what the heuristics alone give
+for the fork's existing classifier examples.
+
+Tuning stays a training review, when John asks for one, as he decided on 11-09. The records gain
+the figures a review needs (below). A review script that replays the user prompts of John's
+sessions locally, to report how often heuristics alone, Jev alone and the blend match his tags
+and corrections, is part of this work; running it on his sessions waits for his word, since
+`AGENTS.md` bars agents from Pi's agent directory otherwise.
 
 ### Documentation and tests
 
 - README: "Levels" and "Routing in detail" rewritten for demand and cost; "The local-only pin"
   replaced by a short note; "Changing the routing" gains the two sections. CHANGELOG entry.
 - Unit tests, table-driven: the blend and every guard; the cost formula with the worked examples;
-  survival lookup; run-shape medians; the horizon; missing figures.
+  survival lookup at, between, before and after its points; run-shape medians; the horizon;
+  missing figures.
 - Sequence tests on the modelled cost: for alternating, long-low and one-off-low sequences, the
   rule's total is never above always staying on the higher model, and never above always following
   the level by more than the margin.
 - Behaviour tests in Pi's runtime, in the existing harness: up at once; a move down only when
-  cheaper; a tag; compaction before a move to a smaller window; an old roster; an old pin entry;
-  the environment switch's notice; a work session never leaving the work account.
+  cheaper; a tag; compaction before a move to a smaller window, and no such move with compaction
+  disabled; escalation after three identical failures and none after three different ones; a
+  version 2 roster without the new sections; a version 1 roster moving without a hold; an old pin
+  entry; the environment switch's notice; a work session never leaving the work account.
+- No test contacts Jev, as `AGENTS.md` requires.
 - The fork's mutation bar applies to the new modules.
 
 ### Rollout
@@ -413,17 +463,28 @@ Every push and every activation needs John's word at that time.
 ## Still to be supplied by John
 
 - Answers to the five open decisions.
-- Approval of the calibrated weights and cut points.
+- His word before a review script reads his sessions.
 - The word for each push and activation.
 
 ## Calls the designer made, for John to check
 
 - Jev's weight is three times the heuristics' at full confidence.
+- Jev is still asked one question; upstream's five other questions wait for a later release.
+- The planning signal comes from the fork's own detection, not upstream's file.
 - Signals without an input count for nothing, instead of counting as "easy".
 - A very deep session is never LOW.
+- A close call is 0.1 below a cut point on the new scale; the old `closeCall` is ignored.
 - The horizon grows with consecutive lighter prompts, capped at five runs.
 - A move must win by 15%.
-- Escalation is one level, once per run.
-- The extra Jev questions are asked only if hosted Jev answers them inside the limit.
+- Escalation needs three identical failures, and is one level, once per run.
+- With compaction disabled in Pi, a model the conversation does not fit is still passed over.
+- Version 1 rosters keep working, without a hold and without the cost rule.
+- The defaults ship without a calibration on John's sessions; tuning is a later review.
 - Thinking effort is left alone in this release.
 - The roster keeps version 2; the new sections are optional.
+
+## Checked by an independent reader
+
+A builder check of the first draft (2026-11-18) raised five questions and found eleven statements
+about the code or upstream that were wrong. This revision answers the questions in the text and
+corrects the statements. None of them needed a decision from John beyond the five listed first.
