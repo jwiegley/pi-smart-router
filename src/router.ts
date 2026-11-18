@@ -43,6 +43,7 @@ import type { PromptFacts } from "./demand.ts";
 import {
   directoryFailedNotice,
   directoryNotice,
+  escalationNotice,
   fallbackMoveNotice,
   fallbackNotice,
   firstLine,
@@ -400,6 +401,15 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
    */
   const refusalFor = (id: VirtualId, value: Roster, ctx: ExtensionContext): RouterError | undefined => (id === "auto" ? scopeRefusal(value, ctx) : undefined);
 
+  /** Pi's settings, for the compaction figures a route prices with; Pi's defaults (compactionFor) when they cannot be read. */
+  const settingsNow = (): unknown => {
+    try {
+      return pi.getSettings();
+    } catch {
+      return undefined;
+    }
+  };
+
   const prepare = (id: VirtualId, request: ModelRouteRequest, ctx: ExtensionContext): RouteInput => {
     const { sessionManager } = ctx;
     requireBoundedHistory(id, sessionManager);
@@ -408,7 +418,10 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     if (state.kind !== "ok") throw rosterRefusal(id, state, resolvedScope(ctx) === "work");
     const refused = refusalFor(id, state.value, ctx);
     if (refused !== undefined) throw refused;
-    return { id, request, rc: contextFor(ctx, state.value, id), record: recordOf(sessionManager.getSessionId()) };
+    const record = recordOf(sessionManager.getSessionId());
+    // The thinking level this request carries: the price assumes the effort the request is sent at.
+    const figures: CostFigures = { ledger: record.ledger, thinking: request.thinkingLevel };
+    return { id, request, rc: contextFor(ctx, state.value, id), record, figures, compaction: compactionFor(settingsNow(), id) };
   };
 
   // auto declares the smallest window and output budget among the first available candidate of
@@ -973,8 +986,9 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   /**
    * At agent_settled, the run is over: its level, if it had one, is recorded with the model of its
    * last assistant message that ended without an error, whichever route or selection sent it, and
-   * with none when no model answered. The run's plan, pick, level and answer are dropped, whether or
-   * not the record could be appended. A run without a level of its own records nothing.
+   * with none when no model answered. The run's plan, pick, level, answer, tag and escalation are
+   * dropped, whether or not the record could be appended. A run without a level of its own records
+   * nothing.
    */
   const settle = (record: Session, aborted: boolean): void => {
     const { pendingLevel: pending, answered } = record;
@@ -985,6 +999,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     record.pendingLevel = undefined;
     record.answered = undefined;
     record.runTier = undefined;
+    record.runTagged = false;
+    record.escalated = false;
     noteRunEnd(record.ledger);
     if (pending !== undefined) pi.appendEntry(LEVEL_ENTRY, levelRecord(pending, answered, aborted, answered !== undefined && inChain(pending.level.scope, answered)));
   };
@@ -1066,7 +1082,11 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     routeOwned: (id, request, ctx) => {
       const input = prepare(id, request, ctx);
       const before = input.record.runPick;
+      const { runTier: from, escalated } = input.record;
       const route = routeOwned(input);
+      // A stuck run that moves up says so, where it happens: the levels and the model, nothing of its tools' output.
+      const to = input.record.runTier;
+      if (!escalated && input.record.escalated && from !== undefined && to !== undefined) notify(ctx, escalationNotice(from, to, route.model.id), "info");
       // A run under way that moves from its model onto the scope's chain says so, where it happens.
       const after = input.record.runPick;
       if (id === "auto" && !input.rc.localOnly && before !== undefined && after !== undefined && before.ref !== after.ref) {

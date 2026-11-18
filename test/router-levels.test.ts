@@ -188,6 +188,12 @@ function inputTransform(loaded: Loaded): void {
 }
 
 const UNMATCHED = "pi-smart-router: a tagged message's level could not be matched to the run that started, so it was dropped.";
+/**
+ * The rule a run follows when its first request has no plan of its own, on smart-router/auto under a
+ * version 2 roster: a prompt's run whose message's plan could not be matched to it is planned by
+ * nothing, as a custom message's run is (design, "Requests inside a run").
+ */
+const RUN_NEED = "a run that starts without a plan takes the level its session last needed and goes through the same choice (run:need), never another message's plan";
 const GOAL_X = { role: "custom", customType: "goal-x", content: "continue", display: false, timestamp: NOW };
 
 /** Two messages that overlap a Jev wait, and the two answers, settled when the test says. */
@@ -880,8 +886,8 @@ describe("a session replaced, or a newer input, during the wait", () => {
     loaded.runtime.answer = async () => jevAnswer(LOW);
     assert.deepEqual(await say(loaded, "/skill:review src/c.ts #high"), [{ action: "transform", text: "/skill:review src/c.ts" }]);
     assert.equal(recordOf(loaded)?.plan?.level?.tier, "high");
-    assert.equal(await runPrompt(loaded, expanded.replace("a.ts", "c.ts")), ASTRA, "it sticks to the last responder");
-    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel], ["stick:last", undefined, undefined]);
+    assert.equal(await runPrompt(loaded, expanded.replace("a.ts", "c.ts")), ASTRA, `the last run's SUPER, not the dropped plan's HIGH: ${RUN_NEED}`);
+    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel], ["run:need", undefined, undefined], RUN_NEED);
     assert.deepEqual(lastNotice(loaded), { type: "warning", message: UNMATCHED }, "the dropped plan carried a tag");
     waiting.resolve(jevAnswer(LOW));
     assert.deepEqual(await one, [undefined]);
@@ -923,8 +929,8 @@ describe("a message a later extension's input handler holds, handles or changes"
     // M's handlers return first. Pi is no longer streaming, so M starts a run of its own, with its own prompt.
     holdM.resolve();
     await m;
-    assert.equal(await runPrompt(loaded, "fix the failing test"), LUNA, "the last responder, not X's SUPER");
-    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel], ["stick:last", undefined, undefined]);
+    assert.equal(await runPrompt(loaded, "fix the failing test"), LUNA, `the last run's LOW, not X's SUPER: ${RUN_NEED}`);
+    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel], ["run:need", undefined, undefined], RUN_NEED);
     assert.deepEqual(lastNotice(loaded), { type: "warning", message: UNMATCHED }, "X's dropped plan carried a tag");
     holdX.resolve();
     await x;
@@ -991,11 +997,11 @@ describe("a message a later extension's input handler holds, handles or changes"
       assert.deepEqual([planned?.signal, planned?.decision.ok && planned.decision.choice.ref], ["planning", ASTRA], `version ${version}: X planned`);
       holdM.resolve();
       await m;
-      assert.equal(await runPrompt(loaded, "fix the failing test"), first, `version ${version}: the last responder`);
+      assert.equal(await runPrompt(loaded, "fix the failing test"), first, version === 2 ? `version 2: the last run's level, not X's: ${RUN_NEED}` : "version 1: the last responder");
       assert.deepEqual(
         [recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel, loaded.session.notices],
-        ["stick:last", undefined, undefined, []],
-        `version ${version}: neither X's plan nor its level, and no tag to tell of`,
+        [version === 2 ? "run:need" : "stick:last", undefined, undefined, []],
+        `version ${version}: neither X's plan nor its level, and no tag to tell of${version === 2 ? `; ${RUN_NEED}` : ""}`,
       );
       holdX.resolve();
       await x;
@@ -1098,8 +1104,13 @@ describe("a message a later extension's input handler holds, handles or changes"
       assert.deepEqual(await say(loaded, "ping"), [undefined, { action: "handled" }]);
       await say(loaded, version === 2 ? "?quick sketch the design of the parser #low" : "?quick sketch the design of the parser");
       assert.ok(recordOf(loaded)?.plan !== undefined, `version ${version}: the message planned`);
-      assert.equal(await runPrompt(loaded, "Respond briefly in 1-2 sentences: sketch the design of the parser"), KIMI, `version ${version}: unplanned`);
-      assert.equal(recordOf(loaded)?.history.at(-1)?.code, "stick:last", `version ${version}`);
+      // Version 2: "hello"'s run needed LOW, so the unplanned run goes to LOW's luna, whoever answered last. Version 1 has no levels: it sticks to the last responder.
+      assert.equal(
+        await runPrompt(loaded, "Respond briefly in 1-2 sentences: sketch the design of the parser"),
+        version === 2 ? LUNA : KIMI,
+        version === 2 ? `version 2: unplanned, so the last run's LOW: ${RUN_NEED}` : "version 1: unplanned, so the last responder",
+      );
+      assert.equal(recordOf(loaded)?.history.at(-1)?.code, version === 2 ? "run:need" : "stick:last", version === 2 ? `version 2: ${RUN_NEED}` : "version 1");
       // Version 1 has no tags, so its unplanned run says nothing.
       assert.deepEqual(lastNotice(loaded), version === 2 ? { type: "warning", message: UNMATCHED } : { type: "info", message: "pong" }, `version ${version}`);
     }
@@ -1135,8 +1146,8 @@ describe("a message held through another message's whole run", () => {
     assert.equal(recordOf(loaded)?.plan?.level?.tier, "super", "X2 planned");
     release();
     await s;
-    assert.equal(await runPrompt(loaded, "fix the failing test"), second, "the last responder, not X2's SUPER");
-    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel], ["stick:last", undefined, undefined]);
+    assert.equal(await runPrompt(loaded, "fix the failing test"), second, `the last run's level, not X2's SUPER: ${RUN_NEED}`);
+    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel], ["run:need", undefined, undefined], RUN_NEED);
     assert.deepEqual(lastNotice(loaded), { type: "warning", message: UNMATCHED });
     holdX.resolve();
     await x;
@@ -1151,8 +1162,8 @@ describe("a message held through another message's whole run", () => {
     assert.deepEqual(await say(loaded, "design the new storage layer #super"), [{ action: "transform", text: "design the new storage layer" }, { action: "handled" }]);
     release();
     await s;
-    assert.equal(await runPrompt(loaded, "fix the failing test"), second);
-    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel], ["stick:last", undefined, undefined]);
+    assert.equal(await runPrompt(loaded, "fix the failing test"), second, `the last run's level: ${RUN_NEED}`);
+    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel], ["run:need", undefined, undefined], RUN_NEED);
   });
 
   test("the same with an untagged message whose Jev answer is SUPER: the steer's run takes neither its plan nor its answer (E3)", async (t) => {
@@ -1169,8 +1180,8 @@ describe("a message held through another message's whole run", () => {
     assert.equal(recordOf(loaded)?.plan?.level?.jev?.kind, "answer", "X2 planned by Jev");
     release();
     await s;
-    assert.equal(await runPrompt(loaded, "fix the failing test"), second);
-    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel], ["stick:last", undefined, undefined]);
+    assert.equal(await runPrompt(loaded, "fix the failing test"), second, `the last run's level: ${RUN_NEED}`);
+    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel], ["run:need", undefined, undefined], RUN_NEED);
     holdX.resolve();
     await x;
   });
@@ -1209,8 +1220,9 @@ describe("a message held through another message's whole run", () => {
     assert.equal(recordOf(loaded)?.plan?.level?.tier, "high", "ping planned before the example handled it");
     holdA.resolve();
     await a;
-    assert.equal(await runPrompt(loaded, "rename foo to bar"), KIMI, "the last responder, not ping's HIGH");
-    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel], ["stick:last", undefined, undefined]);
+    // B's run needed LOW; kimi answered it, but the unplanned run goes through the choice at LOW.
+    assert.equal(await runPrompt(loaded, "rename foo to bar"), LUNA, `the last run's LOW, not ping's HIGH: ${RUN_NEED}`);
+    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel], ["run:need", undefined, undefined], RUN_NEED);
     assert.deepEqual(lastNotice(loaded), { type: "warning", message: UNMATCHED });
   });
 
@@ -1256,8 +1268,8 @@ describe("a message held through another message's whole run", () => {
     assert.equal(recordOf(loaded)?.plan?.level?.tier, "super", "X planned");
     holdS.resolve();
     await s;
-    assert.equal(await runPrompt(loaded, "fix the failing test"), retyped, "the last responder, not X's SUPER");
-    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel], ["stick:last", undefined, undefined]);
+    assert.equal(await runPrompt(loaded, "fix the failing test"), retyped, `the last run's level, not X's SUPER: ${RUN_NEED}`);
+    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level, recordOf(loaded)?.pendingLevel], ["run:need", undefined, undefined], RUN_NEED);
     assert.deepEqual(lastNotice(loaded), { type: "warning", message: UNMATCHED });
     holdX.resolve();
     await x;
@@ -1272,8 +1284,8 @@ describe("a message held through another message's whole run", () => {
       await say(loaded, `${name} #super`);
       release();
       await held;
-      assert.equal(await runPrompt(loaded, text), LUNA, `${text} is remembered, so its run takes no plan`);
-      assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level], ["stick:last", undefined], text);
+      assert.equal(await runPrompt(loaded, text), LUNA, `${text} is remembered, so its run takes no plan: ${RUN_NEED}`);
+      assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level], ["run:need", undefined], `${text}: ${RUN_NEED}`);
     };
     await say(loaded, "go ahead");
     assert.equal(await runPrompt(loaded, "go ahead"), LUNA);
@@ -1369,8 +1381,8 @@ describe("what the router keeps of a message's text", () => {
     assert.equal(recordOf(loaded)?.plan?.level?.tier, "super");
     holdM.resolve();
     await heldM;
-    assert.equal(await runPrompt(loaded, m), LUNA, "M's run takes no plan of X's");
-    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level], ["stick:last", undefined]);
+    assert.equal(await runPrompt(loaded, m), LUNA, `M's run takes no plan of X's: ${RUN_NEED}`);
+    assert.deepEqual([recordOf(loaded)?.history.at(-1)?.code, recordOf(loaded)?.history.at(-1)?.level], ["run:need", undefined], RUN_NEED);
     holdX.resolve();
     await heldX;
   });

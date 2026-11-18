@@ -5,7 +5,7 @@ import test, { afterEach, beforeEach, describe } from "node:test";
 import { isDeepStrictEqual } from "node:util";
 
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, Message, Model } from "@earendil-works/pi-ai";
 import type { ModelRouteReason } from "@earendil-works/pi-coding-agent";
 
 import { planUserTurn } from "../src/decide.ts";
@@ -521,6 +521,8 @@ describe("a version 1 roster in work scope, past prepare()'s own refusal", () =>
     request: { ...request(reason), model: VIRTUAL },
     rc,
     record,
+    figures: undefined,
+    compaction: COMPACTION,
   });
 
   test("smart-router/auto refuses on every path that can reach a model, and nothing is sent or recorded", () => {
@@ -663,6 +665,8 @@ describe("a version 2 run's plan", () => {
     request: { ...request("user"), model: VIRTUAL },
     rc,
     record,
+    figures: undefined,
+    compaction: COMPACTION,
   });
 
   test("puts its level in the run's history entry", async (t) => {
@@ -739,6 +743,71 @@ describe("a version 2 run's plan", () => {
     assert.equal(record.plan.level, undefined);
     assert.equal(routed(routeOwned(owned(local, record))), GLM);
     assert.deepEqual([record.history.at(-1)?.code, "level" in (record.history.at(-1) ?? {})], ["local", false]);
+  });
+});
+
+describe("a stuck run's move up, by the rules alone", () => {
+  const V2 = rosterFixtureV2("roster-hera-v2.json");
+  const TERRA = "openai-codex-2/gpt-6.1-terra";
+  const VIRTUAL = model("smart-router/auto", { api: "pi-virtual", baseUrl: "" });
+  const catalog = (): FakeCatalog => new FakeCatalog([...heraModels(), codex(TERRA)]);
+  /** A run whose bash calls failed three times in a row with one text. */
+  const stuckMessages: Message[] = [
+    { role: "user", content: [{ type: "text", text: "fix the build" }], timestamp: NOW },
+    ...[0, 1, 2].flatMap((i): Message[] => [
+      assistant(TERRA, { content: [{ type: "toolCall", id: `call-${i}`, name: "bash", arguments: {} }], stopReason: "toolUse" }),
+      { role: "toolResult", toolCallId: `call-${i}`, toolName: "bash", content: [{ type: "text", text: "No such file" }], isError: true, timestamp: NOW },
+    ]),
+  ];
+  /** A record whose run is under way on `ref`, at MEDIUM by its record, whatever made it so. */
+  const underWay = (rc: ResolveContext, ref: string, role: string): SessionRecord => {
+    const record = newRecord();
+    record.runPick = { id: rc.virtualId, ref, role };
+    record.runTier = "medium";
+    return record;
+  };
+  const continuation = (rc: ResolveContext, record: SessionRecord, on: string): RouteInput => ({
+    id: rc.virtualId,
+    request: { ...request("continuation", { messages: stuckMessages, previous: { model: model(on), thinkingLevel: "high" } }), model: VIRTUAL },
+    rc,
+    record,
+    figures: undefined,
+    compaction: COMPACTION,
+  });
+
+  test("smart-router/auto under a version 2 roster moves a stuck MEDIUM run to HIGH: the control", () => {
+    const rc = heraContext({ roster: V2, catalog: catalog() });
+    const record = underWay(rc, TERRA, "medium");
+    assert.equal(routed(routeOwned(continuation(rc, record, TERRA))), SOL, "HIGH's own model");
+    assert.deepEqual([record.history.at(-1)?.code, record.runTier, record.escalated], ["escalate", "high", true], "the move up, once");
+  });
+
+  test("smart-router/local and a version 1 roster never move a run up, whatever the record says", () => {
+    const cases: ReadonlyArray<readonly [string, ResolveContext, string, string]> = [
+      ["smart-router/local", heraContext({ roster: V2, catalog: catalog(), virtualId: "local" }), GLM, "local"],
+      ["a version 1 roster", heraContext({ catalog: catalog() }), DEEPSEEK, "worker"],
+    ];
+    for (const [name, rc, on, role] of cases) {
+      const record = underWay(rc, on, role);
+      const route = routeOwned(continuation(rc, record, on));
+      assert.equal(routed(route), on, `${name}: the run stays on its model`);
+      assert.deepEqual([record.history.at(-1)?.code, record.runTier, record.escalated], ["stick:previous", "medium", false], `${name}: no move up`);
+    }
+  });
+
+  test("a tagged run, a run at SUPER and a run that moved up already stay where they are", () => {
+    const rc = heraContext({ roster: V2, catalog: catalog() });
+    const cases: ReadonlyArray<readonly [string, (record: SessionRecord) => void]> = [
+      ["a tagged run", (record) => (record.runTagged = true)],
+      ["a run at SUPER", (record) => (record.runTier = "super")],
+      ["a run that moved up already", (record) => (record.escalated = true)],
+    ];
+    for (const [name, edit] of cases) {
+      const record = underWay(rc, TERRA, "medium");
+      edit(record);
+      assert.equal(routed(routeOwned(continuation(rc, record, TERRA))), TERRA, name);
+      assert.equal(record.history.at(-1)?.code, "stick:previous", name);
+    }
   });
 });
 

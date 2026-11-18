@@ -9,21 +9,21 @@ import assert from "node:assert/strict";
 import test, { afterEach, beforeEach, describe } from "node:test";
 import type { TestContext } from "node:test";
 
-import type { Api, ClassifierResult, Model, Usage } from "@earendil-works/pi-ai";
+import type { Api, ClassifierResult, Message, Model, Usage } from "@earendil-works/pi-ai";
 import { estimateTokens } from "@earendil-works/pi-coding-agent";
 
 import { LEVEL_ENTRY, LEVEL_KEY, SCOPE_ENTRY } from "../src/constants.ts";
 import { runCost, survivalOf } from "../src/cost.ts";
 import type { Candidate, Rates, Workload } from "../src/cost.ts";
 import type { CostTerms, PlanLevel } from "../src/decide.ts";
-import { stepUpNotice } from "../src/errors.ts";
+import { escalationNotice, fallbackMoveNotice, stepUpNotice } from "../src/errors.ts";
 import { effortOf } from "../src/ledger.ts";
 import { decisionLines } from "../src/records.ts";
 import { scopeEntry } from "../src/scope.ts";
 import { DEFAULT_SWITCHING, RUN_DEFAULTS } from "../src/settings.ts";
 import { tierLabel, TIERS } from "../src/tiers.ts";
 import type { Tier } from "../src/tiers.ts";
-import { ASTRA, CHATGPT, FakeCatalog, GLM, HERA_LAN, model, NOW, SOL, WORK_SOL } from "./support/catalog.ts";
+import { ASTRA, CHATGPT, FakeCatalog, GLM, HERA_LAN, heraModels, model, NOW, SOL, WORK_SOL } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
 import { agentDir, assistant, FakeRuntime, previous, request, resetSlot, routed, start } from "./support/pi.ts";
 import type { Loaded, LoadOptions } from "./support/pi.ts";
@@ -106,12 +106,15 @@ beforeEach(resetSlot);
 afterEach(resetSlot);
 
 /** A session on John's routing with smart-router/auto selected and the clock at NOW. */
-async function session(t: TestContext, options: Partial<Omit<LoadOptions, "dir">> & { readonly select?: string; readonly catalog?: FakeCatalog } = {}): Promise<Session> {
-  const { catalog: given, ...rest } = options;
+async function session(
+  t: TestContext,
+  options: Partial<Omit<LoadOptions, "dir">> & { readonly select?: string; readonly catalog?: FakeCatalog; readonly roster?: string } = {},
+): Promise<Session> {
+  const { catalog: given, roster, ...rest } = options;
   const runtime = new FakeRuntime(given ?? catalog());
   runtime.addClassifier(JEV);
   const state = { clock: NOW } as Session;
-  (state as { loaded: Loaded }).loaded = await start({ dir: agentDir(t, { roster: ROSTER }), runtime, now: () => state.clock, ...rest });
+  (state as { loaded: Loaded }).loaded = await start({ dir: agentDir(t, { roster: roster ?? ROSTER }), runtime, now: () => state.clock, ...rest });
   return state;
 }
 
@@ -646,5 +649,348 @@ describe("what the session records and shows", () => {
     assert.match(decisionLines(both)[0] ?? "", /; guards: close-call, risky\.$/, "every guard, in the order the demand applied them");
     const none: PlanLevel = { ...base, demand: { ...base.demand!, guards: [] } };
     assert.match(decisionLines(none)[0] ?? "", /\(turn_type 0\.09\)\.$/, "no guard applied: nothing is said of guards");
+  });
+});
+
+const MINUTE = 60_000;
+const LIMIT = "You've hit your usage limit.";
+/** The scope's one chain, in John's order. */
+const CHAIN = [OR_GLM, OR_QWEN, GLM, NYX_QWEN, HERA_QWEN] as const;
+/** A tool result's text: no record, notice or history entry may hold it. */
+const TOOL_TEXT = `bash: ./build-${MARK}: No such file or directory`;
+
+/** The code of the session's latest history entry. */
+const lastCode = (state: Session): string | undefined => recordOf(state).history.at(-1)?.code;
+
+/**
+ * A run that starts without a prompt (an extension's own, such as a goal continuation): its first
+ * request has no plan, and the model that answered last is `on`.
+ */
+async function unprompted(state: Session, on: string, thinkingLevel = state.loaded.host.thinking) {
+  await state.loaded.host.emit("before_agent_start", { messageType: "custom" });
+  const signal = state.loaded.session.startRun();
+  return state.loaded.runtime.route("auto", request("continuation", { signal, previous: previous(state.loaded.runtime, on), thinkingLevel }));
+}
+
+/** A continuation of the run under way on smart-router/<id>, after `on` answered, with these messages. */
+function continuation(state: Session, on: string, messages: readonly Message[] = [], id: "auto" | "local" = "auto") {
+  const signal = state.loaded.session.controller?.signal;
+  assert.ok(signal !== undefined, "a run is under way");
+  return state.loaded.runtime.route(id, request("continuation", { signal, previous: previous(state.loaded.runtime, on), messages }));
+}
+
+/** An answer of `tokens` from `ref` inside the run under way: no settle. */
+async function answered(state: Session, ref: string, tokens: number): Promise<void> {
+  await state.loaded.host.emit("message_end", { message: assistant(ref, { usage: usageOf(tokens), timestamp: state.clock, thinkingLevel: state.loaded.host.thinking }) });
+  state.clock += MINUTE;
+}
+
+/** The agent settles, and the next prompt comes 30 seconds later. */
+async function settled(state: Session): Promise<void> {
+  await state.loaded.host.emit("agent_settled", { aborted: false });
+  state.loaded.session.endRun();
+  state.clock += 30_000;
+}
+
+/**
+ * The messages of a run whose tool calls failed: a user message, then for each failure an
+ * assistant message calling bash and its failed result, with `texts`' text in turn.
+ */
+function failures(count: number, texts: readonly string[] = [TOOL_TEXT]): Message[] {
+  const messages: Message[] = [{ role: "user", content: [{ type: "text", text: "fix the build" }], timestamp: NOW }];
+  for (let i = 0; i < count; i++) {
+    messages.push(assistant(TERRA, { content: [{ type: "toolCall", id: `call-${i}`, name: "bash", arguments: { command: "./build" } }], stopReason: "toolUse" }));
+    messages.push({ role: "toolResult", toolCallId: `call-${i}`, toolName: "bash", content: [{ type: "text", text: texts[i % texts.length] ?? TOOL_TEXT }], isError: true, timestamp: NOW });
+  }
+  return messages;
+}
+
+/** Nothing the router kept, recorded or showed holds a tool result's text. */
+function holdsNoToolText(state: Session): void {
+  const kept = JSON.stringify([recordOf(state).history, state.loaded.session.entries, state.loaded.session.notices, [...state.loaded.session.statuses.values()]]);
+  assert.ok(!kept.includes(MARK), `no tool result's text is kept: ${kept}`);
+}
+
+const levelRecords = (state: Session): number => state.loaded.session.entries.filter((entry) => entry.customType === LEVEL_ENTRY).length;
+
+describe("a run that starts without a prompt", () => {
+  test("takes the level its session last needed, through the same choice", async (t) => {
+    const state = await session(t);
+    assert.equal(await run(state, "go on", ANSWER_MEDIUM), TERRA, "a planned MEDIUM run goes to terra");
+    assert.deepEqual([recordOf(state).need, recordOf(state).runTier], ["medium", undefined], "the session last needed MEDIUM; no run is under way");
+    // terra's account runs out: every personal level model cools.
+    await state.loaded.host.emit("message_end", { message: assistant(TERRA, { stopReason: "error", errorMessage: LIMIT, content: [] }) });
+    const during = await unprompted(state, TERRA);
+    assert.deepEqual([routed(during), lastCode(state)], [OR_GLM, "fallback:medium→openrouter"], "while terra cools the run takes MEDIUM's chain, as a prompt's run would");
+    assert.equal(recordOf(state).runTier, "medium", "the run is at MEDIUM, on the chain");
+    await answer(state, OR_GLM);
+    state.clock += 31 * MINUTE;
+    const back = await unprompted(state, OR_GLM);
+    assert.deepEqual([routed(back), lastCode(state)], [TERRA, "run:need"], "with terra back, MEDIUM's own model, by the choice a prompt's run makes");
+    assert.equal(recordOf(state).history.at(-1)?.level, undefined, "a run without a prompt has no level record of its own");
+    assert.deepEqual(
+      recordOf(state).ledger.needs,
+      [
+        { need: "medium", took: "medium" },
+        { need: "medium", took: "medium" },
+        { need: "medium", took: "medium" },
+      ],
+      "each run without a prompt counts as a prompt that needed the session's level, as the plan's prompt did",
+    );
+    await answer(state, TERRA);
+    assert.equal(levelRecords(state), 1, "only the planned run wrote a level record");
+    assert.equal(recordOf(state).ledger.runs.length, 3, "each run's shape is noted");
+  });
+
+  test("stays on a warm stronger model when that is cheaper, as a prompt's run would", async (t) => {
+    const state = await session(t);
+    await threeSuperRuns(state);
+    assert.equal(await run(state, "go on", ANSWER_MEDIUM), ASTRA, "a MEDIUM prompt stays on the warm astra");
+    assert.equal(recordOf(state).need, "medium", "the session last needed MEDIUM");
+    // As the second lighter prompt in a row would be priced: horizon 2, SUPER needed by 3 of 4 prompts.
+    const expected = expectedCosts({ tokens: 150_000, cached: 149_000, shape: ONE_REQUEST, horizon: 2, again: 3 / 4 });
+    assert.ok(
+      Math.min(expected.terra, expected.sol) >= expected.astra * (1 - DEFAULT_SWITCHING.margin),
+      `no other model undercuts the warm astra by the margin: ${JSON.stringify(expected)}`,
+    );
+    const route = await unprompted(state, ASTRA);
+    assert.deepEqual([routed(route), lastCode(state)], [ASTRA, "run:need"], "the run stays on astra, by cost");
+    assert.equal(recordOf(state).runTier, "super", "the run is on SUPER's model");
+    assert.deepEqual(recordOf(state).ledger.needs.at(-1), { need: "medium", took: "super" }, "it needed MEDIUM and SUPER's model took it");
+  });
+
+  test("moves to the needed level's model when the ledger says the run is long", async (t) => {
+    // A resumed session whose latest run needed MEDIUM and stayed on astra by cost: no run is counted
+    // yet, so the run's shape is the default, five requests.
+    const state = await session(t, {
+      setup: (s) => {
+        s.appendCustom(LEVEL_ENTRY, { v: 1, at: NOW - 30_000, scope: "personal", source: "jev", tier: "super", need: "medium", ref: ASTRA });
+        s.appendAssistant(assistant(ASTRA, { usage: usageOf(150_000), timestamp: NOW - 90_000, thinkingLevel: "high" }), new Date(NOW - 30_000).toISOString());
+      },
+    });
+    assert.deepEqual([recordOf(state).need, recordOf(state).ledger.runs.length], ["medium", 0], "the need is seeded, and no run is counted");
+    const expected = expectedCosts({ tokens: 150_000, cached: 149_000, shape: RUN_DEFAULTS, horizon: 1, again: 0.5 });
+    assert.ok(expected.terra < expected.astra * (1 - DEFAULT_SWITCHING.margin), `over five requests terra undercuts astra by the margin: ${JSON.stringify(expected)}`);
+    const route = await unprompted(state, ASTRA);
+    assert.deepEqual([routed(route), lastCode(state)], [TERRA, "run:need"], "the run moves to terra");
+    assert.equal(recordOf(state).runTier, "medium", "the run is on MEDIUM's model");
+  });
+
+  test("is priced at the thinking level its request carries", async (t) => {
+    const state = await session(t);
+    await threeSuperRuns(state);
+    assert.equal(await run(state, "go on", ANSWER_MEDIUM), ASTRA, "a MEDIUM prompt stays on the warm astra, answered at high");
+    const astraModel = state.loaded.runtime.physical(ASTRA);
+    assert.notEqual(effortOf(astraModel, "low"), effortOf(astraModel, "high"), "astra sends low and high as two efforts");
+    assert.equal(state.loaded.host.thinking, "high", "the session's selected level is still high");
+    // The request carries low: at that effort astra has nothing cached, and terra is cheaper.
+    const route = await unprompted(state, ASTRA, "low");
+    assert.deepEqual([routed(route), lastCode(state), route.thinkingLevel], [TERRA, "run:need", "low"], "the price and the request agree: a change of effort leaves astra cold");
+  });
+
+  test("routes with Pi's default compaction settings when Pi's settings cannot be read", async (t) => {
+    const state = await session(t);
+    await threeSuperRuns(state);
+    assert.equal(await run(state, "go on", ANSWER_MEDIUM), ASTRA, "a MEDIUM prompt stays on the warm astra");
+    // A settings object the fake host cannot clone: its getSettings() throws.
+    state.loaded.host.settings = { compaction: { enabled: false }, unreadable: () => undefined };
+    assert.throws(() => structuredClone(state.loaded.host.settings), "the host's getSettings() throws");
+    const route = await unprompted(state, ASTRA);
+    assert.deepEqual([routed(route), lastCode(state)], [ASTRA, "run:need"], "the run is routed and priced as with Pi's defaults: it stays on astra");
+  });
+
+  test("a session that never planned a run sticks to its last responder, as before", async (t) => {
+    const state = await session(t);
+    assert.equal(recordOf(state).need, undefined, "no run was planned");
+    const route = await unprompted(state, ASTRA);
+    assert.deepEqual([routed(route), lastCode(state)], [ASTRA, "stick:previous"], "the run stays where it was");
+    assert.deepEqual([recordOf(state).runTier, recordOf(state).ledger.needs], [undefined, []], "no level, and no prompt's need counted");
+  });
+
+  test("after a run that stepped up, goes through the choice at the level it needed: its own model once back, a step-up while it is away", async (t) => {
+    const cat = catalog();
+    for (const ref of [LUNA, ...CHAIN]) cat.unavailable.add(ref);
+    const state = await session(t, { catalog: cat });
+    const level = await say(state, "rename foo to bar", ANSWER_LOW);
+    assert.deepEqual([level.need, level.tier, level.steppedUp], ["low", "medium", true], "LOW's model and the chain are away: the prompt's run steps up to MEDIUM");
+    assert.equal(routed(await route(state, "rename foo to bar")), TERRA);
+    await answer(state, TERRA);
+    assert.deepEqual([recordOf(state).need, recordOf(state).ledger.needs.at(-1)], ["low", { need: "low", took: "medium" }], "the session needed LOW; MEDIUM's model took it");
+
+    const away = await unprompted(state, TERRA);
+    assert.deepEqual([routed(away), lastCode(state), recordOf(state).runTier], [TERRA, "step-up", "medium"], "with luna still away, the run steps up as a prompt's run would");
+    await answer(state, TERRA);
+
+    cat.unavailable.delete(LUNA);
+    const back = await unprompted(state, TERRA);
+    assert.deepEqual(
+      [routed(back), lastCode(state), recordOf(state).runTier],
+      [LUNA, "run:need", "low"],
+      "with luna back, the choice is made at LOW, and luna's prices, a tenth of terra's, outweigh terra's warm cache",
+    );
+  });
+
+  test("right after a compaction, takes the needed level's own model, unpriced", async (t) => {
+    const state = await session(t);
+    await threeSuperRuns(state);
+    assert.equal(await run(state, "go on", ANSWER_MEDIUM), ASTRA, "a MEDIUM prompt stays on the warm astra");
+    await state.loaded.host.emit("session_compact", {});
+    assert.deepEqual([recordOf(state).last?.ref, recordOf(state).last?.usage], [ASTRA, undefined], "the size is unknown until the next answer");
+    const route = await unprompted(state, ASTRA);
+    assert.deepEqual([routed(route), lastCode(state), recordOf(state).runTier], [TERRA, "run:need", "medium"], "no usage yet: the needed level's own model, not astra by a size the conversation no longer has");
+  });
+
+  test("in the other scope than the need's, carries the need, a level name, and chooses in the current scope: a work session never leaves the work account", async (t) => {
+    const state = await session(t);
+    assert.equal(await run(state, "go on", ANSWER_MEDIUM), TERRA, "a personal MEDIUM run goes to terra");
+    await state.loaded.host.command("smart-router", "scope work");
+    const route = await unprompted(state, TERRA);
+    assert.deepEqual([routed(route), lastCode(state), recordOf(state).runTier], [WORK_TERRA, "run:need", "medium"], "MEDIUM in the work section: the work account's terra");
+  });
+});
+
+describe("escalation", () => {
+  test("a stuck run moves up one level, once, with a notice", async (t) => {
+    assert.equal(
+      escalationNotice("medium", "high", "gpt-6.1-sol"),
+      "pi-smart-router: this run's last three tool calls failed the same way, so it moves up from MEDIUM to HIGH (gpt-6.1-sol).",
+      "the notice names the levels and the model",
+    );
+    const state = await session(t);
+    await say(state, "go on", ANSWER_MEDIUM);
+    assert.equal(routed(await route(state, "go on")), TERRA, "a MEDIUM run on terra");
+    const before = state.loaded.session.notices.length;
+    const differ = continuation(state, TERRA, failures(3, [TOOL_TEXT, `${TOOL_TEXT} again`]));
+    assert.deepEqual([routed(differ), lastCode(state)], [TERRA, "stick:previous"], "three failures that differ are ordinary work");
+    const up = continuation(state, TERRA, failures(3));
+    assert.deepEqual([routed(up), lastCode(state)], [SOL, "escalate"], "three identical failures move the run to HIGH's model");
+    assert.deepEqual(state.loaded.session.notices.slice(before), [{ type: "info", message: escalationNotice("medium", "high", "gpt-6.1-sol") }], "said once, where it happens");
+    assert.deepEqual([recordOf(state).runTier, recordOf(state).escalated], ["high", true], "the run is at HIGH now, and escalated");
+    const again = continuation(state, SOL, failures(6));
+    assert.deepEqual([routed(again), lastCode(state)], [SOL, "stick:previous"], "three more failures: the run stays on sol, once per run");
+    assert.equal(state.loaded.session.notices.length, before + 1, "no second notice");
+    holdsNoToolText(state);
+  });
+
+  test("a run at SUPER, a tagged run, smart-router/local and a version 1 roster are never escalated", async (t) => {
+    const top = await session(t, { id: "super" });
+    await say(top, "design the whole thing", ANSWER_SUPER);
+    assert.equal(routed(await route(top, "design the whole thing")), ASTRA, "a SUPER run on astra");
+    let before = top.loaded.session.notices.length;
+    assert.equal(routed(continuation(top, ASTRA, failures(3))), ASTRA, "SUPER has no level above it");
+    assert.equal(top.loaded.session.notices.length, before, "SUPER: no notice");
+
+    resetSlot();
+    const tagged = await session(t, { id: "tagged" });
+    const level = await say(tagged, "go on #medium", ANSWER_SUPER);
+    assert.equal(level.source, "tag", "a tagged run");
+    assert.equal(routed(await route(tagged, "go on")), TERRA, "the tag's MEDIUM: terra");
+    assert.equal(recordOf(tagged).runTagged, true, "the run's level came from its tag");
+    before = tagged.loaded.session.notices.length;
+    assert.equal(routed(continuation(tagged, TERRA, failures(3))), TERRA, "John's tag is his choice for that run");
+    assert.equal(tagged.loaded.session.notices.length, before, "tagged: no notice");
+
+    resetSlot();
+    const local = await session(t, { id: "local", select: "local" });
+    await local.loaded.host.emit("input", { text: "rename foo to bar", source: "interactive" });
+    const signal = local.loaded.session.startRun();
+    await local.loaded.host.emit("before_agent_start", { messageType: "user", prompt: "rename foo to bar" });
+    assert.equal(routed(local.loaded.runtime.route("local", request("user", { signal }))), GLM, "smart-router/local's run on Hera's GLM");
+    before = local.loaded.session.notices.length;
+    assert.equal(routed(continuation(local, GLM, failures(3), "local")), GLM, "smart-router/local keeps to the local role");
+    assert.equal(local.loaded.session.notices.length, before, "local: no notice");
+
+    resetSlot();
+    const v1 = await session(t, { id: "v1", roster: fixture("roster-hera.json"), catalog: new FakeCatalog(heraModels()) });
+    await v1.loaded.host.emit("input", { text: "rename foo to bar", source: "interactive" });
+    const v1Signal = v1.loaded.session.startRun();
+    await v1.loaded.host.emit("before_agent_start", { messageType: "user", prompt: "rename foo to bar" });
+    const first = routed(v1.loaded.runtime.route("auto", request("user", { signal: v1Signal })));
+    before = v1.loaded.session.notices.length;
+    assert.equal(routed(continuation(v1, first, failures(3))), first, "a version 1 roster has no levels to move up");
+    assert.equal(v1.loaded.session.notices.length, before, "version 1: no notice");
+  });
+
+  test("the next run starts from its own level again", async (t) => {
+    const state = await session(t);
+    await say(state, "go on", ANSWER_MEDIUM);
+    assert.equal(routed(await route(state, "go on")), TERRA);
+    await answered(state, TERRA, 3_000);
+    assert.equal(routed(continuation(state, TERRA, failures(3))), SOL, "the stuck run moves up");
+    await answered(state, SOL, 4_000);
+    await settled(state);
+    assert.deepEqual([recordOf(state).escalated, recordOf(state).runTier, recordOf(state).runTagged], [false, undefined, false], "the agent settled: nothing of the run is left");
+    const level = await say(state, "go on with it", ANSWER_MEDIUM);
+    assert.deepEqual([level.need, level.tier], ["medium", "medium"], "the next MEDIUM prompt goes to MEDIUM's model: terra's prices are half sol's");
+    assert.equal(routed(await route(state, "go on with it")), TERRA, "the next run starts on terra");
+    const before = state.loaded.session.notices.length;
+    assert.equal(routed(continuation(state, TERRA, failures(3))), SOL, "and can move up once again");
+    assert.deepEqual(state.loaded.session.notices.slice(before), [{ type: "info", message: escalationNotice("medium", "high", "gpt-6.1-sol") }]);
+  });
+
+  test("when the level above has no available model the run goes on to the next, as a step-up would", async (t) => {
+    const cat = catalog();
+    const state = await session(t, { catalog: cat });
+    await say(state, "go on", ANSWER_MEDIUM);
+    assert.equal(routed(await route(state, "go on")), TERRA);
+    cat.unavailable.add(SOL);
+    let before = state.loaded.session.notices.length;
+    assert.deepEqual([routed(continuation(state, TERRA, failures(3))), lastCode(state), recordOf(state).runTier], [OR_GLM, "escalate", "high"], "HIGH takes its chain before it passes the run up");
+    assert.deepEqual(
+      state.loaded.session.notices.slice(before),
+      [
+        { type: "info", message: escalationNotice("medium", "high", "z-ai/glm-5.3-flash") },
+        { type: "info", message: fallbackMoveNotice("gpt-6.1-terra", "openrouter", "z-ai/glm-5.3-flash") },
+      ],
+      "the move up is said, and so is the move onto the chain",
+    );
+    await settled(state);
+
+    for (const ref of CHAIN) cat.unavailable.add(ref);
+    await say(state, "go on with it", ANSWER_MEDIUM);
+    assert.equal(routed(await route(state, "go on with it")), TERRA);
+    before = state.loaded.session.notices.length;
+    assert.deepEqual([routed(continuation(state, TERRA, failures(3))), lastCode(state), recordOf(state).runTier], [ASTRA, "escalate", "super"], "with HIGH and the chain away, the run goes to SUPER");
+    assert.deepEqual(state.loaded.session.notices.slice(before), [{ type: "info", message: escalationNotice("medium", "super", "gpt-6-astra") }]);
+  });
+});
+
+describe("/smart-router status after the latest decision", () => {
+  /** The lines after "Last decision:", up to the egress line. */
+  async function terms(state: Session): Promise<string[]> {
+    await state.loaded.host.command("smart-router", "status");
+    const lines = (state.loaded.session.notices.at(-1)?.message ?? "").split("\n");
+    const at = lines.findIndex((line) => line.startsWith("Last decision: "));
+    assert.ok(at >= 0, lines.join("\n"));
+    return lines.slice(at + 1).filter((line) => line.startsWith("  Demand ") || line.startsWith("  Cost "));
+  }
+
+  test("shows the terms of the run the last entry belongs to: a planned run's after its continuations", async (t) => {
+    const state = await session(t);
+    const level = await say(state, "go on", ANSWER_MEDIUM);
+    await route(state, "go on");
+    continuation(state, TERRA);
+    continuation(state, TERRA);
+    assert.deepEqual(await terms(state), decisionLines(level), "two continuations later, the planned run's terms");
+  });
+
+  test("shows none after a direct request: it belongs to no planned run", async (t) => {
+    const state = await session(t);
+    await say(state, "go on", ANSWER_MEDIUM);
+    await route(state, "go on");
+    await answer(state, TERRA);
+    state.loaded.runtime.route("auto", request("direct", { previous: previous(state.loaded.runtime, TERRA) }));
+    assert.equal(recordOf(state).history.at(-1)?.reason, "direct", "the last entry is the direct request's");
+    assert.deepEqual(await terms(state), [], "no terms of an older run");
+  });
+
+  test("shows none after a run without a prompt", async (t) => {
+    const state = await session(t);
+    await say(state, "go on", ANSWER_MEDIUM);
+    await route(state, "go on");
+    await answer(state, TERRA);
+    await unprompted(state, TERRA);
+    continuation(state, TERRA);
+    assert.deepEqual(await terms(state), [], "the run without a prompt has no terms of its own, and the older run's are not shown");
   });
 });

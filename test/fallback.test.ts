@@ -609,7 +609,11 @@ describe("a run through the router with a fallback chain", () => {
       await later.loaded.host.emit("before_agent_start", { messageType: "custom" });
       run = later.loaded.session.startRun();
       const back = later.loaded.runtime.route("auto", request(reason, { signal: run, previous: previous(later.loaded.runtime, OR_GLM) }));
-      assert.deepEqual([routed(back), lastHistory(later.loaded)?.code], [SOL, "return:level"], reason);
+      assert.deepEqual(
+        [routed(back), lastHistory(later.loaded)?.code],
+        [SOL, "run:need"],
+        `${reason}: a run that starts without a prompt takes the level its session last needed and goes through the same choice (run:need)`,
+      );
       // The run's own continuations stay on the model it now has.
       assert.equal(routed(later.loaded.runtime.route("auto", request("continuation", { signal: run, previous: previous(later.loaded.runtime, SOL) }))), SOL);
       assert.equal(lastHistory(later.loaded)?.code, "stick:previous");
@@ -631,7 +635,11 @@ describe("a run through the router with a fallback chain", () => {
       const route = state.loaded.runtime.route("auto", request("continuation", { signal, previous: previous(state.loaded.runtime, OR_GLM) }));
       return [routed(route), lastHistory(state.loaded)?.code];
     };
-    assert.deepEqual(await unplanned(await restored({})), [SOL, "return:level"]);
+    assert.deepEqual(
+      await unplanned(await restored({})),
+      [SOL, "run:need"],
+      "a run that starts without a prompt takes the level its session last needed and goes through the same choice (run:need)",
+    );
     // A correction is a label, not a run's level; a record of another scope, or of no tier, seeds nothing.
     for (const record of [{ source: "correction", refers: NOW - 50 * MINUTE }, { scope: "work" }, { tier: "ultra" }, { v: 2 }]) {
       resetSlot();

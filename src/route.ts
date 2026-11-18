@@ -10,9 +10,15 @@
 //   owner user          the run's plan (on auto, only under the roster version it was made for,
 //                       and under version 2 in its scope), else as a continuation (steering,
 //                       follow-ups)
-//   owner continuation  previous, else the run's pick, else the last responder: that model if it
-//                       resolves, else its role, else the role's fallback; with no base, the
-//                       default role (the local role when local-only) and its fallback
+//   owner run start     on smart-router/auto under a version 2 roster, a run's first request
+//                       without a plan (an extension's run, which has no prompt) takes the level
+//                       its session last needed, through the choice a prompt's run makes
+//                       (run:need); a session that never planned a run continues as below
+//   owner continuation  a stuck run (src/stuck.ts) on smart-router/auto under a version 2 roster
+//                       moves up one level, once per run, unless its level is SUPER or its tag's
+//                       (escalate); else previous, else the run's pick, else the last responder:
+//                       that model if it resolves, else its role, else the role's fallback; with
+//                       no base, the default role (the local role when local-only) and its fallback
 //   owner retry         a usage-limit or auth failure moves to the role's next candidate, then its
 //                       fallback; a local model whose server could not be reached, before any
 //                       output, gives way to the candidate written after it that is not held,
@@ -32,8 +38,8 @@ import { isWorkCodex, subscriptionKind } from "./accounts.ts";
 import type { Classification } from "./classify.ts";
 import { VIRTUAL_API } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
-import { eligibleRole, NO_LOCAL_SECTION, noScopeSection, pickInRole } from "./decide.ts";
-import type { Choice, Decision, LastResponder, LevelInput, Plan, PlanLevel } from "./decide.ts";
+import { chooseModel, eligibleRole, NO_LOCAL_SECTION, noScopeSection, pickInRole } from "./decide.ts";
+import type { Choice, CompactionFigures, CostFigures, Decision, LastResponder, LevelInput, Plan, PlanLevel } from "./decide.ts";
 import { invariant, noBoundedHistory, unroutable } from "./errors.ts";
 import type { JevOutcome } from "./jev.ts";
 import { newLedger, notePrompt } from "./ledger.ts";
@@ -42,6 +48,9 @@ import { checkLocal } from "./local.ts";
 import { clock, coolFrom, failureKind, holdFrom, refOf, resolveCandidate } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
 import { autoRoles, excludedBy, excludesFor, isWorkBound, roleLevel, roleOf, scopeSection } from "./roster.ts";
+import type { ScopeSection } from "./roster.ts";
+import { stuck } from "./stuck.ts";
+import { tierAbove } from "./tiers.ts";
 import type { Tier } from "./tiers.ts";
 
 /** The model the owner loop's last route picked in the current run. */
@@ -65,6 +74,11 @@ export interface HistoryEntry {
   readonly foreign: boolean;
   /** A version 2 run's level, on the request that consumed its plan. Version 1 entries have none. */
   readonly level?: PlanLevel;
+  /**
+   * The owner loop's request continued a run under way: the run's first request is an earlier
+   * entry. /smart-router status walks back over such entries to the run's first request.
+   */
+  readonly continuesRun?: true;
 }
 
 export const HISTORY_LIMIT = 50;
@@ -119,13 +133,19 @@ export interface SessionRecord {
   /** What the session has measured: each model's cache, its runs' shape and its prompts' levels (src/ledger.ts). */
   readonly ledger: Ledger;
   /**
-   * The level the session's last planned version 2 run needed. While the session is on a model of
-   * the scope's fallback chain, that model stands for this level: a run that starts without a
-   * prompt picks in its role again (levelToReturnTo).
+   * The level the session's last planned version 2 run needed: a run that starts without a prompt
+   * takes it, through the same choice (run:need).
    */
   need: Tier | undefined;
-  /** The level whose model the run under way took, from its plan; cleared when the agent settles. */
+  /**
+   * The level whose model the run under way took, from its plan, its run:need choice or its
+   * escalation; cleared when the agent settles.
+   */
   runTier: Tier | undefined;
+  /** Whether the run under way's level came from its message's tag: such a run is never escalated. Cleared when the agent settles. */
+  runTagged: boolean;
+  /** Whether the run under way has moved up once for being stuck; cleared when the agent settles. */
+  escalated: boolean;
   last: LastResponder | undefined;
   readonly history: HistoryEntry[];
   /** The planned version 2 run's level, until its record is written. */
@@ -142,6 +162,8 @@ export function newRecord(): SessionRecord {
     ledger: newLedger(),
     need: undefined,
     runTier: undefined,
+    runTagged: false,
+    escalated: false,
     last: undefined,
     history: [],
     pendingLevel: undefined,
@@ -194,6 +216,10 @@ export interface RouteInput {
   readonly request: ModelRouteRequest;
   readonly rc: ResolveContext;
   readonly record: SessionRecord;
+  /** What the cost rule reads of the session: its ledger and the request's own thinking level. */
+  readonly figures: CostFigures | undefined;
+  /** Pi's compaction settings under the selection. */
+  readonly compaction: CompactionFigures;
 }
 
 const previousRef = (request: ModelRouteRequest): string | undefined =>
@@ -324,21 +350,69 @@ function takePlan(record: SessionRecord, id: VirtualId, rc: ResolveContext): Pla
 }
 
 /**
- * The level role a run that starts without a plan goes back to, if it does: on smart-router/auto
- * under a version 2 roster, when this is the run's first request, the model it would stay on is one
- * of the scope's fallback chain, and the session's last planned run needed a level: the scope's
- * role for that level. Such a run (a goal continuation, a loop's) has no prompt to plan it, and without this it
- * would stay on the chain model for as long as it kept starting runs, however long ago the level's
- * own model came back.
+ * The scope's section where levels route: smart-router/auto under a version 2 roster, in a scope it
+ * serves. Undefined on smart-router/local, under a version 1 roster, and in a scope without one.
  */
-function levelToReturnTo(rc: ResolveContext, request: ModelRouteRequest, record: SessionRecord): string | undefined {
+function levelSection(rc: ResolveContext): ScopeSection | undefined {
+  if (rc.virtualId !== "auto" || rc.localOnly || rc.roster.version !== 2) return undefined;
+  return scopeSection(rc.roster, rc.scope);
+}
+
+/** A decision that puts the run at a level: the level whose model takes it. */
+interface Leveled {
+  readonly decision: Decision;
+  readonly tier: Tier;
+}
+
+/**
+ * A run that starts without a prompt (an extension's own, such as a goal continuation or a loop's)
+ * has no plan: it takes the level its session last needed and goes through the choice a prompt's
+ * run makes, priced with the session's figures and nothing for a prompt. Undefined when the
+ * session never planned a run: it continues as before.
+ */
+function runNeed(input: RouteInput, section: ScopeSection): Leveled | undefined {
+  const { rc, record } = input;
   const { need } = record;
-  if (rc.roster.version !== 2 || rc.virtualId !== "auto" || rc.localOnly || record.runPick !== undefined || need === undefined) return undefined;
-  const section = scopeSection(rc.roster, rc.scope);
-  const base = previousRef(request) ?? record.last?.ref;
-  const role = base === undefined ? undefined : roleOf(rc.roster, base)?.name;
-  if (section?.fallback === undefined || role === undefined || !section.fallback.includes(role)) return undefined;
-  return section.levels[need].role;
+  if (need === undefined) return undefined;
+  const { tier, decision } = chooseModel({
+    rc,
+    section,
+    need,
+    code: "run:need",
+    last: record.last,
+    promptTokens: 0,
+    compaction: input.compaction,
+    figures: input.figures,
+    priced: true,
+  });
+  return { tier, decision };
+}
+
+/**
+ * A stuck run's move up: on a continuation of a run whose level is below SUPER and not its tag's,
+ * that has not moved up yet, when its last three tool calls failed the same way, the level above
+ * the run's, by the climb a step-up makes (its chain, then the levels above it), unpriced. Only a
+ * model other than the run's is a move; it carries the code `escalate`.
+ */
+function escalation(input: RouteInput, section: ScopeSection): Leveled | undefined {
+  const { request, rc, record } = input;
+  const { runPick, runTier } = record;
+  if (request.reason !== "continuation" || runPick?.id !== rc.virtualId || runTier === undefined || record.escalated || record.runTagged) return undefined;
+  const above = tierAbove(runTier);
+  if (above === undefined || !stuck(request.messages)) return undefined;
+  const { tier, decision } = chooseModel({
+    rc,
+    section,
+    need: above,
+    code: "escalate",
+    last: record.last,
+    promptTokens: 0,
+    compaction: input.compaction,
+    figures: input.figures,
+    priced: false,
+  });
+  if (!decision.ok || decision.choice.ref === runPick.ref) return undefined;
+  return { tier, decision: { ok: true, choice: { ...decision.choice, code: "escalate" } } };
 }
 
 /** The planned model if it still resolves, else the planned role, then its fallback. */
@@ -435,22 +509,35 @@ function remember(record: SessionRecord, entry: HistoryEntry): void {
 /** A request of the owner session's own agent loop. */
 export function routeOwned(input: RouteInput): ModelRoute {
   const { id, request, rc, record } = input;
+  const starts = record.runPick === undefined;
   let decision: Decision;
   let plan: Plan | undefined;
   if (request.reason === "user") plan = takePlan(record, id, rc);
-  const back = plan === undefined && request.reason !== "retry" ? levelToReturnTo(rc, request, record) : undefined;
+  const section = levelSection(rc);
+  const unplanned = section === undefined || plan !== undefined || request.reason === "retry" ? undefined : starts ? runNeed(input, section) : undefined;
+  const escalated = section === undefined || plan !== undefined || unplanned !== undefined ? undefined : escalation(input, section);
   if (plan !== undefined) decision = fromPlan(rc, plan);
   else if (request.reason === "retry") decision = retry(rc, request, record);
-  else if (back !== undefined) decision = pickInRole(rc, back, { fallback: true, code: "return:level" });
+  else if (unplanned !== undefined) decision = unplanned.decision;
+  else if (escalated !== undefined) decision = escalated.decision;
   else decision = stick(rc, previousRef(request), record);
   const choice = settle(input, decision);
   // A planned run's prompt: its need and the level whose model took it go in the ledger, and the
-  // need is the session's until the next planned run.
+  // need is the session's until the next planned run. A run without a prompt counts as a prompt
+  // that needed the session's level.
   if (plan?.level !== undefined) {
-    const { need, tier } = plan.level;
+    const { need, tier, source } = plan.level;
     notePrompt(record.ledger, need, tier);
     record.need = need;
     record.runTier = tier;
+    record.runTagged = source === "tag";
+  } else if (unplanned !== undefined && record.need !== undefined) {
+    notePrompt(record.ledger, record.need, unplanned.tier);
+    record.runTier = unplanned.tier;
+    record.runTagged = false;
+  } else if (escalated !== undefined) {
+    record.runTier = escalated.tier;
+    record.escalated = true;
   }
   record.runPick = { id, ref: choice.ref, role: choice.role };
   remember(record, {
@@ -464,6 +551,7 @@ export function routeOwned(input: RouteInput): ModelRoute {
     code: choice.code,
     foreign: false,
     ...(plan?.level === undefined ? {} : { level: plan.level }),
+    ...(starts ? {} : { continuesRun: true as const }),
   });
   return { model: choice.model, thinkingLevel: levelFor(rc, choice.role, request.thinkingLevel) };
 }

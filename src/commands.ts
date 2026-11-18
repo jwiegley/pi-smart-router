@@ -350,11 +350,21 @@ function classifierOf(roster: Loaded<Roster>): string | undefined {
   return roster.kind === "ok" && roster.value.version === 2 ? roster.value.classifier?.model : undefined;
 }
 
-/** The level of the latest history entry that has one. */
-function latestLevel(history: readonly HistoryEntry[]): PlanLevel | undefined {
+/**
+ * The level of the run the latest history entry belongs to: from that entry, back over the entries
+ * that continue its run (continuations, retries, steers and follow-ups) to the run's first request,
+ * passing over direct and foreign requests on the way, which belong to no run of the owner's loop.
+ * None when the latest entry is itself a direct or foreign request, or when the run's first request
+ * has no level: a hand-picked model's direct requests, a run without a prompt and a version 1 run
+ * show no older run's terms.
+ */
+function runLevel(history: readonly HistoryEntry[]): PlanLevel | undefined {
+  const latest = history.at(-1);
+  if (latest === undefined || latest.reason === "direct" || latest.foreign) return undefined;
   for (let index = history.length - 1; index >= 0; index -= 1) {
-    const level = history[index]?.level;
-    if (level !== undefined) return level;
+    const entry = history[index];
+    if (entry === undefined || entry.reason === "direct" || entry.foreign || entry.continuesRun === true) continue;
+    return entry.level;
   }
   return undefined;
 }
@@ -379,9 +389,10 @@ export function statusText(host: CommandHost, ctx: ExtensionContext): string {
   }
   const last = session?.history.at(-1);
   lines.push(`Last decision: ${last === undefined ? "none yet" : describeEntry(last)}`);
-  // The terms behind the latest decision that planned a level: the demand, and what each candidate
-  // would cost. A run's continuations and direct requests carry none, so they do not hide it.
-  const decided = latestLevel(session?.history ?? []);
+  // The terms behind the decision of the run the latest entry belongs to: the demand, and what each
+  // candidate would cost. A planned run's continuations do not hide them, and a run that had no
+  // level of its own shows none rather than an older run's.
+  const decided = runLevel(session?.history ?? []);
   if (decided !== undefined) lines.push(...decisionLines(decided));
   const onFallback = roster.kind === "ok" && roster.value.version === 2 ? onFallbackLine(roster.value, last) : undefined;
   if (onFallback !== undefined) lines.push(onFallback);
