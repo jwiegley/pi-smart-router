@@ -39,7 +39,7 @@ import { classify, riskyTrigger } from "./classify.ts";
 import type { RiskyTrigger, Signal } from "./classify.ts";
 import { PROVIDER } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
-import { chooseByCost, ratesOf } from "./cost.ts";
+import { chooseByCost, positive, ratesOf } from "./cost.ts";
 import type { Candidate, Priced, Rates, Workload } from "./cost.ts";
 import { demandOf } from "./demand.ts";
 import type { Demand, PromptFacts } from "./demand.ts";
@@ -343,10 +343,9 @@ export interface Chosen {
 
 /** A cache lifetime the catalog entry states: its short retention's, else its long one's, when positive. */
 function lifetimeOf(model: Model<Api>): number | undefined {
-  const positive = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value > 0;
   const short = model.promptCache?.short;
   const long = model.promptCache?.long;
-  return positive(short) ? short : positive(long) ? long : undefined;
+  return short !== undefined && positive(short) ? short : long !== undefined && positive(long) ? long : undefined;
 }
 
 /**
@@ -354,10 +353,12 @@ function lifetimeOf(model: Model<Api>): number | undefined {
  * (a tagged one), or when the needed level's own models cannot take it, the climb as it always was
  * (its chain, then a step up). Otherwise each level's first available model of its own is a
  * candidate, once (a model a lower level took is not a candidate again), and, with compaction
- * disabled, only when the conversation fits it. With no usage yet, a candidate without a price or
- * one seen after now (checked in that order), the needed level's own model takes the run and the
- * cost is unknown. Else chooseByCost picks, counting a model's cache only at the effort of its last
- * answer: a known effort that differs from the one it would be sent now leaves it nothing cached.
+ * disabled, only when the conversation fits it. With no usage yet (no history measured, whatever
+ * the prompt's size), a candidate without a price or one seen after now (checked in that order),
+ * the needed level's own model takes the run and the cost is unknown. A candidate is priced at the
+ * size it is sent: the conversation, or, when Pi compacts first, what the compaction leaves. Else
+ * chooseByCost picks, counting a model's cache only at the effort of its last answer: a known
+ * effort that differs from the one it would be sent now leaves it nothing cached.
  */
 export function chooseModel(input: {
   readonly rc: ResolveContext;
@@ -395,17 +396,22 @@ export function chooseModel(input: {
     steppedUp: false,
     cost: { outcome: "unknown", why },
   });
-  if (last?.usage === undefined || conversation === 0) return unknown("no usage yet");
+  // The history alone: a prompt is no usage.
+  if (last?.usage === undefined || historyOf(last) === 0) return unknown("no usage yet");
   const { ledger, thinking } = figures;
-  const rated: Array<{ readonly tier: Tier; readonly choice: Choice; readonly rates: Rates }> = [];
+  // A candidate that compacts first is sent the conversation Pi leaves, so it is priced at that size.
+  const after = compaction.keepRecent + SUMMARY_TOKENS;
+  const rated: Array<{ readonly tier: Tier; readonly choice: Choice; readonly rates: Rates; readonly compacts: boolean }> = [];
   for (const { tier, decision } of levels) {
-    const rates = ratesOf(decision.choice.model.cost, conversation, ledger.writes.has(decision.choice.model.provider));
+    const { model } = decision.choice;
+    const compacts = compaction.enabled && !fitsSize(conversation, compaction.reserve, model);
+    const rates = ratesOf(model.cost, compacts ? after : conversation, ledger.writes.has(model.provider));
     if (rates === undefined) return unknown("no price");
-    rated.push({ tier, choice: decision.choice, rates });
+    rated.push({ tier, choice: decision.choice, rates, compacts });
   }
   if (rated.some(({ choice }) => (ledger.seen.get(choice.ref)?.at ?? rc.now) > rc.now)) return unknown("the clock went backwards");
 
-  const candidates = rated.map(({ tier, choice, rates }): Candidate => {
+  const candidates = rated.map(({ tier, choice, rates, compacts }): Candidate => {
     const seen = ledger.seen.get(choice.ref);
     const effort = effortOf(choice.model, roleLevel(rc.roster, choice.role, thinking));
     const sameEffort = seen?.effort === undefined || seen.effort === effort;
@@ -416,7 +422,7 @@ export function chooseModel(input: {
       cached: seen !== undefined && sameEffort ? Math.min(seen.tokens, conversation) : 0,
       idle: seen === undefined ? undefined : (rc.now - seen.at) / 1_000,
       lifetime: lifetimeOf(choice.model),
-      compacts: compaction.enabled && !fitsSize(conversation, compaction.reserve, choice.model),
+      compacts,
     };
   });
   const switching = rc.roster.version === 2 ? rc.roster.switching : DEFAULT_SWITCHING;
@@ -429,7 +435,7 @@ export function chooseModel(input: {
     workload,
     again,
     settings: switching,
-    compaction: { summary: SUMMARY_TOKENS, after: compaction.keepRecent + SUMMARY_TOKENS },
+    compaction: { summary: SUMMARY_TOKENS, after },
   });
   const taken = rated.find((entry) => entry.choice.ref === choice.chosen.ref)!;
   return {

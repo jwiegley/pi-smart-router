@@ -9,11 +9,13 @@ import test, { describe } from "node:test";
 
 import type { Api, Model, ModelThinkingLevel, Usage } from "@earendil-works/pi-ai";
 
-import type { Priced } from "../src/cost.ts";
+import { runCost } from "../src/cost.ts";
+import type { Candidate, Priced, Rates, Workload } from "../src/cost.ts";
 import { chooseModel } from "../src/decide.ts";
 import type { Chosen, CompactionFigures, CostFigures, LastResponder } from "../src/decide.ts";
 import { newLedger } from "../src/ledger.ts";
 import type { Ledger, RunStat } from "../src/ledger.ts";
+import { DEFAULT_SWITCHING, SUMMARY_TOKENS } from "../src/settings.ts";
 import { policyFromRoster } from "../src/local.ts";
 import { Cooldowns, resolveContext } from "../src/resolve.ts";
 import type { ResolveContext } from "../src/resolve.ts";
@@ -123,6 +125,7 @@ interface ChooseOptions {
   readonly thinking?: ModelThinkingLevel;
   readonly ledger?: Ledger;
   readonly priced?: boolean;
+  readonly promptTokens?: number;
 }
 
 function choose(options: ChooseOptions = {}): Chosen {
@@ -132,7 +135,7 @@ function choose(options: ChooseOptions = {}): Chosen {
     need: options.need ?? "medium",
     code: options.code ?? "heuristics",
     last: "last" in options ? options.last : lastFrom(ASTRA),
-    promptTokens: 0,
+    promptTokens: options.promptTokens ?? 0,
     compaction: options.compaction ?? ENABLED,
     figures: "figures" in options ? options.figures : { ledger: options.ledger ?? ledgerOf(), thinking: options.thinking ?? "high" },
     priced: options.priced ?? true,
@@ -218,8 +221,12 @@ describe("missing figures", () => {
     assert.deepEqual(pickOf(chosen), [TERRA, "medium", "heuristics"], "no usage yet: the needed level's own model");
     assert.deepEqual(chosen.cost, { outcome: "unknown", why: "no usage yet" }, "no usage yet");
     assert.equal(chosen.steppedUp, false, "no usage yet");
-    const empty = choose({ last: { ref: ASTRA, at: NOW - 30_000, usage: { ...usageOf(1_000), cacheRead: 0, output: 0, totalTokens: 0 } } });
-    assert.deepEqual(empty.cost, { outcome: "unknown", why: "no usage yet" }, "a usage of 0 tokens is no usage either");
+    const zero = { ...usageOf(1_000), cacheRead: 0, output: 0, totalTokens: 0 };
+    const empty = choose({ last: { ref: ASTRA, at: NOW - 30_000, usage: zero }, promptTokens: 50 });
+    assert.deepEqual(pickOf(empty), [TERRA, "medium", "heuristics"], "a usage of 0 tokens is no usage either, whatever the prompt's size");
+    assert.deepEqual(empty.cost, { outcome: "unknown", why: "no usage yet" }, "a usage of 0 tokens is no usage either, whatever the prompt's size");
+    const unmeasured = choose({ last: { ref: ASTRA, at: NOW - 30_000 }, promptTokens: 50 });
+    assert.deepEqual(unmeasured.cost, { outcome: "unknown", why: "no usage yet" }, "a last response without usage is no usage, whatever the prompt's size");
   });
 
   test("a model without a price makes the cost unknown", () => {
@@ -335,6 +342,63 @@ describe("a conversation larger than a candidate's window", () => {
       [TERRA, ASTRA],
       "sol is too small and Pi would not compact: it is not priced",
     );
+  });
+});
+
+describe("the new prompt", () => {
+  // Sol's window less the reserve holds 111,616 tokens: a history of 111,600 fits alone, and not with a 50-token prompt.
+  const tight = (): FakeCatalog => catalog(codex(SOL, { contextWindow: 128_000 }));
+  const edge = lastFrom(ASTRA, 111_600);
+
+  test("counts toward the conversation at a window's edge: the fit, and the cache's cap", () => {
+    const alone = choose({ rc: context({ catalog: tight() }), last: edge, ledger: ledgerOf({ tokens: 200_000 }), compaction: DISABLED });
+    assert.deepEqual(pricedOf(alone).map((entry) => entry.ref), [TERRA, SOL, ASTRA], "the history alone fits sol: with compaction disabled it is a candidate");
+    const disabled = choose({ rc: context({ catalog: tight() }), last: edge, ledger: ledgerOf({ tokens: 200_000 }), compaction: DISABLED, promptTokens: 50 });
+    assert.deepEqual(
+      pricedOf(disabled).map((entry) => entry.ref),
+      [TERRA, ASTRA],
+      "history plus prompt no longer fits sol: with compaction disabled it is no candidate",
+    );
+    assert.equal(entryOf(disabled, ASTRA).cached, 111_650, "the cached size is capped by the conversation, history plus prompt");
+    const enabled = choose({ rc: context({ catalog: tight() }), last: edge, ledger: ledgerOf({ tokens: 200_000 }), promptTokens: 50 });
+    assert.equal(entryOf(enabled, SOL).compacts, true, "history plus prompt no longer fits sol: with compaction enabled Pi compacts first");
+    assert.equal(entryOf(enabled, TERRA).compacts, false, "history plus prompt fits terra");
+    assert.equal(entryOf(alone, ASTRA).cached, 111_600, "the cached size is capped by the conversation, the history alone without a prompt");
+  });
+});
+
+describe("a candidate that compacts first", () => {
+  // Terra's window is too small for 200,000 tokens; after the compaction it is sent 24,000. Its price
+  // has a request-wide tier above 100,000 tokens, between the two sizes.
+  const LOWER = PRICES[TERRA]!;
+  const tiered = (upper: { input: number; output: number; cacheRead: number; cacheWrite: number }): FakeCatalog =>
+    catalog(codex(TERRA, { contextWindow: 128_000, cost: { ...LOWER, tiers: [{ inputTokensAbove: 100_000, ...upper }] } }));
+  const long: RunStat = { requests: 10, output: 1_000, growth: 0, seconds: 600 };
+  const run = (rc: ResolveContext): Chosen => choose({ rc, last: lastFrom(ASTRA, 200_000), ledger: ledgerOf({ tokens: 199_000, run: long }) });
+  const perToken = (cost: { input: number; output: number; cacheRead: number }): Rates => ({ input: cost.input / 1e6, cacheRead: cost.cacheRead / 1e6, output: cost.output / 1e6 });
+
+  /** Terra's expected cost: astra's summary at 200,000 tokens, then the run on 24,000 tokens at `rates`, then leaving astra. */
+  function expected(rates: Rates, leaving: number): number {
+    const astra: Candidate = { ref: ASTRA, tier: "super", rates: perToken(PRICES[ASTRA]!), cached: 199_000, idle: 30, compacts: false };
+    const once: Workload = { tokens: 200_000, requests: 1, output: 0, growth: 0, seconds: 0, horizon: 1 };
+    const summary = runCost(astra, once, DEFAULT_SWITCHING.cacheSurvival) + SUMMARY_TOKENS * astra.rates.output;
+    const fresh: Candidate = { ref: TERRA, tier: "medium", rates, cached: 0, idle: undefined, compacts: true };
+    const after = 20_000 + SUMMARY_TOKENS;
+    return summary + runCost(fresh, { tokens: after, requests: 10, output: 1_000, growth: 0, seconds: 600, horizon: 1 }, DEFAULT_SWITCHING.cacheSurvival) + leaving;
+  }
+
+  test("is priced at the rates of the size it is sent after the compaction", () => {
+    const chosen = run(context({ catalog: tiered({ input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 }) }));
+    const terra = entryOf(chosen, TERRA);
+    assert.equal(terra.compacts, true, "200,000 tokens do not fit terra: Pi compacts first");
+    near(terra.cost, expected(perToken(LOWER), terra.leaving), "terra is sent 24,000 tokens, under the tier's 100,000: priced at the lower rates");
+    near(terra.cost, 0.468972, "the lower rates are terra's untiered price: the same cost as without the tier");
+  });
+
+  test("is priced when only the tier of the size it is not sent lacks a price", () => {
+    const chosen = run(context({ catalog: tiered({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }) }));
+    assert.notEqual(chosen.cost?.outcome, "unknown", `terra is sent 24,000 tokens, whose price is known: ${JSON.stringify(chosen.cost)}`);
+    near(entryOf(chosen, TERRA).cost, 0.468972, "terra is sent 24,000 tokens, under the unpriced tier: priced at the lower rates");
   });
 });
 

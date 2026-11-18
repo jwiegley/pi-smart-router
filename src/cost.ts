@@ -97,7 +97,8 @@ export function survivalOf(candidate: Pick<Candidate, "idle" | "lifetime">, tabl
   return survival(table, idle);
 }
 
-function positive(value: number): boolean {
+/** A figure that is a finite number above zero. */
+export function positive(value: number): boolean {
   return Number.isFinite(value) && value > 0;
 }
 
