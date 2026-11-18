@@ -436,7 +436,7 @@ The inputs the spec implies but its own test list does not name, most likely fir
   });
   ```
 
-  In `test/cost-sequences.test.ts`, a small simulator in the test file: a clock, and per model the size it has cached and when it last answered. Each step is `[need, requests, seconds]`; the conversation is 150,000 tokens and does not grow; 1,000 output tokens per request; 30 seconds pass between a run's end and the next prompt. Three policies choose a model for a step: `rule` (`chooseByCost` with the horizon and the chance the level is needed again computed from the steps so far, as Task 5 defines them), `high` (always astra) and `follow` (always the needed level's model). A step is charged `runCost` of the model that took it, with what that model had cached; the model then has the whole conversation cached.
+  In `test/cost-sequences.test.ts`, a small simulator in the test file: a clock, and per model the size it has cached and when it last answered. Each step is `[need, requests, seconds]`; the conversation is 150,000 tokens and does not grow; 1,000 output tokens per request; 30 seconds pass between a run's end and the next prompt. Three policies choose a model for a step: `rule` (`chooseByCost`, with the horizon and the chance computed from the steps so far by two helpers in the test file), `high` (always astra) and `follow` (always the needed level's model). The horizon is 1 plus the number of steps, counted back from the latest, that needed this level or less and were taken by a level above this one, at most 5. The chance that the current model's level is needed again is the share of the last ten steps that needed that level or more: 0.5 with fewer than three steps, never under 0.2. The current model is the one that took the latest step. A step is charged `runCost` of the model that took it, with what that model had cached; the model then has the whole conversation cached.
 
   ```ts
   for (const [name, steps] of [
@@ -891,7 +891,7 @@ The inputs the spec implies but its own test list does not name, most likely fir
     test("each answer that ends without an error is noted, with its effort; an aborted or failed one is not", async (t) => { /* message_end with thinkingLevel "high" -> record.ledger.seen has the ref at input+cacheRead+cacheWrite; stopReason "aborted" and "error" leave it unchanged */ });
     test("a run's shape is noted when the agent settles", async (t) => { /* three runs through say/firstRequest/finish -> record.ledger.runs.length 3 */ });
     test("a compaction and a move in the tree forget every cache", async (t) => { /* host.emit("session_compact", ...) and ("session_tree", ...) */ });
-    test("a resumed session keeps its model's cache", async (t) => { /* session.appendAssistant of an astra response 30 s ago before start(): after start the ledger has astra seen, and a short MEDIUM prompt stays on astra */ });
+    test("a resumed session keeps its model's cache", async (t) => { /* session.appendAssistant of an astra response 30 s ago before start(): after start the ledger has astra seen at its prompt size, and the next MEDIUM prompt's cost terms price astra with that size cached and a survival of 0.97, not as a cold model */ });
     test("seeding stops at a rewrite: a response before a smaller prompt of the same model is not counted", async (t) => { /* branch: terra at 90_000, astra at 150_000, astra at 30_000 -> after start the ledger has only astra, at 30_000 */ });
   });
   describe("a planned run", () => {
