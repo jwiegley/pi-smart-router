@@ -3,6 +3,8 @@ import test, { describe } from "node:test";
 
 import { chooseByCost, runCost } from "../src/cost.ts";
 import type { Candidate, Rates, Workload } from "../src/cost.ts";
+import { againChance, horizonFor, newLedger, notePrompt } from "../src/ledger.ts";
+import type { Ledger } from "../src/ledger.ts";
 import { DEFAULT_SWITCHING } from "../src/settings.ts";
 import { tierRank } from "../src/tiers.ts";
 import type { Tier } from "../src/tiers.ts";
@@ -41,29 +43,11 @@ function repeat<T>(times: number, items: readonly T[]): T[] {
   return Array.from({ length: times }, () => items).flat();
 }
 
-/** One prompt as it happened: the level it needed and the level of the model that took it. */
-interface Taken {
-  readonly need: Tier;
-  readonly taken: Tier;
-}
-
-/** 1 plus the steps, counted back from the latest, that needed this level or less and were taken above it; at most the cap. */
-function horizonOf(history: readonly Taken[], need: Tier): number {
-  let count = 0;
-  for (let i = history.length - 1; i >= 0 && count < DEFAULT_SWITCHING.horizonCap; i--) {
-    const step = history[i]!;
-    if (tierRank(step.need) <= tierRank(need) && tierRank(step.taken) > tierRank(need)) count++;
-    else break;
-  }
-  return Math.min(1 + count, DEFAULT_SWITCHING.horizonCap);
-}
-
-/** The share of the last ten steps that needed the current model's level or more: 0.5 with fewer than three, never under 0.2. */
-function againOf(history: readonly Taken[], level: Tier): number {
-  if (history.length < 3) return 0.5;
-  const recent = history.slice(-10);
-  const share = recent.filter((step) => tierRank(step.need) >= tierRank(level)).length / recent.length;
-  return Math.max(0.2, share);
+/** A ledger that has noted these prompts, each the level it needed and the level of the model that took it. */
+function ledgerOf(prompts: ReadonlyArray<readonly [need: Tier, took: Tier]>): Ledger {
+  const ledger = newLedger();
+  for (const [need, took] of prompts) notePrompt(ledger, need, took);
+  return ledger;
 }
 
 type Policy = "rule" | "high" | "follow";
@@ -77,7 +61,8 @@ function simulate(policy: Policy, steps: readonly Step[]): Outcome {
   let clock = 0;
   const cached = new Map<string, number>();
   const answered = new Map<string, number>();
-  const history: Taken[] = [];
+  // The session's ledger, fed as the router feeds it: each prompt's need and the level that took it.
+  const ledger = newLedger();
   const models: string[] = [];
   let current: Model | undefined;
   let total = 0;
@@ -104,13 +89,13 @@ function simulate(policy: Policy, steps: readonly Step[]): Outcome {
         output: OUTPUT,
         growth: 0,
         seconds,
-        horizon: horizonOf(history, need),
+        horizon: horizonFor(ledger, need, DEFAULT_SWITCHING.horizonCap),
       };
       const choice = chooseByCost({
         candidates: MODELS.filter((m) => tierRank(m.tier) >= tierRank(need)).map(candidate),
         current: current?.ref,
         workload,
-        again: current === undefined ? 0.5 : againOf(history, current.tier),
+        again: current === undefined ? 0.5 : againChance(ledger, current.tier),
         settings: DEFAULT_SWITCHING,
         compaction: COMPACTION,
       });
@@ -122,7 +107,7 @@ function simulate(policy: Policy, steps: readonly Step[]): Outcome {
     cached.set(model.ref, TOKENS);
     answered.set(model.ref, clock);
     clock += BETWEEN;
-    history.push({ need, taken: model.tier });
+    notePrompt(ledger, need, model.tier);
     models.push(model.ref);
     current = model;
   }
@@ -137,13 +122,17 @@ const SEQUENCES: ReadonlyArray<readonly [name: string, steps: readonly Step[]]> 
   ["a burst of light prompts", [["super", 5, 300], ...repeat(8, [["low", 1, 60]] as const), ["super", 5, 300]]],
 ];
 
-describe("the test's horizon helper", () => {
+describe("the ledger's horizon, as the sequences feed it", () => {
   test("counts lighter steps taken above the level, and is capped at the setting", () => {
-    const lighter: Taken = { need: "medium", taken: "super" };
+    const lighter = ["medium", "super"] as const;
     for (const [count, expected] of [[0, 1], [1, 2], [4, 5], [5, 5], [7, 5]] as const) {
-      assert.equal(horizonOf(repeat(count, [lighter]), "medium"), expected, `${count} qualifying steps: horizon ${expected}, never over the cap`);
+      assert.equal(
+        horizonFor(ledgerOf(repeat(count, [lighter])), "medium", DEFAULT_SWITCHING.horizonCap),
+        expected,
+        `${count} qualifying steps: horizon ${expected}, never over the cap`,
+      );
     }
-    assert.equal(horizonOf([lighter, { need: "super", taken: "super" }], "medium"), 1, "a step that needed more ends the count");
+    assert.equal(horizonFor(ledgerOf([lighter, ["super", "super"]]), "medium", DEFAULT_SWITCHING.horizonCap), 1, "a step that needed more ends the count");
   });
 });
 

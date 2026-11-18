@@ -90,6 +90,8 @@ export function survival(table: SurvivalTable, idleSeconds: number | undefined):
 /** A candidate's chance: 1 up to a stated lifetime and 0 after it; else the table's. `extraSeconds` is idle time still to come. */
 export function survivalOf(candidate: Pick<Candidate, "idle" | "lifetime">, table: SurvivalTable, extraSeconds = 0): number {
   if (candidate.idle === undefined) return 0;
+  // A negative idle time gets the table's first chance, or 1 with a lifetime. It is never priced:
+  // chooseModel (decide.ts) rejects a model seen after now as a clock that went backwards.
   const idle = candidate.idle + extraSeconds;
   if (candidate.lifetime !== undefined) return idle <= candidate.lifetime ? 1 : 0;
   return survival(table, idle);

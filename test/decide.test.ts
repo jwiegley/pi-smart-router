@@ -8,11 +8,12 @@ import type { Labels } from "../src/accounts.ts";
 import { BUILTIN_EXCLUDES } from "../src/constants.ts";
 import type { VirtualId } from "../src/constants.ts";
 import { compactionFor, eligibleRole, fits, NO_LOCAL_SECTION, pickInRole, planUserTurn } from "../src/decide.ts";
-import type { Choice, CompactionFigures, Decision, LastResponder, LevelInput, Plan, PlanLevel } from "../src/decide.ts";
+import type { Choice, CompactionFigures, CostFigures, Decision, LastResponder, LevelInput, Plan, PlanLevel } from "../src/decide.ts";
 import { HEURISTIC_MESSAGES } from "../src/demand.ts";
 import type { PromptFacts } from "../src/demand.ts";
 import type { Loaded } from "../src/files.ts";
 import type { JevOutcome } from "../src/jev.ts";
+import { newLedger } from "../src/ledger.ts";
 import { baseUrlHost, checkLocal, isLocalHost, policyFromRoster } from "../src/local.ts";
 import type { LocalPolicy } from "../src/local.ts";
 import { Cooldowns, refOf, resolveCandidate, resolveContext } from "../src/resolve.ts";
@@ -533,8 +534,11 @@ const v2Catalog = (): FakeCatalog =>
 const v2 = (catalog: FakeCatalog = v2Catalog(), overrides: Partial<Omit<ResolveContext, "available" | "catalog">> = {}): ResolveContext =>
   contextWith(catalog, { roster: V2, ...overrides });
 
-function planV2(text: string, options: { level?: LevelInput; last?: LastResponder; rc?: ResolveContext; compaction?: CompactionFigures; facts?: PromptFacts } = {}): Plan {
-  const { level } = options;
+function planV2(
+  text: string,
+  options: { level?: LevelInput; last?: LastResponder; rc?: ResolveContext; compaction?: CompactionFigures; facts?: PromptFacts; figures?: CostFigures } = {},
+): Plan {
+  const { level, figures } = options;
   return planUserTurn({
     rc: options.rc ?? v2(),
     text,
@@ -543,6 +547,7 @@ function planV2(text: string, options: { level?: LevelInput; last?: LastResponde
     compaction: options.compaction ?? ENABLED,
     facts: options.facts ?? FRESH,
     ...(level === undefined ? {} : { level }),
+    ...(figures === undefined ? {} : { figures }),
   });
 }
 
@@ -1041,6 +1046,43 @@ describe("a conversation too large for a model", () => {
     expectPlan(result, ASTRA, "step-up");
     assert.equal(result.level?.tier, "super");
     assert.equal(result.level?.steppedUp, true);
+  });
+});
+
+describe("a version 2 plan with the session's figures", () => {
+  /** John's prices on the personal level models, dollars per million tokens. */
+  const priced = (): FakeCatalog =>
+    v2Catalog()
+      .add(codex(LUNA, { cost: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 } }))
+      .add(codex(TERRA, { cost: { input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25 } }))
+      .add(codex(SOL, { cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 } }))
+      .add(codex(ASTRA, { cost: { input: 8, output: 40, cacheRead: 0.4, cacheWrite: 10 } }));
+  /** Astra answered 30 seconds ago with 149,000 of 150,000 tokens cached, at effort high, after three short runs. */
+  const figures = (): CostFigures => {
+    const ledger = newLedger();
+    ledger.seen.set(ASTRA, { tokens: 149_000, at: NOW - 30_000, effort: "high" });
+    for (let i = 0; i < 3; i++) ledger.runs.push({ requests: 1, output: 1_000, growth: 0, seconds: 60 });
+    return { ledger, thinking: "high" };
+  };
+  const astra: LastResponder = { ref: ASTRA, at: NOW - 30_000, usage: { ...usage(150_000), input: 1_000, cacheRead: 149_000 } };
+
+  test("an untagged run takes the model its run costs least on, and its level says why", () => {
+    const result = planV2(FRANCE, { rc: v2(priced()), last: astra, figures: figures() });
+    expectPlan(result, ASTRA, "heuristics", "a MEDIUM prompt on a warm astra stays there when the run is short");
+    const level = result.level;
+    assert.ok(level !== undefined, JSON.stringify(result));
+    assert.deepEqual(
+      [level.need, level.tier, level.steppedUp, result.role],
+      ["medium", "super", false, "super"],
+      "a stronger model chosen by cost is no step-up, and the plan keeps its level's role",
+    );
+    assert.ok(level.cost?.outcome === "stayed" && level.cost.chosen === ASTRA, `the level records the cost rule's outcome: ${JSON.stringify(level.cost)}`);
+  });
+
+  test("a tagged run is never priced", () => {
+    const result = planV2(FRANCE, { rc: v2(priced()), level: { tag: "medium" }, last: astra, figures: figures() });
+    expectPlan(result, TERRA, "tag", "a tag takes its level's first available model");
+    assert.equal(result.level?.cost, undefined, "a tagged run is never priced");
   });
 });
 

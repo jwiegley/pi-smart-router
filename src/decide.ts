@@ -19,26 +19,39 @@
 // available candidate is too small for the conversation passes the run up too, and when no tier's
 // first available candidate fits, the highest tier with one takes the run.
 //
+// Among the levels at or above the needed one, the run goes to the model the expected run costs
+// least on (chooseModel, priced by src/cost.ts), counting what each model has in its prompt cache and how
+// likely that cache still exists: each level's first available model of its own is a candidate,
+// and the model that answered last keeps the run unless another is cheaper by the roster's margin.
+// The figures come from the session's ledger (src/ledger.ts). Without them, for a tagged run, when
+// the needed level's own models cannot take the run, or when a figure is missing, the run goes to
+// the needed level as described here, and a missing figure is recorded as an unknown cost.
+//
 // A scope that declares a fallback chain (roster.ts) gives every tier more candidates: after the
 // tier's own models, the chain's roles in the order written. A tier takes the chain before it
 // passes the run up, so a run keeps its tier while any chain model can take it. A chain model holds
 // no tier: the next run starts from its own tier's first candidate, and so returns to the tier's
 // own model as soon as that is available again.
-import type { Api, Model, Usage } from "@earendil-works/pi-ai";
+import type { Api, Model, ModelThinkingLevel, Usage } from "@earendil-works/pi-ai";
 import { calculateContextTokens, DEFAULT_COMPACTION_SETTINGS, estimateTokens } from "@earendil-works/pi-coding-agent";
 
 import { classify, riskyTrigger } from "./classify.ts";
 import type { RiskyTrigger, Signal } from "./classify.ts";
 import { PROVIDER } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
+import { chooseByCost, ratesOf } from "./cost.ts";
+import type { Candidate, Priced, Rates, Workload } from "./cost.ts";
 import { demandOf } from "./demand.ts";
 import type { Demand, PromptFacts } from "./demand.ts";
 import { isRecord, own } from "./files.ts";
 import type { JevOutcome } from "./jev.ts";
+import { againChance, effortOf, horizonFor, runShape } from "./ledger.ts";
+import type { Ledger } from "./ledger.ts";
 import { HELD_REASON, resolveCandidate } from "./resolve.ts";
 import type { Resolution, ResolveContext } from "./resolve.ts";
-import { autoRoles, candidatesOf, fallbackAfter, roleOf, scopeSection } from "./roster.ts";
+import { autoRoles, candidatesOf, fallbackAfter, roleLevel, roleOf, scopeSection } from "./roster.ts";
 import type { RosterV2, Scope, ScopeSection } from "./roster.ts";
+import { AGAIN_DEFAULT, DEFAULT_SWITCHING, SUMMARY_TOKENS } from "./settings.ts";
 import { tierAbove, tierRank } from "./tiers.ts";
 import type { Tier } from "./tiers.ts";
 
@@ -187,7 +200,7 @@ export interface PlanLevel {
   readonly demand?: Demand;
   /**
    * Whether `tier` is above `need` because each level between had no available model, or none that
-   * fits with compaction disabled.
+   * fits with compaction disabled. A stronger model chosen by cost is no step-up.
    */
   readonly steppedUp: boolean;
   /**
@@ -199,6 +212,8 @@ export interface PlanLevel {
   readonly jev?: JevOutcome;
   /** The pick is a model of the scope's fallback chain, not one of the tier's own: the run keeps its tier. */
   readonly fallback?: true;
+  /** What the cost rule decided, when it was asked: an untagged run with the session's figures. */
+  readonly cost?: CostTerms;
 }
 
 /** A run's decision, made when its prompt arrives and consumed by its first request. */
@@ -234,6 +249,8 @@ export interface PlanInput {
   readonly level?: LevelInput;
   /** What the heuristics read of the session before the prompt; only an untagged version 2 run on auto uses them. */
   readonly facts: PromptFacts;
+  /** What the cost rule reads of the session; without them a version 2 run on auto goes to the level it needs. */
+  readonly figures?: CostFigures;
 }
 
 /** The role of a ref that may take this request: the local role when local-only, else for auto a role auto can reach. */
@@ -271,7 +288,7 @@ function ranksBefore(rc: ResolveContext, section: ScopeSection, tier: Tier, choi
  * model's names the roles. When no tier has an available candidate, every role's reasons, each role
  * once, and the start tier.
  */
-function climb(p: PlanInput, section: ScopeSection, start: Tier, code: string, checkFit: boolean): { readonly tier: Tier; readonly decision: Decision } {
+function climb(p: Sizing, section: ScopeSection, start: Tier, code: string, checkFit: boolean): { readonly tier: Tier; readonly decision: Decision } {
   const attempts: Attempt[] = [];
   let first: { readonly tier: Tier; readonly decision: Decision & { readonly ok: true } } | undefined;
   let highest: { readonly tier: Tier; readonly decision: Decision & { readonly ok: true } } | undefined;
@@ -279,7 +296,7 @@ function climb(p: PlanInput, section: ScopeSection, start: Tier, code: string, c
     const decision = pickInRole(p.rc, section.levels[tier].role, { fallback: true, code: tier === start ? code : STEP_UP });
     // Every tier shares the scope's chain, so its roles' reasons are listed with the first tier's only.
     if (!decision.ok) attempts.push(...decision.attempts.filter((attempt) => !attempts.some((seen) => seen.role === attempt.role)));
-    else if (!checkFit || fits({ last: p.last, text: p.text, now: p.now, reserve: p.compaction.reserve }, decision.choice.model)) return { tier, decision };
+    else if (!checkFit || fitsSize(p.conversation, p.reserve, decision.choice.model)) return { tier, decision };
     else {
       highest = { tier, decision };
       first ??= highest;
@@ -289,6 +306,138 @@ function climb(p: PlanInput, section: ScopeSection, start: Tier, code: string, c
   // tier shares, moving up gains nothing: the run keeps the tier it started at.
   if (first !== undefined && highest !== undefined && first.decision.choice.ref === highest.decision.choice.ref) return first;
   return highest ?? { tier: start, decision: { ok: false, attempts } };
+}
+
+/** What a climb measures a candidate against: the conversation with the new prompt, and Pi's compaction reserve. */
+interface Sizing {
+  readonly rc: ResolveContext;
+  readonly conversation: number;
+  readonly reserve: number;
+}
+
+/** What the cost rule reads of the session. */
+export interface CostFigures {
+  readonly ledger: Ledger;
+  /** The thinking level selected for the session; a role may fix another (roleLevel). */
+  readonly thinking: ModelThinkingLevel;
+}
+
+/** What the cost rule decided, for the run's record: model refs, numbers, level names and outcome names, never prompt text. */
+export type CostTerms =
+  | { readonly outcome: "unknown"; readonly why: "no usage yet" | "no price" | "the clock went backwards" }
+  | {
+      readonly outcome: "stayed" | "moved" | "only";
+      readonly chosen: string;
+      readonly priced: readonly Priced[];
+      readonly workload: Workload;
+      readonly again: number;
+    };
+
+/** The level whose model takes a run, its pick, whether it stepped up past the needed level, and what the cost rule decided. */
+export interface Chosen {
+  readonly tier: Tier;
+  readonly decision: Decision;
+  readonly steppedUp: boolean;
+  readonly cost?: CostTerms;
+}
+
+/** A cache lifetime the catalog entry states: its short retention's, else its long one's, when positive. */
+function lifetimeOf(model: Model<Api>): number | undefined {
+  const positive = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value > 0;
+  const short = model.promptCache?.short;
+  const long = model.promptCache?.long;
+  return positive(short) ? short : positive(long) ? long : undefined;
+}
+
+/**
+ * The model a run takes, from the level it needs up. Without figures, for a run that is not priced
+ * (a tagged one), or when the needed level's own models cannot take it, the climb as it always was
+ * (its chain, then a step up). Otherwise each level's first available model of its own is a
+ * candidate, once (a model a lower level took is not a candidate again), and, with compaction
+ * disabled, only when the conversation fits it. With no usage yet, a candidate without a price or
+ * one seen after now (checked in that order), the needed level's own model takes the run and the
+ * cost is unknown. Else chooseByCost picks, counting a model's cache only at the effort of its last
+ * answer: a known effort that differs from the one it would be sent now leaves it nothing cached.
+ */
+export function chooseModel(input: {
+  readonly rc: ResolveContext;
+  readonly section: ScopeSection;
+  readonly need: Tier;
+  readonly code: string;
+  readonly last: LastResponder | undefined;
+  readonly promptTokens: number;
+  readonly compaction: CompactionFigures;
+  readonly figures: CostFigures | undefined;
+  readonly priced: boolean;
+}): Chosen {
+  const { rc, section, need, code, last, compaction, figures } = input;
+  const conversation = historyOf(last) + input.promptTokens;
+  const climbed = (): Chosen => {
+    const { tier, decision } = climb({ rc, conversation, reserve: compaction.reserve }, section, need, code, !compaction.enabled);
+    return { tier, decision, steppedUp: tierRank(tier) > tierRank(need) };
+  };
+  if (figures === undefined || !input.priced) return climbed();
+
+  const levels: Array<{ readonly tier: Tier; readonly decision: Decision & { readonly ok: true } }> = [];
+  for (let tier: Tier | undefined = need; tier !== undefined; tier = tierAbove(tier)) {
+    const decision = pickInRole(rc, section.levels[tier].role, { fallback: false, code });
+    if (!decision.ok) continue;
+    if (!compaction.enabled && !fitsSize(conversation, compaction.reserve, decision.choice.model)) continue;
+    if (levels.some((level) => level.decision.choice.ref === decision.choice.ref)) continue;
+    levels.push({ tier, decision });
+  }
+  const needed = levels[0];
+  if (needed === undefined || needed.tier !== need) return climbed();
+
+  const unknown = (why: "no usage yet" | "no price" | "the clock went backwards"): Chosen => ({
+    tier: need,
+    decision: needed.decision,
+    steppedUp: false,
+    cost: { outcome: "unknown", why },
+  });
+  if (last?.usage === undefined || conversation === 0) return unknown("no usage yet");
+  const { ledger, thinking } = figures;
+  const rated: Array<{ readonly tier: Tier; readonly choice: Choice; readonly rates: Rates }> = [];
+  for (const { tier, decision } of levels) {
+    const rates = ratesOf(decision.choice.model.cost, conversation, ledger.writes.has(decision.choice.model.provider));
+    if (rates === undefined) return unknown("no price");
+    rated.push({ tier, choice: decision.choice, rates });
+  }
+  if (rated.some(({ choice }) => (ledger.seen.get(choice.ref)?.at ?? rc.now) > rc.now)) return unknown("the clock went backwards");
+
+  const candidates = rated.map(({ tier, choice, rates }): Candidate => {
+    const seen = ledger.seen.get(choice.ref);
+    const effort = effortOf(choice.model, roleLevel(rc.roster, choice.role, thinking));
+    const sameEffort = seen?.effort === undefined || seen.effort === effort;
+    return {
+      ref: choice.ref,
+      tier,
+      rates,
+      cached: seen !== undefined && sameEffort ? Math.min(seen.tokens, conversation) : 0,
+      idle: seen === undefined ? undefined : (rc.now - seen.at) / 1_000,
+      lifetime: lifetimeOf(choice.model),
+      compacts: compaction.enabled && !fitsSize(conversation, compaction.reserve, choice.model),
+    };
+  });
+  const switching = rc.roster.version === 2 ? rc.roster.switching : DEFAULT_SWITCHING;
+  const workload: Workload = { tokens: conversation, ...runShape(ledger), horizon: horizonFor(ledger, need, switching.horizonCap) };
+  const current = candidates.find((candidate) => candidate.ref === last.ref);
+  const again = current === undefined ? AGAIN_DEFAULT : againChance(ledger, current.tier);
+  const choice = chooseByCost({
+    candidates,
+    current: current?.ref,
+    workload,
+    again,
+    settings: switching,
+    compaction: { summary: SUMMARY_TOKENS, after: compaction.keepRecent + SUMMARY_TOKENS },
+  });
+  const taken = rated.find((entry) => entry.choice.ref === choice.chosen.ref)!;
+  return {
+    tier: taken.tier,
+    decision: { ok: true, choice: taken.choice },
+    steppedUp: false,
+    cost: { outcome: choice.outcome, chosen: choice.chosen.ref, priced: choice.priced, workload, again },
+  };
 }
 
 /**
@@ -313,8 +462,18 @@ function planLevel(p: PlanInput, roster: RosterV2, section: ScopeSection, signal
   const tag = p.level?.tag;
   const jev = p.level?.jev;
   const { need, source, trigger, demand } = needOf(p, roster, signal);
-  // Whichever tier answered last, the pick starts at the level the prompt needs.
-  const { tier, decision } = climb(p, section, need, source, !p.compaction.enabled);
+  // Whichever tier answered last, the pick starts at the level the prompt needs. A tagged run is never priced.
+  const { tier, decision, steppedUp, cost } = chooseModel({
+    rc,
+    section,
+    need,
+    code: source,
+    last,
+    promptTokens: promptTokensOf(p.text, p.now),
+    compaction: p.compaction,
+    figures: p.figures,
+    priced: tag === undefined,
+  });
   const choice = decision.ok ? decision.choice : undefined;
   // The tier's own role, whichever role the pick is in: a chain model's role is not the run's.
   const levelRole = section.levels[tier].role;
@@ -326,10 +485,11 @@ function planLevel(p: PlanInput, roster: RosterV2, section: ScopeSection, signal
     source,
     ...(trigger === undefined ? {} : { trigger }),
     ...(demand === undefined ? {} : { demand }),
-    steppedUp: tierRank(tier) > tierRank(need),
+    steppedUp,
     returnedToFirst: choice !== undefined && last !== undefined && ranksBefore(rc, section, tier, choice, last.ref),
     ...(tag !== undefined || jev === undefined ? {} : { jev }),
     ...(viaChain ? { fallback: true as const } : {}),
+    ...(cost === undefined ? {} : { cost }),
   };
   // The plan keeps the tier's role, so the run's first request picks among the tier's candidates again.
   return { role: choice === undefined ? undefined : levelRole, code: choice?.code ?? source, decision, level };
@@ -369,10 +529,23 @@ export function planUserTurn(p: PlanInput): Plan {
  * window less the compaction reserve. A model whose window is unknown fits.
  */
 export function fits(p: Pick<PlanInput, "last" | "text" | "now"> & { readonly reserve: number }, model: Model<Api>): boolean {
+  return fitsSize(historyOf(p.last) + promptTokensOf(p.text, p.now), p.reserve, model);
+}
+
+/** The conversation's size as the latest response measured it; 0 without one. */
+function historyOf(last: LastResponder | undefined): number {
+  return last?.usage === undefined ? 0 : calculateContextTokens(last.usage);
+}
+
+/** The new prompt's size, by Pi's estimate of a user message holding its text. */
+function promptTokensOf(text: string, now: number): number {
+  return estimateTokens({ role: "user", content: [{ type: "text", text }], timestamp: now });
+}
+
+/** Whether a conversation of `conversation` tokens fits a model's window less the reserve; a model whose window is unknown fits. */
+function fitsSize(conversation: number, reserve: number, model: Model<Api>): boolean {
   if (!(model.contextWindow > 0)) return true;
-  const history = p.last?.usage === undefined ? 0 : calculateContextTokens(p.last.usage);
-  const prompt = estimateTokens({ role: "user", content: [{ type: "text", text: p.text }], timestamp: p.now });
-  return history + prompt <= model.contextWindow - p.reserve;
+  return conversation <= model.contextWindow - reserve;
 }
 
 const tokens = (value: unknown): number | undefined =>

@@ -7,6 +7,8 @@
 // whole file invalid, and nothing routes by a last-known-good copy (the scope keeps only the last
 // valid roster's work directories, src/router.ts). Unknown keys are refused at every level, so the
 // file has nowhere to hold a key, token, header, base URL or environment.
+import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+
 import { isWorkCodex, subscriptionKind } from "./accounts.ts";
 import {
   ALL_LEVELS,
@@ -168,6 +170,12 @@ export function excludedBy(patterns: readonly string[], ref: string): string | u
 /** The role a ref belongs to. */
 export function roleOf(roster: Pick<Roster, "roles">, ref: string): Role | undefined {
   return roster.roles.find((role) => role.models.includes(ref));
+}
+
+/** The thinking level a role sends: its fixed one, or the selected one. Pi clamps it to the model. */
+export function roleLevel(roster: Roster, roleName: string, selected: ModelThinkingLevel): ModelThinkingLevel {
+  const role = roster.roles.find((entry) => entry.name === roleName);
+  return role === undefined || role.thinking === "selected" ? selected : role.thinking;
 }
 
 /** A role's position on the ladder, or -1. */

@@ -39,7 +39,7 @@ import type { JevOutcome } from "./jev.ts";
 import { checkLocal } from "./local.ts";
 import { clock, coolFrom, failureKind, holdFrom, refOf, resolveCandidate } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
-import { autoRoles, excludedBy, excludesFor, isWorkBound, levelRoles, roleOf, scopeSection } from "./roster.ts";
+import { autoRoles, excludedBy, excludesFor, isWorkBound, levelRoles, roleLevel, roleOf, scopeSection } from "./roster.ts";
 
 /** The model the owner loop's last route picked in the current run. */
 export interface RunPick {
@@ -382,10 +382,9 @@ export function assertSafe(id: VirtualId, rc: ResolveContext, choice: Choice): v
   if (problem !== undefined) throw invariant(id, choice.ref, problem, workSession(rc));
 }
 
-/** The level a role sends: the selected one, or the role's fixed level. Pi clamps it to the model. */
+/** The level a role sends: the selected one, or the role's fixed level (roleLevel). Pi clamps it to the model. */
 export function levelFor(rc: ResolveContext, roleName: string, selected: ModelThinkingLevel): ModelThinkingLevel {
-  const role = rc.roster.roles.find((entry) => entry.name === roleName);
-  return role === undefined || role.thinking === "selected" ? selected : role.thinking;
+  return roleLevel(rc.roster, roleName, selected);
 }
 
 /** The first cooling account that a refusal's candidates wait for, and the time it stops, as HH:MM. */
