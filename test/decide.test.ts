@@ -228,13 +228,6 @@ describe("local-only plans", () => {
     assert.deepEqual([open.ref, open.code], [QWEN, "fallback:local→worker"]);
   });
 
-  test("a pinned auto selection is local-only too", () => {
-    const result = plan(PLANNING, { rc: heraContext({ localOnly: true }) });
-    assert.equal(result.decision.ok, false, "Hera's local role is not one auto may reach");
-    const reachable: Roster = { ...HERA, routing: { ...HERA.routing, trivial: "local" } };
-    expectPlan(plan(PLANNING, { rc: heraContext({ roster: reachable, localOnly: true, policy: policyFromRoster(reachable) }) }), GLM, "local");
-  });
-
   test("refuse without a local section", () => {
     const { local: _local, ...rest } = HERA;
     const result = plan(PLANNING, { rc: heraContext({ roster: rest, virtualId: "local" }) });
@@ -401,7 +394,7 @@ function randomCase(seed: number): Case {
             : undefined;
 
   const virtualId: VirtualId = one(["auto", "local"] as const);
-  const localOnly = virtualId === "local" || chance(0.3);
+  const localOnly = virtualId === "local";
   const policy: LocalPolicy = chance(0.5)
     ? policyFromRoster(roster)
     : {
@@ -459,7 +452,7 @@ function assertHonestRefusal(rc: ResolveContext, decision: Decision, skip: strin
 
 describe("property-style invariants", () => {
   test("1,000 random rosters, catalogs and inputs never yield an unsafe pick", (t) => {
-    const seen = { plans: 0, picks: 0, refused: 0, local: 0, fallback: 0, workAliasBeside: 0, pinnedAuto: 0 };
+    const seen = { plans: 0, picks: 0, refused: 0, local: 0, fallback: 0, workAliasBeside: 0 };
     for (let seed = 1; seed <= 1000; seed += 1) {
       const { rc, text, last: lastResponder, reserve } = randomCase(seed);
       const where = `seed ${seed}`;
@@ -469,7 +462,6 @@ describe("property-style invariants", () => {
         assertSafeChoice(rc, result.decision.choice, `${where} plan`, true);
         seen.plans += 1;
         if (rc.localOnly) seen.local += 1;
-        if (rc.localOnly && rc.virtualId === "auto") seen.pinnedAuto += 1;
         if (result.decision.choice.code.startsWith("fallback:")) seen.fallback += 1;
       } else {
         seen.refused += 1;

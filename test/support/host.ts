@@ -71,7 +71,7 @@ import type {
   SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 
-import { ENV_PIN, ENV_SCOPE, ROUTING_REGISTRY_KEY, SLOT_KEY, STATUS_KEY } from "../../src/constants.ts";
+import { ENV_PIN, ENV_SCOPE, ROUTING_REGISTRY_KEY, SLOT_KEY } from "../../src/constants.ts";
 import { ensureRoutingRegistry, resolveActiveRoute } from "./co.ts";
 import type { Snapshot } from "./co.ts";
 
@@ -535,8 +535,8 @@ export class FakeUI {
     } as unknown as ExtensionUIContext;
   }
 
-  /** A status item: the pin's by default, or the one under `key`. */
-  status(key: string = STATUS_KEY): string | undefined {
+  /** The status item under `key`. */
+  status(key: string): string | undefined {
     return this.statuses.get(key);
   }
 

@@ -4,9 +4,8 @@ import test, { afterEach, beforeEach, describe } from "node:test";
 import { isRoutingRegistry, routingRegistry } from "../src/cache-optimizer.ts";
 import type { RouterAdapter } from "../src/cache-optimizer.ts";
 import { ROUTING_REGISTRY_KEY } from "../src/constants.ts";
-import { policyFromRoster } from "../src/local.ts";
 import { processSlot } from "../src/owners.ts";
-import { ASTRA, DEEPSEEK, FakeCatalog, GLM, GLM_CLOUD, heraModels, KIMI, NOW, rosterFixture, SOL } from "./support/catalog.ts";
+import { ASTRA, DEEPSEEK, FakeCatalog, GLM, GLM_CLOUD, heraModels, KIMI, NOW, SOL } from "./support/catalog.ts";
 import { ensureRoutingRegistry, hashSessionId, isRouterAdapterV1, isRoutingRegistryV1, keepsSystemPrompt, registryValue, resolveActiveRoute } from "./support/co.ts";
 import type { Registry, Snapshot } from "./support/co.ts";
 import { agentDir, assistant, FakeRuntime, load, previous, request, resetSlot, routed, start } from "./support/pi.ts";
@@ -148,14 +147,14 @@ describe("the answer for a session", () => {
     assert.throws(() => loaded.runtime.route("auto", request("user", { signal })), /Nothing was sent/);
   });
 
-  test("stays local under the pin, and is nothing for smart-router/auto, which refuses there", async (t) => {
-    const loaded = await start({ dir: agentDir(t), select: "local", setup: (session) => session.pin(policyFromRoster(rosterFixture("roster-hera.json"))) });
+  test("stays local on smart-router/local, whatever answered before, and its plan is never smart-router/auto's", async (t) => {
+    const loaded = await start({ dir: agentDir(t), select: "local" });
     await loaded.host.emit("message_end", { message: assistant(KIMI) });
-    assert.equal(brief(loaded), `${GLM} selected`);
+    assert.equal(brief(loaded), `${GLM} selected`, "a cloud model's answer does not move smart-router/local");
     await loaded.host.emit("input", { text: PLANNING, source: "interactive" });
     assert.equal(brief(loaded), `${GLM} planned`);
     loaded.session.force("auto");
-    assert.equal(seen(loaded), undefined, "the plan was made for smart-router/local, and smart-router/auto's first request never takes it");
+    assert.equal(brief(loaded), `${KIMI} selected`, "the plan was made for smart-router/local: smart-router/auto's first request never takes it, and would stay on the last responder");
   });
 
   test("is the run's pick while its request is in flight, even when that model stopped resolving since", async (t) => {

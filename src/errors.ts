@@ -1,9 +1,9 @@
 // The texts the router throws and shows. Every refusal names the virtual model, says that nothing
 // was sent, gives the cause in the router's own words (never a provider's error text) and the way
 // out. A model picked by hand always stays selected, so "choose a model with /model" is a way out
-// of every refusal. In work scope, outside the pin, a refusal names only the models that keep the
-// conversation on the work account, smart-router/auto and the work Codex models (chooseModel): it
-// does not suggest sending work content anywhere else, though any model John picks is kept.
+// of every refusal. In work scope a refusal names only the models that keep the conversation on
+// the work account, smart-router/auto and the work Codex models (chooseModel): it does not suggest
+// sending work content anywhere else, though any model John picks is kept.
 //
 // Pi decides whether to retry a failed request from its error text alone, and a router refusal is
 // deterministic: retrying it with backoff only delays the error. An interpolated ref or reason can
@@ -58,10 +58,10 @@ export function firstLine(error: unknown): string {
 }
 
 /**
- * How a refusal offers a model to choose by hand: any model, or, for a work session that is not
- * pinned (`work`: work scope, or a scope that cannot be read, outside the pin), only the models
- * that keep the conversation on the work account: a work Codex model when smart-router/auto
- * refused, and smart-router/auto too when smart-router/local did.
+ * How a refusal offers a model to choose by hand: any model, or, for a work session (`work`: work
+ * scope, or a scope that cannot be read), only the models that keep the conversation on the work
+ * account: a work Codex model when smart-router/auto refused, and smart-router/auto too when
+ * smart-router/local did.
  */
 function chooseModel(id: VirtualId, work: boolean): string {
   if (!work) return "choose a model with /model";
@@ -98,7 +98,7 @@ function rosterCause(problem: RosterProblem): string {
   }
 }
 
-/** `work`: whether the session is a work session that is not pinned (chooseModel). */
+/** `work`: whether the session is a work session (chooseModel). */
 export function rosterRefusal(id: VirtualId, problem: RosterProblem, work = false): RouterError {
   const fix = problem.kind === "missing" ? "Create it as the README describes" : "Fix it and send the prompt again";
   return refusal(id, rosterCause(problem), `${fix}, or ${chooseModel(id, work)}.`);
@@ -125,7 +125,7 @@ export interface ResendFacts {
   readonly partway: boolean;
   /** What a new run would get; undefined when nothing but the failed model is left. */
   readonly next: { readonly role: string | undefined; readonly modelId: string } | undefined;
-  /** Whether the session is a work session that is not pinned. */
+  /** Whether the session is a work session. */
   readonly work: boolean;
 }
 
@@ -163,32 +163,27 @@ export function noBoundedHistory(id: VirtualId): RouterError {
 }
 
 export function historyNotice(): string {
-  return `pi-smart-router: ${NO_HISTORY}, so smart-router/auto and smart-router/local refuse every request, and every session counts as pinned to local models because its pin cannot be read. Run jwiegley/pi 1.5.0 or later.`;
+  return `pi-smart-router: ${NO_HISTORY}, so smart-router/auto and smart-router/local refuse every request. Run jwiegley/pi 1.5.0 or later.`;
 }
 
-/** Why a local candidate the roster allows is refused while pinned: the recorded policy does not hold it. */
-export const PIN_POLICY_CHANGED = "the roster's local role changed after this session was pinned; run /smart-router local on to accept it";
-
-/** Shown when a resumed session is not pinned, but the session it replaced was. */
-export function resumeNotice(): string {
-  return "pi-smart-router: the session you left was pinned to local models, and this one is not. Run /smart-router local on to pin it.";
+/** Said once at session start when PI_SMART_ROUTER_LOCAL_ONLY is set. */
+export function pinEnvNotice(): string {
+  return "pi-smart-router: PI_SMART_ROUTER_LOCAL_ONLY is set, but the local-only pin has been removed and keeps nothing local. Select smart-router/local to route locally.";
 }
 
-/** Shown when a fork or /new carried the pin over. */
-export function carriedNotice(): string {
-  return "pi-smart-router: this session is pinned to local models, as the session it came from was.";
+/** Said once in a session on smart-router/auto whose latest pin entry says it was pinned. */
+export function pinEntryNotice(): string {
+  return "pi-smart-router: an earlier version pinned this session to local models. The pin has been removed and is ignored: smart-router/auto routes by level here. Select smart-router/local to route locally.";
 }
 
-/** Shown when the pin of the session a fork or /new came from could not be recorded in the new one. */
-export function carryFailedNotice(reason: string): string {
-  return `pi-smart-router: the session this one came from was pinned to local models, but its pin could not be recorded here (${reason}). Run /smart-router local on before you send anything.`;
-}
+/** The answer to `/smart-router local ...`, whatever follows. */
+export const PIN_REMOVED = "The local-only pin has been removed. To route locally, select the local model: /model smart-router/local";
 
 /**
- * smart-router/auto refuses a session whose scope cannot be read, pinned or not, until the scope
- * is recorded again: it cannot tell which account the session's requests may use. Such a scope
- * counts as work scope. smart-router/local refuses no scope. `work`: whether the session is a work
- * session that is not pinned (chooseModel).
+ * smart-router/auto refuses a session whose scope cannot be read until the scope is recorded
+ * again: it cannot tell which account the session's requests may use. Such a scope counts as work
+ * scope. smart-router/local refuses no scope. `work`: whether the session is a work session
+ * (chooseModel).
  */
 export function scopeUnreadable(id: VirtualId, reason: string, work = false): RouterError {
   return refusal(id, `this session's scope cannot be read (${reason})`, `Record it again with /smart-router scope work or /smart-router scope personal, or ${chooseModel(id, work)}.`);
@@ -207,9 +202,9 @@ function either(ways: readonly string[]): string {
 /**
  * smart-router/auto refuses a session whose scope the roster does not serve: work under a version 1
  * roster, or a scope a version 2 roster has no section for. `work`: whether the session is a work
- * session that is not pinned (chooseModel); a version 1 roster binds no work account, so then no
- * model is offered. `movable`: whether /smart-router scope personal can move the session, which the
- * latch refuses; it is offered only then, and only to a work session that is not pinned.
+ * session (chooseModel); a version 1 roster binds no work account, so then no model is offered.
+ * `movable`: whether /smart-router scope personal can move the session, which the latch refuses;
+ * it is offered only then, and only to a work session.
  */
 export function scopeUnserved(id: VirtualId, scope: Scope, version: 1 | 2, work = false, movable = false): RouterError {
   const ways = [
@@ -247,7 +242,6 @@ export function tagOnlyNotice(tier: Tier): string {
 
 const TAG_IGNORED = {
   busy: "a run is under way, and it keeps its model until it ends",
-  pinned: "this session is pinned to local models",
   version: "levels need a version 2 roster",
   scope: "smart-router/auto refuses this session's scope",
 } as const;
@@ -291,10 +285,9 @@ function describeAttempt(attempt: Attempt, index: number, later: string): string
 
 export interface UnroutableContext {
   readonly localOnly: boolean;
-  readonly pinned: boolean;
   /** Whether the roles after the first are a version 2 run's step-ups to higher tiers, apart from those tried as a fallback, not version 1's declared fallback. */
   readonly stepUps?: boolean;
-  /** Whether the session is a work session that is not pinned (chooseModel). */
+  /** Whether the session is a work session (chooseModel). */
   readonly work?: boolean;
   /** An account some candidate waits for after a usage-limit or authentication error, and when that ends (HH:MM). */
   readonly cooling?: { readonly provider: string; readonly until: string } | undefined;
@@ -307,25 +300,15 @@ export function unroutable(
   context: UnroutableContext,
 ): RouterError {
   const work = context.work === true;
-  const unpin = context.pinned ? "run /smart-router local off" : work ? chooseModel(id, true) : "choose another model with /model";
+  const other = work ? chooseModel(id, true) : "choose another model with /model";
   if (failure.problem !== undefined) {
-    return refusal(id, failure.problem, `Fix the roster and send the prompt again, or ${unpin}.`);
+    return refusal(id, failure.problem, `Fix the roster and send the prompt again, or ${other}.`);
   }
   const subject = context.localOnly ? "no local model" : "no model";
-  const pinned = context.pinned ? " while this session is pinned to local models" : "";
   const later = context.stepUps === true ? "step-up" : "fallback";
   const detail = failure.attempts.map((attempt, index) => describeAttempt(attempt, index, later)).join("; ");
-  const cause = `${subject} can take this request${pinned}${detail === "" ? "" : ` (${detail})`}`;
-  const changed = context.pinned && failure.attempts.some((attempt) => attempt.candidates.some((candidate) => candidate.detail === PIN_POLICY_CHANGED));
-  // Under the pin smart-router/auto routes only within the pin's policy, which its roles seldom
-  // reach, so its way out is the model that does route there.
-  const way = changed
-    ? "Run /smart-router local on to accept the roster's local role, or run /smart-router local off."
-    : context.pinned && id === "auto"
-      ? "Choose smart-router/local with /model, or run /smart-router local off."
-      : context.localOnly
-        ? `Start the local model server and send the prompt again, or ${unpin}.`
-        : `See /smart-router status, or ${chooseModel(id, work)}.`;
+  const cause = `${subject} can take this request${detail === "" ? "" : ` (${detail})`}`;
+  const way = context.localOnly ? `Start the local model server and send the prompt again, or ${other}.` : `See /smart-router status, or ${chooseModel(id, work)}.`;
   // An exhausted account ends by itself: the refusal says when, and that the selection is John's.
   // In a work session it does not offer another work Codex model: that is on the same account.
   if (context.cooling === undefined || context.localOnly) return refusal(id, cause, way);
@@ -340,7 +323,7 @@ export function stale(id: VirtualId): RouterError {
   return refusal(id, "this request came through a route left by a session that has ended", "Run /reload.");
 }
 
-/** A pick that broke one of the router's own invariants: a bug, refused rather than sent. `work`: whether the session is a work session that is not pinned (chooseModel). */
+/** A pick that broke one of the router's own invariants: a bug, refused rather than sent. `work`: whether the session is a work session (chooseModel). */
 export function invariant(id: VirtualId, ref: string, problem: string, work = false): RouterError {
   return refusal(id, `the router picked ${ref}, which ${problem}; this is a bug in pi-smart-router`, sentence(chooseModel(id, work)));
 }

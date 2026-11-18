@@ -95,8 +95,9 @@ export interface ScopeSection {
 export type ScopedBinding = AccountBinding & { readonly scope: Scope };
 
 /**
- * The local role and what counts as local. There is no field for tools: the pin pins the model
- * only (John's decision Q7), so a roster cannot ask for a tool block the router would not apply.
+ * The local role and what counts as local. There is no field for tools: smart-router/local routes
+ * the model only (John's decision Q7), so a roster cannot ask for a tool block the router would not
+ * apply.
  */
 export interface LocalSection {
   readonly role: string;
@@ -211,8 +212,7 @@ function scopeRoles(section: ScopeSection | undefined): string[] {
  * chain after one of its level roles, the rest of the chain after one of the chain's roles, and
  * nothing after any other role, in a scope without a chain or under version 1 (whose one-hop
  * routing.fallback is pickInRole's). The chain only ever moves forward: no role leads back to a
- * level. The helper knows no session, so its callers apply it only to smart-router/auto outside the
- * pin.
+ * level. The helper knows no session, so its callers apply it only to smart-router/auto.
  */
 export function fallbackAfter(roster: Roster, scope: Scope, roleName: string): readonly string[] {
   const section = scopeSection(roster, scope);
@@ -232,7 +232,7 @@ export interface Candidate {
 /**
  * Every model a pick that starts in `roleName` can reach in a session's scope, in the order it
  * tries them: the role's own models, then each role fallbackAfter gives, each in its own order.
- * It is what smart-router/auto tries outside the pin; status and the checker print it.
+ * It is what smart-router/auto tries; status and the checker print it.
  */
 export function candidatesOf(roster: Roster, scope: Scope, roleName: string): readonly Candidate[] {
   return [roleName, ...fallbackAfter(roster, scope, roleName)].flatMap((name) =>

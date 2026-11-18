@@ -154,8 +154,6 @@ export interface JevGate {
   readonly idle: boolean;
   /** The router model selected, if one is: only smart-router/auto routes by level. */
   readonly selection: VirtualId | undefined;
-  /** Whether the session is pinned, by its entry or by PI_SMART_ROUTER_LOCAL_ONLY. */
-  readonly pinned: boolean;
   /** The roster, when it loaded. */
   readonly roster: Roster | undefined;
   /** The fork's bounded session readers, through which Jev's context is read; undefined on a Pi without them. */
@@ -175,14 +173,13 @@ export interface JevAsk {
 
 /**
  * Whether Jev is asked about a message, and with what. Never for a steer or a follow-up, off
- * smart-router/auto, under the pin, without the bounded readers, for an extension's resend of the
- * latest message, without a version 2 roster's classifier, or in a scope that cannot be read or
- * that the roster does not serve. Pure: the router reads every condition first. Nothing refuses a
- * pinned session's prompt on smart-router/auto before this, so the pin is checked here.
+ * smart-router/auto, without the bounded readers, for an extension's resend of the latest message,
+ * without a version 2 roster's classifier, or in a scope that cannot be read or that the roster
+ * does not serve. Pure: the router reads every condition first.
  */
 export function jevAsk(gate: JevGate): JevAsk | undefined {
   const { roster, scope, history } = gate;
-  if (!gate.idle || gate.selection !== "auto" || gate.pinned || history === undefined || gate.resend) return undefined;
+  if (!gate.idle || gate.selection !== "auto" || history === undefined || gate.resend) return undefined;
   if (roster?.version !== 2 || roster.classifier === undefined || scope.kind !== "ok") return undefined;
   const section = scopeSection(roster, scope.scope);
   return section === undefined ? undefined : { settings: roster.classifier, section, history };

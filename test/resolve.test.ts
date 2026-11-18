@@ -172,9 +172,9 @@ describe("each reason, in order", () => {
     refused(resolveCandidate(GLM, heraContext({ virtualId: "local", policy: recorded })), "not-local", /not in the local role/);
   });
 
-  test("not-local applies to every local-only request, whatever the virtual model", () => {
-    refused(resolveCandidate(DEEPSEEK, heraContext({ localOnly: true })), "not-local");
-    resolves(resolveCandidate(DEEPSEEK, heraContext({ localOnly: false })));
+  test("not-local applies to every request of smart-router/local, the one local-only model, and to none of smart-router/auto", () => {
+    refused(resolveCandidate(DEEPSEEK, heraContext({ virtualId: "local" })), "not-local");
+    resolves(resolveCandidate(DEEPSEEK, heraContext({ virtualId: "auto" })));
   });
 
   test("the first failing check is the one reported", () => {
@@ -182,11 +182,11 @@ describe("each reason, in order", () => {
     catalog.unavailable.add(SOL);
     const cooldowns = new Cooldowns();
     cooldowns.cool(SOL, 1, NOW, 30);
-    refused(resolveCandidate(SOL, contextWith(catalog, { cooldowns, localOnly: true, labels: labelsOf([]) })), "not-available");
+    refused(resolveCandidate(SOL, contextWith(catalog, { cooldowns, virtualId: "local", labels: labelsOf([]) })), "not-available");
     catalog.unavailable.delete(SOL);
-    refused(resolveCandidate(SOL, contextWith(catalog, { cooldowns, localOnly: true, labels: labelsOf([]) })), "account");
-    refused(resolveCandidate(SOL, contextWith(catalog, { cooldowns, localOnly: true })), /^cooling-until-/);
-    refused(resolveCandidate(SOL, contextWith(catalog, { localOnly: true })), "not-local");
+    refused(resolveCandidate(SOL, contextWith(catalog, { cooldowns, virtualId: "local", labels: labelsOf([]) })), "account");
+    refused(resolveCandidate(SOL, contextWith(catalog, { cooldowns, virtualId: "local" })), /^cooling-until-/);
+    refused(resolveCandidate(SOL, contextWith(catalog, { virtualId: "local" })), "not-local");
   });
 });
 

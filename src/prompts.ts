@@ -12,7 +12,7 @@
 // John edits guidance, not the protocol. Whatever these texts say, the request has one question
 // with exactly the four levels as its choices (src/jev.ts), an answer is taken only when it names
 // one of the four and gives a probability for each, and the level it names is routed inside the
-// session's scope, under its account rules and under the pin (src/decide.ts, src/route.ts). No
+// session's scope and under its account rules (src/decide.ts, src/route.ts). No
 // text here is read by anything but Jev.
 //
 // Whatever the source, the text goes through redaction before it is sent (src/jev.ts), as the

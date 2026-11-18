@@ -45,7 +45,6 @@ const JOHN_ROUTING = [
   "    3. omlx-hera/GLM-5.3-Flash-oQ4e-mtp  (role local, thinking max)",
   `    4. ${NYX_QWEN}  (role local, thinking max)`,
   "    5. omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp  (role local, thinking max)",
-  "  under the pin: only the local role local, in its own order (below)",
   "",
   "smart-router/auto in work scope: a tag, else Jev (openrouter/typesafe/jev-1.14), else the keywords, pick the level; each level tries its own models in order:",
   "  LOW    openai-codex-3/gpt-6-luna  (role work-low)",
@@ -54,11 +53,10 @@ const JOHN_ROUTING = [
   "  SUPER  openai-codex-3/gpt-6-astra  (role work-super)",
   "  no fallback: a level with no available model passes its run up to the next level; with none above, the run is refused",
   "  sessions under these directories are in work scope: /Users/johnw/src/positron",
-  "  under the pin: refused, since smart-router/auto does not reach the local role in this scope; choose smart-router/local",
   "",
   ...DEMAND_AND_SWITCHING,
   "",
-  "smart-router/local, in any scope, pinned or not: only these, in this order, never a cloud model:",
+  "smart-router/local, in any scope: only these, in this order, never a cloud model:",
   "  1. omlx-hera/GLM-5.3-Flash-oQ4e-mtp  (role local, thinking max)",
   `  2. ${NYX_QWEN}  (role local, thinking max)`,
   "  3. omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp  (role local, thinking max)",
@@ -86,10 +84,10 @@ describe("checking a roster's text", () => {
     assert.deepEqual(checkRoster(JOHN), { ok: true, lines: ["OK: a valid version 2 roster.", "", ...JOHN_ROUTING] });
   });
 
-  test("a version 2 roster without a chain or a classifier, for one scope, says what the other scope and the pin do", () => {
+  test("a version 2 roster without a chain or a classifier, for one scope, says what the other scope does", () => {
     const report = checkRoster(fixture("roster-work.json"));
     assert.equal(report.ok, true);
-    assert.deepEqual(report.lines.slice(0, 12), [
+    assert.deepEqual(report.lines.slice(0, 11), [
       "OK: a valid version 2 roster.",
       "",
       "smart-router/auto in personal scope: refused, since the roster has no personal scope",
@@ -100,22 +98,21 @@ describe("checking a roster's text", () => {
       "  HIGH   openai-codex/gpt-6.1-sol  (role work-high)",
       "  SUPER  openai-codex/gpt-6-astra  (role work-super)",
       "  no fallback: a level with no available model passes its run up to the next level; with none above, the run is refused",
-      "  under the pin: refused, since smart-router/auto does not reach the local role in this scope; choose smart-router/local",
       "",
     ]);
-    assert.deepEqual(report.lines.slice(12, 18), DEMAND_AND_SWITCHING, "the defaults are read back for a roster that gives neither section");
-    assert.deepEqual(report.lines.slice(18, 21), ["", "smart-router/local, in any scope, pinned or not:", "  refused: the roster has no local section"]);
+    assert.deepEqual(report.lines.slice(11, 17), DEMAND_AND_SWITCHING, "the defaults are read back for a roster that gives neither section");
+    assert.deepEqual(report.lines.slice(17, 20), ["", "smart-router/local, in any scope:", "  refused: the roster has no local section"]);
   });
 
   test("a level with several models of its own lists them in order", () => {
     const report = checkRoster(fixture("roster-hera-v2.json"));
     assert.ok(report.lines.includes(`  LOW    openai-codex-2/gpt-6-luna, then ${NYX_QWEN}, then omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp  (role low)`), report.lines.join("\n"));
-    assert.ok(report.lines.includes("  under the pin: refused, since smart-router/auto does not reach the local role in this scope; choose smart-router/local"));
+    assert.ok(!report.lines.some((line) => /\bpin(ned)?\b/.test(line)), "the local-only pin has been removed, and no line speaks of it");
   });
 
   test("a version 1 roster reads back as its routing table and one-hop fallbacks", () => {
     const report = checkRoster(fixture("roster-hera.json"));
-    assert.deepEqual(report.lines.slice(0, 9), [
+    assert.deepEqual(report.lines.slice(0, 8), [
       "OK: a valid version 1 roster.",
       "",
       "smart-router/auto in personal scope (version 1: the keywords pick the kind of run):",
@@ -123,7 +120,6 @@ describe("checking a roster's text", () => {
       "  complex  openai-codex-2/gpt-6.1-sol  (role engineer); then the fallback openrouter/z-ai/glm-5.3  (role coder)",
       "  default  openrouter/deepseek/deepseek-v4.1-flash-1017  (role worker); no fallback",
       "  trivial  openrouter/deepseek/deepseek-v4.1-flash-1017  (role worker); no fallback",
-      "  under the pin: refused, since smart-router/auto does not reach the local role in this scope; choose smart-router/local",
       "smart-router/auto in work scope: refused, since a version 1 roster serves no work scope",
     ]);
   });
@@ -148,7 +144,7 @@ describe("checking a roster's text", () => {
     const [, example] = /```json\n([\s\S]*?)\n```/.exec(section) ?? [];
     assert.equal(`${example}\n`, JOHN);
     const [, shown] = /```text\n([\s\S]*?)\n```/.exec(section) ?? [];
-    assert.deepEqual((shown ?? "").split("\n"), JOHN_ROUTING.slice(0, 12));
+    assert.deepEqual((shown ?? "").split("\n"), JOHN_ROUTING.slice(0, 11));
   });
 
   test("every roster the README shows is valid", () => {

@@ -33,12 +33,10 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 import { install } from "../../index.ts";
-import { PIN_ENTRY, PROVIDER, ROUTING_REGISTRY_KEY, SLOT_KEY } from "../../src/constants.ts";
+import { PROVIDER, ROUTING_REGISTRY_KEY, SLOT_KEY } from "../../src/constants.ts";
 import type { VirtualId } from "../../src/constants.ts";
 import { isRecord } from "../../src/files.ts";
 import type { ClassifierRegistry } from "../../src/jev.ts";
-import type { LocalPolicy } from "../../src/local.ts";
-import { pinOff, pinOn } from "../../src/pin.ts";
 import { refOf } from "../../src/resolve.ts";
 import { createRouter } from "../../src/router.ts";
 import type { Router, RouterOptions } from "../../src/router.ts";
@@ -405,21 +403,6 @@ export class FakeSession {
     this.entries.push({ type, customType, data, id: `e${this.entries.length}`, parentId: null, timestamp: new Date(NOW).toISOString() });
   }
 
-  /** Pin the session to a policy, as /smart-router local on records it. */
-  pin(policy: LocalPolicy): void {
-    this.appendCustom(PIN_ENTRY, pinOn(policy, NOW));
-  }
-
-  /** Record the one entry that unpins. */
-  unpin(): void {
-    this.appendCustom(PIN_ENTRY, pinOff(NOW));
-  }
-
-  /** The pin entries recorded so far, oldest first. */
-  pinEntries(): unknown[] {
-    return this.entries.filter((entry) => entry.customType === PIN_ENTRY).map((entry) => entry.data);
-  }
-
   /** Force the selection without a model_select, as writing session.agent.state.model does. */
   force(ref: string): void {
     this.select(ref);
@@ -560,7 +543,7 @@ export interface LoadOptions extends SessionOptions {
   readonly build?: (pi: ExtensionAPI, options: RouterOptions) => Router;
   /** Runs before the router loads: an extension that loads earlier registers its handlers here. */
   readonly before?: (host: FakeHost) => void;
-  /** Entries the session holds before it starts, such as a pin. */
+  /** Entries the session holds before it starts, such as a scope or an earlier version's pin entry. */
   readonly setup?: (session: FakeSession) => void;
 }
 

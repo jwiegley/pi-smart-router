@@ -37,17 +37,9 @@ import type { Choice, Decision, LastResponder, LevelInput, Plan, PlanLevel } fro
 import { invariant, noBoundedHistory, unroutable } from "./errors.ts";
 import type { JevOutcome } from "./jev.ts";
 import { checkLocal } from "./local.ts";
-import type { LocalPolicy } from "./local.ts";
 import { clock, coolFrom, failureKind, holdFrom, refOf, resolveCandidate } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
 import { autoRoles, excludedBy, excludesFor, isWorkBound, levelRoles, roleOf, scopeSection } from "./roster.ts";
-
-/** A session's pin as routing sees it. */
-export interface Pin {
-  readonly on: boolean;
-  /** The policy local-only routing obeys while pinned. */
-  readonly policy: LocalPolicy;
-}
 
 /** The model the owner loop's last route picked in the current run. */
 export interface RunPick {
@@ -164,7 +156,6 @@ export interface RouteInput {
   readonly id: VirtualId;
   readonly request: ModelRouteRequest;
   readonly rc: ResolveContext;
-  readonly pin: Pin;
   readonly record: SessionRecord;
 }
 
@@ -261,7 +252,7 @@ export interface Failover {
  * What would take the request if it were sent again after such a failure, as a new run's plan
  * would pick it: from `start`, the role the new run starts in (its level's, or the local role),
  * the first candidate in the written order that is neither cooling nor held, then the scope's
- * chain; held to the selection, the scope and the pin as any pick is. The failed model is cooling
+ * chain; held to the selection and the scope as any pick is. The failed model is cooling
  * or held by now. Nothing when only the failed model itself, or nothing, is left. Pure.
  */
 export function afterFailure(rc: ResolveContext, failover: Failover, start: string | undefined): Choice | undefined {
@@ -284,7 +275,7 @@ export function planApplies(plan: Plan, id: VirtualId, rc: ResolveContext): bool
 
 /**
  * The run's plan, consumed: it is never used twice, and never where it does not apply. A plan that
- * no longer applies, because the selection, the pin, the scope or the roster's version changed after
+ * no longer applies, because the selection, the scope or the roster's version changed after
  * its message planned, takes its level with it: the run did not go to that level, so it records none.
  */
 function takePlan(record: SessionRecord, id: VirtualId, rc: ResolveContext): Plan | undefined {
@@ -297,7 +288,7 @@ function takePlan(record: SessionRecord, id: VirtualId, rc: ResolveContext): Pla
 
 /**
  * The level a run that starts without a plan goes back to, if it does: on smart-router/auto under a
- * version 2 roster, outside the pin, when this is the run's first request, the model it would stay
+ * version 2 roster, when this is the run's first request, the model it would stay
  * on is one of the scope's fallback chain, and the session's last planned run took a level of this
  * scope. Such a run (a goal continuation, a loop's) has no prompt to plan it, and without this it
  * would stay on the chain model for as long as it kept starting runs, however long ago the level's
@@ -327,8 +318,8 @@ function fromPlan(rc: ResolveContext, plan: Plan): Decision {
  * How a pick's provider breaks the session's scope, if it does. A personal session never sends to a
  * work-bound account. A work session sends only to the work-bound Codex account, which only a
  * version 2 roster binds: under a version 1 roster, which serves no work scope, it sends nothing.
- * In both, a local-only request keeps the pin's rules, checked after this one: a local model, which
- * has no account. prepare() already refuses smart-router/auto for a scope the roster does not
+ * In both, a local-only request, smart-router/local's, keeps the local policy, checked after this
+ * one: a local model, which has no account. prepare() already refuses smart-router/auto for a scope the roster does not
  * serve; this check holds even if that refusal is bypassed.
  */
 function outsideScope(rc: ResolveContext, provider: string): string | undefined {
@@ -341,11 +332,11 @@ function outsideScope(rc: ResolveContext, provider: string): string | undefined 
 }
 
 /**
- * Whether the request's session is a work session that is not pinned: work scope, or a scope that
- * cannot be read, outside the pin. A refusal then names only the models that keep the conversation
- * on the work account (src/errors.ts).
+ * Whether the request's session is a work session: work scope, or a scope that cannot be read,
+ * which resolves in work scope. A refusal then names only the models that keep the conversation on
+ * the work account (src/errors.ts).
  */
-const workUnpinned = (rc: ResolveContext): boolean => rc.pinned !== true && rc.scope === "work";
+const workSession = (rc: ResolveContext): boolean => rc.scope === "work";
 
 /** The router's own invariants, checked on every pick before it is returned. */
 export function assertSafe(id: VirtualId, rc: ResolveContext, choice: Choice): void {
@@ -369,7 +360,7 @@ export function assertSafe(id: VirtualId, rc: ResolveContext, choice: Choice): v
                   : rc.localOnly && !checkLocal(choice.model, rc.policy, true).ok
                     ? "is outside the local policy"
                     : undefined;
-  if (problem !== undefined) throw invariant(id, choice.ref, problem, workUnpinned(rc));
+  if (problem !== undefined) throw invariant(id, choice.ref, problem, workSession(rc));
 }
 
 /** The level a role sends: the selected one, or the role's fixed level. Pi clamps it to the model. */
@@ -391,9 +382,8 @@ function settle(input: RouteInput, decision: Decision): Choice {
   if (!decision.ok) {
     throw unroutable(input.id, decision, {
       localOnly: input.rc.localOnly,
-      pinned: input.pin.on,
       stepUps: input.rc.roster.version === 2,
-      work: workUnpinned(input.rc),
+      work: workSession(input.rc),
       cooling: coolingAccount(input.rc, decision),
     });
   }

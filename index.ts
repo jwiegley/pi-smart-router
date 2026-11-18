@@ -6,9 +6,10 @@
 // back to a physical one. Until the router is built, and for good if building it fails, both
 // models refuse every request. The router's handlers are wired only after it is built, so a
 // failure leaves the two refusing models and no handler bound to a half-built router. The factory
-// does no I/O; it reads two environment variables, the pin's and the scope's switches. It never
-// uses the value an API call returns, so it also works through nix-config's managed entry, which
-// stages on() and register*() calls.
+// does no I/O; it reads two environment variables: the scope's switch, and the removed local-only
+// pin's, which is latched only so that each session start can say it is ignored. It never uses the
+// value an API call returns, so it also works through nix-config's managed entry, which stages on()
+// and register*() calls.
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionVirtualModel } from "@earendil-works/pi-coding-agent";
 

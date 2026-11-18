@@ -41,14 +41,12 @@ answered, and Pi's footer shows it.
   back before anything is sent. See [Changing the routing](#changing-the-routing).
 - **`smart-router/local`** routes only to the roster's local role, and never falls back to anything
   else. If no local model can take the request, it is refused. It does so in personal scope, in
-  work scope and in a session whose scope cannot be read alike, pinned or not: selecting it is the
-  request for local routing.
-- **The local-only pin** (`/smart-router local on`) keeps the router's two models on local models
-  until you unpin it: `smart-router/local` routes to the local role, and `smart-router/auto` routes
-  only inside the pin's policy. See [The local-only pin](#the-local-only-pin).
+  work scope and in a session whose scope cannot be read alike: selecting it is the request for
+  local routing. The local-only pin of earlier versions is gone; see
+  [Routing locally](#routing-locally).
 - **A model picked by hand always stays selected.** The router routes only while the selection is
   `smart-router/auto` or `smart-router/local`. A model you choose with `/model` or by cycling is
-  sent as it is, in work scope and under the pin too: the router does not switch it back, refuse
+  sent as it is, in work scope too: the router does not switch it back, refuse
   its prompts, cancel its compactions or touch its requests. See
   [A model picked by hand](#a-model-picked-by-hand).
 - **Every refusal says "Nothing was sent."** A refusal names the virtual model, gives the cause in
@@ -56,11 +54,11 @@ answered, and Pi's footer shows it.
 
 The router opens no network connection of its own and sets no timer. When a version 2 roster
 has a classifier, it asks Pi's model registry for one classifier request per routed run on
-smart-router/auto, with a per-attempt timeout and no retries. It never does so under the pin, on
+smart-router/auto, with a per-attempt timeout and no retries. It never does so on
 smart-router/local, for a steer or follow-up, or without a classifier.
 
 It also starts no process, writes no file of its own and keeps no prompt text; its session entries
-(the pin's, the scope's and the level records) are written by Pi, into the session. It reads
+(the scope's and the level records) are written by Pi, into the session. It reads
 only files under Pi's agent directory: the roster, Multi-Pass's subscription labels when the
 roster binds a Multi-Pass account, and the prompt files the roster names in `smart-router/`
 ([Jev's prompts](#jevs-prompts)). It reads no file relative to the working directory or a
@@ -71,9 +69,8 @@ smaller role. It has no runtime dependency and no native code; Pi supplies
 `@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai`.
 
 It needs jwiegley/pi 1.5.0 or later, whose bounded session reads let it look at a session without
-loading its whole history. Upstream Pi 1.5.0 lacks those reads, so there the router fails closed: it
-cannot read a session's pin, counts every session as pinned, and both of its models refuse every
-request for as long as it is loaded. Do not load it on upstream Pi.
+loading its whole history. Upstream Pi 1.5.0 lacks those reads, so there the router fails closed:
+both of its models refuse every request for as long as it is loaded. Do not load it on upstream Pi.
 
 ## Installing
 
@@ -134,7 +131,7 @@ The roster is one JSON file per host, at `<agentDir>/smart-router.json`, which i
   "$comment": "Hera. openai-codex-2 is John's personal ChatGPT account, labelled 'personal' in Multi-Pass. The router itself excludes openai-codex-3 and refuses work or Positron labels; plain openai-codex is excluded here because Hera reserves it for the work account.",
   "exclude": ["openai-codex/*"],
   "roles": [
-    { "name": "local", "$comment": "private or extreme economy; free; only smart-router/local and the pin", "models": ["omlx-hera/GLM-5.3-Flash-oQ4e-mtp"], "thinking": "max" },
+    { "name": "local", "$comment": "private or extreme economy; free; only smart-router/local", "models": ["omlx-hera/GLM-5.3-Flash-oQ4e-mtp"], "thinking": "max" },
     { "name": "worker", "$comment": "economical", "models": ["openrouter/deepseek/deepseek-v4.1-flash-1017"] },
     { "name": "thinker", "$comment": "strong; the architect's fallback", "models": ["openrouter/moonshotai/kimi-k3.1-pro"] },
     { "name": "coder", "$comment": "the engineer's fallback, reached only through routing.fallback; ranked just below the engineer so that sessions return to sol as soon as it is available", "models": ["openrouter/z-ai/glm-5.3"] },
@@ -163,7 +160,7 @@ account there, and with the line, a role that names it is a validation error.
   "version": 1,
   "$comment": "Clio, Vulcan, athena and pallas. Native openai-codex is John's personal ChatGPT login on these hosts; the binding below is his acknowledgement, which the router cannot verify. Run /smart-router status after any /login, /logout, /subs add or /subs remove.",
   "roles": [
-    { "name": "local", "$comment": "private or extreme economy; free; only smart-router/local and the pin", "models": ["omlx-hera/GLM-5.3-Flash-oQ4e-mtp"], "thinking": "max" },
+    { "name": "local", "$comment": "private or extreme economy; free; only smart-router/local", "models": ["omlx-hera/GLM-5.3-Flash-oQ4e-mtp"], "thinking": "max" },
     { "name": "worker", "$comment": "economical", "models": ["openrouter/deepseek/deepseek-v4.1-flash-1017"] },
     { "name": "thinker", "$comment": "strong; the architect's fallback", "models": ["openrouter/moonshotai/kimi-k3.1-pro"] },
     { "name": "coder", "$comment": "the engineer's fallback, reached only through routing.fallback", "models": ["openrouter/z-ai/glm-5.3"] },
@@ -187,7 +184,7 @@ is no `exclude` line, and the native login is bound with `"native": "personal"`.
 
 ### How the roles are used
 
-- **local (GLM on Hera's oMLX)** takes requests only through `smart-router/local` and the pin.
+- **local (GLM on Hera's oMLX)** takes requests only through `smart-router/local`.
   `smart-router/auto` never routes to it, because no routing target or fallback names it; that
   keeps auto from causing cold oMLX prefills.
 - **worker (DeepSeek)** takes default and trivial runs.
@@ -219,7 +216,7 @@ session that fell back to coder returns to sol at its next complex run once sol 
 | `routing.trivial`, `routing.complex`, `routing.planning` | no | Roles for those classifications; each defaults to `routing.default`. |
 | `routing.fallback` | no | `{ "role": "role" }`: one hop, never to itself. Without an entry, a role that cannot take a request refuses it. |
 | `accounts` | for subscription providers | A binding for every subscription provider a role uses. See below. |
-| `local` | no | `role` (the local role), `providers` (every provider of the local role, and nothing qualifies as local unless it is listed) and `hosts` (base-URL host names). Without it, `smart-router/local` and the pin always refuse. |
+| `local` | no | `role` (the local role), `providers` (every provider of the local role, and nothing qualifies as local unless it is listed) and `hosts` (base-URL host names). Without it, `smart-router/local` always refuses. |
 | `stickyIdleMinutes` | no | 0 to 1440, default 5. How long a session must be idle before a run may move down the ladder. |
 | `cooldownMinutes` | no | 1 to 1440, default 30. How long a usage-limit or authentication error takes a model out of routing, and with it every model of the same subscription account. |
 | `unreachableMinutes` | no | 1 to 60, default 5. How long a local model whose server could not be reached is passed over while another model can take the request. |
@@ -272,7 +269,7 @@ rosters keep working, in personal scope only, with the keyword classifier alone.
   "$comment": "Hera, version 2. Personal levels take Codex first, on openai-codex-2 (John's personal ChatGPT account, labelled 'personal' in Multi-Pass), then OpenRouter. Work levels take only openai-codex-3, the work account, which the router excludes everywhere else. Plain openai-codex is excluded here because Hera reserves it for the work account.",
   "exclude": ["openai-codex/*"],
   "roles": [
-    { "name": "local", "$comment": "private or extreme economy; free; only smart-router/local and the pin", "models": ["omlx-hera/GLM-5.3-Flash-oQ4e-mtp"], "thinking": "max" },
+    { "name": "local", "$comment": "private or extreme economy; free; only smart-router/local", "models": ["omlx-hera/GLM-5.3-Flash-oQ4e-mtp"], "thinking": "max" },
     { "name": "low", "$comment": "Nyx's ref is a Nix-store basename that changes whenever its model is rebuilt", "models": ["openai-codex-2/gpt-6-luna", "nyx/g3mjym7raqj6147biq46zxym32gyda9g-Qwen3.8-27B-exl3-6fe61ad", "omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp"] },
     { "name": "medium", "models": ["openai-codex-2/gpt-6.1-terra", "openrouter/deepseek/deepseek-v4.1-flash-1017"] },
     { "name": "high", "models": ["openai-codex-2/gpt-6.1-sol", "openrouter/z-ai/glm-5.3"] },
@@ -320,9 +317,9 @@ rosters keep working, in personal scope only, with the keyword classifier alone.
   needs an edit after each rebuild until nix-config gives it a stable id. Pi offers it only once
   `NYX_API_KEY` reaches Pi's environment; until then, LOW falls through to Hera's Qwen whenever luna
   is unavailable.
-- **The local section** keeps Nyx, so Nyx's Qwen counts as local although the pin routes only to
-  GLM: `/smart-router local on` leaves it selected when it was picked by hand, and the pin's status
-  item shows over it.
+- **The local section** keeps Nyx, so Nyx's Qwen counts as local although `smart-router/local`
+  routes only to GLM: when its server cannot be reached, LOW passes it over for a few minutes, as
+  it does any local model ([Routing in detail](#routing-in-detail)).
 
 A work machine's roster has only the work roles, on its native `openai-codex` login bound as work:
 
@@ -368,7 +365,7 @@ session uses only the work account.
   "$comment": "Hera, version 2, with John's routing of 2026-11-17. Personal levels take one Codex model each, on openai-codex-2 (John's personal ChatGPT account, labelled 'personal' in Multi-Pass). When a level's model cannot take a request, every level falls back along one chain: OpenRouter's GLM and Qwen, then the local models. Work levels take only openai-codex-3, the work account, and declare no fallback. Plain openai-codex is excluded here because Hera reserves it for the work account.",
   "exclude": ["openai-codex/*"],
   "roles": [
-    { "name": "local", "$comment": "smart-router/local and the pin, in this order; also the end of the personal fallback chain. Nyx's ref is a Nix-store basename that changes whenever its model is rebuilt", "models": ["omlx-hera/GLM-5.3-Flash-oQ4e-mtp", "nyx/g3mjym7raqj6147biq46zxym32gyda9g-Qwen3.8-27B-exl3-6fe61ad", "omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp"], "thinking": "max" },
+    { "name": "local", "$comment": "smart-router/local, in this order; also the end of the personal fallback chain. Nyx's ref is a Nix-store basename that changes whenever its model is rebuilt", "models": ["omlx-hera/GLM-5.3-Flash-oQ4e-mtp", "nyx/g3mjym7raqj6147biq46zxym32gyda9g-Qwen3.8-27B-exl3-6fe61ad", "omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp"], "thinking": "max" },
     { "name": "openrouter", "$comment": "the start of the personal fallback chain: another vendor, on another quota", "models": ["openrouter/z-ai/glm-5.3-flash", "openrouter/qwen/qwen3.8-27b"] },
     { "name": "low", "models": ["openai-codex-2/gpt-6-luna"] },
     { "name": "medium", "models": ["openai-codex-2/gpt-6.1-terra"] },
@@ -422,7 +419,6 @@ smart-router/auto in personal scope: a tag, else Jev (openrouter/typesafe/jev-1.
     3. omlx-hera/GLM-5.3-Flash-oQ4e-mtp  (role local, thinking max)
     4. nyx/g3mjym7raqj6147biq46zxym32gyda9g-Qwen3.8-27B-exl3-6fe61ad  (role local, thinking max)
     5. omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp  (role local, thinking max)
-  under the pin: only the local role local, in its own order (below)
 ```
 
 How the chain works:
@@ -472,9 +468,7 @@ How the chain works:
   work chain takes only work-bound Codex models: no OpenRouter, local or personal-account model can
   be named there. A model still sits in exactly one role, so a chain cannot repeat a level's model.
 - **The local role may end a chain.** That is the one way `smart-router/auto` reaches the local
-  models. Under the pin, `smart-router/auto` in that scope then routes to the local role, in the
-  role's own order and inside the pin's policy, and the chain's cloud roles are not used.
-  `smart-router/local` never uses a chain: it routes to the local role alone, as before.
+  models. `smart-router/local` never uses a chain: it routes to the local role alone, as before.
 - **It says so.** A run planned onto a chain model shows a notice, "no LOW model can take this
   run, so it goes to the fallback openrouter (z-ai/glm-5.3-flash)"; a run under way that moves
   onto one says "gpt-6-astra can no longer take this run, so it goes on with the fallback
@@ -545,7 +539,7 @@ the check, and the next prompt of every running session uses it: no restart, no 
 |---|---|
 | The model a level uses | The `models` of that level's role in `roles`. `scopes.<scope>.levels.<level>.role` names the role; the first model listed is the one used, the rest are tried after it. |
 | What takes over when a level's model cannot | `scopes.<scope>.fallback`: the roles, in order. Each role's own `models` order is the order inside it. |
-| The local set, for `smart-router/local` and the pin | The `models` of the local role, in order. A new server also needs its provider in `local.providers` and its host in `local.hosts`. |
+| The local set, for `smart-router/local` | The `models` of the local role, in order. A new server also needs its provider in `local.providers` and its host in `local.hosts`. |
 | A work session's models | The `work-*` roles, which take only the work Codex account. |
 | What a level means to Jev | That level's `describe`, or the file its `describeFile` names. |
 | How Jev judges a message | `classifier.instructions`, or the file `classifier.instructionsFile` names. |
@@ -555,7 +549,7 @@ the check, and the next prompt of every running session uses it: no restart, no 
 
 Roles are named, rather than a level listing its models inline, because the role is what a model
 has exactly one of: it gives the model its `thinking`, its place on the ladder, its line in
-`status`, and, for the local role, its membership of the pin's policy. A level and
+`status`, and, for the local role, its membership of the local policy. A level and
 a fallback chain only point at roles, so swapping a model is still one edit, in `roles`.
 
 **Swap a level's model.** Move HIGH to a newer sol:
@@ -590,8 +584,7 @@ chain; deleting `"local"` from it keeps `smart-router/auto` off the LAN models.
 +    { "name": "local", "models": ["omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp", "omlx-hera/GLM-5.3-Flash-oQ4e-mtp"], "thinking": "max" },
 ```
 
-The same edit changes the end of any chain that names `local`. A session pinned earlier keeps the
-local set it was pinned with until `/smart-router local on` is run again.
+The same edit changes the end of any chain that names `local`.
 
 **Sharpen a level's description.** In the roster:
 
@@ -614,7 +607,7 @@ node /path/to/pi-smart-router/src/check-cli.ts ~/.config/pi/agent/smart-router.j
 
 or `/smart-router check` in a session. Both use the router's own parser. A valid roster is read
 back in plain language: for `smart-router/auto` in each scope, each level's models, the fallback
-chain in order and what the pin leaves; for `smart-router/local`, the local models in order; where
+chain in order; for `smart-router/local`, the local models in order; where
 each of Jev's prompts comes from; and the account bindings. An invalid one gives the first error
 with its place, such as
 `INVALID: roles[3].models[1]: "omlx-hera/GLM-5.3-Flash-oQ4e-mtp" is already in role "local"`.
@@ -727,7 +720,7 @@ These are version 1's rules. Version 2 keeps them, comparing levels rather than 
   the model written after it that is not held, round its role once, and then on along the
   fallback chain. The runs that follow pass a held model over in the same way. This applies to
   local-role models too, which are never cooled. It never leaves what the selection may use:
-  `smart-router/local` and the pin stay in the local role and its policy. `status` shows a held
+  `smart-router/local` stays in the local role and its policy. `status` shows a held
   model as `unreachable-until-HH:MM`, with an `Unreachable:` line.
   - *A hold is a preference, never a refusal.* When every candidate that could take the request
     is held, the hold gives way: a retry stays on the model it has, under Pi's backoff, as it
@@ -768,7 +761,7 @@ These are version 1's rules. Version 2 keeps them, comparing levels rather than 
   [A fallback chain](#a-fallback-chain) for what a usage limit costs.
 - **Compaction and other summaries** go to the model that answered last when it may take them, so
   the transcript does not go to a new vendor; otherwise to the default role (under version 2, the
-  session's scope's medium level), or to the local role under `smart-router/local` and the pin.
+  session's scope's medium level), or to the local role under `smart-router/local`.
 - **Thinking.** Both models offer every thinking level, so a `max` default is not clamped at
   selection. A role sends the session's level or its fixed `thinking`, and Pi clamps that to what the
   routed model supports.
@@ -841,13 +834,13 @@ Then the level goes through version 1's rules, comparing levels:
 **Tags elsewhere.** A message that is only a tag sends nothing, with a notice. A tag is removed
 wherever it is typed, and where it cannot set its run's level a notice says it has no effect: in a
 steer or follow-up typed while a run streams, whose model is fixed until the run ends; on
-`smart-router/local`, under the pin or on a physical model; under a version 1 roster; and in a scope
+`smart-router/local` or on a physical model; under a version 1 roster; and in a scope
 that `smart-router/auto` refuses. An extension's resend of the latest message's text, as
 pi-idle-check makes, keeps that message's level, from its tag or from Jev, and Jev is not asked
 again.
 
 **The footer** shows each run's scope, level, model and what decided the level, under a status key
-of its own, `smart-router-level`, never the pin's: `personal HIGH → gpt-6.1-sol (jev 82%)`,
+of its own, `smart-router-level`: `personal HIGH → gpt-6.1-sol (jev 82%)`,
 `work HIGH → gpt-6.1-sol (floor)`, `personal SUPER → gpt-6-astra (tag)`, or
 `personal MEDIUM → gpt-6.1-terra (keywords; jev timeout)`. When a hold or a step-up takes the run to
 another level than Jev's, the note names Jev's: `(jev LOW 80%)`. `/smart-router history` shows the
@@ -889,8 +882,7 @@ labelled choices and returns one, with a probability for each. Under a version 2
   prompt file that cannot be used (`prompt`; then nothing is sent to Jev) counts as a failure, and
   the keywords decide. The run's record names the failure, and so does the
   footer of a run the keywords decided.
-- **Never asked** under the pin or `PI_SMART_ROUTER_LOCAL_ONLY`, on `smart-router/local` or a
-  physical model, for a steer or follow-up, without a classifier, under a version 1 roster, in a
+- **Never asked** on `smart-router/local` or a physical model, for a steer or follow-up, without a classifier, under a version 1 roster, in a
   session whose scope cannot be read or that the roster does not serve, for a message that is only
   a tag, or for an extension's resend of the latest message's text.
 - **Where the text goes:** to OpenRouter, then to TypeSafe in the US. TypeSafe does not train on
@@ -954,13 +946,12 @@ name ending in `.md` or `.txt`, with no directory part:
 - an answer counts only when it names one of those four and gives a probability for each;
   anything else is discarded as malformed and the keywords decide;
 - the level is routed within the session's scope, by that scope's levels, account bindings and
-  exclusions; a prompt cannot name a model, change the scope or lift the pin, and under the pin Jev
-  is not asked at all;
+  exclusions; a prompt cannot name a model or change the scope;
 - redaction, the size caps, the tag syntax (`#low` … `#super`) and the floor for risky operations.
 
 `test/prompts.test.ts` gives the router a prompt that asks for another label, a work-account
-model, work scope and an unpinning, with a classifier that does as it says, and shows that none of
-it happens.
+model, work scope and the lifting of the local-only pin of earlier versions, with a classifier that
+does as it says, and shows that none of it happens.
 
 ### What redaction hides
 
@@ -1097,16 +1088,15 @@ it the entry names, stays in the text that Jev reads, and the list is not comple
 ## A model picked by hand
 
 John's decision of 2026-11-16: a manual choice always wins. A model selected with `/model` or by
-cycling, or restored with a session, stays selected and is sent as it is, in personal scope, in work
-scope and under the pin. The router routes only while the selection is `smart-router/auto` or
+cycling, or restored with a session, stays selected and is sent as it is, in personal scope and in
+work scope. The router routes only while the selection is `smart-router/auto` or
 `smart-router/local`.
 
 Each row below is asserted by the tests under "the router's handlers", "a model picked by hand in
-work scope", "a model picked by hand under the pin" and "a restored selection" in
-`test/selection.test.ts`, on Hera's rosters. Scenarios 6 to 9, 11, 20 and 26, and L5, L6 and L10,
-of `test/behaviour.test.ts` show the same in Pi's own runtime.
+work scope" and "a restored selection" in `test/selection.test.ts`, on Hera's rosters. Scenarios 6
+to 9, 11 and 26, and L5, L6 and L10, of `test/behaviour.test.ts` show the same in Pi's own runtime.
 
-| In a work session, or in a pinned one | What happens |
+| In a work session | What happens |
 |---|---|
 | `/model openrouter/moonshotai/kimi-k3.1-pro`, or cycling to `openai-codex-2/gpt-6.1-sol` | That model is the selection. The router shows no notice and selects nothing. |
 | `xai/grok-4.7` picked in a work session, the case John reported | It stays. The notice "so xai/grok-4.7 was not kept, and the selection is smart-router/auto again" no longer exists. |
@@ -1116,60 +1106,47 @@ of `test/behaviour.test.ts` show the same in Pi's own runtime.
 | The provider request | The router registers no handler for it, so the payload arrives whole. |
 | Cache warming | The router registers no handler for it, so Pi's own decision stands. |
 | A compaction, and `/tree` with a summary | Each proceeds, on the model picked by hand. |
-| A work session resumed on such a model, by its entry or its work directory; a session of a latched process at startup, resume, reload, `/new` or a fork; a pinned session at resume, or under `PI_SMART_ROUTER_LOCAL_ONLY` | It starts on that model, and nothing is selected in its place. |
+| A work session resumed on such a model, by its entry or its work directory; a session of a latched process at startup, resume, reload, `/new` or a fork | It starts on that model, and nothing is selected in its place. |
 | Another extension selects a model, as Multi-Pass `allowedSubs` does | Its selection stands as a hand's does. The router cannot tell the two apart, and answers neither. |
 
 The consequence, which John accepted: in a work session, a personal-account or OpenRouter model
-picked by hand receives that conversation under that account, and under the pin a cloud model
-picked by hand receives it too.
+picked by hand receives that conversation under that account.
 
 **The router's own models keep their policies, in their routes.** A request their policy does not
 allow is refused by the model that was asked, and the selection stays where it was:
 
 | Selection | Session | Its requests |
 |---|---|---|
-| `smart-router/auto` | work scope, not pinned | Go only to the work-bound Codex account. Refused when the roster serves no work scope, or the scope cannot be read. |
-| `smart-router/auto` | pinned | Go only inside the pin's policy. In a scope whose fallback chain names the local role, to that role's models, in its order. In any other scope, where auto does not reach the local role, refused: "smart-router/auto: no local model can take this request while this session is pinned to local models (…). Nothing was sent. Choose smart-router/local with /model, or run /smart-router local off." |
-| `smart-router/local` | either scope, or a scope that cannot be read, pinned or not | Go only to the local role, and never to a cloud model. Refused only when no local model can take the request. |
+| `smart-router/auto` | work scope | Go only to the work-bound Codex account. Refused when the roster serves no work scope, or the scope cannot be read. |
+| `smart-router/local` | either scope, or a scope that cannot be read | Go only to the local role, and never to a cloud model. Refused only when no local model can take the request. |
 
 John's decision of 2026-11-16, "Let smart-router/local route in work scope": selecting
-`smart-router/local` is itself the request for local routing, so a work session needs no pin for
-it. The consequence: in a work session, on the shared work machines too, selecting
-`smart-router/local` sends the conversation to the roster's local models, not to the work account,
-without the pin step. Until 1.4.0-jw.1 that request was refused unless the session was pinned.
+`smart-router/local` is itself the request for local routing, so it routes in a work session too.
+The consequence: in a work session, on the shared work machines too, selecting
+`smart-router/local` sends the conversation to the roster's local models, not to the work account.
+Until 1.4.0-jw.1 that request was refused unless the session was pinned, with the local-only pin
+that has since been removed.
 
 John's decision of 2026-11-17, "Let local route there too": `smart-router/local` routes in a
-session whose scope cannot be read as well, pinned or not, so it refuses no scope at all. Until
-1.4.0-jw.2 it refused such a session outside the pin. `smart-router/auto` still refuses one, since
-it cannot tell which account the session's requests may use.
+session whose scope cannot be read as well, so it refuses no scope at all. Until 1.4.0-jw.2 it
+refused such a session unless it was pinned. `smart-router/auto` still refuses one, since it cannot
+tell which account the session's requests may use.
 
-In work scope, outside the pin, a refusal names only `smart-router/auto` and work Codex models as
+In work scope a refusal names only `smart-router/auto` and work Codex models as
 models to choose, since those keep the conversation on the work account. Any other model you pick
 is kept all the same.
 
-**The one switch.** The router selects a model in one place: `/smart-router local on`, which asks
-for local routing, selects `smart-router/local`, unless the selection is already that model or a
-physical model inside the pin's policy, such as GLM selected directly. No other command and no
-event selects a model. Each of these is a test in `test/commands.test.ts`:
+**No switch.** No command and no event selects a model. The local-only pin's
+`/smart-router local on`, which selected `smart-router/local`, was the one place that did, and it
+has been removed. Each of these is a test in `test/commands.test.ts`:
 
 - `/smart-router scope work` with Kimi selected answers "pi-smart-router: scope work (entry)." and
   "The selection stays openrouter/moonshotai/kimi-k3.1-pro. A model picked by hand is sent as it is,
   in work scope too."
 - `/smart-router scope work` with `smart-router/local` selected answers "The selection stays
-  smart-router/local. In work scope smart-router/local routes to the local models without the pin,
-  so its next requests go to them, not to the work account."
-- `/smart-router local off` in a work session leaves the selection too: on `smart-router/local` it
-  ends with the same sentence, and on Kimi with "A model picked by hand is sent as it is, in work
-  scope too."
+  smart-router/local. In work scope smart-router/local routes to the local models, so its next
+  requests go to them, not to the work account."
 - `/smart-router scope personal` changes no selection.
-
-**A session that starts pinned starts on whatever Pi selected.** A pin carried into a fork or
-`/new`, a resumed pin and `PI_SMART_ROUTER_LOCAL_ONLY` select nothing. Pi starts a new session on
-the settings default: when that is `smart-router/auto`, its requests go to the local role where
-its scope's fallback chain names that role, and are otherwise refused, with the text above, until
-you choose `smart-router/local`; when it is a cloud model, that model is sent as it
-is. The pin's status item, `local models`, shows only while the pin covers the selection: either of
-the router's models, or a physical model inside the pin's policy.
 
 ## Scope: personal or work
 
@@ -1180,10 +1157,10 @@ account bindings. The first rule that applies decides it:
    scope. It is read each time the router loads; once seen, it holds for the life of the process,
    even if the variable is removed later. nix-config's shared-work profile is to set it.
 2. **The session's entry.** `/smart-router scope work` and `/smart-router scope personal` record a
-   `smart-router.scope` entry in the session, as the pin is recorded, and resume keeps it.
+   `smart-router.scope` entry in the session, and resume keeps it.
    - Personal to work takes effect at once, for the routes of the router's own models. The selection
      stays as it is, and the answer says what it will do: a model picked by hand is sent as it is,
-     and `smart-router/local` routes to the local models, without the pin too.
+     and `smart-router/local` routes to the local models.
    - Work to personal asks first and says that the earlier turns are work content; Enter keeps
      work scope. It is refused under the latch, and in modes without dialogs.
 3. **The roster's work directories**, on every read. A session without an entry whose working
@@ -1205,19 +1182,18 @@ scope, the scope the router routes that session in.
 **It fails closed.** A malformed `smart-router.scope` entry, a custom message of that type, or a
 session whose entries cannot be read has an unreadable scope: `smart-router/auto` refuses until
 `/smart-router scope work` or `/smart-router scope personal` records a scope again.
-`smart-router/local` routes to the local role's models all the same, pinned or not: its requests
-carry no account, so there is nothing for the scope to decide. Such a request resolves in work
-scope, the narrower one, and records neither a scope nor a pin.
+`smart-router/local` routes to the local role's models all the same: its requests carry no
+account, so there is nothing for the scope to decide. Such a request resolves in work scope, the
+narrower one, and records no scope.
 
 **Where each scope's requests go.** Scope governs the router's own two models, and nothing else.
-Outside the pin, `smart-router/auto` never sends a personal session to a work-bound account, and
-sends a work session only to a work-bound Codex account. Under the pin, both scopes route only to
-the local role's models. A version 1 roster serves no work scope: `smart-router/auto` refuses a
+`smart-router/auto` never sends a personal session to a work-bound account, and sends a work
+session only to a work-bound Codex account. A version 1 roster serves no work scope: `smart-router/auto` refuses a
 work session, and the check every pick passes refuses it again. A latched process whose roster has
 no work scope refuses every request on `smart-router/auto`, and `/smart-router status` says why.
-`smart-router/local` serves both scopes, and a scope that cannot be read, pinned or not, since it
-carries no account: a work session on it goes to the local role's models, under a roster that
-serves no work scope too, and never to a cloud model. In either scope, pinned or not, a model picked by hand
+`smart-router/local` serves both scopes, and a scope that cannot be read, since it carries no
+account: a work session on it goes to the local role's models, under a roster that serves no work
+scope too, and never to a cloud model. In either scope a model picked by hand
 is sent as it is, a work-account model in a personal session included
 ([A model picked by hand](#a-model-picked-by-hand)).
 
@@ -1228,8 +1204,6 @@ Work scope has no hold on the selection. Until 1.3.0-jw.2 a work guard switched 
 that something kept switching away. John's decision of 2026-11-16 removed it: a model picked by
 hand stays selected in a work session and is sent as it is.
 
-- **The pin comes first.** While a session is pinned, the router's models route only inside the
-  pin's policy, in either scope.
 - **A failed reload moves no session.** While the roster fails to load, the scope reads the work
   directories of the last valid roster loaded in the process, which the process slot keeps. Both
   of the router's models refuse until the roster loads; a model picked by hand is sent as it is.
@@ -1260,119 +1234,51 @@ elsewhere, the latch included:
 ### Limits and rollout
 
 - A scope set by an entry reaches what goes through its session: the default goal-x auditor routes
-  in it, as it obeys the session's pin, and a fork made from the command line (`pi --fork`) copies
+  in it, and a fork made from the command line (`pi --fork`) copies
   the entry with the rest of the session. pi-subagents children start with no entries, so it does
   not reach them. Run work in a work directory or in a latched process, which reach a child that
   loads the router as they reach any session.
 - **Rollout order.** Write the version 2 work roster before setting `PI_SMART_ROUTER_SCOPE=work`: in
-  a latched process with a version 1 roster, or with no roster loaded, the router's own models send
-  nothing unless pinned.
+  a latched process with a version 1 roster, or with no roster loaded, `smart-router/auto` sends
+  nothing, and `smart-router/local` sends only to the local models.
 
-## The local-only pin
+## Routing locally
 
-`/smart-router local on` pins the session to local models: from then on both of the router's
-models route only inside the local policy. It holds the router's routes, not the selection: a model
-picked by hand afterwards stays selected and is sent as it is
-([A model picked by hand](#a-model-picked-by-hand)).
+To route a session locally, select the local model: `/model smart-router/local`. It routes only to
+the roster's local role, in the role's order and inside the local section's providers and hosts,
+in either scope and in a session whose scope cannot be read, and never falls back to a cloud model:
+when no local model can take a request, the request is refused with "Nothing was sent". Like work
+scope, it governs only the requests the router routes. A model picked by hand afterwards is sent as
+it is, and `/smart-router status` lists what else can send data off the machine. For strictly
+private work, keep using a dedicated session on a local model with pi-warden off
+(`NIX_MANAGED_PI_WARDEN=off`).
 
-- It records the local policy in force (the local role's models, providers and hosts) in a
-  `smart-router.pin` session entry, so a later roster edit cannot widen what counts as local. If
-  the roster is invalid or has no local section, the pin records an empty policy, under which
-  nothing qualifies, and says so.
-- It selects `smart-router/local`, since the command asks for local routing, unless the selection
-  is already that model or a physical model inside the policy, such as GLM selected directly. This
-  is the only place where the router selects a model. When the switch fails, it says that the
-  selection stays as it is.
-- It warns when earlier turns of the branch went to a cloud model. Those have already left the
-  machine; the pin protects only what follows.
-- It lists what can still send data off the machine (below).
+Earlier versions also had a local-only pin: `/smart-router local on|off|status`, a
+`smart-router.pin` session entry and the `PI_SMART_ROUTER_LOCAL_ONLY` environment variable, which
+kept both of the router's models on local models. John's decision of 2026-11-18 removed it:
+`smart-router/local` already routes locally. What is left of it says that it is gone, so that
+nobody believes an old pin still keeps a session local:
 
-The status item reads `local models` while the session is pinned and the pin covers the selection:
-either of the router's models, or a physical model inside the policy. Over a model picked by hand
-outside the policy it is cleared, because that model is sent as it is. It does not say "private".
-
-`/smart-router local off` asks first, and Enter keeps the pin; only "Yes, unpin" unpins. It refuses
-in modes without dialogs and while the environment switch is on. It leaves the selection as it is.
-In work scope, the question says that `smart-router/auto`'s next requests go to the work account,
-and the answer says what the selection will do: `smart-router/local` still routes to the local
-models once unpinned, in a session whose scope cannot be read too, and a model picked by hand is
-sent as it is. `/smart-router local status` shows the pin and what
-can still leave the machine.
-
-- **Session-wide.** The pin belongs to the session file, every branch included. Resume keeps it.
-- **Forks and `/new` carry it** into the session they create. Resuming an unpinned session after a
-  pinned one shows a notice.
-- **Selecting `smart-router/local` does not pin.** It routes locally; pinning is explicit.
-- **`PI_SMART_ROUTER_LOCAL_ONLY`**, set to any non-blank value other than `0`, `false` or `off`,
-  pins every session in the process, with the local section of the first valid roster, so no
-  session of the process asks the classifier either. It is read each time the router loads; once
-  seen, it stays on for the life of the process, even if the variable is removed later. It selects
-  nothing: a session that starts on `smart-router/auto` stays there, and its requests go to the
-  local role where its scope's fallback chain names that role, and are otherwise refused until you
-  choose `smart-router/local`. Set it in a launcher or an alias; Nix never sets it.
-- **It fails closed.** Only a well-formed unpinning entry unpins. A `smart-router.pin` entry of any
-  other shape, a custom message of that type or another version pins with an empty policy, under
-  which nothing qualifies, until you pin again. On a Pi without the fork's bounded session reads,
-  every session counts as pinned, and both models refuse every request.
-
-### What the pin guarantees
-
-While a session is pinned, every request routed through either virtual model goes to a model inside
-the pinned policy, or fails with "Nothing was sent". That covers user runs, continuations, retries,
-Pi's compaction and branch summaries, a goal-x auditor that inherits the session's selection, and
-pi-subagents children that inherit `smart-router/local` and load the router. `smart-router/auto`
-obeys the pin too. In a scope whose fallback chain names the local role, a pinned request on
-`smart-router/auto` goes to that role's models; the chain's cloud roles are never used under the
-pin. In any other scope, where auto does not reach the local role, it is refused, with a text that
-names `smart-router/local`.
-
-The guarantee is about the router's two models, and it ends at the selection. Until 1.3.0-jw.2
-the pin also guarded the selection: it undid a model selected outside the policy, refused prompts,
-switched or stopped runs at `turn_start`, cancelled compaction and summaries, emptied provider
-payloads, stopped cache warming, and locked a session that something kept switching away. John's
-decision of 2026-11-16 removed all of that. With a model picked by hand selected, a pinned session
-sends everything to that model: the prompt, the run, compactions, summaries and warm requests.
-
-While a session is pinned, the router asks no classifier, and a tag is removed with a notice that it
-has no effect. Once the session is unpinned, Jev reads the recent conversation as it does for any
-message, pinned turns included.
-
-Another extension that selects a model, as Multi-Pass `allowedSubs` in the project does, or
-pi-openai-codex-compat on a branch holding a native Codex compaction checkpoint, moves a pinned
-session off the router's models, and the router does not move it back: the pin's status item is
-cleared, and the session sends to the model that extension selected. `/new` carries the pin into a
-clean session.
-
-### What the pin does not cover
-
-The pin pins the router's two models. It does not hold the selection, blocks no tools, and cannot
-see requests that do not go through its own routes. Still able to send data off the machine:
-
-- **A model picked by hand.** It stays selected and is sent as it is: its turns, and the
-  compactions and summaries made while it is selected. `/smart-router status` lists it first.
-- **Tools.** Subagent and workflow tools, which may run models of their own; web fetch and web search
-  tools, which send URLs and queries; browser tools; and whatever the bash tool can read and send.
-  `/smart-router local on` lists the ones loaded, by name.
-- **Extensions with their own models:** pi-warden's judge (it sends redacted context to its backend
-  while enabled), a configured goal-x auditor, workflow tiers, subagent agents with explicit models,
-  pi-btw, and Multi-Pass `/subs`, which can move the session to another subscription.
-- **Pi's own `/share`, `/export` and `/bug`**, which run before any extension hook. `/bug` uploads to
-  Earendil, optionally with the transcript and a summary the current model writes.
-- **Extension commands**, which run before the router sees the input.
-- **Turns sent before the pin**, and processes outside Pi, such as agent-deck's relay and backups.
-
-For strictly private work, keep using a dedicated session on a local model with pi-warden off
-(`NIX_MANAGED_PI_WARDEN=off`). The pin is the router's safeguard for its own routes, not a sandbox.
+- **`/smart-router local`**, whatever follows, answers "The local-only pin has been removed. To
+  route locally, select the local model: /model smart-router/local", and records and selects
+  nothing.
+- **`PI_SMART_ROUTER_LOCAL_ONLY` is ignored, with a notice.** While a process has seen it set, each
+  session start says "PI_SMART_ROUTER_LOCAL_ONLY is set, but the local-only pin has been removed and
+  keeps nothing local. Select smart-router/local to route locally." It selects and routes nothing.
+- **An old pin entry is ignored, with a notice.** A session an earlier version pinned is told once,
+  the first time it is on `smart-router/auto`, at its start or at an idle prompt, that "The pin has
+  been removed and is ignored: smart-router/auto routes by level here." Its entry stays in the
+  session, unread otherwise, and a fork or `/new` carries nothing of it.
 
 ## Records and training
 
 A run that still holds a level when it settles leaves one `smart-router.level` entry in its session,
-however it ended. A message that arrives on `smart-router/local`, under the pin, on a physical model
+however it ended. A message that arrives on `smart-router/local`, on a physical model
 or under a version 1 roster gets no level, and a run without a level leaves no entry.
 
 The router can drop a level before its run settles, and a run can record a level that another
 message planned. These can happen when messages overlap, as when several wait for Jev together or a
-steer arrives while a run settles, and when the selection, the pin, the scope or the roster changes
+steer arrives while a run settles, and when the selection, the scope or the roster changes
 after a message was planned. A run that stays on a model picked by hand after its message was
 planned is different: its requests do not go through the router, so the plan is not compared, and
 the entry keeps the planned level, with the hand-picked model as its `ref` when that model answered.
@@ -1420,9 +1326,9 @@ reads no other session and does not write the roster.
 
 | Command | Does |
 |---|---|
-| `/smart-router` or `/smart-router status` | The roster's path and state; the selection and its thinking level; the pin; the session's scope and what set it, under a version 2 roster or whenever `smart-router/auto` refuses the scope; every role's models on this host with `ok` or the reason they cannot route, and catalog prices; the accounts cooling and the local models held as unreachable; account bindings, checked in the session's scope, and auth sources; a version 1 roster's routing table and fallbacks, or a version 2 roster's levels and fallback chain in each scope, its classifier and the source of each of Jev's prompts; the last decision, and whether it went to a fallback chain's model; what can still leave the machine, a model picked by hand first and then the classifier when `smart-router/auto` may ask it; and a warning for any fallback that would move a run onto Codex's API from another one. |
+| `/smart-router` or `/smart-router status` | The roster's path and state; the selection and its thinking level; the session's scope and what set it, under a version 2 roster or whenever `smart-router/auto` refuses the scope; every role's models on this host with `ok` or the reason they cannot route, and catalog prices; the accounts cooling and the local models held as unreachable; account bindings, checked in the session's scope, and auth sources; a version 1 roster's routing table and fallbacks, or a version 2 roster's levels and fallback chain in each scope, its classifier and the source of each of Jev's prompts; the last decision, and whether it went to a fallback chain's model; what can still leave the machine, a model picked by hand first and then the classifier when `smart-router/auto` may ask it; and a warning for any fallback that would move a run onto Codex's API from another one. |
 | `/smart-router history [n]` | The last `n` routing decisions (10 by default, at most 50), with reason codes, and on a version 2 run's first request its scope, level and what decided the level. Model ids and codes only, never prompt text. |
-| `/smart-router local on`, `off`, `status` | The pin. `on` selects `smart-router/local`, the only selection any command makes; `off` leaves the selection as it is. |
+| `/smart-router local …` | Whatever follows, says that the local-only pin of earlier versions has been removed and that `/model smart-router/local` routes locally. It records and selects nothing. [Routing locally](#routing-locally). |
 | `/smart-router scope [work\|personal\|status]` | The session's scope and what set it: `latch`, `entry`, `directory` or `default`. `work` records work scope at once; `personal` asks first in work scope, and is refused under `PI_SMART_ROUTER_SCOPE=work`. Neither changes the selection. |
 | `/smart-router was low\|medium\|high\|super` | Record that the run in flight, when it holds a level, or else the run of the latest record, should have gone to that level. Nothing is sent again. |
 | `/smart-router check` | Read the roster and its prompt files again and read them back: what each selection and scope routes to, in order, and where each of Jev's prompts comes from; or the first error, with its place. It selects, records and sends nothing. [Checking a roster](#checking-a-roster). |
@@ -1434,15 +1340,14 @@ reads no other session and does not write the roster.
 - **pi-openai-codex-compat** still wraps routed `openai-codex` requests, but whatever it keys on the
   *selected* model does not apply to them: its request options, its Codex tool surface and its remote
   compaction. On a branch with a native Codex compaction checkpoint it switches the selection back
-  to Codex, and the router leaves it there, pinned or not: the session is then on Codex. Start
-  pinned work outside such a branch (`/new` carries the pin). Hera's `openai-codex-2` never uses
-  codex-compat.
+  to Codex, and the router leaves it there: the session is then on Codex. Start local work outside
+  such a branch. Hera's `openai-codex-2` never uses codex-compat.
 - **goal-x**: continuations route like any run that starts without a prompt, and get cooldowns and
-  fallbacks. The default auditor routes through the session and obeys its pin; a configured auditor
-  bypasses the router and the pin, so leave it unset in private work. Leave `auditorProjectResources`
-  and `projectResources` off: each loads a second router into every audit. The default auditor
-  routes in the session's scope too, one an entry set included; a configured auditor bypasses work
-  scope as it bypasses the pin
+  fallbacks. The default auditor routes through the session, on the selection it inherits; a
+  configured auditor bypasses the router, so leave it unset in private work. Leave
+  `auditorProjectResources` and `projectResources` off: each loads a second router into every
+  audit. The default auditor routes in the session's scope too, one an entry set included; a
+  configured auditor bypasses work scope as it bypasses the router
   ([What work scope does not cover](#what-work-scope-does-not-cover)).
 - **pi-subagents**: foreground children inherit the selection but load the router only when it is
   registered for children, as nix-config's integration is meant to do; otherwise a child on
@@ -1457,7 +1362,7 @@ reads no other session and does not write the roster.
 - **pi-idle-check and hashline** key per-model settings on `smart-router/*`; configure them for those
   ids as you would for the models behind them. pi-idle-check's resend of a message keeps the level
   its tag or Jev gave it.
-- **pi-warden** aggregates statistics under the virtual id. Its judge is independent of the pin.
+- **pi-warden** aggregates statistics under the virtual id. Its judge is independent of the router.
 - **pi-btw** starts a runtime of its own without the router and probably refuses under
   `smart-router/*`.
 
@@ -1474,11 +1379,9 @@ Other things to know:
 
 ## Opting out
 
-- **Per run:** choose another model with `/model`. It stays selected, in work scope and under the
-  pin too.
-- **Per session:** `/smart-router local off` unpins after confirmation, and
-  `/smart-router scope personal` moves a work session to personal scope after confirmation, except
-  under the latch.
+- **Per run:** choose another model with `/model`. It stays selected, in work scope too.
+- **Per session:** `/smart-router scope personal` moves a work session to personal scope after
+  confirmation, except under the latch.
 - **Entirely:** stop loading the extension. Because a resumed session on `smart-router/*` would then
   fall back to a cloud model, a launcher that leaves the router out should register two refusing
   models with the same ids instead. nix-config's integration, which is to be written there and is

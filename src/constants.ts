@@ -92,18 +92,20 @@ export const PROMPT_FILE_NAME = /^[a-z0-9][a-z0-9._-]{0,63}\.(?:md|txt)$/;
 export const PROMPT_FILE_MAX_BYTES = 16 * 1024;
 export const INSTRUCTIONS_MAX_CHARS = 4000;
 
-/** The pin's session entry, the environment switch, the status item, the command and the process slots. */
+/**
+ * The removed local-only pin's session entry and environment switch, read only to say that they
+ * are ignored (pinEntryNotice and pinEnvNotice in src/errors.ts); the command and the process slots.
+ */
 export const PIN_ENTRY = "smart-router.pin";
 export const COMMAND = "smart-router";
 export const ENV_PIN = "PI_SMART_ROUTER_LOCAL_ONLY";
-export const STATUS_KEY = "smart-router";
 export const SLOT_KEY = "jwiegley.pi-smart-router.v1";
 export const ROUTING_REGISTRY_KEY = "pi.routing.registry.v1";
 
 /**
  * The scope's session entry and its environment switch, whose one value `work` puts every session
  * of the process in work scope; the session entry that records each routed run's level, and the
- * status item that shows it, which is never the pin's.
+ * status item that shows it.
  */
 export const SCOPE_ENTRY = "smart-router.scope";
 export const ENV_SCOPE = "PI_SMART_ROUTER_SCOPE";

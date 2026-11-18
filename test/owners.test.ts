@@ -2,12 +2,8 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test, { afterEach, beforeEach, describe } from "node:test";
 
-import { writeFileSync } from "node:fs";
-import { join as joinPath } from "node:path";
-
-import { ENV_PIN, ENV_SCOPE, SCOPE_ENTRY, SLOT_KEY } from "../src/constants.ts";
+import { ENV_SCOPE, SCOPE_ENTRY, SLOT_KEY } from "../src/constants.ts";
 import { scopeUnserved, stale } from "../src/errors.ts";
-import { EMPTY_POLICY, policyFromRoster } from "../src/local.ts";
 import {
   envSwitchOn,
   isLive,
@@ -23,10 +19,8 @@ import {
   sessionHash,
   takeScopeHandoff,
 } from "../src/owners.ts";
-import { readPin } from "../src/pin.ts";
 import { readScope, scopeEntry } from "../src/scope.ts";
-import { ASTRA, DEEPSEEK, GLM, KIMI, NOW, rosterFixture, SOL } from "./support/catalog.ts";
-import { fixture } from "./support/fixtures.ts";
+import { ASTRA, DEEPSEEK, GLM, KIMI, NOW, SOL } from "./support/catalog.ts";
 import { agentDir, assistant, FakeRuntime, load, previous, request, resetSlot, routed, start } from "./support/pi.ts";
 import type { Loaded } from "./support/pi.ts";
 
@@ -81,7 +75,7 @@ describe("the process slot", () => {
   });
 });
 
-describe("the environment switch", () => {
+describe("the removed pin's environment switch, latched only for its notice", () => {
   test("any non-blank value but 0, false or off turns it on; near misses fail closed", () => {
     for (const value of ["1", "on", "yes", "true", "no", "of", "flase", " ON ", "0x"]) assert.equal(envSwitchOn(value), true, value);
     for (const value of [undefined, "", "  ", "0", "false", "off", "OFF", " False "]) assert.equal(envSwitchOn(value), false, String(value));
@@ -93,55 +87,6 @@ describe("the environment switch", () => {
     assert.equal(latchEnvPin(slot, "1"), true);
     assert.equal(latchEnvPin(slot, undefined), true, "removing the variable leaves it on");
     assert.equal(latchEnvPin(slot, "off"), true);
-  });
-
-  test("the factory latches it, and routing is pinned by it from then on", async (t) => {
-    const saved = process.env[ENV_PIN];
-    try {
-      process.env[ENV_PIN] = "1";
-      const first = await start({ dir: agentDir(t), id: "first" });
-      delete process.env[ENV_PIN];
-      const second = await start({ dir: agentDir(t), id: "second", runtime: new FakeRuntime() });
-      assert.equal(processSlot().env.on, true);
-      const policy = policyFromRoster(rosterFixture("roster-hera.json"));
-      assert.deepEqual(processSlot().env.policy, policy, "the first valid roster's local section is latched as the switch's policy");
-      assert.deepEqual(readPin(second.session.ctx.sessionManager, processSlot().env), { on: true, policy, entry: "none", at: undefined, env: true });
-      for (const loaded of [first, second]) {
-        assert.deepEqual([loaded.session.model?.id, loaded.host.selections.length], ["auto", 0], "session_start leaves the selection as it is");
-        assert.equal(routed(loaded.runtime.route("local", request("direct"))), GLM);
-        // smart-router/auto never reaches the local role in John's roster, so pinned, it refuses, and names the model that routes there.
-        assert.throws(() => loaded.runtime.route("auto", request("direct", { previous: previous(loaded.runtime, KIMI) })), {
-          message: /^smart-router\/auto: .*pinned to local models.* Nothing was sent\. Choose smart-router\/local with \/model, or run \/smart-router local off\.$/,
-        });
-      }
-    } finally {
-      if (saved === undefined) delete process.env[ENV_PIN];
-      else process.env[ENV_PIN] = saved;
-    }
-  });
-
-  test("the switch's policy is the first valid roster's: none before it, and a later edit does not change it", async (t) => {
-    const saved = process.env[ENV_PIN];
-    try {
-      process.env[ENV_PIN] = "on";
-      const dir = agentDir(t, { roster: null });
-      const loaded = await start({ dir, id: "first" });
-      assert.equal(processSlot().env.policy, undefined);
-      assert.deepEqual(readPin(loaded.session.ctx.sessionManager, processSlot().env).policy, EMPTY_POLICY, "with nothing latched, no model qualifies");
-      writeFileSync(joinPath(dir, "smart-router.json"), fixture("roster-hera.json"), { mode: 0o600 });
-      await loaded.host.emit("input", { text: "hello", source: "interactive" });
-      const latched = policyFromRoster(rosterFixture("roster-hera.json"));
-      assert.deepEqual(processSlot().env.policy, latched);
-      const widened = JSON.parse(fixture("roster-hera.json"));
-      widened.local.providers.push("openrouter");
-      widened.local.hosts.push("10.0.0.9");
-      writeFileSync(joinPath(dir, "smart-router.json"), JSON.stringify(widened), { mode: 0o600 });
-      await loaded.host.command("smart-router", "reload");
-      assert.deepEqual(processSlot().env.policy, latched, "a roster edit cannot widen the switch's policy");
-    } finally {
-      if (saved === undefined) delete process.env[ENV_PIN];
-      else process.env[ENV_PIN] = saved;
-    }
   });
 });
 
@@ -159,7 +104,7 @@ describe("the scope switch", () => {
     assert.equal(scopeLatched(slot), true, "removing the variable leaves it on");
     latchEnvScope(slot, "personal");
     assert.equal(scopeLatched(slot), true);
-    assert.equal(slot.env.on, false, "the pin's switch is a separate latch");
+    assert.equal(slot.env.on, false, "PI_SMART_ROUTER_LOCAL_ONLY's latch is a separate one");
   });
 
   test("the factory latches it, and from then on every session of the process is in work scope", async (t) => {
@@ -172,13 +117,10 @@ describe("the scope switch", () => {
       const second = await start({ dir: agentDir(t), id: "second", runtime: new FakeRuntime(), setup: personal });
       assert.equal(scopeLatched(processSlot()), true);
       assert.deepEqual(readScope(second.session.ctx.sessionManager, scopeLatched(processSlot()), undefined), { kind: "ok", scope: "work", source: "latch" });
-      // Hera's roster is version 1, which serves no work scope: auto refuses, and local routes to the LAN model without the pin.
+      // Hera's roster is version 1, which serves no work scope: auto refuses, and local routes to the LAN model.
       assert.throws(() => second.runtime.route("auto", request("direct", { previous: previous(second.runtime, KIMI) })), { message: scopeUnserved("auto", "work", 1, true).message });
       assert.equal(routed(second.runtime.route("local", request("direct"))), GLM);
-      assert.equal(processSlot().env.on, false, "the scope switch does not pin");
-      // Pinned, the latched session's smart-router/local routes to the LAN model too.
-      second.session.pin(policyFromRoster(rosterFixture("roster-hera.json")));
-      assert.equal(routed(second.runtime.route("local", request("direct"))), GLM);
+      assert.equal(processSlot().env.on, false, "the scope switch does not latch PI_SMART_ROUTER_LOCAL_ONLY's");
     } finally {
       if (saved === undefined) delete process.env[ENV_SCOPE];
       else process.env[ENV_SCOPE] = saved;
@@ -194,7 +136,7 @@ describe("scope handoffs", () => {
     leaveScopeHandoff(slot, "/sessions/x.jsonl", "work");
     leaveScopeHandoff(slot, "/sessions/y.jsonl", "personal");
     leaveScopeHandoff(slot, "", "work");
-    assert.equal(slot.handoffs.size, 0, "never the pin's map");
+    assert.equal(slot.handoffs.size, 0, "never the map the removed pin used, which stays for the slot's shape");
     assert.deepEqual(
       [...(slot.scopeHandoffs ?? [])],
       [

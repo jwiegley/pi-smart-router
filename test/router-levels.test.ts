@@ -13,14 +13,13 @@ import { isDeepStrictEqual } from "node:util";
 import type { Api, ClassifierResult, Model } from "@earendil-works/pi-ai";
 import type { InputEventResult } from "@earendil-works/pi-coding-agent";
 
-import { ENV_PIN, ENV_SCOPE, LEVEL_ENTRY, LEVEL_KEY, SCOPE_ENTRY, STATUS_KEY } from "../src/constants.ts";
+import { ENV_SCOPE, LEVEL_ENTRY, LEVEL_KEY, SCOPE_ENTRY } from "../src/constants.ts";
 import { JEV_INSTRUCTIONS } from "../src/jev.ts";
-import { policyFromRoster } from "../src/local.ts";
 import { createRouter } from "../src/router.ts";
 import { scopeEntry } from "../src/scope.ts";
 import { TIERS } from "../src/tiers.ts";
 import type { Tier } from "../src/tiers.ts";
-import { ASTRA, CHATGPT, DEEPSEEK, FakeCatalog, GLM, GLM_CLOUD, HERA_LAN, heraModels, KIMI, model, NOW, rosterFixture, rosterFixtureV2, SOL } from "./support/catalog.ts";
+import { ASTRA, CHATGPT, DEEPSEEK, FakeCatalog, GLM, GLM_CLOUD, HERA_LAN, heraModels, KIMI, model, NOW, SOL } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
 import { agentDir, assistant, failure as failedRequest, FakeRuntime, load, request, resetSlot, routed, start } from "./support/pi.ts";
 import type { Loaded, LoadOptions } from "./support/pi.ts";
@@ -278,34 +277,6 @@ describe("a trailing tag", () => {
     assert.deepEqual(loaded.session.notices, [{ type: "warning", message: "pi-smart-router: the input handler failed: the agent directory is gone" }]);
   });
 
-  test("has no effect in a pinned session: removed with a notice, and Jev is not asked", async (t) => {
-    const policy = policyFromRoster(rosterFixtureV2("roster-hera-v2.json"));
-    const loaded = await hera(t, { select: "local", setup: (session) => session.pin(policy) });
-    assert.deepEqual(await say(loaded, "x #low"), [{ action: "transform", text: "x" }]);
-    assert.equal(calls(loaded), 0);
-    assert.match(lastNotice(loaded)?.message ?? "", /no effect/);
-    assert.deepEqual(lastNotice(loaded), { type: "warning", message: "pi-smart-router: the LOW tag was removed and has no effect, because this session is pinned to local models." });
-    assert.deepEqual([recordOf(loaded)?.plan?.signal, recordOf(loaded)?.pendingLevel], ["local", undefined], "the run is planned on the local role");
-    // On a model picked by hand the message is sent, without its tag; only a message that is nothing but a tag is not.
-    await loaded.host.choose(KIMI);
-    assert.deepEqual(await say(loaded, "x #low"), [{ action: "transform", text: "x" }]);
-    assert.deepEqual(lastNotice(loaded), { type: "warning", message: "pi-smart-router: the LOW tag was removed and has no effect, because this session is pinned to local models." });
-    assert.deepEqual(await say(loaded, "#low"), [{ action: "handled" }]);
-    assert.deepEqual(lastNotice(loaded), { type: "warning", message: "pi-smart-router: the message was only a LOW tag, so nothing was sent. Put the tag at the end of a message." });
-    assert.equal(calls(loaded), 0);
-  });
-
-  test("has no effect under PI_SMART_ROUTER_LOCAL_ONLY, and Jev is not asked", async (t) => {
-    await withEnv(ENV_PIN, "1", async () => {
-      const loaded = await hera(t);
-      assert.equal(loaded.session.model?.id, "auto", "the selection is left on smart-router/auto, whose routes obey the pin");
-      assert.deepEqual(await say(loaded, "x #low"), [{ action: "transform", text: "x" }]);
-      assert.deepEqual(await say(loaded, "x"), [undefined]);
-      assert.equal(calls(loaded), 0);
-      assert.match(lastNotice(loaded)?.message ?? "", /the LOW tag was removed and has no effect, because this session is pinned to local models/);
-    });
-  });
-
   test("has no effect while a run is under way: removed with a notice, Jev is not asked, and the run's plan stays", async (t) => {
     const loaded = await hera(t);
     loaded.runtime.answer = async () => jevAnswer(LOW);
@@ -442,22 +413,6 @@ describe("an untagged message", () => {
     }
     assert.equal(recordOf(none)?.plan?.level?.source, "keyword");
     assert.equal(recordOf(none)?.plan?.level?.jev, undefined, "a roster without a classifier asks nothing, so nothing failed");
-  });
-
-  test("asks nothing in a pinned session on smart-router/auto: the prompt goes on, and the run is planned under the pin", async (t) => {
-    // Nothing refuses a pinned session's prompt on smart-router/auto, so the input itself reads the pin before Jev.
-    const loaded = await hera(t);
-    loaded.runtime.answer = async () => jevAnswer(LOW);
-    loaded.session.pin(policyFromRoster(rosterFixtureV2("roster-hera-v2.json")));
-    for (const [text, sent] of [
-      ["go ahead", undefined],
-      ["go ahead #high", { action: "transform", text: "go ahead" }],
-    ] as const) {
-      assert.deepEqual(await say(loaded, text), [sent], `${text}: the prompt is passed on`);
-      assert.equal(calls(loaded), 0, `${text}: Jev was asked`);
-      assert.equal(recordOf(loaded)?.plan?.localOnly, true, `${text}: the run is planned under the pin`);
-    }
-    assert.equal(loaded.session.model?.id, "auto", "and the selection stays");
   });
 });
 
@@ -1321,15 +1276,12 @@ describe("what pi-cache-optimizer is told", () => {
     assert.equal(firstRequest(loaded), WORK_TERRA);
   });
 
-  test("smart-router/auto has no pick in a scope it refuses, and smart-router/local has its LAN pick in work scope, pinned or not", async (t) => {
+  test("smart-router/auto has no pick in a scope it refuses, and smart-router/local has its LAN pick in work scope", async (t) => {
     await withEnv(ENV_SCOPE, "work", async () => {
       const loaded = await start({ dir: agentDir(t), runtime: heraRuntime(), now: () => NOW });
       assert.throws(() => loaded.runtime.route("auto", request("direct")), /work scope, which a version 1 roster does not serve/);
       assert.equal(brief(loaded), undefined);
       assert.equal(routed(loaded.runtime.route("local", request("direct"))), GLM);
-      assert.equal(brief(loaded, "local"), `${GLM} selected`);
-      // Pinned, the same session's smart-router/local routes to the LAN model too, and says so.
-      loaded.session.pin(policyFromRoster(rosterFixture("roster-hera.json")));
       assert.equal(brief(loaded, "local"), `${GLM} selected`);
     });
   });
@@ -1741,13 +1693,11 @@ describe("a run's record", () => {
     assert.equal(calls(loaded), 1, "one question, for the first message");
   });
 
-  test("a run without a level records nothing: a physical selection, smart-router/local, a pinned session and a version 1 roster", async (t) => {
-    const policy = policyFromRoster(rosterFixtureV2("roster-hera-v2.json"));
+  test("a run without a level records nothing: a physical selection, smart-router/local and a version 1 roster", async (t) => {
     const physical = await hera(t, { id: "physical", select: KIMI });
     const local = await hera(t, { id: "local", select: "local" });
-    const pinned = await hera(t, { id: "pinned", select: "local", setup: (session) => session.pin(policy) });
     const v1 = await hera(t, { id: "v1", roster: fixture("roster-hera.json") });
-    for (const loaded of [physical, local, pinned, v1]) {
+    for (const loaded of [physical, local, v1]) {
       loaded.runtime.answer = async () => jevAnswer(LOW);
       for (const [text, prompt] of [
         ["rename foo to bar", "rename foo to bar"],
@@ -1804,12 +1754,12 @@ describe("a run's record", () => {
 describe("the footer", () => {
   const footer = (loaded: Loaded): string | undefined => loaded.session.statuses.get(LEVEL_KEY);
 
-  test("shows a planned run's scope, tier, model and what decided it, under its own key, never the pin's", async (t) => {
+  test("shows a planned run's scope, tier, model and what decided it, under its own key", async (t) => {
     const loaded = await hera(t);
     loaded.runtime.answer = () => new Promise(() => {});
     await say(loaded, "x #high");
     assert.equal(footer(loaded), "personal HIGH → gpt-6.1-sol (tag)");
-    assert.equal(loaded.session.statuses.get(STATUS_KEY), undefined, "the pin's item is untouched");
+    assert.deepEqual([...loaded.session.statuses.keys()], [LEVEL_KEY], "the level's item is the only status item the router sets");
   });
 
   test("after a Jev timeout, names the keywords and the timeout", async (t) => {

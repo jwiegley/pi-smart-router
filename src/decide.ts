@@ -100,7 +100,7 @@ export interface PickOptions {
  * The roles a pick may go on to after `roleName`, when the caller allows a fallback: version 1's
  * declared fallback role, one hop and never further; under version 2, on smart-router/auto, what is
  * left of the session's scope's chain (fallbackAfter). Never while local-only: smart-router/local
- * and the pin keep to the local role.
+ * keeps to the local role.
  */
 function fallbackRoles(rc: ResolveContext, roleName: string): readonly string[] {
   if (rc.localOnly) return [];
@@ -117,7 +117,7 @@ function fallbackRoles(rc: ResolveContext, roleName: string): readonly string[] 
  *
  * A hold is a preference, never a refusal. When nothing resolves and a hold is among the reasons,
  * the pick is made again without the holds, in the written order: every cooldown and every check
- * of the selection, the scope and the pin stays, so the request goes to the first candidate that
+ * of the selection and the scope stays, so the request goes to the first candidate that
  * only its hold kept out. A server that had a blip is tried again rather than the request refused.
  */
 export function pickInRole(rc: ResolveContext, roleName: string, options: PickOptions): Decision {

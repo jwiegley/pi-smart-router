@@ -72,14 +72,12 @@ interface ContextOptions {
   readonly cooldowns?: Cooldowns;
   readonly scope?: Scope;
   readonly virtualId?: "auto" | "local";
-  readonly pinned?: boolean;
   readonly now?: number;
 }
 
 function context(options: ContextOptions = {}): ResolveContext {
   const roster = options.roster ?? ROSTER;
   const virtualId = options.virtualId ?? "auto";
-  const pinned = options.pinned === true;
   return resolveContext({
     roster,
     catalog: options.catalog ?? catalog(),
@@ -87,9 +85,8 @@ function context(options: ContextOptions = {}): ResolveContext {
     cooldowns: options.cooldowns ?? new Cooldowns(),
     now: options.now ?? NOW,
     virtualId,
-    localOnly: virtualId === "local" || pinned,
+    localOnly: virtualId === "local",
     policy: policyFromRoster(roster),
-    pinned,
     scope: options.scope ?? "personal",
   });
 }
@@ -430,7 +427,7 @@ describe("the work scope declares no fallback, so it behaves as before", () => {
   });
 });
 
-describe("smart-router/local and the pin keep to the local role", () => {
+describe("smart-router/local keeps to the local role", () => {
   test("smart-router/local takes the local role in its order, and is refused rather than sent to a cloud model", () => {
     const models = catalog();
     const next = (scope: Scope): unknown => picked(plan(context({ catalog: models, virtualId: "local", scope }), { tag: "super" }).decision);
@@ -442,30 +439,6 @@ describe("smart-router/local and the pin keep to the local role", () => {
     models.unavailable.add(HERA_QWEN);
     assert.equal(next("personal"), "refused: local");
     assert.equal(next("work"), "refused: local");
-  });
-
-  test("a pinned session on smart-router/auto uses only the chain's local models: the cloud entries are filtered out", () => {
-    const models = catalog();
-    const pinned = (): Plan => plan(context({ catalog: models, pinned: true }), { tag: "high" });
-    assert.deepEqual(picked(pinned().decision), ["local", GLM, "local"]);
-    assert.equal(pinned().level, undefined);
-    models.unavailable.add(GLM);
-    assert.deepEqual(picked(pinned().decision), ["local", NYX_QWEN, "local"]);
-    models.unavailable.add(NYX_QWEN);
-    models.unavailable.add(HERA_QWEN);
-    assert.equal(picked(pinned().decision), "refused: local");
-    // The pin is what filters: a pick that starts in a cloud chain role is refused under it.
-    assert.equal(eligibleRole(context({ pinned: true }), OR_GLM), undefined);
-    assert.deepEqual(picked(pickInRole(context({ pinned: true }), "local", { skip: GLM, fallback: true, code: "t" })), ["local", NYX_QWEN, "t"]);
-  });
-
-  test("a pinned work session on smart-router/auto is refused as before: the work scope's chain does not reach the local role", () => {
-    const planned = plan(context({ pinned: true, scope: "work" }), { tag: "high" });
-    assert.equal(planned.decision.ok, false);
-    assert.deepEqual(
-      planned.decision.ok ? [] : planned.decision.attempts.flatMap((attempt) => attempt.candidates.map((candidate) => candidate.reason)),
-      ["not-routable-by-auto", "not-routable-by-auto", "not-routable-by-auto"],
-    );
   });
 });
 
@@ -651,12 +624,11 @@ describe("a run through the router with a fallback chain", () => {
 
   test("a restored session returns to its level too: the level comes from its latest record, when its scope still has it", async (t) => {
     /** A session resumed with a HIGH run on record whose last answer came from OpenRouter. */
-    const restored = (record: Record<string, unknown>, extra?: (s: FakeSession) => void) =>
+    const restored = (record: Record<string, unknown>) =>
       session(t, {
         setup: (s) => {
           s.appendCustom(LEVEL_ENTRY, { v: 1, at: NOW - 40 * MINUTE, scope: "personal", source: "tag", tier: "high", asked: "high", tag: "high", ref: OR_GLM, fallback: true, ...record });
           s.appendAssistant(assistant(OR_GLM, { timestamp: NOW - 40 * MINUTE }));
-          extra?.(s);
         },
       });
     const unplanned = async (state: Session): Promise<readonly [string, string | undefined]> => {
@@ -671,12 +643,6 @@ describe("a run through the router with a fallback chain", () => {
       resetSlot();
       assert.deepEqual(await unplanned(await restored(record)), [OR_GLM, "stick:previous"], JSON.stringify(record));
     }
-    // Under the pin the run stays in the local role: there is no level to return to.
-    resetSlot();
-    const pinned = await restored({}, (s) => s.pin(policyFromRoster(ROSTER)));
-    await pinned.loaded.host.emit("before_agent_start", { messageType: "custom" });
-    const signal = pinned.loaded.session.startRun();
-    assert.equal(routed(pinned.loaded.runtime.route("auto", request("continuation", { signal, previous: previous(pinned.loaded.runtime, OR_GLM) }))), GLM);
   });
 
   test("a run starts with no memory of the models that failed in the run before", async (t) => {
@@ -745,15 +711,7 @@ describe("a run through the router with a fallback chain", () => {
     assert.doesNotMatch(again, /openrouter|omlx-hera|nyx|openai-codex-2/);
   });
 
-  test("a pinned personal session on smart-router/auto routes to the local role, and smart-router/local is unchanged", async (t) => {
-    const pinned = await session(t, { setup: (s) => s.pin(policyFromRoster(ROSTER)) });
-    const signal = await prompt(pinned.loaded, "plan the migration #super");
-    const route = pinned.loaded.runtime.route("auto", request("user", { signal }));
-    assert.deepEqual([routed(route), route.thinkingLevel, lastHistory(pinned.loaded)?.code], [GLM, "max", "local"]);
-    pinned.cat.unavailable.add(GLM);
-    assert.equal(routed(pinned.loaded.runtime.route("auto", request("retry", { signal, failed: failure(pinned.loaded.runtime, GLM, LIMIT) }))), NYX_QWEN);
-
-    resetSlot();
+  test("smart-router/local routes to the local role, and is refused rather than sent to a cloud model", async (t) => {
     const local = await session(t, { select: "local" });
     const run = await prompt(local.loaded, "plan the migration");
     assert.deepEqual([routed(local.loaded.runtime.route("local", request("user", { signal: run }))), lastHistory(local.loaded)?.code], [GLM, "local"]);

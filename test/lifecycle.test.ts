@@ -5,9 +5,10 @@ import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import smartRouter, { install } from "../index.ts";
+import { ROUTING_REGISTRY_KEY } from "../src/constants.ts";
 import { processSlot } from "../src/owners.ts";
 import { createRouter } from "../src/router.ts";
-import { ASTRA, DEEPSEEK, KIMI } from "./support/catalog.ts";
+import { ASTRA, DEEPSEEK, KIMI, NOW } from "./support/catalog.ts";
 import { agentDir, assistant, FakeHost, FakeRuntime, FakeSession, load, request, resetSlot, routed, start } from "./support/pi.ts";
 
 const HANDLERS = [
@@ -17,13 +18,16 @@ const HANDLERS = [
   "turn_start",
   "message_end",
   "agent_settled",
-  "model_select",
   "session_before_compact",
   "session_before_tree",
   "session_shutdown",
 ];
-/** Events whose handler could change what a selection sends. The router registers none: a model picked by hand is sent as it is. */
-const NEVER_HANDLED = ["before_provider_request", "cache_warming_decision", "tool_call"];
+/**
+ * Events whose handler could change what a selection sends. The router registers none: a model
+ * picked by hand is sent as it is. Nor does it answer a selection: model_select only showed the
+ * removed local-only pin's status item.
+ */
+const NEVER_HANDLED = ["before_provider_request", "cache_warming_decision", "tool_call", "model_select"];
 
 beforeEach(resetSlot);
 afterEach(resetSlot);
@@ -206,4 +210,23 @@ test("no timer, socket or other handle outlives a session", async (t) => {
   await loaded.host.emit("agent_settled", { aborted: false });
   await loaded.host.emit("session_shutdown", { reason: "quit" });
   assert.deepEqual(process.getActiveResourcesInfo().sort(), before);
+});
+
+test("a session_start step that fails leaves the others to run", async (t) => {
+  // Another extension's pi.routing.registry.v1: it passes pi-cache-optimizer's shape check, but its registerRouter throws.
+  const broken = () => {
+    throw new Error("broken registry");
+  };
+  (globalThis as Record<symbol, unknown>)[Symbol.for(ROUTING_REGISTRY_KEY)] = { version: 1, registerRouter: broken, getRouter: () => undefined };
+  const loaded = load({ dir: agentDir(t), runtime: new FakeRuntime() });
+  loaded.session.appendAssistant(assistant(KIMI, { timestamp: NOW - 60_000 }));
+  loaded.session.select("auto");
+  await loaded.host.emit("session_start", { reason: "resume" });
+  assert.ok(
+    loaded.session.notices.some((notice) => notice.message === "pi-smart-router: the session_start handler failed: broken registry"),
+    "the failed step is reported",
+  );
+  assert.deepEqual(loaded.router?.limits(), { auto: { contextWindow: 128_000, maxTokens: 32_000 }, local: { contextWindow: 262_144, maxTokens: 81_920 } }, "the roster was read");
+  assert.equal(loaded.runtime.find("smart-router", "local")?.contextWindow, 262_144, "both models were registered again with its limits");
+  assert.equal(loaded.router?.record(loaded.session.id)?.last?.ref, KIMI, "the last responder was seeded");
 });

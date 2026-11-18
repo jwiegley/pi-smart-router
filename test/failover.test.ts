@@ -12,17 +12,15 @@ import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 
 import { LEVEL_ENTRY, LEVEL_KEY, SCOPE_ENTRY } from "../src/constants.ts";
-import { policyFromRoster } from "../src/local.ts";
 import { scopeEntry } from "../src/scope.ts";
 import { TIERS } from "../src/tiers.ts";
 import type { Tier } from "../src/tiers.ts";
-import { ASTRA, CHATGPT, FakeCatalog, GLM, HERA_LAN, KIMI, model, NOW, rosterFixtureV2, SOL, WORK_SOL } from "./support/catalog.ts";
+import { ASTRA, CHATGPT, FakeCatalog, GLM, HERA_LAN, KIMI, model, NOW, SOL, WORK_SOL } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
 import { agentDir, assistant, FakeRuntime, request, resetSlot, routed, start } from "./support/pi.ts";
 import type { FakeSession, Loaded } from "./support/pi.ts";
 
 const TEXT = fixture("roster-hera-v2-fallback.json");
-const ROSTER = rosterFixtureV2("roster-hera-v2-fallback.json");
 const LUNA = "openai-codex-2/gpt-6-luna";
 const TERRA = "openai-codex-2/gpt-6.1-terra";
 const OR_GLM = "openrouter/z-ai/glm-5.3-flash";
@@ -270,16 +268,5 @@ describe("a real usage limit: the run ends, the notice says what to do, and the 
       "warning: pi-smart-router: gpt-6-luna could not take this run (the account openai-codex-3 is out of use until HH:MM), and nothing was answered. No other model can take it now: send the request again after HH:MM. Another model picked by hand with /model is sent as it is.",
     ]);
     assert.doesNotMatch(notices.join("\n"), /choose a work Codex model/);
-  });
-
-  test("a pinned session: a resend stays inside the pin's policy, or waits", async (t) => {
-    const { loaded, cat } = await session(t, { setup: (s) => s.pin(policyFromRoster(ROSTER)) });
-    cat.remove(NYX_QWEN);
-    cat.remove(HERA_QWEN);
-    const signal = await prompt(loaded, "rename foo to bar #low");
-    assert.equal(routed(loaded.runtime.route("auto", request("user", { signal }))), GLM);
-    assert.deepEqual(await fails(loaded, GLM, "read ECONNRESET"), [
-      "warning: pi-smart-router: GLM-5.3-Flash-oQ4e-mtp could not take this run (its server could not be reached), and nothing was answered. No other model can take it now: send the request again, and it is tried again, or choose a model with /model.",
-    ]);
   });
 });

@@ -15,11 +15,13 @@
 //   4. otherwise the router refuses with its own non-retryable error.
 //
 // The slot holds only process-wide state: the owners, the catalog objects their registrations
-// produced, the environment latches, pin and scope handoffs, what the last valid roster said of
-// work scope, and the pi-cache-optimizer adapter's registration. Per-session records live in each
-// router instance. Every load of this module, /reload included, shares the slot, so it holds plain
-// data and is checked by shape, never by class identity. The scope's fields came later: they are
-// optional and made on first use, so a slot an earlier load made still has the shape.
+// produced, the environment latches, scope handoffs, what the last valid roster said of work scope,
+// and the pi-cache-optimizer adapter's registration. Per-session records live in each router
+// instance. Every load of this module, /reload included, shares the slot, so it holds plain data
+// and is checked by shape, never by class identity. The scope's fields came later: they are
+// optional and made on first use, so a slot an earlier load made still has the shape. The removed
+// local-only pin's fields stay, unused, for the same reason: a copy of an earlier version loaded
+// in the same process checks for them, and fails on a slot without them.
 import { createHash } from "node:crypto";
 
 import type { ExtensionContext, ModelRoute, ModelRouteRequest } from "@earendil-works/pi-coding-agent";
@@ -53,9 +55,13 @@ export interface Owner {
 }
 
 export interface EnvLatch {
-  /** On for the life of the process once any instance saw PI_SMART_ROUTER_LOCAL_ONLY on. */
+  /**
+   * On for the life of the process once any instance saw PI_SMART_ROUTER_LOCAL_ONLY on. The pin it
+   * once set has been removed: it now only records that the variable was set, so that each session
+   * start says the variable is ignored (pinEnvNotice in src/errors.ts).
+   */
   on: boolean;
-  /** The local policy the switch pins to when a session has no pin entry of its own. */
+  /** Was the local policy the removed pin's switch pinned to. Kept for the slot's shape; no longer written or read. */
   policy: LocalPolicy | undefined;
   /** True for the life of the process once any instance saw PI_SMART_ROUTER_SCOPE=work; set only then. */
   work?: boolean;
@@ -67,7 +73,7 @@ export interface Slot {
   /** Each catalog object an owner's registration produced, mapped to that owner. */
   readonly registered: WeakMap<object, Owner>;
   readonly env: EnvLatch;
-  /** Pins handed to the session a fork or /new creates, keyed by its session file. */
+  /** Was the removed pin's handoffs to the session a fork or /new creates. Kept for the slot's shape (isSlot); no longer written or read. */
   readonly handoffs: Map<string, unknown>;
   /** Scopes handed to the session a fork or /new creates, keyed by its session file; made on first use. */
   scopeHandoffs?: Map<string, unknown>;
@@ -121,7 +127,7 @@ export function envSwitchOn(value: string | undefined): boolean {
   return text !== "" && text !== "0" && text !== "false" && text !== "off";
 }
 
-/** Latch the environment switch. Once on, it stays on for the life of the process. */
+/** Latch the environment switch, which now only says it is ignored. Once on, it stays on for the life of the process. */
 export function latchEnvPin(slot: Slot, value: string | undefined): boolean {
   if (envSwitchOn(value)) slot.env.on = true;
   return slot.env.on;
@@ -139,7 +145,7 @@ export function scopeLatched(slot: Slot): boolean {
   return slot.env.work === true;
 }
 
-/** At session_shutdown: the scope handed to the session a fork or /new creates, under its file. Never in slot.handoffs, which holds pins. */
+/** At session_shutdown: the scope handed to the session a fork or /new creates, under its file. Never in slot.handoffs, which the removed pin used. */
 export function leaveScopeHandoff(slot: Slot, file: string, scope: Scope): void {
   if (file === "") return;
   slot.scopeHandoffs ??= new Map();

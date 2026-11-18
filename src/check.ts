@@ -14,8 +14,8 @@ import { readUserFile } from "./files.ts";
 import type { ReadOptions } from "./files.ts";
 import { promptLines, promptProblem, promptReader, promptUses } from "./prompts.ts";
 import type { PromptReader, PromptUse } from "./prompts.ts";
-import { autoRoles, candidatesOf, parseRoster, SCOPES, unreachableMinutesOf } from "./roster.ts";
-import type { Roster, RosterV1, RosterV2, Scope } from "./roster.ts";
+import { candidatesOf, parseRoster, SCOPES, unreachableMinutesOf } from "./roster.ts";
+import type { Roster, RosterV1, RosterV2 } from "./roster.ts";
 import { DEEP_SESSION_ENTRIES, DEEP_SESSION_TOKENS, SIGNALS } from "./settings.ts";
 import { tierLabel, TIERS } from "./tiers.ts";
 
@@ -36,23 +36,15 @@ function numbered(roster: Roster, candidates: ReadonlyArray<{ readonly role: str
   return candidates.map(({ role, ref }, index) => `${indent}${index + 1}. ${ref}  (role ${role}${thinkingOf(roster, role)})`);
 }
 
-/** What smart-router/local, and smart-router/auto under the pin, route to. */
+/** What smart-router/local routes to. */
 function localLines(roster: Roster): string[] {
   const role = roster.local?.role;
-  if (role === undefined) return ["smart-router/local, in any scope, pinned or not:", "  refused: the roster has no local section"];
+  if (role === undefined) return ["smart-router/local, in any scope:", "  refused: the roster has no local section"];
   return [
-    "smart-router/local, in any scope, pinned or not: only these, in this order, never a cloud model:",
+    "smart-router/local, in any scope: only these, in this order, never a cloud model:",
     ...numbered(roster, modelsOf(roster, role).map((ref) => ({ role, ref })), "  "),
     `  local means: a provider of ${roster.local?.providers.join(", ")} whose base URL is on ${roster.local?.hosts.join(", ")}`,
   ];
-}
-
-/** What a pinned session on smart-router/auto does in a scope: the local role when auto reaches it there, else a refusal. */
-function pinnedLine(roster: Roster, scope: Scope): string {
-  const role = roster.local?.role;
-  return role !== undefined && autoRoles(roster, scope).has(role)
-    ? `  under the pin: only the local role ${role}, in its own order (below)`
-    : "  under the pin: refused, since smart-router/auto does not reach the local role in this scope; choose smart-router/local";
 }
 
 function accountLines(roster: Roster): string[] {
@@ -87,7 +79,7 @@ function describeV2(roster: RosterV2): string[] {
       lines.push("  then, for every level, when its own models cannot take a request, the fallback chain in this order:", ...numbered(roster, chain, "    "));
     }
     if (scope === "work" && section.directories.length > 0) lines.push(`  sessions under these directories are in work scope: ${section.directories.join(", ")}`);
-    lines.push(pinnedLine(roster, scope), "");
+    lines.push("");
   }
   return lines;
 }
@@ -100,7 +92,7 @@ function describeV1(roster: RosterV1): string[] {
     const after = target === undefined ? "no fallback" : `then the fallback ${modelsOf(roster, target).join(", then ")}  (role ${target})`;
     lines.push(`  ${kind.padEnd(8)} ${modelsOf(roster, role).join(", then ")}  (role ${role}${thinkingOf(roster, role)}); ${after}`);
   }
-  lines.push(pinnedLine(roster, "personal"), "smart-router/auto in work scope: refused, since a version 1 roster serves no work scope", "");
+  lines.push("smart-router/auto in work scope: refused, since a version 1 roster serves no work scope", "");
   return lines;
 }
 

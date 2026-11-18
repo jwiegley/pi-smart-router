@@ -177,7 +177,7 @@ describe("jevAsk", () => {
   const history: BoundedHistory = { getLatestCustomEntry: () => undefined, getRecentActiveEntries: () => [] };
   const personal: ScopeState = { kind: "ok", scope: "personal", source: "default" };
   /** A message Jev is asked about: every condition holds. */
-  const asked: JevGate = { idle: true, selection: "auto", pinned: false, roster, history, scope: personal, resend: false };
+  const asked: JevGate = { idle: true, selection: "auto", roster, history, scope: personal, resend: false };
   /** A version 2 roster from a fixture, edited as JSON. */
   const edited = (name: string, edit: (json: Record<string, unknown>) => void): Roster => {
     const json = JSON.parse(fixture(name)) as Record<string, unknown>;
@@ -200,10 +200,6 @@ describe("jevAsk", () => {
   test("never asks off smart-router/auto: on smart-router/local, or on a physical model", () => {
     assert.equal(jevAsk({ ...asked, selection: "local" }), undefined);
     assert.equal(jevAsk({ ...asked, selection: undefined }), undefined);
-  });
-
-  test("never asks in a pinned session, pinned by its entry or by PI_SMART_ROUTER_LOCAL_ONLY", () => {
-    assert.equal(jevAsk({ ...asked, pinned: true }), undefined);
   });
 
   test("never asks without the bounded session readers", () => {

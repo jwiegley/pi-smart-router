@@ -1,10 +1,11 @@
 // One instance of the router: the session whose extension runtime loaded it, the files it reads
-// (the roster, Multi-Pass's labels and the prompt files the roster names), its per-session records and cooldowns, the limits both models declare, the pin's handoffs
-// and status item, the session's scope with its handoffs and work directories, the refusals of its
-// own two models for a scope their policy does not serve, a message's tag and Jev's request, each
-// planned run's level record and the footer item that shows its level, the /smart-router command,
-// what it tells pi-cache-optimizer, and the handlers wire() registers. No handler changes or blocks
-// what is selected (src/selection.ts).
+// (the roster, Multi-Pass's labels and the prompt files the roster names), its per-session records
+// and cooldowns, the limits both models declare, the session's scope with its handoffs and work
+// directories, the refusals of its own two models for a scope their policy does not serve, a
+// message's tag and Jev's request, each planned run's level record and the footer item that shows
+// its level, the notices that the removed local-only pin's switch and entries are ignored, the
+// /smart-router command, what it tells pi-cache-optimizer, and the handlers wire() registers. No
+// handler changes or blocks what is selected (src/selection.ts).
 //
 // createRouter only builds closures. It makes no pi.on, registration or command call, so a throw
 // while it is built leaves only the two refusing models index.ts registered, and wire() makes
@@ -36,8 +37,6 @@ import type { VirtualId } from "./constants.ts";
 import { pickInRole, planUserTurn, reserveFor } from "./decide.ts";
 import type { Decision, LastResponder, LevelInput, Plan } from "./decide.ts";
 import {
-  carriedNotice,
-  carryFailedNotice,
   directoryFailedNotice,
   directoryNotice,
   fallbackMoveNotice,
@@ -45,9 +44,10 @@ import {
   firstLine,
   historyNotice,
   looksRetryable,
+  pinEntryNotice,
+  pinEnvNotice,
   promptNotice,
   resendNotice,
-  resumeNotice,
   rosterNotice,
   rosterRefusal,
   scopeCarriedNotice,
@@ -61,26 +61,24 @@ import {
   unmatchedTagNotice,
 } from "./errors.ts";
 import type { RouterError, TagIgnored } from "./errors.ts";
-import { isRecord } from "./files.ts";
+import { isRecord, own } from "./files.ts";
 import type { FileSystem, Loaded } from "./files.ts";
 import { askJev, buildContext, jevAsk, recentMessages } from "./jev.ts";
 import type { JevAsk, JevOutcome } from "./jev.ts";
-import { EMPTY_POLICY, policyFromRoster } from "./local.ts";
+import { policyFromRoster } from "./local.ts";
 import { healDisplaced, isLive, isLiveOwner, join, leave, leaveScopeHandoff, ownerBySignal, rememberedRoster, rememberRoster, scopeLatched, sessionHash, takeScopeHandoff } from "./owners.ts";
 import type { Owner, OwnerRouter, RosterMemory, Slot } from "./owners.ts";
-import { latchEnvPolicy, leaveHandoff, pinOn, readPin, takeHandoff } from "./pin.ts";
 import { promptProblem, promptStore, promptUses, scopePrompts } from "./prompts.ts";
-import type { PinReading } from "./pin.ts";
 import { footerText, levelRecord, readLevelRecord } from "./records.ts";
 import { clock, coolFrom, Cooldowns, coolsAccount, hasOutput, holdFrom, Holds, resolveContext } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
 import { afterFailure, boundedHistory, newRecord, planApplies, predict, requireBoundedHistory, routeOther, routeOwned } from "./route.ts";
-import type { BoundedHistory, Failover, LastInput, Pin, RouteInput, SessionRecord } from "./route.ts";
+import type { BoundedHistory, Failover, LastInput, RouteInput, SessionRecord } from "./route.ts";
 import { autoRoles, parseRef, roleOf, rosterFile, SCOPES, scopeSection, servesScope } from "./roster.ts";
 import type { Roster, RosterV2, Scope } from "./roster.ts";
 import { readScope, scopeEntry, workDirectoryOf } from "./scope.ts";
 import type { ScopeEntryData, ScopeState, WorkDirectories } from "./scope.ts";
-import { describeModel, showPinStatus, switchToLocal } from "./selection.ts";
+import { describeModel } from "./selection.ts";
 import { parseTag } from "./tags.ts";
 import type { Tagged } from "./tags.ts";
 import type { Tier } from "./tiers.ts";
@@ -113,6 +111,8 @@ export interface Session extends SessionRecord {
   directoryTried: boolean;
   /** The token of the latest input that planned: an input that waited for Jev plans only if no newer input has planned since. */
   plannedToken: number;
+  /** Whether this instance has said that the session's old pin entry is ignored (pinEntryNotice). It says so once. */
+  pinEntryTold: boolean;
   /** Whether the footer shows a level item this instance set: only then does a run without a level clear it. */
   levelShown: boolean;
   /** The model of the current run's last assistant message that ended without an error: the one its record names. */
@@ -142,7 +142,6 @@ export interface Router extends OwnerRouter {
 }
 
 const BOTH_DEFAULT: Readonly<Record<VirtualId, Limits>> = Object.freeze({ auto: DEFAULT_LIMITS, local: DEFAULT_LIMITS });
-const UNPINNED: Pin = Object.freeze({ on: false, policy: EMPTY_POLICY });
 const HANDLED: InputEventResult = Object.freeze({ action: "handled" });
 /** How many messages whose runs have not started a session remembers (Session.remembered). */
 const REMEMBERED = 64;
@@ -211,6 +210,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         ...newRecord(),
         directoryTried: false,
         plannedToken: 0,
+        pinEntryTold: false,
         levelShown: false,
         answered: undefined,
         planDigest: undefined,
@@ -230,9 +230,6 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       return undefined;
     }
   };
-
-  /** A session's pin, read fail closed. A context whose session cannot be read counts as pinned. */
-  const pinOf = (ctx: ExtensionContext): PinReading => readPin(managerOf(ctx), slot.env);
 
   /**
    * What the scope reads of the roster: its work directories as it is now, else, while it fails to
@@ -270,9 +267,6 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
    */
   const scopeOf = (ctx: ExtensionContext): ScopeState => readScope(managerOf(ctx), scopeLatched(slot), workOf(ctx));
 
-  /** The pin's status item, for the selection or for the model a model_select names (showPinStatus). Never throws. */
-  const showStatus = (ctx: ExtensionContext, model?: Model<Api>): void => showPinStatus(ctx, pinOf(ctx), model);
-
   /**
    * The scope a session resolves in. A scope that cannot be read resolves in work scope, the
    * narrower one: prepare() refuses smart-router/auto for it, and smart-router/local's requests,
@@ -284,7 +278,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   };
 
   /** A resolver context in the session's scope, or in `scope`, which only /smart-router status names. */
-  const contextFor = (ctx: ExtensionContext, value: Roster, id: VirtualId, pin: Pin, scope: Scope = resolvedScope(ctx)): ResolveContext =>
+  const contextFor = (ctx: ExtensionContext, value: Roster, id: VirtualId, scope: Scope = resolvedScope(ctx)): ResolveContext =>
     resolveContext({
       roster: value,
       catalog: ctx.modelRegistry,
@@ -293,25 +287,20 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       holds,
       now: now(),
       virtualId: id,
-      localOnly: id === "local" || pin.on,
-      policy: pin.on ? pin.policy : policyFromRoster(value),
-      pinned: pin.on,
+      localOnly: id === "local",
+      policy: policyFromRoster(value),
       scope,
     });
 
   /**
-   * Every roster load passes here, so the environment switch latches the first valid one's local
-   * policy, and the slot keeps what the latest valid one says of work scope (rosterFacts). Reading
-   * again a roster this instance already holds is no new load, so it leaves in the slot a roster
-   * another instance loaded since.
+   * Every roster load passes here, so the slot keeps what the latest valid one says of work scope
+   * (rosterFacts). Reading again a roster this instance already holds is no new load, so it leaves
+   * in the slot a roster another instance loaded since.
    */
   const loaded = (state: Loaded<Roster>): Loaded<Roster> => {
-    if (state.kind === "ok") {
-      latchEnvPolicy(slot.env, state.value);
-      if (state.value !== lastLoaded) {
-        lastLoaded = state.value;
-        rememberRoster(slot, memoryOf(state.value));
-      }
+    if (state.kind === "ok" && state.value !== lastLoaded) {
+      lastLoaded = state.value;
+      rememberRoster(slot, memoryOf(state.value));
     }
     return state;
   };
@@ -334,15 +323,15 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   /**
    * Why smart-router/auto refuses this session's scope, if it does: a scope that cannot be read, a
    * work-scope session under a version 1 roster, and a scope a version 2 roster has no section for.
-   * Its way out is worded for a work session that is not pinned (chooseModel in src/errors.ts): a
-   * work or unreadable scope, outside the pin.
+   * Its way out is worded for a work session (chooseModel in src/errors.ts): a work or unreadable
+   * scope.
    */
   const scopeRefusal = (value: Roster, ctx: ExtensionContext): RouterError | undefined => {
     const scope = scopeOf(ctx);
-    if (scope.kind === "unreadable") return scopeUnreadable("auto", scope.reason, !pinOf(ctx).on);
+    if (scope.kind === "unreadable") return scopeUnreadable("auto", scope.reason, true);
     if (servesScope(value, scope.scope)) return undefined;
     // Outside the latch, /smart-router scope personal can move the session.
-    return scopeUnserved("auto", scope.scope, value.version, scope.scope === "work" && !pinOf(ctx).on, scope.source !== "latch");
+    return scopeUnserved("auto", scope.scope, value.version, scope.scope === "work", scope.source !== "latch");
   };
 
   /**
@@ -350,8 +339,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
    * the refusal; what pi-cache-optimizer is told and an input's plan follow it.
    *
    * Only smart-router/auto has one. Local-only requests carry no account, and selecting
-   * smart-router/local is itself the request for local routing, so it refuses no scope, pinned or
-   * not, whatever scopes the roster serves: neither scope (John's decision of 2026-11-16, "Let
+   * smart-router/local is itself the request for local routing, so it refuses no scope, whatever
+   * scopes the roster serves: neither scope (John's decision of 2026-11-16, "Let
    * smart-router/local route in work scope"), nor one that cannot be read (his decision of
    * 2026-11-17, "Let local route there too"). Such a request resolves in work scope
    * (resolvedScope), where a local model passes every check as it does in work scope itself.
@@ -362,12 +351,11 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     const { sessionManager } = ctx;
     requireBoundedHistory(id, sessionManager);
     const state = loaded(roster.current());
-    const pin = pinOf(ctx);
-    // A work session that is not pinned: work scope, or a scope that cannot be read, outside the pin.
-    if (state.kind !== "ok") throw rosterRefusal(id, state, !pin.on && resolvedScope(ctx) === "work");
+    // A work session: work scope, or a scope that cannot be read.
+    if (state.kind !== "ok") throw rosterRefusal(id, state, resolvedScope(ctx) === "work");
     const refused = refusalFor(id, state.value, ctx);
     if (refused !== undefined) throw refused;
-    return { id, request, rc: contextFor(ctx, state.value, id, pin), pin, record: recordOf(sessionManager.getSessionId()) };
+    return { id, request, rc: contextFor(ctx, state.value, id), record: recordOf(sessionManager.getSessionId()) };
   };
 
   // auto declares the smallest window and output budget among the first available candidate of
@@ -379,7 +367,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     const scopes: readonly Scope[] = value.version === 2 ? SCOPES : ["personal"];
     const picks = (id: VirtualId, roles: (scope: Scope) => Iterable<string>): Decision[] =>
       scopes.flatMap((scope) => {
-        const rc = contextFor(ctx, value, id, UNPINNED, scope);
+        const rc = contextFor(ctx, value, id, scope);
         return [...roles(scope)].map((role) => pickInRole(rc, role, { fallback: false, code: "limits" }));
       });
     const auto = smallest(picks("auto", (scope) => autoRoles(value, scope)));
@@ -457,7 +445,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       if (state.kind !== "ok" || boundedHistory(ctx.sessionManager) === undefined) return undefined;
       // smart-router/auto has no pick in a scope that prepare() refuses it for.
       if (refusalFor(id, state.value, ctx) !== undefined) return undefined;
-      const rc = contextFor(ctx, state.value, id, pinOf(ctx));
+      const rc = contextFor(ctx, state.value, id);
       const record = records.get(owner.sessionId) ?? newRecord();
       const at = now();
       const answer = (model: Model<Api>, status: ActiveRoute["status"]): ActiveRoute => ({ provider: model.provider, modelId: model.id, api: model.api, status, at });
@@ -482,8 +470,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   };
 
   /**
-   * The footer's level item, under its own key, never the pin's: a version 2 run's level and model,
-   * or none. A session that shows none is not told so again, so a version 1 roster never sets it.
+   * The footer's level item, under its own key: a version 2 run's level and model, or none. A
+   * session that shows none is not told so again, so a version 1 roster never sets it.
    */
   const showLevel = (ctx: ExtensionContext, record: Session, text: string | undefined): void => {
     if (text === undefined && !record.levelShown) return;
@@ -495,21 +483,32 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     }
   };
 
-  /** A fork or /new records the pin it carries; a resume only says that the session it left was pinned. */
-  const carry = (ctx: ExtensionContext): void => {
-    const handoff = takeHandoff(slot, ctx.sessionManager.getSessionFile());
-    if (handoff?.kind === "pin") {
-      let failure: string | undefined;
-      try {
-        pi.appendEntry(PIN_ENTRY, pinOn(handoff.policy, now()));
-      } catch (error) {
-        failure = firstLine(error);
-      }
-      if (failure === undefined) notify(ctx, carriedNotice(), "info");
-      else notify(ctx, carryFailedNotice(failure), "error");
-    } else if (handoff?.kind === "notice" && !pinOf(ctx).on) {
-      notify(ctx, resumeNotice(), "warning");
+  /**
+   * Whether the session's latest pin entry, which an earlier version wrote, says it was pinned. The
+   * pin has been removed and the entry is ignored; it is read only to say so. Never throws: an entry
+   * that cannot be read, or that says anything else, says nothing.
+   */
+  const pinnedBefore = (ctx: ExtensionContext): boolean => {
+    try {
+      const entry = boundedHistory(managerOf(ctx))?.getLatestCustomEntry(PIN_ENTRY, { scope: "active" });
+      const data = isRecord(entry) ? own(entry, "data") : undefined;
+      return isRecord(data) && own(data, "on") === true;
+    } catch {
+      return false;
     }
+  };
+
+  /**
+   * Say once in a session that its old pin entry is ignored: the first time, at session start or at
+   * an idle input, that smart-router/auto is selected and the entry says the session was pinned.
+   * Only smart-router/auto now routes where the pin would not have: smart-router/local still routes
+   * locally, and a model picked by hand was always sent as it is.
+   */
+  const tellPinEntry = (ctx: ExtensionContext): void => {
+    const record = recordOf(ctx.sessionManager.getSessionId());
+    if (record.pinEntryTold || virtualIdOf(ctx.model) !== "auto" || !pinnedBefore(ctx)) return;
+    record.pinEntryTold = true;
+    notify(ctx, pinEntryNotice(), "warning");
   };
 
   /** Append a scope entry, and say whether it was recorded. */
@@ -550,44 +549,42 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     recordScope(ctx, scopeEntry("work", "directory", now()), directoryNotice(work.cwd, directory), (reason) => directoryFailedNotice(work.cwd, directory, reason));
   };
 
-  // The pin's steps come first and last, and nothing between them can skip them: a fork or /new
-  // records the pin it carries before any other step runs, and the pin's status item is shown
-  // whatever failed in between. The restored selection is left as it is. The scope a fork or /new
-  // carries is recorded next, and the scope the work directories give is recorded as soon as the
-  // roster is read. Each of the other steps reports its own failure and lets the rest run.
+  // The restored selection is left as it is. The scope a fork or /new carries is recorded first,
+  // and the scope the work directories give is recorded as soon as the roster is read. Each step
+  // reports its own failure and lets the rest run.
   const start = (ctx: ExtensionContext): void => {
-    try {
-      const { sessionManager } = ctx;
-      const sessionId = sessionManager.getSessionId();
-      if (self !== undefined) leave(slot, self);
-      self = { router: api, ctx, sessionId, hash: sessionHash(sessionId) };
-      join(slot, self);
-      carry(ctx);
-      const step = <T>(run: () => T): T | undefined => guarded("session_start", ctx, run);
-      step(() => carryScope(ctx));
-      step(() => registerAdapter(slot));
-      const state = step(refreshFiles);
-      step(() => recordDirectory(ctx));
-      if (state !== undefined) {
-        step(() => {
-          limits = state.kind === "ok" ? computeLimits(ctx, state.value) : BOTH_DEFAULT;
-        });
-      }
-      step(() => registerModels(ctx));
-      const view = boundedHistory(sessionManager);
-      const last = view === undefined ? undefined : step(() => seed(view));
-      if (last !== undefined) recordOf(sessionId).last = last;
-      // A resumed session's level is its latest run's, so that it returns from the chain as a running one does.
-      const held = view === undefined || state?.kind !== "ok" ? undefined : step(() => seedLevel(view, state.value));
-      if (held !== undefined) recordOf(sessionId).levelRole = held;
-      const notice = state !== undefined && state.kind !== "ok" ? rosterNotice(state) : view === undefined ? historyNotice() : undefined;
-      if (notice !== undefined) notify(ctx, notice, "warning");
-      // A prompt file that cannot be used stops no route, so it is said once here; status says it too.
-      const unusable = state?.kind === "ok" && state.value.version === 2 && state.value.classifier !== undefined ? promptProblem(promptUses(state.value, prompts.read)) : undefined;
-      if (unusable !== undefined) notify(ctx, promptNotice(unusable), "warning");
-    } finally {
-      showStatus(ctx);
+    const { sessionManager } = ctx;
+    const sessionId = sessionManager.getSessionId();
+    if (self !== undefined) leave(slot, self);
+    self = { router: api, ctx, sessionId, hash: sessionHash(sessionId) };
+    join(slot, self);
+    const step = <T>(run: () => T): T | undefined => guarded("session_start", ctx, run);
+    // The removed pin's switch and entries keep nothing local: a session that relied on them is told so.
+    step(() => {
+      if (slot.env.on) notify(ctx, pinEnvNotice(), "warning");
+    });
+    step(() => tellPinEntry(ctx));
+    step(() => carryScope(ctx));
+    step(() => registerAdapter(slot));
+    const state = step(refreshFiles);
+    step(() => recordDirectory(ctx));
+    if (state !== undefined) {
+      step(() => {
+        limits = state.kind === "ok" ? computeLimits(ctx, state.value) : BOTH_DEFAULT;
+      });
     }
+    step(() => registerModels(ctx));
+    const view = boundedHistory(sessionManager);
+    const last = view === undefined ? undefined : step(() => seed(view));
+    if (last !== undefined) recordOf(sessionId).last = last;
+    // A resumed session's level is its latest run's, so that it returns from the chain as a running one does.
+    const held = view === undefined || state?.kind !== "ok" ? undefined : step(() => seedLevel(view, state.value));
+    if (held !== undefined) recordOf(sessionId).levelRole = held;
+    const notice = state !== undefined && state.kind !== "ok" ? rosterNotice(state) : view === undefined ? historyNotice() : undefined;
+    if (notice !== undefined) notify(ctx, notice, "warning");
+    // A prompt file that cannot be used stops no route, so it is said once here; status says it too.
+    const unusable = state?.kind === "ok" && state.value.version === 2 && state.value.classifier !== undefined ? promptProblem(promptUses(state.value, prompts.read)) : undefined;
+    if (unusable !== undefined) notify(ctx, promptNotice(unusable), "warning");
   };
 
   /**
@@ -636,7 +633,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       if (pending?.token === token) pending.jev = jev;
     };
 
-  /** Plan an idle input's run with the session as it is now: after a wait, its selection, pin, scope and roster may have moved. */
+  /** Plan an idle input's run with the session as it is now: after a wait, its selection, scope and roster may have moved. */
   const plan = (ctx: ExtensionContext, record: Session, text: string, digest: string, level: LevelInput, token: number): Plan | undefined => {
     if (!ctx.isIdle()) return undefined;
     const { sessionManager } = ctx;
@@ -645,7 +642,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     if (id === undefined || state.kind !== "ok" || boundedHistory(sessionManager) === undefined) return undefined;
     // The selected model refuses this scope at the run's first request, so there is no run to plan.
     if (refusalFor(id, state.value, ctx) !== undefined) return undefined;
-    const rc = contextFor(ctx, state.value, id, pinOf(ctx));
+    const rc = contextFor(ctx, state.value, id);
     const planned = planUserTurn({ rc, text, last: record.last, now: now(), reserve: reserveFor(pi.getSettings(), id), level, held: record.levelRole });
     record.plan = planned;
     record.planDigest = digest;
@@ -709,10 +706,9 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   // arrives while a run starts or streams (steering, follow-ups) neither plans nor drops; its tag
   // is removed with a notice. A roster edit read here that lists the session's directory is
   // recorded before the run is planned, and nothing is planned for a scope smart-router/auto
-  // refuses (plan()), where Jev is not asked either (jevAsk). A version 2 run on auto, unpinned,
-  // takes the level its last input planned with when an extension resends that text
-  // (pi-idle-check), else its tag's, with Jev's opinion asked and recorded without waiting, else
-  // Jev's answer, waited for. The plan and its pending level carry the digest of the message's text,
+  // refuses (plan()), where Jev is not asked either (jevAsk). A version 2 run on auto takes the
+  // level its last input planned with when an extension resends that text (pi-idle-check), else
+  // its tag's, with Jev's opinion asked and recorded without waiting, else Jev's answer, waited for. The plan and its pending level carry the digest of the message's text,
   // which binds them to the run the message's prompt starts.
   const planInput = async (event: InputEvent, ctx: ExtensionContext, tagged: Tagged | undefined, previous: LastInput | undefined): Promise<void> => {
     const tier = tagged?.tier;
@@ -733,12 +729,10 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     const state = refreshFiles();
     guarded("input", ctx, () => recordDirectory(ctx));
     const id = virtualIdOf(ctx.model);
-    const pinned = pinOf(ctx).on;
     const value = state.kind === "ok" ? state.value : undefined;
     if (tier !== undefined) {
-      const why: TagIgnored | undefined = pinned
-        ? "pinned"
-        : id !== "auto"
+      const why: TagIgnored | undefined =
+        id !== "auto"
           ? { selection: describeModel(ctx.model) }
           : value?.version === 1
             ? "version"
@@ -753,7 +747,6 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     const ask = jevAsk({
       idle: ctx.isIdle(),
       selection: id,
-      pinned,
       roster: value,
       history: boundedHistory(sessionManager),
       scope,
@@ -761,8 +754,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     });
     // jevAsk gives an ask only under a version 2 roster, in a scope that reads: its request is built for both.
     const asked = ask !== undefined && value?.version === 2 && scope.kind === "ok" ? { ask, value, scope: scope.scope } : undefined;
-    // A level input counts only where levels route: planUserTurn ignores it under version 1, on
-    // smart-router/local and under the pin, and plan() plans nothing off the router's models.
+    // A level input counts only where levels route: planUserTurn ignores it under version 1 and on
+    // smart-router/local, and plan() plans nothing off the router's models.
     let level: LevelInput = reused ?? (tier === undefined ? {} : { tag: tier });
     let opinion = false;
     if (asked !== undefined && tier !== undefined) {
@@ -810,10 +803,10 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   const sayResend = (ctx: ExtensionContext, record: Session, value: Roster, failover: Failover): void => {
     const id = virtualIdOf(ctx.model);
     if (id === undefined || record.runPick?.id !== id || refusalFor(id, value, ctx) !== undefined) return;
-    const rc = contextFor(ctx, value, id, pinOf(ctx));
+    const rc = contextFor(ctx, value, id);
     const parsed = parseRef(failover.ref);
     const cause = failover.kind === "unreachable" ? { unreachable: true as const } : { account: parsed?.provider ?? "", until: clock(cooldowns.until(failover.ref, rc.now) ?? rc.now) };
-    // A new run starts in its level's role, the one this run's level had; on smart-router/local and under the pin, in the local role.
+    // A new run starts in its level's role, the one this run's level had; on smart-router/local, in the local role.
     const section = rc.localOnly ? undefined : scopeSection(value, rc.scope);
     const tier = record.pendingLevel?.level.tier;
     const start = section !== undefined && tier !== undefined ? section.levels[tier].role : rc.localOnly ? value.local?.role : undefined;
@@ -826,7 +819,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         cause,
         partway: record.answered !== undefined,
         next: next === undefined ? undefined : { role: chain, modelId: next.model.id },
-        work: !rc.pinned && rc.scope === "work",
+        work: rc.scope === "work",
       }),
       "warning",
     );
@@ -886,7 +879,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   /**
    * A fork or /new carries the scope the latch, an entry or the work directories set. A default
    * scope is not carried, so the new session decides its own. An unreadable one is carried as work,
-   * the scope routing holds that session in, as a malformed pin is carried as a pin.
+   * the scope routing holds that session in.
    */
   const leaveScope = (event: SessionShutdownEvent, ctx: ExtensionContext): void => {
     const { reason, targetSessionFile: target } = event;
@@ -898,9 +891,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
 
   const shutdown = (event: SessionShutdownEvent, ctx: ExtensionContext): void => {
     try {
-      // The pin and the scope go with a fork or /new into the session it creates, keyed by that
-      // session's file, each in its own map.
-      leaveHandoff(slot, event.reason, event.targetSessionFile, pinOf(ctx));
+      // The scope goes with a fork or /new into the session it creates, keyed by that session's file.
       leaveScope(event, ctx);
     } finally {
       records.clear();
@@ -935,8 +926,6 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
 
   const commandHost: CommandHost = {
     pi,
-    selectLocal: (ctx) => switchToLocal(pi, ctx, pinOf(ctx)),
-    showStatus,
     now,
     refresh: () => filesNow(refreshFiles()),
     reload: (ctx) => {
@@ -954,7 +943,6 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       }
       return { ...filesNow(state), limitsChanged };
     },
-    pinOf,
     scopeOf,
     session: (ctx) => records.get(ctx.sessionManager.getSessionId()),
     resolver: contextFor,
@@ -998,6 +986,10 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         const result: InputEventResult | undefined = tagged === undefined ? undefined : tagged.text === "" ? HANDLED : { action: "transform", text: tagged.text };
         try {
           const previous = guarded("input", ctx, () => resetInput(ctx));
+          // An old pin entry is said to be ignored at the first idle input on smart-router/auto, unless session_start said it.
+          guarded("input", ctx, () => {
+            if (ctx.isIdle()) tellPinEntry(ctx);
+          });
           if (tagged !== undefined && tagged.text === "") {
             notify(ctx, tagOnlyNotice(tagged.tier), "warning");
           } else {
@@ -1052,8 +1044,6 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       target.on("turn_start", (_event, ctx) => guarded("turn_start", ctx, () => void heal(ctx)));
       target.on("message_end", (event, ctx) => guarded("message_end", ctx, () => messageEnd(event, ctx)));
       target.on("agent_settled", (event, ctx) => guarded("agent_settled", ctx, () => settle(recordOf(ctx.sessionManager.getSessionId()), event.aborted === true)));
-      // A selection is never answered: the only thing that follows it is the pin's status item.
-      target.on("model_select", (event, ctx) => guarded("model_select", ctx, () => showStatus(ctx, event.model)));
       // Compaction and tree navigation go on under any selection: these only heal the registration
       // their summary may route through, and return nothing.
       target.on("session_before_compact", (_event, ctx) => guarded("session_before_compact", ctx, () => void heal(ctx)));
