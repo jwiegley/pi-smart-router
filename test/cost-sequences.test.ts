@@ -55,7 +55,7 @@ function horizonOf(history: readonly Taken[], need: Tier): number {
     if (tierRank(step.need) <= tierRank(need) && tierRank(step.taken) > tierRank(need)) count++;
     else break;
   }
-  return 1 + count;
+  return Math.min(1 + count, DEFAULT_SWITCHING.horizonCap);
 }
 
 /** The share of the last ten steps that needed the current model's level or more: 0.5 with fewer than three, never under 0.2. */
@@ -136,6 +136,16 @@ const SEQUENCES: ReadonlyArray<readonly [name: string, steps: readonly Step[]]> 
   ["one light prompt among heavy ones", [...repeat(3, [["super", 5, 300]] as const), ["low", 1, 60], ...repeat(3, [["super", 5, 300]] as const)]],
   ["a burst of light prompts", [["super", 5, 300], ...repeat(8, [["low", 1, 60]] as const), ["super", 5, 300]]],
 ];
+
+describe("the test's horizon helper", () => {
+  test("counts lighter steps taken above the level, and is capped at the setting", () => {
+    const lighter: Taken = { need: "medium", taken: "super" };
+    for (const [count, expected] of [[0, 1], [1, 2], [4, 5], [5, 5], [7, 5]] as const) {
+      assert.equal(horizonOf(repeat(count, [lighter]), "medium"), expected, `${count} qualifying steps: horizon ${expected}, never over the cap`);
+    }
+    assert.equal(horizonOf([lighter, { need: "super", taken: "super" }], "medium"), 1, "a step that needed more ends the count");
+  });
+});
 
 describe("the rule over a sequence of prompts", () => {
   for (const [name, steps] of SEQUENCES) {

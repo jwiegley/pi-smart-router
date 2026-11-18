@@ -123,7 +123,7 @@ export function ratesOf(cost: CatalogCost | undefined, tokens: number, writes: b
   if (!positive(level.input) || !positive(level.output) || !nonNegative(level.cacheRead)) return undefined;
   const input = writes && positive(level.cacheWrite) ? level.cacheWrite : level.input;
   if (!positive(input)) return undefined;
-  const cacheRead = level.cacheRead > 0 ? level.cacheRead : input;
+  const cacheRead = level.cacheRead > 0 ? level.cacheRead : level.input;
   return { input: input / 1e6, cacheRead: cacheRead / 1e6, output: level.output / 1e6 };
 }
 
@@ -182,7 +182,7 @@ export function chooseByCost(input: {
       cost = runCost(candidate, workload, table);
       if (current !== undefined && !stays) {
         const gone = 1 - survivalOf(current, table, workload.seconds * workload.horizon);
-        leaving = again * gone * Math.min(current.cached, workload.tokens) * (current.rates.input - current.rates.cacheRead);
+        leaving = again * gone * Math.min(Math.max(current.cached, 0), workload.tokens) * (current.rates.input - current.rates.cacheRead);
       }
     }
     return {

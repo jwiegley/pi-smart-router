@@ -166,6 +166,10 @@ describe("ratesOf", () => {
     const noDiscount = ratesOf({ input: 2, output: 5, cacheRead: 0, cacheWrite: 0 }, 1000, false);
     assert.ok(noDiscount, "a zero cache-read price with a real input price is priced");
     near(noDiscount.cacheRead * 1e6, 2, "a zero cache-read price counts as input: no discount is known");
+    const withWrites = ratesOf({ input: 2, output: 5, cacheRead: 0, cacheWrite: 2.5 }, 1000, true);
+    assert.ok(withWrites, "a zero cache-read price with cache writes reported is priced");
+    near(withWrites.input * 1e6, 2.5, "writes reported: uncached input is the write price");
+    near(withWrites.cacheRead * 1e6, 2, "writes reported: a zero cache-read price counts at the catalog's input price, not the write price");
   });
 });
 
@@ -265,6 +269,20 @@ describe("chooseByCost", () => {
     assert.equal(priceOf(choice, "A").leaving, 0, "A leaves nothing behind");
     // B's summary is also written by A, so B costs the same summary plus its own run, plus leaving.
     near(priceOf(choice, "B").cost, 0.43304 + runCost({ ...b }, { ...workload, tokens: 24_000 }, TABLE) + 0.0912, "B: the same summary on A");
+  });
+
+  test("a current model with a negative cached size leaves nothing behind", () => {
+    const current = candidate("A", "super", ASTRA, { cached: -50_000, idle: 30 });
+    const other = candidate("B", "medium", TERRA);
+    const choice = chooseByCost({
+      candidates: [other, current],
+      current: "A",
+      workload: work(1, 60, 1),
+      again: 0.5,
+      settings: DEFAULT_SWITCHING,
+      compaction: NO_COMPACTION,
+    });
+    assert.equal(priceOf(choice, "B").leaving, 0, "a negative cached size is no cache: leaving costs nothing, never less");
   });
 
   test("with no current model a compacting candidate writes its own summary", () => {
