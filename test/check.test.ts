@@ -110,6 +110,18 @@ describe("checking a roster's text", () => {
     assert.ok(!report.lines.some((line) => /\bpin(ned)?\b/.test(line)), "the local-only pin has been removed, and no line speaks of it");
   });
 
+  test("a roster that gives stickyIdleMinutes is told it is ignored, in either version; one without it is told nothing", () => {
+    const IGNORED = "stickyIdleMinutes is accepted and ignored: nothing holds a session on a model by time.";
+    for (const name of ["roster-hera-v2-fallback.json", "roster-hera.json"]) {
+      const given = JSON.parse(fixture(name));
+      given.stickyIdleMinutes = 5;
+      const report = checkRoster(JSON.stringify(given));
+      assert.equal(report.ok, true, `${name}: ${report.lines[0]}`);
+      assert.ok(report.lines.includes(IGNORED), `${name}: ${report.lines.join("\n")}`);
+      assert.ok(!checkRoster(fixture(name)).lines.some((line) => /stickyIdleMinutes/.test(line)), `${name} without it`);
+    }
+  });
+
   test("a version 1 roster reads back as its routing table and one-hop fallbacks", () => {
     const report = checkRoster(fixture("roster-hera.json"));
     assert.deepEqual(report.lines.slice(0, 8), [

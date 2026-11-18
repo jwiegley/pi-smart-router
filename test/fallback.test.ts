@@ -13,7 +13,7 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 
 import { LEVEL_ENTRY, LEVEL_KEY, SCOPE_ENTRY } from "../src/constants.ts";
 import { eligibleRole, pickInRole, planUserTurn } from "../src/decide.ts";
-import type { Decision, LastResponder, LevelInput, Plan } from "../src/decide.ts";
+import type { CompactionFigures, Decision, LastResponder, LevelInput, Plan } from "../src/decide.ts";
 import { policyFromRoster } from "../src/local.ts";
 import { Cooldowns, resolveCandidate, resolveContext } from "../src/resolve.ts";
 import type { ResolveContext } from "../src/resolve.ts";
@@ -98,9 +98,12 @@ function cooled(...refs: string[]): Cooldowns {
   return cooldowns;
 }
 
-function plan(rc: ResolveContext, level: LevelInput, options: { last?: LastResponder; text?: string; held?: string } = {}): Plan {
-  const { held } = options;
-  return planUserTurn({ rc, text: options.text ?? "What is the capital of France?", last: options.last, now: rc.now, reserve: 16_384, level, ...(held === undefined ? {} : { held }) });
+/** Pi's default compaction settings, and the same with compaction disabled. */
+const ENABLED: CompactionFigures = { enabled: true, reserve: 16_384, keepRecent: 20_000 };
+const DISABLED: CompactionFigures = { ...ENABLED, enabled: false };
+
+function plan(rc: ResolveContext, level: LevelInput, options: { last?: LastResponder; text?: string; compaction?: CompactionFigures } = {}): Plan {
+  return planUserTurn({ rc, text: options.text ?? "What is the capital of France?", last: options.last, now: rc.now, compaction: options.compaction ?? ENABLED, level });
 }
 
 const picked = (decision: Decision): readonly [string, string, string] | string =>
@@ -335,41 +338,27 @@ describe("planning with a fallback chain", () => {
     assert.deepEqual(picked(plan(context({ cooldowns, now: NOW + 31 * MINUTE }), { tag: "low" }, { last }).decision), ["low", LUNA, "tag"]);
   });
 
-  test("a chain model stands for the level the session held: a lower run inside the idle window stays at that level, and resumes on its own model", () => {
-    const last: LastResponder = { ref: OR_GLM, at: NOW - MINUTE };
-    // The session was at SUPER when the chain took over. A trivial follow-up stays at SUPER.
-    const held = plan(context({ cooldowns: cooled(ASTRA) }), {}, { last, text: "Format this file", held: "super" });
-    assert.deepEqual(picked(held.decision), ["openrouter", OR_GLM, "fallback:super→openrouter"]);
-    assert.deepEqual([held.level?.tier, held.level?.asked, held.level?.start, held.level?.fallback], ["super", "low", "super", true]);
-    // And when astra is back, it is astra that takes it, not luna.
-    assert.deepEqual(picked(plan(context(), {}, { last, text: "Format this file", held: "super" }).decision), ["super", ASTRA, "hold:sticky"]);
-    // The hold ends as any does: once the session has been idle, and at once for a tag.
-    assert.deepEqual(picked(plan(context(), {}, { last: { ref: OR_GLM, at: NOW - 6 * MINUTE }, text: "Format this file", held: "super" }).decision), ["low", LUNA, "reopen:idle"]);
-    assert.deepEqual(picked(plan(context(), { tag: "low" }, { last, held: "super" }).decision), ["low", LUNA, "tag"]);
-    // Only a chain model stands for the held level: a level's own model holds its own level, whatever was held before.
-    assert.deepEqual(picked(plan(context(), {}, { last: { ref: LUNA, at: NOW - MINUTE }, text: "Format this file", held: "super" }).decision), ["low", LUNA, "keyword"]);
-    assert.deepEqual(picked(plan(context(), {}, { last: { ref: SOL, at: NOW - MINUTE }, text: "Format this file", held: "super" }).decision), ["high", SOL, "hold:sticky"]);
-    // A role that is no level of the scope holds nothing.
-    assert.deepEqual(picked(plan(context(), {}, { last, text: "Format this file", held: "work-super" }).decision), ["low", LUNA, "keyword"]);
-  });
-
-  test("when no candidate fits and every level would take the same chain model, the run keeps its own level", () => {
+  test("with compaction disabled, when no candidate fits and every level would take the same chain model, the run keeps its own level", () => {
     const usage = { input: 250_000, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 250_000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
-    const planned = plan(context({ cooldowns: cooled(LUNA, TERRA, SOL, ASTRA) }), { tag: "low" }, { last: { ref: LUNA, at: NOW - MINUTE, usage } });
+    const planned = plan(context({ cooldowns: cooled(LUNA, TERRA, SOL, ASTRA) }), { tag: "low" }, { last: { ref: LUNA, at: NOW - MINUTE, usage }, compaction: DISABLED });
     assert.deepEqual(picked(planned.decision), ["openrouter", OR_GLM, "fallback:low→openrouter"]);
     assert.deepEqual([planned.level?.tier, planned.level?.steppedUp, planned.level?.fallback, planned.role], ["low", false, true, "low"]);
     // A higher level whose own model is available and too small still takes the run, as before.
-    const up = plan(context({ cooldowns: cooled(LUNA, TERRA, SOL) }), { tag: "low" }, { last: { ref: LUNA, at: NOW - MINUTE, usage: { ...usage, input: 300_000, totalTokens: 300_000 } } });
+    const huge = { last: { ref: LUNA, at: NOW - MINUTE, usage: { ...usage, input: 300_000, totalTokens: 300_000 } } };
+    const up = plan(context({ cooldowns: cooled(LUNA, TERRA, SOL) }), { tag: "low" }, { ...huge, compaction: DISABLED });
     assert.deepEqual([picked(up.decision), up.level?.tier, up.level?.steppedUp], [["super", ASTRA, "step-up"], "super", true]);
+    // With compaction enabled the run keeps its level and the chain model, and Pi compacts.
+    const kept = plan(context({ cooldowns: cooled(LUNA, TERRA, SOL) }), { tag: "low" }, huge);
+    assert.deepEqual([picked(kept.decision), kept.level?.tier, kept.level?.steppedUp], [["openrouter", OR_GLM, "fallback:low→openrouter"], "low", false], "with compaction enabled a too-small model is compacted for");
   });
 
-  test("without a recorded level, a chain model holds none: the next untagged run goes to its own level's model, inside the idle window too", () => {
+  test("a chain model holds no level: the next untagged run goes to its own level's model, a moment later too", () => {
     for (const ref of CHAIN) {
       const planned = plan(context(), {}, { last: { ref, at: NOW - MINUTE }, text: "Format this file" });
       assert.deepEqual(picked(planned.decision), ["low", LUNA, "keyword"], ref);
     }
-    // A level's own model still holds its level, as before.
-    assert.deepEqual(picked(plan(context(), {}, { last: { ref: ASTRA, at: NOW - MINUTE }, text: "Format this file" }).decision), ["super", ASTRA, "hold:sticky"]);
+    // Nor does a level's own model.
+    assert.deepEqual(picked(plan(context(), {}, { last: { ref: ASTRA, at: NOW - MINUTE }, text: "Format this file" }).decision), ["low", LUNA, "keyword"], "nothing holds a session by time");
   });
 
   test("a move further down the chain is no return", () => {
@@ -382,11 +371,15 @@ describe("planning with a fallback chain", () => {
     assert.equal(up.level?.returnedToFirst, true);
   });
 
-  test("a fallback too small for the conversation passes the run up, where the next level's own model takes it", () => {
+  test("with compaction disabled, a fallback too small for the conversation passes the run up, where the next level's own model takes it", () => {
     const usage = { input: 250_000, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 250_000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
-    const planned = plan(context({ cooldowns: cooled(LUNA) }), { tag: "low" }, { last: { ref: LUNA, at: NOW - MINUTE, usage } });
+    const last = { ref: LUNA, at: NOW - MINUTE, usage };
+    const planned = plan(context({ cooldowns: cooled(LUNA) }), { tag: "low" }, { last, compaction: DISABLED });
     assert.deepEqual(picked(planned.decision), ["medium", TERRA, "step-up"]);
     assert.deepEqual([planned.level?.tier, planned.level?.steppedUp, planned.level?.fallback], ["medium", true, undefined]);
+    // With compaction enabled the fallback takes the run at its level, and Pi compacts.
+    const kept = plan(context({ cooldowns: cooled(LUNA) }), { tag: "low" }, { last });
+    assert.deepEqual([picked(kept.decision), kept.level?.tier, kept.level?.steppedUp, kept.level?.fallback], [["openrouter", OR_GLM, "fallback:low→openrouter"], "low", false, true], "with compaction enabled a too-small model is compacted for");
   });
 
   test("a pick that starts in a chain role goes forward only, never back to a level", () => {
@@ -661,7 +654,7 @@ describe("a run through the router with a fallback chain", () => {
     assert.equal(routed(runtime.route("local", request("retry", { signal, failed: failure(runtime, GLM, LIMIT) }))), NYX_QWEN);
   });
 
-  test("a SUPER session answered by the chain stays at SUPER for a trivial follow-up, and a move onto the chain in mid-run is said once", async (t) => {
+  test("a move onto the chain in mid-run is said once, and a trivial follow-up a minute later goes to LOW, on the chain while the account cools", async (t) => {
     const state = await session(t);
     const { loaded } = state;
     const { runtime } = loaded;
@@ -676,8 +669,9 @@ describe("a run through the router with a fallback chain", () => {
     await finish(loaded, OR_GLM);
     state.clock = NOW + MINUTE;
     signal = await prompt(loaded, "Format this file");
-    assert.equal(loaded.session.statuses.get(LEVEL_KEY), "personal SUPER → z-ai/glm-5.3-flash (keywords; jev unavailable; fallback)");
-    assert.deepEqual([routed(runtime.route("auto", request("user", { signal }))), lastHistory(loaded)?.code], [OR_GLM, "fallback:super→openrouter"]);
+    // The limit cooled the whole openai-codex-2 account, luna too, so LOW goes to the chain.
+    assert.equal(loaded.session.statuses.get(LEVEL_KEY), "personal LOW → z-ai/glm-5.3-flash (keywords; jev unavailable; fallback)", "nothing holds a session by time");
+    assert.deepEqual([routed(runtime.route("auto", request("user", { signal }))), lastHistory(loaded)?.code], [OR_GLM, "fallback:low→openrouter"], "nothing holds a session by time");
   });
 
   test("a refusal names the level's role, then the chain's roles as fallbacks, then the levels above as step-ups", async (t) => {

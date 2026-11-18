@@ -41,7 +41,7 @@ export interface LevelRecord {
   readonly source: LevelSource | "correction";
   /** The tier planned for the run, or the one a correction says it should have gone to. */
   readonly tier: Tier;
-  /** The tier the tag, Jev or the keywords asked for, before the floor, the hold rules and any step-up. */
+  /** The tier the tag, Jev or the keywords asked for, before the floor and any step-up. */
   readonly asked?: Tier;
   /** A tagged run's tag. */
   readonly tag?: Tier;
@@ -132,8 +132,8 @@ export function readLevelRecord(entry: unknown): LevelRecord | undefined {
 
 /**
  * What decided a run's tier, in a few words: Jev with the probability it gave its tier, a tag, the
- * floor, or the keywords and why Jev did not decide. A hold or a step-up can take the run to another
- * tier than Jev's, and the note then names Jev's, so its probability is never read as the run's.
+ * floor, or the keywords and why Jev did not decide. A step-up can take the run to another tier than
+ * Jev's, and the note then names Jev's, so its probability is never read as the run's.
  */
 export function levelNote(level: PlanLevel): string {
   const { jev } = level;

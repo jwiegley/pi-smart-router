@@ -7,8 +7,8 @@ import { checkAccount } from "../src/accounts.ts";
 import type { Labels } from "../src/accounts.ts";
 import { BUILTIN_EXCLUDES } from "../src/constants.ts";
 import type { VirtualId } from "../src/constants.ts";
-import { eligibleRole, fits, NO_LOCAL_SECTION, pickInRole, planUserTurn, reserveFor } from "../src/decide.ts";
-import type { Choice, Decision, LastResponder, LevelInput, Plan } from "../src/decide.ts";
+import { compactionFor, eligibleRole, fits, NO_LOCAL_SECTION, pickInRole, planUserTurn } from "../src/decide.ts";
+import type { Choice, CompactionFigures, Decision, LastResponder, LevelInput, Plan } from "../src/decide.ts";
 import type { Loaded } from "../src/files.ts";
 import type { JevOutcome } from "../src/jev.ts";
 import { baseUrlHost, checkLocal, isLocalHost, policyFromRoster } from "../src/local.ts";
@@ -43,6 +43,9 @@ import {
 
 const HERA = rosterFixture("roster-hera.json");
 const MINUTE = 60_000;
+/** Pi's compaction settings when none are given: enabled, with its default reserve and recent tail. */
+const ENABLED: CompactionFigures = { enabled: true, reserve: 16_384, keepRecent: 20_000 };
+const DISABLED: CompactionFigures = { ...ENABLED, enabled: false };
 
 function usage(totalTokens: number): Usage {
   return { input: totalTokens, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
@@ -52,8 +55,8 @@ function last(ref: string, ago: number, tokens?: number): LastResponder {
   return { ref, at: NOW - ago, ...(tokens === undefined ? {} : { usage: usage(tokens) }) };
 }
 
-function plan(text: string, options: { last?: LastResponder; rc?: ResolveContext; reserve?: number } = {}): Plan {
-  return planUserTurn({ rc: options.rc ?? heraContext(), text, last: options.last, now: NOW, reserve: options.reserve ?? 16_384 });
+function plan(text: string, options: { last?: LastResponder; rc?: ResolveContext } = {}): Plan {
+  return planUserTurn({ rc: options.rc ?? heraContext(), text, last: options.last, now: NOW, compaction: ENABLED });
 }
 
 function chosen(decision: Decision): Choice {
@@ -94,45 +97,12 @@ describe("the routing table", () => {
     expectPlan(plan(COMPLEX, { last: last(SOL, 10_000) }), SOL, "signal:complex");
   });
 
-  test("a lower role holds the latest response's role inside the idle window", () => {
-    expectPlan(plan(COMPLEX, { last: last(ASTRA, MINUTE) }), ASTRA, "hold:sticky");
-    expectPlan(plan(TRIVIAL, { last: last(ASTRA, 5 * MINUTE - 1) }), ASTRA, "hold:sticky");
-    expectPlan(plan(TRIVIAL, { last: last(SOL, MINUTE) }), SOL, "hold:sticky");
-  });
-
-  test("a lower role reopens once the session has been idle for stickyIdleMinutes", () => {
-    expectPlan(plan(TRIVIAL, { last: last(ASTRA, 5 * MINUTE) }), DEEPSEEK, "reopen:idle");
-    expectPlan(plan(COMPLEX, { last: last(ASTRA, 6 * MINUTE) }), SOL, "reopen:idle");
-  });
-
-  test("stickyIdleMinutes 0 re-routes every run by its classification", () => {
-    const rc = heraContext({ roster: { ...HERA, stickyIdleMinutes: 0 } });
-    expectPlan(plan(COMPLEX, { rc, last: last(ASTRA, 0) }), SOL, "reopen:idle");
-  });
-
-  test("the fit guard holds a downgrade the conversation would not fit", () => {
-    // DeepSeek's window is 128,000; 16,384 are reserved.
-    expectPlan(plan(TRIVIAL, { last: last(ASTRA, 6 * MINUTE, 120_000) }), ASTRA, "hold:fit");
-    expectPlan(plan(TRIVIAL, { last: last(ASTRA, 6 * MINUTE, 100_000) }), DEEPSEEK, "reopen:idle");
-    expectPlan(plan(TRIVIAL, { last: last(ASTRA, 6 * MINUTE, 120_000), reserve: 4_096 }), DEEPSEEK, "reopen:idle");
-    const huge = `${TRIVIAL} ${"word ".repeat(60_000)}`;
-    expectPlan(plan(huge, { last: last(ASTRA, 6 * MINUTE, 50_000) }), ASTRA, "hold:fit");
-  });
-
-  test("a downgrade to a role that cannot take the run reports why instead of holding", () => {
+  test("a run whose role cannot take it reports why, whichever role answered last", () => {
     const catalog = new FakeCatalog(heraModels());
     catalog.unavailable.add(DEEPSEEK);
     const result = plan(TRIVIAL, { rc: contextWith(catalog), last: last(ASTRA, 6 * MINUTE) });
     assert.equal(result.decision.ok, false);
-    assert.deepEqual([result.role, result.code], ["worker", "reopen:idle"]);
-  });
-
-  test("the sticky role prefers the model that answered last", () => {
-    const roster: Roster = { ...HERA, roles: HERA.roles.map((role) => (role.name === "architect" ? { ...role, models: [ASTRA, "openrouter/other/architect"] } : role)) };
-    const catalog = new FakeCatalog([...heraModels(), model("openrouter/other/architect")]);
-    expectPlan(plan(COMPLEX, { rc: contextWith(catalog, { roster }), last: last("openrouter/other/architect", MINUTE) }), "openrouter/other/architect", "hold:sticky");
-    catalog.unavailable.add("openrouter/other/architect");
-    expectPlan(plan(COMPLEX, { rc: contextWith(catalog, { roster }), last: last("openrouter/other/architect", MINUTE) }), ASTRA, "hold:sticky");
+    assert.deepEqual([result.role, result.code], ["worker", "signal:trivial"], "nothing holds a session by time");
   });
 
   test("auto never sticks to the local role", () => {
@@ -236,7 +206,7 @@ describe("local-only plans", () => {
   });
 });
 
-describe("fits and the reserve", () => {
+describe("fits and the compaction settings", () => {
   test("fits measures the latest usage plus the new prompt against the window less the reserve", () => {
     const window = model("x/y", { contextWindow: 100_000 });
     // "hi" estimates as one token.
@@ -247,15 +217,21 @@ describe("fits and the reserve", () => {
     assert.equal(fits({ last: last(ASTRA, 0, 10_000_000), text: "hi", now: NOW, reserve: 0 }, model("x/z", { contextWindow: 0 })), true);
   });
 
-  test("the reserve comes from the selection's override, then the setting, then Pi's default", () => {
-    assert.equal(reserveFor({}, "auto"), 16_384);
-    assert.equal(reserveFor(undefined, "auto"), 16_384);
-    assert.equal(reserveFor({ compaction: { reserveTokens: 4_096 } }, "auto"), 4_096);
+  test("compactionFor: the reserve and the recent tail come from the selection's override, then the setting, then Pi's default", () => {
+    const reserve = (settings: unknown, id: VirtualId): number => compactionFor(settings, id).reserve;
+    assert.equal(reserve({}, "auto"), 16_384);
+    assert.equal(reserve(undefined, "auto"), 16_384);
+    assert.equal(reserve({ compaction: { reserveTokens: 4_096 } }, "auto"), 4_096);
     const settings = { compaction: { reserveTokens: 4_096, modelOverrides: { "smart-router/auto": { reserveTokens: 32_000 }, "smart-router/local": { keepRecentTokens: 1 } } } };
-    assert.equal(reserveFor(settings, "auto"), 32_000);
-    assert.equal(reserveFor(settings, "local"), 4_096);
-    assert.equal(reserveFor({ compaction: { reserveTokens: -1, modelOverrides: { "smart-router/auto": { reserveTokens: 1.5 } } } }, "auto"), 16_384);
-    assert.equal(reserveFor({ compaction: { modelOverrides: { "smart-router/auto": { reserveTokens: 0 } } } }, "auto"), 0);
+    assert.equal(reserve(settings, "auto"), 32_000);
+    assert.equal(reserve(settings, "local"), 4_096);
+    assert.equal(reserve({ compaction: { reserveTokens: -1, modelOverrides: { "smart-router/auto": { reserveTokens: 1.5 } } } }, "auto"), 16_384);
+    assert.equal(reserve({ compaction: { modelOverrides: { "smart-router/auto": { reserveTokens: 0 } } } }, "auto"), 0);
+    // Pi reads keepRecentTokens through the same override as the reserve.
+    assert.deepEqual([compactionFor(settings, "local").keepRecent, compactionFor(settings, "auto").keepRecent], [1, 20_000]);
+    // enabled is Pi's boolean, true unless it is false.
+    assert.equal(compactionFor({ compaction: { enabled: "no" } }, "auto").enabled, true);
+    assert.equal(compactionFor({ compaction: { enabled: false } }, "auto").enabled, false);
   });
 });
 
@@ -307,7 +283,7 @@ interface Case {
   readonly rc: ResolveContext;
   readonly text: string;
   readonly last: LastResponder | undefined;
-  readonly reserve: number;
+  readonly compaction: CompactionFigures;
 }
 
 function randomCase(seed: number): Case {
@@ -352,8 +328,8 @@ function randomCase(seed: number): Case {
     routing: { default: one(names), trivial: one(names), complex: one(names), planning: one(names), fallback },
     accounts,
     ...(local === undefined ? {} : { local }),
-    stickyIdleMinutes: Math.floor(rand() * 10),
     cooldownMinutes: 30,
+    ignored: [],
   };
 
   const catalog = new FakeCatalog();
@@ -410,7 +386,7 @@ function randomCase(seed: number): Case {
         ...(chance(0.7) ? { usage: usage(Math.floor(rand() * 300_000)) } : {}),
       }
     : undefined;
-  return { rc, text: one(TEXTS), last: lastResponder, reserve: Math.floor(rand() * 50_000) };
+  return { rc, text: one(TEXTS), last: lastResponder, compaction: { enabled: chance(0.5), reserve: Math.floor(rand() * 50_000), keepRecent: 20_000 } };
 }
 
 /**
@@ -454,9 +430,9 @@ describe("property-style invariants", () => {
   test("1,000 random rosters, catalogs and inputs never yield an unsafe pick", (t) => {
     const seen = { plans: 0, picks: 0, refused: 0, local: 0, fallback: 0, workAliasBeside: 0 };
     for (let seed = 1; seed <= 1000; seed += 1) {
-      const { rc, text, last: lastResponder, reserve } = randomCase(seed);
+      const { rc, text, last: lastResponder, compaction } = randomCase(seed);
       const where = `seed ${seed}`;
-      const result = planUserTurn({ rc, text, last: lastResponder, now: rc.now, reserve });
+      const result = planUserTurn({ rc, text, last: lastResponder, now: rc.now, compaction });
       assert.equal(result.localOnly, rc.localOnly, where);
       if (result.decision.ok) {
         assertSafeChoice(rc, result.decision.choice, `${where} plan`, true);
@@ -475,7 +451,6 @@ describe("property-style invariants", () => {
           { fallback: true, code: "t" },
           { fallback: false, code: "t" },
           { fallback: true, code: "t", skip },
-          { fallback: true, code: "t", prefer: role.models.at(-1) },
         ]) {
           const decision = pickInRole(rc, role.name, options);
           if (decision.ok) {
@@ -486,9 +461,6 @@ describe("property-style invariants", () => {
             // Complete: a role with a candidate that resolves is never passed over.
             const own = role.models.find((ref) => ref !== options.skip && resolveCandidate(ref, rc).ok);
             if (own !== undefined) assert.equal(decision.choice.role, role.name, `${where}: passed over ${own}`);
-            if (options.prefer !== undefined && resolveCandidate(options.prefer, rc).ok && options.prefer !== options.skip) {
-              assert.equal(decision.choice.ref, options.prefer, `${where}: ignored the preferred model`);
-            }
           } else {
             assertHonestRefusal(rc, decision, options.skip, `${where} pick ${role.name}`);
           }
@@ -517,59 +489,59 @@ describe("property-style invariants", () => {
   test("the generator is deterministic", () => {
     const a = randomCase(42);
     const b = randomCase(42);
-    assert.deepEqual(JSON.stringify([a.text, a.reserve, a.rc.virtualId, a.rc.roster.roles]), JSON.stringify([b.text, b.reserve, b.rc.virtualId, b.rc.roster.roles]));
+    assert.deepEqual(JSON.stringify([a.text, a.compaction, a.rc.virtualId, a.rc.roster.roles]), JSON.stringify([b.text, b.compaction, b.rc.virtualId, b.rc.roster.roles]));
     assert.notDeepEqual(JSON.stringify(randomCase(43).rc.roster.roles), JSON.stringify(a.rc.roster.roles));
   });
 });
 
 // ─── Version 2: levels ──────────────────────────────────────────────────────
 
+const V2 = rosterFixtureV2("roster-hera-v2.json");
+const LUNA = "openai-codex-2/gpt-6-luna";
+const TERRA = "openai-codex-2/gpt-6.1-terra";
+const NYX_QWEN = "nyx/g3mjym7raqj6147biq46zxym32gyda9g-Qwen3.8-27B-exl3-6fe61ad";
+const HERA_QWEN = "omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp";
+const WORK_LUNA = "openai-codex-3/gpt-6-luna";
+const WORK_TERRA = "openai-codex-3/gpt-6.1-terra";
+const WORK_ASTRA = "openai-codex-3/gpt-6-astra";
+const JEV = "openrouter/typesafe/jev-1.14";
+const FRANCE = "What is the capital of France?";
+const FORCE_PUSH = "force push the branch";
+
+/** A Codex model, as Hera's catalog lists them. */
+const codex = (ref: string, init: Partial<Model<Api>> = {}): Model<Api> =>
+  model(ref, { api: "openai-codex-responses", baseUrl: CHATGPT, contextWindow: 272_000, maxTokens: 128_000, ...init });
+
+/** Hera's catalog with every model of its version 2 roster: both Codex accounts, OpenRouter, Nyx and Hera's Qwen. */
+const v2Catalog = (): FakeCatalog =>
+  new FakeCatalog([
+    ...heraModels(),
+    codex(LUNA),
+    codex(TERRA),
+    model(NYX_QWEN, { baseUrl: "https://nyx.lan/v1", contextWindow: 98_304 }),
+    model(HERA_QWEN, { baseUrl: HERA_LAN, contextWindow: 262_144 }),
+    codex(WORK_LUNA),
+    codex(WORK_TERRA),
+    codex(WORK_ASTRA),
+  ]);
+
+const v2 = (catalog: FakeCatalog = v2Catalog(), overrides: Partial<Omit<ResolveContext, "available" | "catalog">> = {}): ResolveContext =>
+  contextWith(catalog, { roster: V2, ...overrides });
+
+function planV2(text: string, options: { level?: LevelInput; last?: LastResponder; rc?: ResolveContext; compaction?: CompactionFigures } = {}): Plan {
+  const { level } = options;
+  return planUserTurn({ rc: options.rc ?? v2(), text, last: options.last, now: NOW, compaction: options.compaction ?? ENABLED, ...(level === undefined ? {} : { level }) });
+}
+
+/** Jev's answer: its top choice, and the tier the close-call rule made of it. */
+function answer(choice: Tier, tier: Tier = choice): JevOutcome {
+  const probabilities: Record<Tier, number> = { low: 0.05, medium: 0.05, high: 0.05, super: 0.05 };
+  probabilities[choice] = tier === choice ? 0.85 : 0.5;
+  if (tier !== choice) probabilities[tier] = 0.4;
+  return { kind: "answer", model: JEV, choice, tier, probabilities, confidence: probabilities[choice], ms: 140 };
+}
+
 describe("v2 levels", () => {
-  const V2 = rosterFixtureV2("roster-hera-v2.json");
-  const LUNA = "openai-codex-2/gpt-6-luna";
-  const TERRA = "openai-codex-2/gpt-6.1-terra";
-  const NYX_QWEN = "nyx/g3mjym7raqj6147biq46zxym32gyda9g-Qwen3.8-27B-exl3-6fe61ad";
-  const HERA_QWEN = "omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp";
-  const WORK_LUNA = "openai-codex-3/gpt-6-luna";
-  const WORK_TERRA = "openai-codex-3/gpt-6.1-terra";
-  const WORK_ASTRA = "openai-codex-3/gpt-6-astra";
-  const JEV = "openrouter/typesafe/jev-1.14";
-  const FRANCE = "What is the capital of France?";
-  const FORCE_PUSH = "force push the branch";
-
-  /** A Codex model, as Hera's catalog lists them. */
-  const codex = (ref: string, init: Partial<Model<Api>> = {}): Model<Api> =>
-    model(ref, { api: "openai-codex-responses", baseUrl: CHATGPT, contextWindow: 272_000, maxTokens: 128_000, ...init });
-
-  /** Hera's catalog with every model of its version 2 roster: both Codex accounts, OpenRouter, Nyx and Hera's Qwen. */
-  const v2Catalog = (): FakeCatalog =>
-    new FakeCatalog([
-      ...heraModels(),
-      codex(LUNA),
-      codex(TERRA),
-      model(NYX_QWEN, { baseUrl: "https://nyx.lan/v1", contextWindow: 98_304 }),
-      model(HERA_QWEN, { baseUrl: HERA_LAN, contextWindow: 262_144 }),
-      codex(WORK_LUNA),
-      codex(WORK_TERRA),
-      codex(WORK_ASTRA),
-    ]);
-
-  const v2 = (catalog: FakeCatalog = v2Catalog(), overrides: Partial<Omit<ResolveContext, "available" | "catalog">> = {}): ResolveContext =>
-    contextWith(catalog, { roster: V2, ...overrides });
-
-  function planV2(text: string, options: { level?: LevelInput; last?: LastResponder; rc?: ResolveContext; reserve?: number } = {}): Plan {
-    const { level } = options;
-    return planUserTurn({ rc: options.rc ?? v2(), text, last: options.last, now: NOW, reserve: options.reserve ?? 16_384, ...(level === undefined ? {} : { level }) });
-  }
-
-  /** Jev's answer: its top choice, and the tier the close-call rule made of it. */
-  function answer(choice: Tier, tier: Tier = choice): JevOutcome {
-    const probabilities: Record<Tier, number> = { low: 0.05, medium: 0.05, high: 0.05, super: 0.05 };
-    probabilities[choice] = tier === choice ? 0.85 : 0.5;
-    if (tier !== choice) probabilities[tier] = 0.4;
-    return { kind: "answer", model: JEV, choice, tier, probabilities, confidence: probabilities[choice], ms: 140 };
-  }
-
   test("an untagged run without Jev takes the first candidate of the keywords' tier", () => {
     const result = planV2(FRANCE);
     expectPlan(result, TERRA, "keyword");
@@ -608,34 +580,22 @@ describe("v2 levels", () => {
     assert.deepEqual(planV2(FORCE_PUSH, { level: { tag: "low", jev: answer("super") } }), tagged);
   });
 
-  test("a tag goes down at once; an untagged run below the latest response's tier holds that tier inside the idle window", () => {
+  test("a tag goes down at once, and so does an untagged run below the latest response's tier", () => {
     const astra = last(ASTRA, MINUTE);
     expectPlan(planV2(PLAIN, { level: { tag: "low" }, last: astra }), LUNA, "tag");
     const jev = answer("low");
-    const held = planV2(PLAIN, { level: { jev }, last: astra });
-    expectPlan(held, ASTRA, "hold:sticky");
-    assert.deepEqual(held.level, { scope: "personal", tier: "super", asked: "low", start: "super", source: "jev", steppedUp: false, returnedToFirst: false, jev });
+    const down = planV2(PLAIN, { level: { jev }, last: astra });
+    expectPlan(down, LUNA, "jev");
+    assert.deepEqual(down.level, { scope: "personal", tier: "low", asked: "low", start: "low", source: "jev", steppedUp: false, returnedToFirst: false, jev }, "nothing holds a session by time");
   });
 
-  test("a latest response from the other scope's roles holds nothing", () => {
+  test("a latest response from the other scope's roles changes nothing either", () => {
     const jev = answer("low");
     expectPlan(planV2(PLAIN, { level: { jev }, last: last(WORK_ASTRA, MINUTE) }), LUNA, "jev");
     expectPlan(planV2(PLAIN, { rc: v2(v2Catalog(), { scope: "work" }), level: { jev }, last: last(ASTRA, MINUTE) }), WORK_LUNA, "jev");
   });
 
-  test("an untagged run reopens a lower tier once the session has been idle, unless the conversation would not fit it", () => {
-    const jev = answer("low");
-    expectPlan(planV2(PLAIN, { level: { jev }, last: last(ASTRA, 5 * MINUTE) }), LUNA, "reopen:idle");
-    // Luna's window is 128,000 here; 16,384 are reserved. Medium's terra would fit, but the run
-    // holds the tier it has, as a version 1 role does.
-    const catalog = v2Catalog().add(codex(LUNA, { contextWindow: 128_000 }));
-    const held = planV2(PLAIN, { rc: v2(catalog), level: { jev }, last: last(ASTRA, 6 * MINUTE, 120_000) });
-    expectPlan(held, ASTRA, "hold:fit");
-    assert.deepEqual(held.level, { scope: "personal", tier: "super", asked: "low", start: "super", source: "jev", steppedUp: false, returnedToFirst: false, jev });
-    expectPlan(planV2(PLAIN, { rc: v2(catalog), level: { jev }, last: last(ASTRA, 6 * MINUTE, 100_000) }), LUNA, "reopen:idle");
-  });
-
-  test("a hold is a preference: when the held tier and every tier above it have no available candidate, the run climbs from its own tier", () => {
+  test("a run starts at its own tier whatever tier answered last, and climbs from there", () => {
     // Astra answered a minute ago and is cooling now, and kimi is unavailable, so super can take nothing.
     const cooldowns = new Cooldowns();
     cooldowns.cool(ASTRA, 1, NOW, 30);
@@ -649,11 +609,15 @@ describe("v2 levels", () => {
     const personal = planV2(FRANCE, { rc: v2(catalog, { cooldowns }), last: last(ASTRA, MINUTE) });
     expectPlan(personal, TERRA, "keyword");
     assert.deepEqual(personal.level, { scope: "personal", ...MEDIUM });
-    // Idle, the run would hold super because luna is too small; it climbs from low instead.
+    // Luna is too small for the conversation. With compaction enabled the run takes it, and Pi compacts.
     const small = v2Catalog().add(codex(LUNA, { contextWindow: 128_000 }));
     small.unavailable.add(KIMI);
     const jev = answer("low");
-    const fit = planV2(PLAIN, { rc: v2(small, { cooldowns }), level: { jev }, last: last(ASTRA, 6 * MINUTE, 120_000) });
+    const compacted = planV2(PLAIN, { rc: v2(small, { cooldowns }), level: { jev }, last: last(ASTRA, 6 * MINUTE, 120_000) });
+    expectPlan(compacted, LUNA, "jev");
+    assert.deepEqual(compacted.level, { scope: "personal", tier: "low", asked: "low", start: "low", source: "jev", steppedUp: false, returnedToFirst: false, jev }, "with compaction enabled a too-small model is compacted for");
+    // With compaction disabled, the run climbs from low to the first tier that fits.
+    const fit = planV2(PLAIN, { rc: v2(small, { cooldowns }), level: { jev }, last: last(ASTRA, 6 * MINUTE, 120_000), compaction: DISABLED });
     expectPlan(fit, TERRA, "step-up");
     assert.deepEqual(fit.level, { scope: "personal", tier: "medium", asked: "low", start: "low", source: "jev", steppedUp: true, returnedToFirst: false, jev });
     // The floor stays a minimum: a risky run climbs again from high, not from the tier it asked for.
@@ -662,7 +626,7 @@ describe("v2 levels", () => {
     assert.deepEqual(floored.level, { scope: "personal", tier: "high", asked: "low", start: "high", source: "floor", trigger: "destructive-git", steppedUp: false, returnedToFirst: false, jev });
   });
 
-  test("a held run whose own tier and every tier above it have no available candidate is still refused", () => {
+  test("a run whose own tier and every tier above it have no available candidate is refused, whatever tier answered last", () => {
     const catalog = v2Catalog();
     for (const ref of [TERRA, DEEPSEEK, SOL, GLM_CLOUD, ASTRA, KIMI]) catalog.unavailable.add(ref);
     const result = planV2(FRANCE, { rc: v2(catalog), last: last(ASTRA, MINUTE) });
@@ -673,25 +637,30 @@ describe("v2 levels", () => {
     assert.deepEqual(result.decision.attempts.map((attempt) => attempt.role), ["medium", "high", "super"]);
   });
 
-  test("a tagged run moves up a tier when the conversation would not fit its tier's first available model", () => {
+  test("with compaction disabled, a tagged run moves up a tier when the conversation would not fit its tier's first available model", () => {
     // Low's only available candidate has a 32,000-token window, and the conversation holds 100,000.
     const catalog = v2Catalog().add(codex(LUNA, { contextWindow: 32_000 }));
     catalog.unavailable.add(NYX_QWEN).add(HERA_QWEN);
-    const result = planV2(PLAIN, { rc: v2(catalog), level: { tag: "low" }, last: last(SOL, MINUTE, 100_000) });
+    const compacted = planV2(PLAIN, { rc: v2(catalog), level: { tag: "low" }, last: last(SOL, MINUTE, 100_000) });
+    expectPlan(compacted, LUNA, "tag");
+    assert.equal(compacted.level?.steppedUp, false, "with compaction enabled a too-small model is compacted for");
+    const result = planV2(PLAIN, { rc: v2(catalog), level: { tag: "low" }, last: last(SOL, MINUTE, 100_000), compaction: DISABLED });
     expectPlan(result, TERRA, "step-up");
     assert.equal(result.role, "medium");
     assert.deepEqual(result.level, { scope: "personal", tier: "medium", asked: "low", start: "low", source: "tag", steppedUp: true, returnedToFirst: false });
   });
 
-  test("a run moves up past a tier with no available candidate, and so does an idle downgrade", () => {
+  test("a run moves up past a tier with no available candidate, whatever tier answered last", () => {
     const catalog = v2Catalog();
     for (const ref of [LUNA, NYX_QWEN, HERA_QWEN]) catalog.unavailable.add(ref);
     const jev = answer("low");
     const result = planV2(PLAIN, { rc: v2(catalog), level: { jev } });
     expectPlan(result, TERRA, "step-up");
     assert.deepEqual(result.level, { scope: "personal", tier: "medium", asked: "low", start: "low", source: "jev", steppedUp: true, returnedToFirst: false, jev });
-    // Version 1 refuses a downgrade to a role that cannot take the run; a tier passes it up instead.
-    expectPlan(planV2(PLAIN, { rc: v2(catalog), level: { jev }, last: last(ASTRA, 6 * MINUTE) }), TERRA, "step-up");
+    // Version 1 refuses a run whose role cannot take it; a tier passes it up instead.
+    const after = planV2(PLAIN, { rc: v2(catalog), level: { jev }, last: last(ASTRA, 10_000) });
+    expectPlan(after, TERRA, "step-up");
+    assert.equal(after.level?.start, "low", "nothing holds a session by time");
   });
 
   test("a level returns to its first candidate as soon as that is available again", () => {
@@ -721,7 +690,7 @@ describe("v2 levels", () => {
     assert.deepEqual([result.role, result.level], ["work-medium", { scope: "work", tier: "medium", asked: "medium", start: "medium", source: "keyword", steppedUp: false, returnedToFirst: false }]);
   });
 
-  test("the start tier is where the upward pick began, after the floor and the holds", () => {
+  test("the start tier is where the upward pick began, after the floor", () => {
     // High has no available candidate, so a run that starts there goes on to super.
     const catalog = v2Catalog();
     catalog.unavailable.add(SOL).add(GLM_CLOUD);
@@ -729,25 +698,28 @@ describe("v2 levels", () => {
     const floored = planV2(FORCE_PUSH, { rc: v2(catalog), level: { jev } });
     expectPlan(floored, ASTRA, "step-up");
     assert.deepEqual(floored.level, { scope: "personal", tier: "super", asked: "low", start: "high", source: "floor", trigger: "destructive-git", steppedUp: true, returnedToFirst: false, jev });
-    // Sol answered a minute ago: the run holds high, sol's tier, and goes on from there.
-    const held = planV2(PLAIN, { rc: v2(catalog), level: { jev }, last: last(SOL, MINUTE) });
-    expectPlan(held, ASTRA, "step-up");
-    assert.deepEqual(held.level, { scope: "personal", tier: "super", asked: "low", start: "high", source: "jev", steppedUp: true, returnedToFirst: false, jev });
+    // Sol answered a minute ago: the run still starts at its own tier, low, which can take it.
+    const after = planV2(PLAIN, { rc: v2(catalog), level: { jev }, last: last(SOL, MINUTE) });
+    expectPlan(after, LUNA, "jev");
+    assert.deepEqual(after.level, { scope: "personal", tier: "low", asked: "low", start: "low", source: "jev", steppedUp: false, returnedToFirst: false, jev }, "nothing holds a session by time");
   });
 
-  test("when no tier's first available candidate fits, the highest tier with an available candidate takes the run", () => {
-    // The conversation holds 300,000 tokens, more than any window, so Pi compacts.
+  test("with compaction disabled, when no tier's first available candidate fits, the highest tier with an available candidate takes the run", () => {
+    // The conversation holds 300,000 tokens, more than any window.
     const huge = last(SOL, MINUTE, 300_000);
-    const result = planV2(PLAIN, { level: { tag: "low" }, last: huge });
+    const compacted = planV2(PLAIN, { level: { tag: "low" }, last: huge });
+    expectPlan(compacted, LUNA, "tag");
+    assert.equal(compacted.level?.tier, "low", "with compaction enabled a too-small model is compacted for");
+    const result = planV2(PLAIN, { level: { tag: "low" }, last: huge, compaction: DISABLED });
     expectPlan(result, ASTRA, "step-up");
     assert.equal(result.role, "super");
     assert.deepEqual(result.level, { scope: "personal", tier: "super", asked: "low", start: "low", source: "tag", steppedUp: true, returnedToFirst: false });
     // With no super candidate available, high is the highest tier that has one.
     const catalog = v2Catalog();
     catalog.unavailable.add(ASTRA).add(KIMI);
-    expectPlan(planV2(PLAIN, { rc: v2(catalog), level: { tag: "low" }, last: huge }), SOL, "step-up");
+    expectPlan(planV2(PLAIN, { rc: v2(catalog), level: { tag: "low" }, last: huge, compaction: DISABLED }), SOL, "step-up");
     // A run that starts at the highest such tier keeps its own code, and has not stepped up.
-    const top = planV2(PLAIN, { level: { tag: "super" }, last: huge });
+    const top = planV2(PLAIN, { level: { tag: "super" }, last: huge, compaction: DISABLED });
     expectPlan(top, ASTRA, "tag");
     assert.equal(top.level?.steppedUp, false);
   });
@@ -801,7 +773,7 @@ describe("v2 levels", () => {
   test("a version 1 plan carries no level, and a level input changes nothing in it", () => {
     const planned = plan(PLANNING);
     assert.deepEqual(Object.keys(planned), ["virtualId", "localOnly", "signal", "reason", "role", "code", "decision"]);
-    assert.deepEqual(planUserTurn({ rc: heraContext(), text: PLANNING, last: undefined, now: NOW, reserve: 16_384, level: { tag: "low", jev: answer("low") } }), planned);
+    assert.deepEqual(planUserTurn({ rc: heraContext(), text: PLANNING, last: undefined, now: NOW, compaction: ENABLED, level: { tag: "low", jev: answer("low") } }), planned);
   });
 
   test("200 random runs in each scope pick only that scope's accounts, each the first candidate of its role that resolves", (t) => {
@@ -842,23 +814,23 @@ describe("v2 levels", () => {
         cooled.push(ref);
       };
       for (const ref of REFS) if (chance(0.1)) cool(ref);
-      // The latest responses come from both accounts and span the idle window, so that the hold
-      // rules come up, and a third of them cool after answering, as a usage limit does.
+      // The latest responses come from both accounts, at any age and of any size, and a third of
+      // them cool after answering, as a usage limit does.
       const latest = chance(0.85)
         ? { ref: one(chance(0.5) ? WORK_REFS : REFS), at: NOW - Math.floor(rand() * 10 * MINUTE), ...(chance(0.6) ? { usage: usage(Math.floor(rand() * 300_000)) } : {}) }
         : undefined;
       if (latest !== undefined && chance(0.35)) cool(latest.ref);
-      const roster: Roster = { ...V2, stickyIdleMinutes: Math.floor(rand() * 10) };
-      const shown = JSON.stringify({ text, level, last: latest, unavailable: [...catalog.unavailable], cooled, stickyIdleMinutes: roster.stickyIdleMinutes });
+      const compaction = chance(0.5) ? ENABLED : DISABLED;
+      const shown = JSON.stringify({ text, level, last: latest, unavailable: [...catalog.unavailable], cooled, compaction: compaction.enabled });
       for (const scope of SCOPES) {
         const section = V2.scopes[scope];
         assert.ok(section !== undefined);
-        const rc = v2(catalog, { roster, scope, cooldowns });
-        const result = planUserTurn({ rc, text, last: latest, now: NOW, reserve: 16_384, level });
+        const rc = v2(catalog, { scope, cooldowns });
+        const result = planUserTurn({ rc, text, last: latest, now: NOW, compaction, level });
         const where = `seed ${seed} (case ${index} of ${CASES}, ${scope} scope): ${shown}`;
         const planned = result.level;
         assert.ok(planned !== undefined && planned.scope === scope, where);
-        // The run's own tier, which a hold may raise but nothing lowers: the one it asked for, or the floor.
+        // The run's own tier, which nothing lowers: the one it asked for, or the floor.
         const own: Tier = planned.source === "floor" ? "high" : planned.asked;
         const available = (tier: Tier): boolean => pickInRole(rc, section.levels[tier].role, { fallback: false, code: "t" }).ok;
         const from = (tier: Tier): readonly Tier[] => TIERS.slice(tierRank(tier));
@@ -872,8 +844,18 @@ describe("v2 levels", () => {
           assert.ok(tierRank(planned.tier) >= tierRank(own), `${where}: picked below its own tier, ${own}`);
           const models = rc.roster.roles.find((role) => role.name === choice.role)?.models ?? [];
           assert.equal(models.find((ref) => resolveCandidate(ref, rc).ok), choice.ref, `${where}: not the first candidate of ${choice.role} that resolves`);
-          // A pick too small for the conversation is the highest tier with an available candidate.
-          if (!fits({ last: latest, text, now: NOW, reserve: 16_384 }, choice.model)) {
+          const oversized = !fits({ last: latest, text, now: NOW, reserve: compaction.reserve }, choice.model);
+          if (compaction.enabled) {
+            // Nothing holds, and size removes nothing: the first tier from the run's own that has an available candidate.
+            assert.equal(planned.tier, from(own).find(available), `${where}: nothing holds a session by time, and with compaction enabled a too-small model is compacted for`);
+            if (result.code === "step-up") {
+              const below = from(own).filter((tier) => tierRank(tier) < tierRank(planned.tier));
+              assert.ok(below.every((tier) => !available(tier)), `${where}: with compaction enabled a step-up passes only levels with no available candidate`);
+              count("step-up with compaction");
+            }
+            if (oversized) count("compacted for");
+          } else if (oversized) {
+            // A pick too small for the conversation is the highest tier with an available candidate.
             assert.ok(from(planned.tier).slice(1).every((tier) => !available(tier)), `${where}: a tier above the oversized pick has an available candidate`);
             count("oversized");
           }
@@ -886,11 +868,83 @@ describe("v2 levels", () => {
         count(result.code);
       }
     }
-    // The run is not vacuous: both scopes picked and refused, and every source, hold, step-up and
-    // oversized pick happened.
+    // The run is not vacuous: both scopes picked and refused, and every source, step-up, and
+    // oversized pick with compaction disabled and enabled happened.
     t.diagnostic(JSON.stringify(seen));
-    for (const name of ["personal picked", "personal refused", "work picked", "work refused", "oversized", "step-up", "tag", "jev", "keyword", "floor", "hold:sticky", "hold:fit", "reopen:idle"]) {
+    for (const name of ["personal picked", "personal refused", "work picked", "work refused", "oversized", "compacted for", "step-up", "step-up with compaction", "tag", "jev", "keyword", "floor"]) {
       assert.ok((seen[name] ?? 0) > 0, `no ${name} in ${CASES} cases from seed ${SEED}: ${JSON.stringify(seen)}`);
     }
+  });
+});
+
+describe("nothing holds a session by time", () => {
+  test("version 1: a run that classifies lower moves down at once, whatever the last response's age", () => {
+    for (const ago of [0, 10_000, MINUTE, 5 * MINUTE - 1, 6 * MINUTE]) {
+      expectPlan(plan(TRIVIAL, { last: last(KIMI, ago) }), DEEPSEEK, "signal:trivial");
+      expectPlan(plan(COMPLEX, { last: last(ASTRA, ago) }), SOL, "signal:complex");
+    }
+  });
+
+  test("version 2: a tagged LOW after a SUPER response 10 s ago goes to LOW", () => {
+    const result = planV2(PLAIN, { level: { tag: "low" }, last: last(ASTRA, 10_000) });
+    expectPlan(result, LUNA, "tag");
+    assert.equal(result.level?.tier, "low", "nothing holds a session by time");
+  });
+
+  test("version 2: an untagged run goes to the level Jev gives, lower or higher than the last response's", () => {
+    const low = answer("low");
+    const down = planV2(PLAIN, { level: { jev: low }, last: last(ASTRA, 10_000) });
+    expectPlan(down, LUNA, "jev");
+    assert.deepEqual(down.level, { scope: "personal", tier: "low", asked: "low", start: "low", source: "jev", steppedUp: false, returnedToFirst: false, jev: low }, "nothing holds a session by time");
+    const high = answer("super");
+    const up = planV2(PLAIN, { level: { jev: high }, last: last(LUNA, 10_000) });
+    expectPlan(up, ASTRA, "jev");
+    assert.equal(up.level?.tier, "super", "a run that rates higher moves up at once, as before");
+    // Without an answer the keywords decide, and they too move the session down at once.
+    const keywords = planV2(FRANCE, { last: last(ASTRA, 10_000) });
+    expectPlan(keywords, TERRA, "keyword");
+    assert.equal(keywords.level?.tier, "medium", "nothing holds a session by time");
+  });
+});
+
+describe("a conversation too large for a model", () => {
+  /** Low's model has a 128,000-token window; the conversation holds 250,000. */
+  const smallLow = (): FakeCatalog => v2Catalog().add(codex(LUNA, { contextWindow: 128_000 }));
+  const huge = last(SOL, 10_000, 250_000);
+
+  test("with compaction enabled, holds nothing and steps up nothing: the run goes to its level and Pi compacts", () => {
+    const result = planV2(PLAIN, { rc: v2(smallLow()), level: { tag: "low" }, last: huge, compaction: ENABLED });
+    expectPlan(result, LUNA, "tag");
+    assert.equal(result.role, "low");
+    assert.deepEqual(result.level, { scope: "personal", tier: "low", asked: "low", start: "low", source: "tag", steppedUp: false, returnedToFirst: false }, "with compaction enabled a too-small model is compacted for");
+  });
+
+  test("with compaction disabled, a tagged run steps up to the first level whose model fits", () => {
+    const result = planV2(PLAIN, { rc: v2(smallLow()), level: { tag: "low" }, last: huge, compaction: DISABLED });
+    expectPlan(result, TERRA, "step-up");
+    assert.equal(result.role, "medium");
+    assert.deepEqual(result.level, { scope: "personal", tier: "medium", asked: "low", start: "low", source: "tag", steppedUp: true, returnedToFirst: false });
+  });
+
+  test("with compaction disabled and no level that fits, the highest available level takes it", () => {
+    const catalog = v2Catalog();
+    for (const ref of [LUNA, TERRA, SOL, ASTRA]) catalog.add(codex(ref, { contextWindow: 128_000 }));
+    const result = planV2(PLAIN, { rc: v2(catalog), level: { tag: "low" }, last: huge, compaction: DISABLED });
+    expectPlan(result, ASTRA, "step-up");
+    assert.equal(result.level?.tier, "super");
+    assert.equal(result.level?.steppedUp, true);
+  });
+});
+
+describe("compactionFor", () => {
+  test("unset settings give Pi's defaults", () => {
+    assert.deepEqual(compactionFor(undefined, "auto"), { enabled: true, reserve: 16_384, keepRecent: 20_000 });
+    assert.deepEqual(compactionFor({}, "local"), { enabled: true, reserve: 16_384, keepRecent: 20_000 });
+  });
+
+  test("the selection's override comes first, then the setting", () => {
+    const settings = { compaction: { enabled: false, reserveTokens: 64_000, keepRecentTokens: 5_000, modelOverrides: { "smart-router/auto": { reserveTokens: 8_000 } } } };
+    assert.deepEqual(compactionFor(settings, "auto"), { enabled: false, reserve: 8_000, keepRecent: 5_000 });
+    assert.deepEqual(compactionFor(settings, "local"), { enabled: false, reserve: 64_000, keepRecent: 5_000 });
   });
 });

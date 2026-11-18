@@ -115,10 +115,11 @@ export interface RosterV1 {
   readonly routing: Routing;
   readonly accounts: ReadonlyMap<string, AccountBinding>;
   readonly local?: LocalSection;
-  readonly stickyIdleMinutes: number;
   readonly cooldownMinutes: number;
   /** How long a local model whose server could not be reached is skipped; absent, the default (unreachableMinutesOf). */
   readonly unreachableMinutes?: number;
+  /** The settings the file gives that this version accepts and ignores, by path (ignoredSettings). */
+  readonly ignored: readonly string[];
 }
 
 export interface RosterV2 {
@@ -129,10 +130,11 @@ export interface RosterV2 {
   readonly roles: readonly Role[];
   readonly accounts: ReadonlyMap<string, ScopedBinding>;
   readonly local?: LocalSection;
-  readonly stickyIdleMinutes: number;
   readonly cooldownMinutes: number;
   /** As in version 1. */
   readonly unreachableMinutes?: number;
+  /** As in version 1. */
+  readonly ignored: readonly string[];
   /** The scopes the roster serves, at least one. Each level has a role of its own. */
   readonly scopes: Readonly<Partial<Record<Scope, ScopeSection>>>;
   /** Jev's settings, with every default filled in. Without them, Jev is never asked. */
@@ -364,6 +366,18 @@ function minutes(value: unknown, path: string, range: Range): number {
   return count(value, path, range, "minutes");
 }
 
+/**
+ * The settings the roster gives that are accepted and ignored, by path. stickyIdleMinutes is still
+ * checked against its old range, since every roster in use carries it, and its value is dropped:
+ * nothing holds a session on a model by time.
+ */
+function ignoredSettings(root: Record<string, unknown>): string[] {
+  const given = own(root, "stickyIdleMinutes");
+  if (given === undefined) return [];
+  minutes(given, "stickyIdleMinutes", STICKY_IDLE_MINUTES);
+  return ["stickyIdleMinutes"];
+}
+
 /** The roster's unreachableMinutes, when it gives one: the parsed roster holds the field only then. */
 function unreachableField(root: Record<string, unknown>): { readonly unreachableMinutes?: number } {
   const given = own(root, "unreachableMinutes");
@@ -553,7 +567,7 @@ function validate(value: unknown): Roster {
     routing,
     accounts,
     ...(local === undefined ? {} : { local }),
-    stickyIdleMinutes: minutes(own(root, "stickyIdleMinutes"), "stickyIdleMinutes", STICKY_IDLE_MINUTES),
+    ignored: ignoredSettings(root),
     cooldownMinutes: minutes(own(root, "cooldownMinutes"), "cooldownMinutes", COOLDOWN_MINUTES),
     ...unreachableField(root),
   };
@@ -833,7 +847,7 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
     roles,
     accounts,
     ...(local === undefined ? {} : { local }),
-    stickyIdleMinutes: minutes(own(root, "stickyIdleMinutes"), "stickyIdleMinutes", STICKY_IDLE_MINUTES),
+    ignored: ignoredSettings(root),
     cooldownMinutes: minutes(own(root, "cooldownMinutes"), "cooldownMinutes", COOLDOWN_MINUTES),
     ...unreachableField(root),
     scopes,

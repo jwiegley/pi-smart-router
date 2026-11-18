@@ -9,7 +9,7 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ModelRouteReason } from "@earendil-works/pi-coding-agent";
 
 import { planUserTurn } from "../src/decide.ts";
-import type { Choice } from "../src/decide.ts";
+import type { Choice, CompactionFigures } from "../src/decide.ts";
 import { noBoundedHistory } from "../src/errors.ts";
 import type { ResolveContext } from "../src/resolve.ts";
 import { assertSafe, newRecord, predict, routeOther, routeOwned } from "../src/route.ts";
@@ -42,6 +42,8 @@ const SID = "session-1";
 const PLANNING = "plan the migration to the new store";
 const TRIVIAL = "Format this file";
 const HERA = rosterFixture("roster-hera.json");
+/** The compaction settings a plan made here is given; no plan here has a conversation to fit. */
+const COMPACTION: CompactionFigures = { enabled: true, reserve: 0, keepRecent: 20_000 };
 
 /** A Codex model, as Hera's catalog lists them. */
 const codex = (ref: string): Model<Api> => model(ref, { api: "openai-codex-responses", baseUrl: CHATGPT, contextWindow: 272_000, maxTokens: 128_000 });
@@ -444,24 +446,6 @@ describe("session state", () => {
     assert.equal(record(loaded)?.plan, undefined);
   });
 
-  test("the idle window runs from when the last response arrived, and the fit guard reads Pi's reserve", async (t) => {
-    let clock = NOW;
-    const loaded = await start({ dir: agentDir(t), now: () => clock });
-    // DeepSeek's window is 128,000 tokens; the conversation holds 120,000.
-    await loaded.host.emit("message_end", { message: assistant(ASTRA, { timestamp: NOW - 3_600_000, usage: { ...assistant(ASTRA).usage, totalTokens: 120_000 } }) });
-    await loaded.host.emit("input", { text: TRIVIAL, source: "interactive" });
-    assert.equal(record(loaded)?.plan?.code, "hold:sticky", "inside the idle window, although the request started an hour ago");
-    clock = NOW + 6 * 60_000;
-    await loaded.host.emit("input", { text: TRIVIAL, source: "interactive" });
-    assert.equal(record(loaded)?.plan?.code, "hold:fit", "Pi's default reserve of 16,384 leaves 111,616");
-    loaded.host.settings = { compaction: { reserveTokens: 64_000, modelOverrides: { "smart-router/auto": { reserveTokens: 4_096 } } } };
-    await loaded.host.emit("input", { text: TRIVIAL, source: "interactive" });
-    assert.equal(record(loaded)?.plan?.code, "reopen:idle", "the override for smart-router/auto leaves 123,904");
-    loaded.host.settings = { compaction: { reserveTokens: 64_000 } };
-    await loaded.host.emit("input", { text: TRIVIAL, source: "interactive" });
-    assert.equal(record(loaded)?.plan?.code, "hold:fit");
-  });
-
   test("thinking levels: a role's fixed level, else the selected level", async (t) => {
     const loaded = await start({ dir: agentDir(t), select: "local" });
     const signal = loaded.session.startRun();
@@ -538,7 +522,7 @@ describe("a version 1 roster in work scope, past prepare()'s own refusal", () =>
   test("smart-router/auto refuses on every path that can reach a model, and nothing is sent or recorded", () => {
     const rc = heraContext({ scope: "work" });
     const planned = newRecord();
-    planned.plan = planUserTurn({ rc, text: PLANNING, last: undefined, now: NOW, reserve: 0 });
+    planned.plan = planUserTurn({ rc, text: PLANNING, last: undefined, now: NOW, compaction: COMPACTION });
     assert.ok(planned.plan.decision.ok && planned.plan.decision.choice.ref === ASTRA, "the prompt planned astra");
     const paths: Array<[string, SessionRecord, (record: SessionRecord) => unknown]> = [
       ["the owned run", planned, (record) => routeOwned(input(rc, "user", record))],
@@ -692,7 +676,7 @@ describe("a version 2 run's plan", () => {
     const personal = heraContext({ roster: HERA_V2, catalog: v2Catalog() });
     const work = heraContext({ roster: HERA_V2, catalog: v2Catalog(), scope: "work" });
     const record = newRecord();
-    record.plan = planUserTurn({ rc: personal, text: FRANCE, last: undefined, now: NOW, reserve: 0 });
+    record.plan = planUserTurn({ rc: personal, text: FRANCE, last: undefined, now: NOW, compaction: COMPACTION });
     assert.ok(record.plan.decision.ok && record.plan.decision.choice.ref === TERRA, "the prompt planned terra in personal scope");
     // By the run's first request the session is in work scope: the plan is dropped, and the run sticks there.
     assert.equal(routed(routeOwned(owned(work, record))), WORK_TERRA);
@@ -707,7 +691,7 @@ describe("a version 2 run's plan", () => {
       code: "stick:default",
       foreign: false,
     });
-    record.plan = planUserTurn({ rc: work, text: FRANCE, last: undefined, now: NOW, reserve: 0 });
+    record.plan = planUserTurn({ rc: work, text: FRANCE, last: undefined, now: NOW, compaction: COMPACTION });
     assert.equal(routed(routeOwned(owned(work, record))), WORK_TERRA);
     assert.deepEqual([record.history.at(-1)?.code, record.history.at(-1)?.level], ["keyword", { scope: "work", ...KEYWORD_MEDIUM }]);
   });
@@ -716,14 +700,14 @@ describe("a version 2 run's plan", () => {
     const v2 = heraContext({ roster: HERA_V2, catalog: v2Catalog() });
     const v1 = heraContext({ catalog: v2Catalog() });
     const record = newRecord();
-    record.plan = planUserTurn({ rc: v2, text: FRANCE, last: undefined, now: NOW, reserve: 0 });
+    record.plan = planUserTurn({ rc: v2, text: FRANCE, last: undefined, now: NOW, compaction: COMPACTION });
     assert.ok(record.plan.level !== undefined, "a version 2 plan carries its level");
     // The roster became version 1 before the run's first request: the plan is dropped, and the run sticks.
     assert.equal(routed(routeOwned(owned(v1, record))), DEEPSEEK);
     assert.deepEqual([record.history.at(-1)?.role, record.history.at(-1)?.code], ["worker", "stick:default"]);
     // And the other way: a version 1 plan, which has no level, is dropped under a version 2 roster.
     const other = newRecord();
-    other.plan = planUserTurn({ rc: v1, text: FRANCE, last: undefined, now: NOW, reserve: 0 });
+    other.plan = planUserTurn({ rc: v1, text: FRANCE, last: undefined, now: NOW, compaction: COMPACTION });
     assert.equal(other.plan.level, undefined);
     assert.equal(routed(routeOwned(owned(v2, other))), TERRA);
     assert.deepEqual([other.history.at(-1)?.role, other.history.at(-1)?.code], ["medium", "stick:default"]);
@@ -732,7 +716,7 @@ describe("a version 2 run's plan", () => {
   test("a local-only plan, which has no level, is used as before", () => {
     const local = heraContext({ roster: HERA_V2, virtualId: "local" });
     const record = newRecord();
-    record.plan = planUserTurn({ rc: local, text: FRANCE, last: undefined, now: NOW, reserve: 0 });
+    record.plan = planUserTurn({ rc: local, text: FRANCE, last: undefined, now: NOW, compaction: COMPACTION });
     assert.equal(record.plan.level, undefined);
     assert.equal(routed(routeOwned(owned(local, record))), GLM);
     assert.deepEqual([record.history.at(-1)?.code, "level" in (record.history.at(-1) ?? {})], ["local", false]);

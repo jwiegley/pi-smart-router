@@ -137,6 +137,18 @@ function switchingLines(roster: RosterV2): string[] {
   ];
 }
 
+/** Why the settings a roster may give and this version ignores are ignored, by path. */
+const IGNORED_BECAUSE: Readonly<Record<string, string>> = {
+  stickyIdleMinutes: "nothing holds a session on a model by time.",
+};
+
+/** One line for each setting the roster gives that is accepted and ignored. */
+const ignoredLines = (roster: Roster): string[] =>
+  roster.ignored.map((path) => {
+    const because = IGNORED_BECAUSE[path];
+    return because === undefined ? `${path} is accepted and ignored.` : `${path} is accepted and ignored: ${because}`;
+  });
+
 /**
  * What a valid roster routes to, for each selection and scope, in the order it tries, and where
  * Jev's prompts come from. `uses`: a version 2 roster's prompts as they are in effect.
@@ -151,6 +163,7 @@ export function describeRouting(roster: Roster, uses: readonly PromptUse[] = [])
     ...accountLines(roster),
     `A usage-limit or authentication error takes a cloud model out of routing for ${roster.cooldownMinutes} minutes, and with it every model of the same subscription account; a local-role model is never taken out.`,
     `A local model whose server cannot be reached is passed over for ${unreachableMinutesOf(roster)} minutes while another model in the order above can take the request.`,
+    ...ignoredLines(roster),
     "This reads the roster alone. Whether each model is in Pi's catalog on this host, available and has credentials is /smart-router status's to say.",
   ];
 }

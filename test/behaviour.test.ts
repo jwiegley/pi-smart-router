@@ -577,8 +577,8 @@ test("22. before_provider_headers and before_provider_request resolve, through t
   const calls = trace.flatMap((entry, index) => (entry.kind === "call" ? [{ index, call: entry.call }] : []));
   assert.deepEqual(
     calls.map(({ call }) => call.ref),
-    ["codex-like/m", "codex-like/m", "local-a/m"],
-    "the plain prompt held on the architect inside the idle window",
+    ["codex-like/m", "cloud-b/m", "local-a/m"],
+    "nothing holds a session by time: the plain prompt goes to its own role, the worker",
   );
   for (const { index, call } of calls) {
     assert.equal(ref(headersBefore(trace, index)), call.ref, `headers before the request to ${call.ref}`);
@@ -916,12 +916,12 @@ function rosterV2(options: { readonly directories?: readonly string[]; readonly 
 }
 
 /** A world for the level scenarios: their fleet, Multi-Pass's labels, a version 2 roster, and new sessions on smart-router/auto. */
-function levelsWorld(t: TestContext, options: { readonly roster?: RosterJsonV2; readonly fleet?: readonly FauxSpec[] } = {}): World {
+function levelsWorld(t: TestContext, options: { readonly roster?: RosterJsonV2; readonly fleet?: readonly FauxSpec[]; readonly compaction?: (typeof BASE_SETTINGS)["compaction"] } = {}): World {
   return new World(t, {
     roster: options.roster ?? rosterV2(),
     multiPass: LABELS,
     fleet: options.fleet ?? levelsFleet(),
-    settings: { ...BASE_SETTINGS, defaultProvider: "smart-router", defaultModel: "auto" },
+    settings: { ...BASE_SETTINGS, ...(options.compaction === undefined ? {} : { compaction: options.compaction }), defaultProvider: "smart-router", defaultModel: "auto" },
   });
 }
 
@@ -969,17 +969,17 @@ async function reached(slow: { readonly started: Promise<void> }, run: Promise<u
   assert.equal(await Promise.race([slow.started.then(() => "started"), ended]), "started", "the run ended before its request reached the model");
 }
 
-test("L1 a tag routes at once past hold:sticky, never reaches the payload, and survives a resend", TIMEOUT, async (t) => {
+test("L1 an untagged run rated lower moves down at once; a tag routes at once, never reaches the payload, and survives a resend", TIMEOUT, async (t) => {
   const world = levelsWorld(t);
   const pi = await world.start({ select: "smart-router/auto" });
   world.jev.answer(JEV.super);
   await pi.prompt("Survey the options for the session store");
   assert.equal(answered(pi), PERSONAL.super);
-  // An untagged message that Jev puts at HIGH stays on SUPER's model while the session is busy.
+  // An untagged message that Jev puts at HIGH goes to HIGH's model, though SUPER's answered a moment ago.
   world.jev.answer(JEV.high);
   await pi.prompt("Check the error paths");
-  assert.equal(answered(pi), PERSONAL.super);
-  assert.equal(await lastDecision(pi), "smart-router/auto user: super → openai-codex-2/gpt-6-astra (hold:sticky, triage:no_fast_path) [personal SUPER (jev HIGH 80%)]");
+  assert.equal(answered(pi), PERSONAL.high, "nothing holds a session by time");
+  assert.equal(await lastDecision(pi), "smart-router/auto user: high → openai-codex-2/gpt-6.1-sol (jev, triage:no_fast_path) [personal HIGH (jev 80%)]", "nothing holds a session by time");
 
   // A tagged message goes to HIGH at once. Jev's opinion of it is asked, and the run does not wait for it.
   world.jev.hang();
@@ -1013,19 +1013,72 @@ test("L1 a tag routes at once past hold:sticky, never reaches the payload, and s
   assert.deepEqual(called(world.counts()), { "openai-codex-2": 4 });
 });
 
-test("L2 a tagged level steps up, with a notice, when the conversation does not fit", TIMEOUT, async (t) => {
-  // LOW's model declares a 32k window, and the conversation already holds 40,000 tokens.
-  const world = levelsWorld(t, { fleet: levelsFleet({ [PERSONAL.low]: { contextWindow: 32_000 } }) });
+/** A session on smart-router/auto whose conversation, 40,000 tokens, came last from MEDIUM's model; LOW's declares a 32k window. */
+async function oversized(world: World): Promise<Pi> {
   const codex = world.faux("openai-codex-2");
   const sessionManager = history(world, "smart-router/auto", [["Load the fixtures", response(codex, { id: "gpt-6.1-terra", tokens: 40_000, timestamp: Date.now() - 1_000 })]]);
-  const pi = await world.start({ sessionManager });
+  return world.start({ sessionManager });
+}
+
+/** The requests of a trace, in order, as [model, summary or run]. */
+const requestsOf = (trace: World["trace"]): Array<[string, string]> =>
+  trace.flatMap((entry) => (entry.kind === "call" ? [[entry.call.ref, entry.call.summary ? "summary" : "run"] as [string, string]] : []));
+
+test("L2 a tagged level too small for the conversation is compacted for, not stepped past", TIMEOUT, async (t) => {
+  const world = levelsWorld(t, { fleet: levelsFleet({ [PERSONAL.low]: { contextWindow: 32_000 } }) });
+  const pi = await oversized(world);
+  const mark = world.trace.length;
   await pi.prompt("Rename the helper #low");
+  // Pi checks the request against the model it is routed to, finds the conversation over LUNA's
+  // threshold, and compacts first: the summary goes direct to the latest responder, MEDIUM's model.
+  assert.deepEqual(
+    requestsOf(traceFrom(world, mark)),
+    [
+      [PERSONAL.medium, "summary"],
+      [PERSONAL.low, "run"],
+    ],
+    "with compaction enabled a too-small model is compacted for: a summary before the run's first request, which LOW's model takes",
+  );
+  assert.deepEqual(
+    pi.eventsOf("compaction_start").map((event) => event.reason),
+    ["threshold"],
+    "with compaction enabled a too-small model is compacted for",
+  );
+  assert.equal(answered(pi), PERSONAL.low, "with compaction enabled a too-small model is compacted for: the tagged level's model answered");
+  assert.deepEqual(pi.ui.saw(/can take this run/), [], "with compaction enabled a too-small model is compacted for: no step-up, so no notice");
+  assert.equal(pi.ui.status(LEVEL_KEY), "personal LOW → gpt-6-luna (tag)");
+  // The run's request was routed first, to LOW; Pi then found it over LUNA's threshold, and the
+  // summary went direct to the model that answered last.
+  await pi.command("history 2");
+  assert.deepEqual(
+    notice(pi, /routing decisions/)
+      .split("\n")
+      .slice(1)
+      .map((line) => line.replace(/^ {2}\d\d:\d\d:\d\d /, "")),
+    [
+      "smart-router/auto user: low → openai-codex-2/gpt-6-luna (tag, triage:keyword_economical) [personal LOW (tag)]",
+      "smart-router/auto direct: medium → openai-codex-2/gpt-6.1-terra (direct:previous)",
+    ],
+    "with compaction enabled a too-small model is compacted for",
+  );
+  // A record names a step-up only when there was one.
+  const record = { source: "tag", tag: "low", asked: "low", tier: "low", steppedUp: undefined, ref: PERSONAL.low };
+  assert.deepEqual(fields(runRecords(pi).at(-1), record), record, "with compaction enabled a too-small model is compacted for");
+});
+
+test("L2b with compaction disabled, a tagged level steps up, with a notice, when the conversation does not fit", TIMEOUT, async (t) => {
+  const world = levelsWorld(t, { fleet: levelsFleet({ [PERSONAL.low]: { contextWindow: 32_000 } }), compaction: { enabled: false } });
+  const pi = await oversized(world);
+  const mark = world.trace.length;
+  await pi.prompt("Rename the helper #low");
+  assert.deepEqual(requestsOf(traceFrom(world, mark)), [[PERSONAL.medium, "run"]], "with compaction disabled, MEDIUM's model takes the run and nothing is summarized");
   assert.equal(answered(pi), PERSONAL.medium);
   assert.equal(notice(pi, /can take this run/), "pi-smart-router: no LOW model can take this run, so it goes to MEDIUM (gpt-6.1-terra).");
   assert.equal(pi.ui.status(LEVEL_KEY), "personal MEDIUM → gpt-6.1-terra (tag)");
   assert.equal(await lastDecision(pi), "smart-router/auto user: medium → openai-codex-2/gpt-6.1-terra (step-up, triage:keyword_economical) [personal MEDIUM (tag)]");
   const record = { source: "tag", tag: "low", asked: "low", tier: "medium", steppedUp: true, ref: PERSONAL.medium };
   assert.deepEqual(fields(runRecords(pi).at(-1), record), record);
+  assert.deepEqual(pi.eventsOf("compaction_start"), [], "compaction is disabled");
   assert.deepEqual(world.refCounts(), { [PERSONAL.medium]: 1 }, "LOW's model received nothing, and nothing was compacted");
 });
 
@@ -1033,7 +1086,7 @@ test("L3 untagged runs follow Jev; a close call goes higher; failure, refusal an
   const world = levelsWorld(t);
   const pi = await world.start({ select: "smart-router/auto" });
   const footer = (): string | undefined => pi.ui.status(LEVEL_KEY);
-  // Each run's tier is at least the one before it, so no hold applies.
+  // Each run's tier is at least the one before it.
   world.jev.fail("System One API error (500): upstream connect error");
   await pi.prompt(PROMPTS.trivial);
   assert.equal(answered(pi), PERSONAL.low);
@@ -1451,7 +1504,7 @@ test("L7 one smart-router.level record per run; /smart-router was appends a corr
 
   // Run D has a tool turn. Its continuation hits a usage limit that Pi retries, and the retry goes
   // to the level's next model, which answers: still one record, naming that model. Jev says SUPER,
-  // the level of run C, the latest response, so no hold moves it.
+  // the level of run C, the latest response.
   world.jev.answer(JEV.super);
   const codex = world.faux("openai-codex-2");
   codex.respond(
@@ -1512,7 +1565,7 @@ test("L9 a version 1 roster keeps its history and status text byte-identical, bu
       "pi-smart-router: the last 3 routing decisions, oldest first:",
       "  <time> smart-router/auto user: engineer → cloud-a/m (signal:complex, triage:keyword_frontier)",
       "  <time> smart-router/auto user: architect → codex-like/m (signal:planning, planning:plan-words)",
-      "  <time> smart-router/auto user: architect → codex-like/m (hold:sticky, triage:no_fast_path)",
+      "  <time> smart-router/auto user: worker → cloud-b/m (signal:default, triage:no_fast_path)",
     ].join("\n"),
   );
   await pi.command("status");
@@ -1529,7 +1582,7 @@ test("L9 a version 1 roster keeps its history and status text byte-identical, bu
       "  engineer: cloud-a/m ok",
       "  architect: codex-like/m ok",
       "Routing: default worker, trivial worker, complex engineer, planning architect; fallback engineer → coder",
-      "Last decision: <time> smart-router/auto user: architect → codex-like/m (hold:sticky, triage:no_fast_path)",
+      "Last decision: <time> smart-router/auto user: worker → cloud-b/m (signal:default, triage:no_fast_path)",
       "Besides the models smart-router/auto and smart-router/local route to, these can send data off this machine: a model picked by hand with /model, which is sent as it is; Pi's own /share, /export and /bug.",
     ].join("\n"),
   );

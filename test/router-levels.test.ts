@@ -1780,7 +1780,7 @@ describe("the footer", () => {
     assert.equal(footer(loaded), "personal HIGH → gpt-6.1-sol (jev 40%)");
   });
 
-  test("after a step-up or a hold, names the tier Jev chose with its probability, in history too", async (t) => {
+  test("after a step-up, names the tier Jev chose with its probability, in history too; after a higher run, a lower answer moves down", async (t) => {
     const runtime = heraRuntime();
     for (const ref of [LUNA, NYX_QWEN, HERA_QWEN]) runtime.catalog.unavailable.add(ref);
     const stepped = await hera(t, { id: "stepped", runtime });
@@ -1790,14 +1790,14 @@ describe("the footer", () => {
     await finish(stepped, firstRequest(stepped));
     await stepped.host.command("smart-router", "history");
     assert.match(lastNotice(stepped)?.message ?? "", / \[personal MEDIUM \(jev LOW 80%\)\]$/);
-    const held = await hera(t, { id: "held" });
-    held.runtime.answer = async () => jevAnswer(HIGH);
-    await say(held, "go ahead");
-    await finish(held, firstRequest(held));
-    // The latest response, from HIGH a moment ago, holds the session at HIGH.
-    held.runtime.answer = async () => jevAnswer(LOW);
-    await say(held, "and the docs");
-    assert.equal(footer(held), "personal HIGH → gpt-6.1-sol (jev LOW 80%)");
+    const down = await hera(t, { id: "down" });
+    down.runtime.answer = async () => jevAnswer(HIGH);
+    await say(down, "go ahead");
+    await finish(down, firstRequest(down));
+    // The latest response came from HIGH a moment ago; the run goes to LOW all the same.
+    down.runtime.answer = async () => jevAnswer(LOW);
+    await say(down, "and the docs");
+    assert.equal(footer(down), "personal LOW → gpt-6-luna (jev 80%)", "nothing holds a session by time");
   });
 
   test("names the keywords alone without a classifier, the floor that raised a run, and work scope in a work session", async (t) => {

@@ -86,7 +86,7 @@ describe("John's version 2 rosters", () => {
         ["openai-codex-3", { kind: "multi-pass", label: "Positron work", scope: "work" }],
       ]),
       local: { role: "local", providers: ["omlx-hera", "nyx"], hosts: ["hera.lan", "nyx.lan"] },
-      stickyIdleMinutes: 5,
+      ignored: [],
       cooldownMinutes: 30,
       scopes: {
         personal: { levels: levels(""), directories: [] },
@@ -792,6 +792,29 @@ describe("the classifier", () => {
         r.classifier = "openrouter/typesafe/jev-1.14";
       }),
       "classifier: must be an object",
+    );
+  });
+});
+
+describe("stickyIdleMinutes in version 2", () => {
+  test("is accepted, is not on the roster, and is recorded as ignored", () => {
+    const roster = valid(edited((r) => {
+      r.stickyIdleMinutes = 5;
+    }));
+    assert.equal("stickyIdleMinutes" in roster, false, "nothing holds a session by time");
+    assert.deepEqual(roster.ignored, ["stickyIdleMinutes"]);
+  });
+
+  test("a roster without it ignores nothing", () => {
+    assert.deepEqual(valid(HERA).ignored, []);
+  });
+
+  test("is still refused out of its range, with the same text", () => {
+    invalid(
+      edited((r) => {
+        r.stickyIdleMinutes = -1;
+      }),
+      "stickyIdleMinutes: must be a whole number of minutes from 0 to 1440",
     );
   });
 });

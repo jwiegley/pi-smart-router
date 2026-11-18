@@ -21,9 +21,8 @@ answered, and Pi's footer shows it.
 
 - **`smart-router/auto`** routes by what you typed. With a version 1 roster, a planning prompt goes
   to the planning role, a complex one to the complex role, a trivial one to the trivial role,
-  anything else to the default role. A session stays on its model through a stretch of work, moves
-  up at once when a run needs a stronger role, and moves back down only after it has been idle for
-  a while. When a model cannot take a request (not in the catalog, no credentials, cooling down
+  anything else to the default role, up or down, whichever model answered last: nothing holds a
+  session on a model by time. When a model cannot take a request (not in the catalog, no credentials, cooling down
   after a usage limit), the next model of its role takes it, and then the role's declared
   fallback, one hop and no further. Without a declared fallback the request is refused.
 - **Levels and scopes.** With a version 2 roster, `smart-router/auto` sends each run to one of four
@@ -63,9 +62,9 @@ only files under Pi's agent directory: the roster, Multi-Pass's subscription lab
 roster binds a Multi-Pass account, and the prompt files the roster names in `smart-router/`
 ([Jev's prompts](#jevs-prompts)). It reads no file relative to the working directory or a
 project; it only compares the working directory, as text, with the roster's work directories. The
-one project-influenced value it uses is the compaction reserve in Pi's settings, which Pi merges
-with a project's `.pi/settings.json`; it only affects whether stickiness may move a run down to a
-smaller role. It has no runtime dependency and no native code; Pi supplies
+one project-influenced value it uses is the compaction settings in Pi's settings, which Pi merges
+with a project's `.pi/settings.json`; they only affect, with compaction disabled, whether a
+version 2 run passes a level too small for the conversation. It has no runtime dependency and no native code; Pi supplies
 `@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai`.
 
 It needs jwiegley/pi 1.5.0 or later, whose bounded session reads let it look at a session without
@@ -194,15 +193,13 @@ is no `exclude` line, and the native login is bound with `"native": "personal"`.
   sol cannot take a request, thinker when astra cannot, as when the ChatGPT subscription is
   unavailable or cooling down after a usage limit. sol and astra share one ChatGPT account, so the
   fallbacks move to a different quota. A fallback sends the conversation to another vendor; delete
-  the `fallback` object to be refused instead. After a fallback, stickiness can keep the session on
-  coder or thinker for default and trivial runs until it has been idle for `stickyIdleMinutes`,
-  because both rank above worker; the next complex or planning run tries sol or astra again.
+  the `fallback` object to be refused instead. After a fallback, the next run goes to the role its
+  prompt classifies as: a default or trivial run to worker, and a complex or planning run tries sol
+  or astra again.
 
-The order of `roles` is the ladder stickiness uses, cheapest or weakest first. A session that
-reached astra on a planning run stays there for complex follow-ups until it has been idle for 5
-minutes, because engineer ranks below architect. `"stickyIdleMinutes": 0` instead plans on astra
-and implements on sol whenever a run classifies as complex. coder ranks just below engineer, so a
-session that fell back to coder returns to sol at its next complex run once sol is available.
+The order of `roles` is the ladder, cheapest or weakest first. Every run plans on the role its
+prompt classifies as, whichever role answered last: a session plans on astra and implements on sol
+whenever a run classifies as complex, and a trivial follow-up goes to worker at once.
 
 ### Fields
 
@@ -217,7 +214,7 @@ session that fell back to coder returns to sol at its next complex run once sol 
 | `routing.fallback` | no | `{ "role": "role" }`: one hop, never to itself. Without an entry, a role that cannot take a request refuses it. |
 | `accounts` | for subscription providers | A binding for every subscription provider a role uses. See below. |
 | `local` | no | `role` (the local role), `providers` (every provider of the local role, and nothing qualifies as local unless it is listed) and `hosts` (base-URL host names). Without it, `smart-router/local` always refuses. |
-| `stickyIdleMinutes` | no | 0 to 1440, default 5. How long a session must be idle before a run may move down the ladder. |
+| `stickyIdleMinutes` | no | Accepted and ignored: nothing holds a session on a model by time. When given it must still be 0 to 1440, and `/smart-router check` says it is ignored. |
 | `cooldownMinutes` | no | 1 to 1440, default 30. How long a usage-limit or authentication error takes a model out of routing, and with it every model of the same subscription account. |
 | `unreachableMinutes` | no | 1 to 60, default 5. How long a local model whose server could not be reached is passed over while another model can take the request. |
 
@@ -430,9 +427,9 @@ How the chain works:
   in turn. A model that cannot take the request is passed over by the same checks as any other.
 - **One chain serves every level of its scope.** A run keeps its level while any chain model can
   take it: the level takes the chain before it passes the run up, so a LOW run that falls back is
-  still recorded as LOW, with `fallback` in its record. Only when the chain's models are too small
-  for the conversation, or none can take the request, does the run step up
-  ([Levels](#levels)).
+  still recorded as LOW, with `fallback` in its record. Only when none of the chain's models can
+  take the request, or, with Pi's compaction disabled, they are too small for the conversation,
+  does the run step up ([Levels](#levels)).
 - **The first request that hits a usage limit fails.** Pi retries some errors and asks the router
   where the retry goes; it does not retry Codex's "You have hit your ChatGPT usage limit (plus
   plan). Try again in ~N min.", nor a spent credit. So that one run ends unanswered. The router
@@ -455,9 +452,6 @@ How the chain works:
   without a prompt, such as a goal continuation or a loop's, in a resumed session too, which
   takes its level from its latest level record. A run under way stays on the model it has. A cooled account is tried again when its time is up; if it is still out of tokens, that one
   request fails and the account cools again.
-- **The session keeps its level meanwhile.** A chain model stands for the level the session held:
-  a session at SUPER whose account ran out stays at SUPER for a trivial follow-up inside the
-  sticky window, as it would on astra, and is at SUPER when astra returns.
 - **A retry never goes back.** When a chain model itself fails with a limit, or a local one cannot
   be reached, the retry takes another model of the same role, then the roles after it in the chain,
   never an earlier role and never the level's own, and no model twice in one run.
@@ -674,10 +668,9 @@ These are version 1's rules. Version 2 keeps them, comparing levels rather than 
   - a message that a later extension rewrites into the text of a message still held goes unplanned,
     but its run makes the router forget the held one, whose own run can then take the plan of the
     one idle message counted.
-- **Stickiness.** A run that classifies higher than the latest response's role moves up at once. One
-  that classifies lower stays until the session has been idle for `stickyIdleMinutes`, and longer
-  still while the conversation would not fit the lower role's context window less Pi's compaction
-  reserve.
+- **No hold.** A run goes to the role its prompt classifies as at once, higher or lower than the
+  latest response's: nothing holds a session on a model by time. A conversation too large for the
+  role's model is Pi's to compact, when its compaction is enabled.
 - **Cooldowns.** A physical model's usage-limit, quota, billing or authentication error (401, 403,
   `insufficient_quota`, `ResourceExhausted` and the like) takes it out of routing for
   `cooldownMinutes`, so the next run of any kind moves to the role's next model or its fallback. A
@@ -794,8 +787,7 @@ The level is decided when the prompt arrives, by the first rule that applies:
 
 1. **A tag:** the message's last whitespace-separated word, in any case, when it is `#super`,
    `#high`, `#medium` or `#low`, or `#s`, `#h`, `#m` or `#l`. The router removes it before any model
-   sees the text. A tag always wins, at once, up or down: neither a hold nor the floor applies to
-   it. `#high.`, `#hashtag` and `fix issue #12` are not tags.
+   sees the text. A tag always wins, at once, up or down: the floor does not apply to it. `#high.`, `#hashtag` and `fix issue #12` are not tags.
 2. **Jev**, when the roster has a classifier: its most probable level, or the higher of its two
    most probable when they are within `closeCall` of each other. See [Jev](#jev).
 3. **The keywords**, when there is no classifier or Jev fails: the keyword classifier's planning
@@ -806,25 +798,26 @@ says: force push, `git reset --hard`, `rm -rf`, `git rm`, unstage, "clean up the
 cleanup", and "accidentally added", "mistakenly added" or "accidental add", with file names and
 paths blanked out first. A tagged run is never raised.
 
-Then the level goes through version 1's rules, comparing levels:
+Then the level picks its model:
 
-- **Holds.** An untagged run below the level of the model that answered last stays at that level
-  until the session has been idle for `stickyIdleMinutes`, and longer while the conversation would
-  not fit the lower level's first available model. A hold is a preference, not a floor: when the
-  held level and every level above it have no available model, the run climbs from its own level.
-  While a fallback chain's model is answering, it stands for the level the session's last planned
-  run took.
+- **No hold.** The run goes to its own level, whichever level answered last and however long ago:
+  nothing holds a session on a model by time.
+- **A conversation too large for a model.** With Pi's compaction enabled, as it is by default, size
+  neither holds a session nor passes a run up: the run goes to its level's first available model,
+  and Pi, which checks each request against the model it is routed to, compacts first, the summary
+  written by the model that answered last. With compaction disabled Pi would send the request as
+  it is, so there a level whose first available model is too small passes the run up.
 - **The first available candidate.** Within the level's role, the run takes the first candidate in
   roster order that can take the request, not the model that answered last, so a level returns to
   its first model (Codex, on John's rosters) as soon as that model is available again. That costs
   one prompt-cache miss, which the run's record notes.
 - **Step-ups.** A level with no available model, among its own and then its scope's fallback
-  chain, or whose first available model is too small for the conversation, passes the run up to
-  the next level, and a notice names the level the
-  pick started at: "no LOW model can take this run, so it goes to MEDIUM (gpt-6.1-terra)". When no
-  level's first available model fits, the highest level with one takes the run: as in version 1,
-  fit alone never refuses a run, and Pi compacts. A run is refused only when neither its level nor
-  any above it has an available model.
+  chain, or, with compaction disabled, whose first available model is too small for the
+  conversation, passes the run up to the next level, and a notice names the level the
+  pick started at: "no LOW model can take this run, so it goes to MEDIUM (gpt-6.1-terra)". With
+  compaction disabled, when no level's first available model fits, the highest level with one takes
+  the run: fit alone never refuses a run. A run is refused only when neither its level nor any
+  above it has an available model.
 - **Fallbacks are the scope's chain, if it declares one**
   ([A fallback chain](#a-fallback-chain)). Without one, cooldowns and retries work within a level's
   role: a retry after a usage-limit or authentication error goes to the role's next model, and is
@@ -842,7 +835,7 @@ again.
 **The footer** shows each run's scope, level, model and what decided the level, under a status key
 of its own, `smart-router-level`: `personal HIGH → gpt-6.1-sol (jev 82%)`,
 `work HIGH → gpt-6.1-sol (floor)`, `personal SUPER → gpt-6-astra (tag)`, or
-`personal MEDIUM → gpt-6.1-terra (keywords; jev timeout)`. When a hold or a step-up takes the run to
+`personal MEDIUM → gpt-6.1-terra (keywords; jev timeout)`. When a step-up takes the run to
 another level than Jev's, the note names Jev's: `(jev LOW 80%)`. `/smart-router history` shows the
 same on the run's first request, as `[work HIGH (floor)]`.
 

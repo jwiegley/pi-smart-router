@@ -50,6 +50,29 @@ function withKey(target: Json, key: string, value: unknown): void {
   Object.defineProperty(target, key, { value, enumerable: true, configurable: true, writable: true });
 }
 
+describe("stickyIdleMinutes in version 1", () => {
+  test("is accepted, is not on the roster, and is recorded as ignored", () => {
+    const roster = valid(edited((r) => {
+      r.stickyIdleMinutes = 5;
+    }));
+    assert.equal("stickyIdleMinutes" in roster, false, "nothing holds a session by time");
+    assert.deepEqual(roster.ignored, ["stickyIdleMinutes"]);
+  });
+
+  test("a roster without it ignores nothing", () => {
+    assert.deepEqual(valid(HERA).ignored, []);
+  });
+
+  test("is still refused out of its range, with the same text", () => {
+    invalid(
+      edited((r) => {
+        r.stickyIdleMinutes = -1;
+      }),
+      "stickyIdleMinutes: must be a whole number of minutes from 0 to 1440",
+    );
+  });
+});
+
 describe("John's rosters", () => {
   test("Hera's roster validates as written", () => {
     const roster = valid(HERA);
@@ -80,7 +103,7 @@ describe("John's rosters", () => {
     assert.deepEqual([...roster.accounts], [["openai-codex-2", { kind: "multi-pass", label: "personal" }]]);
     assert.deepEqual(roster.local, { role: "local", providers: ["omlx-hera"], hosts: ["hera.lan"] });
     assert.deepEqual(roster.exclude, [...BUILTIN_EXCLUDES, "openai-codex/*"]);
-    assert.deepEqual([roster.stickyIdleMinutes, roster.cooldownMinutes], [5, 30]);
+    assert.deepEqual([roster.ignored, roster.cooldownMinutes], [[], 30], "Hera's roster gives no stickyIdleMinutes, so nothing is ignored");
   });
 
   test("the other hosts' roster validates, with native openai-codex acknowledged", () => {
@@ -385,8 +408,9 @@ describe("structure", () => {
       edited((r) => {
         r[key] = value;
       });
-    assert.equal(valid(at("stickyIdleMinutes", 0)).stickyIdleMinutes, 0);
-    assert.equal(valid(at("stickyIdleMinutes", 1440)).stickyIdleMinutes, 1440);
+    // stickyIdleMinutes is accepted within its range and ignored: nothing holds a session by time.
+    assert.deepEqual(valid(at("stickyIdleMinutes", 0)).ignored, ["stickyIdleMinutes"]);
+    assert.deepEqual(valid(at("stickyIdleMinutes", 1440)).ignored, ["stickyIdleMinutes"]);
     assert.equal(valid(at("cooldownMinutes", 1)).cooldownMinutes, 1);
     assert.equal(valid(at("cooldownMinutes", 1440)).cooldownMinutes, 1440);
     for (const value of [-1, 1441, 2.5, "5", null]) {

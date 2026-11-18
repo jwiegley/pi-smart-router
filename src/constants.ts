@@ -57,7 +57,8 @@ export const ROSTER_MAX_BYTES = 64 * 1024;
 export const MULTI_PASS_FILE = "multi-pass.json";
 export const MULTI_PASS_MAX_BYTES = 256 * 1024;
 
-/** Roster defaults and their allowed ranges, in whole minutes. */
+// Roster defaults and their allowed ranges, in whole minutes.
+/** stickyIdleMinutes is accepted and ignored, and still refused outside this range; its default is never used. */
 export const STICKY_IDLE_MINUTES = { default: 5, min: 0, max: 1440 } as const;
 export const COOLDOWN_MINUTES = { default: 30, min: 1, max: 1440 } as const;
 /**

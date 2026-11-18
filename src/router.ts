@@ -34,7 +34,7 @@ import { smartRouterCommand } from "./commands.ts";
 import type { CommandHost, Files } from "./commands.ts";
 import { COMMAND, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, LEVEL_ENTRY, LEVEL_KEY, PIN_ENTRY, PROVIDER, SCOPE_ENTRY, VIRTUAL_API, VIRTUAL_IDS } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
-import { pickInRole, planUserTurn, reserveFor } from "./decide.ts";
+import { compactionFor, pickInRole, planUserTurn } from "./decide.ts";
 import type { Decision, LastResponder, LevelInput, Plan } from "./decide.ts";
 import {
   directoryFailedNotice,
@@ -422,10 +422,10 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   };
 
   /**
-   * The level role a resumed session held: that of its latest level record's scope and tier, when
-   * the roster still has that scope's section. A correction is a label for a run, not a run's
-   * level, and seeds nothing; neither does an entry the router did not write. The role counts only
-   * in the scope it belongs to (levelToReturnTo, tierOf), so a record of the other scope is inert.
+   * The level role of a resumed session's latest run: that of its latest level record's scope and
+   * tier, when the roster still has that scope's section. A correction is a label for a run, not a
+   * run's level, and seeds nothing; neither does an entry the router did not write. The role counts
+   * only in the scope it belongs to (levelToReturnTo), so a record of the other scope is inert.
    */
   const seedLevel = (view: BoundedHistory, value: Roster): string | undefined => {
     const record = readLevelRecord(view.getLatestCustomEntry(LEVEL_ENTRY, { scope: "active" }));
@@ -581,8 +581,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     const last = view === undefined ? undefined : step(() => seed(view));
     if (last !== undefined) recordOf(sessionId).last = last;
     // A resumed session's level is its latest run's, so that it returns from the chain as a running one does.
-    const held = view === undefined || state?.kind !== "ok" ? undefined : step(() => seedLevel(view, state.value));
-    if (held !== undefined) recordOf(sessionId).levelRole = held;
+    const level = view === undefined || state?.kind !== "ok" ? undefined : step(() => seedLevel(view, state.value));
+    if (level !== undefined) recordOf(sessionId).levelRole = level;
     const notice = state !== undefined && state.kind !== "ok" ? rosterNotice(state) : view === undefined ? historyNotice() : undefined;
     if (notice !== undefined) notify(ctx, notice, "warning");
     // A prompt file that cannot be used stops no route, so it is said once here; status says it too.
@@ -646,7 +646,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     // The selected model refuses this scope at the run's first request, so there is no run to plan.
     if (refusalFor(id, state.value, ctx) !== undefined) return undefined;
     const rc = contextFor(ctx, state.value, id);
-    const planned = planUserTurn({ rc, text, last: record.last, now: now(), reserve: reserveFor(pi.getSettings(), id), level, held: record.levelRole });
+    const planned = planUserTurn({ rc, text, last: record.last, now: now(), compaction: compactionFor(pi.getSettings(), id), level });
     record.plan = planned;
     record.planDigest = digest;
     record.plannedToken = token;

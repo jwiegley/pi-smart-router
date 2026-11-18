@@ -116,7 +116,7 @@ export interface SessionRecord {
   /**
    * The level role the session's last planned version 2 run took. While the session is on a model
    * of the scope's fallback chain, that model stands for this level: a run that starts without a
-   * prompt picks in it again, and the hold rules compare with it (PlanInput.held).
+   * prompt picks in it again (levelToReturnTo).
    */
   levelRole: string | undefined;
   last: LastResponder | undefined;
