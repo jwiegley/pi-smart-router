@@ -1511,5 +1511,8 @@ npm run check:sandbox           # the same, with the behaviour suite, under sand
 ## License
 
 MIT; see [LICENSE](LICENSE). Copyright (c) 2026 beettlle and contributors, and Copyright (c) 2026
-John Wiegley for the port. The triage engine and entropy check in `src/triage/` are upstream's,
-unchanged but for one import specifier.
+John Wiegley for the port. The triage engine, the entropy check and the low-intensity scoring
+(`tier-features.ts`) in `src/triage/` are upstream's, taken at commit
+`54bee53d908a81260a34b94cbe124bfd61f57df7` (v1.4.0) and changed only in their import specifiers
+(`tier-features.ts` also carries a header and reads its types from `types.ts`).
+`scripts/vendor-drift.mjs` compares them with an upstream clone.
