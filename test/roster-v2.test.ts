@@ -5,6 +5,7 @@ import { isCodexProvider, isWorkCodex } from "../src/accounts.ts";
 import { BUILTIN_EXCLUDES } from "../src/constants.ts";
 import { autoRoles, excludedBy, excludesFor, isWorkBound, liftWorkAlias, parseRoster, SCOPES, scopeSection } from "../src/roster.ts";
 import type { Roster, RosterV2, ScopedBinding } from "../src/roster.ts";
+import { DEFAULT_DEMAND, DEFAULT_SWITCHING, DESIGN_WEIGHTS, SIGNALS } from "../src/settings.ts";
 import { rosterFixture, rosterFixtureV2 } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
 
@@ -97,6 +98,8 @@ describe("John's version 2 rosters", () => {
         closeCall: 0.15,
         context: { messages: 6, messageChars: 1500, totalChars: 12000 },
       },
+      demand: DEFAULT_DEMAND,
+      switching: DEFAULT_SWITCHING,
     });
   });
 
@@ -848,7 +851,7 @@ describe("version 2 keys", () => {
   });
 });
 
-test("version 2 reports its first defect in order: keys, exclude, roles, accounts, scopes, level accounts, the work alias, local, classifier, minutes", () => {
+test("version 2 reports its first defect in order: keys, exclude, roles, accounts, scopes, level accounts, the work alias, local, classifier, demand, switching, minutes", () => {
   const defects: Array<readonly [string, (r: Json) => void]> = [
     ["unexpected: unknown key", (r) => (r.unexpected = 1)],
     ['exclude[0]: "x" is neither a provider/id ref nor a provider/* pattern', (r) => (r.exclude = ["x"])],
@@ -859,6 +862,8 @@ test("version 2 reports its first defect in order: keys, exclude, roles, account
     ['roles[9].models[0]: "openai-codex-3/gpt-6-nova" is excluded by openai-codex-3/*', (r) => r.roles.push({ name: "spare", models: ["openai-codex-3/gpt-6-nova"] })],
     ['local.role: "nobody" is not a role', (r) => (r.local.role = "nobody")],
     ["classifier.timeoutMs: must be a whole number of milliseconds from 100 to 1000", (r) => (r.classifier.timeoutMs = 1001)],
+    ["demand.jevWeight: must be a number from 0 to 100", (r) => (r.demand = { jevWeight: -1 })],
+    ["switching.margin: must be a number from 0 to 0.9", (r) => (r.switching = { margin: 1 })],
     ["cooldownMinutes: must be a whole number of minutes from 1 to 1440", (r) => (r.cooldownMinutes = 0)],
   ];
   // Each defect is the one reported while every later defect is present too.
@@ -871,4 +876,62 @@ test("version 2 reports its first defect in order: keys, exclude, roles, account
     );
   }
   valid(HERA);
+});
+
+describe("the demand and switching sections", () => {
+  const FALLBACK = fixture("roster-hera-v2-fallback.json");
+  const SURVIVAL_PROBLEM = "switching.cacheSurvival: must be 1 to 32 pairs of [seconds, chance], the seconds rising and the chances from 1 to 0 never rising";
+  const CUTS_PROBLEM = "demand.cuts: must be three numbers that ascend, each above 0 and below 3";
+  const ALL_ZERO = Object.fromEntries(SIGNALS.map((signal) => [signal, 0]));
+
+  test("a roster without them gets the defaults", () => {
+    const roster = rosterFixtureV2("roster-hera-v2-fallback.json");
+    assert.deepEqual(roster.demand, DEFAULT_DEMAND, "demand defaults");
+    assert.deepEqual(roster.switching, DEFAULT_SWITCHING, "switching defaults");
+    assert.deepEqual(DEFAULT_DEMAND.weights, DESIGN_WEIGHTS, "the default weights are the design's");
+    assert.equal(DESIGN_WEIGHTS.requirement_low + DESIGN_WEIGHTS.cluster_signal, 0, "the two signals nothing computes carry no weight");
+  });
+
+  test("a section that gives one setting keeps the defaults for the rest", () => {
+    const switching = valid(edited((r) => (r.switching = { margin: 0.3 }), FALLBACK)).switching;
+    assert.equal(switching.margin, 0.3, "the margin given");
+    assert.equal(switching.horizonCap, 5, "the default horizon cap");
+    assert.deepEqual(switching.cacheSurvival, DEFAULT_SWITCHING.cacheSurvival, "the default table");
+    const demand = valid(edited((r) => (r.demand = { weights: { turn_type: 0.3 } }), FALLBACK)).demand;
+    assert.equal(demand.weights.turn_type, 0.3, "the weight given");
+    assert.equal(demand.weights.triage_verdict, 0.18, "another weight keeps its default");
+    assert.equal(demand.weights.requirement_low, 0, "a signal nothing computes keeps weight 0");
+    assert.equal(demand.jevWeight, 4, "the default Jev weight");
+    assert.deepEqual(demand.cuts, [0.75, 1.5, 2.25], "the default cuts");
+  });
+
+  test("refuses what the checker promises to refuse", () => {
+    for (const [section, expected] of [
+      [{ demand: { jevWeight: -1 } }, "demand.jevWeight: must be a number from 0 to 100"],
+      [{ demand: { jevWeight: 0, heuristicsWeight: 0 } }, "demand: jevWeight and heuristicsWeight cannot both be 0"],
+      [{ demand: { cuts: [0.75, 1.5, 2.25 + 0.75] } }, CUTS_PROBLEM],
+      [{ demand: { cuts: [0.75, 0.5, 2.25] } }, CUTS_PROBLEM],
+      [{ demand: { cuts: [0.75, 1.5] } }, CUTS_PROBLEM],
+      [{ demand: { deepSessionFloor: "top" } }, "demand.deepSessionFloor: must be one of low, medium, high, super"],
+      [{ demand: { weights: { turn_type: -0.1 } } }, "demand.weights.turn_type: must be a number from 0 to 100"],
+      [{ demand: { weights: { speed: 1 } } }, "demand.weights.speed: unknown key"],
+      [{ demand: { weights: ALL_ZERO } }, "demand.weights: cannot all be 0"],
+      [{ switching: { margin: 1 } }, "switching.margin: must be a number from 0 to 0.9"],
+      [{ switching: { horizonCap: 0 } }, "switching.horizonCap: must be a whole number of runs from 1 to 20"],
+      [{ switching: { cacheSurvival: [[300, 0.9], [60, 0.8]] } }, SURVIVAL_PROBLEM],
+      [{ switching: { cacheSurvival: [[60, 0.8], [300, 0.9]] } }, SURVIVAL_PROBLEM],
+      [{ switching: { cacheSurvival: [] } }, SURVIVAL_PROBLEM],
+    ] as const) {
+      const parsed = parseRoster(JSON.stringify({ ...JSON.parse(FALLBACK), ...section }));
+      assert.equal(parsed.ok, false, `${expected} is refused`);
+      assert.ok(!parsed.ok && parsed.error.startsWith(expected), `${expected}, got ${parsed.ok ? "ok" : parsed.error}`);
+    }
+  });
+
+  test("version 1 refuses both sections as unknown keys", () => {
+    for (const key of ["demand", "switching"]) {
+      const parsed = parseRoster(JSON.stringify({ ...JSON.parse(fixture("roster-hera.json")), [key]: {} }));
+      assert.ok(!parsed.ok && parsed.error.startsWith(`${key}: unknown key`), `${key} in version 1`);
+    }
+  });
 });

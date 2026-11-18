@@ -34,7 +34,9 @@ import { agentFile, isRecord, message, own } from "./files.ts";
 import type { AgentFile, FileSystem, Parsed } from "./files.ts";
 import type { JevSettings } from "./jev.ts";
 import { canonicalHost, isLocalHost } from "./local.ts";
-import { TIERS } from "./tiers.ts";
+import { DEFAULT_DEMAND, DEFAULT_SWITCHING, SIGNALS } from "./settings.ts";
+import type { DemandSettings, SurvivalTable, SwitchingSettings } from "./settings.ts";
+import { isTier, TIERS } from "./tiers.ts";
 import type { Tier } from "./tiers.ts";
 
 /** The level a role sends: the selected level, or a fixed one. */
@@ -134,6 +136,10 @@ export interface RosterV2 {
   readonly scopes: Readonly<Partial<Record<Scope, ScopeSection>>>;
   /** Jev's settings, with every default filled in. Without them, Jev is never asked. */
   readonly classifier?: JevSettings;
+  /** How a prompt's demand is weighed, with every default filled in. */
+  readonly demand: DemandSettings;
+  /** When a session moves to another model, with every default filled in. */
+  readonly switching: SwitchingSettings;
 }
 
 export type Roster = RosterV1 | RosterV2;
@@ -555,7 +561,7 @@ function validate(value: unknown): Roster {
 
 // ─── Version 2 ───────────────────────────────────────────────────────────────
 
-const V2_TOP_KEYS = ["version", "exclude", "roles", "scopes", "accounts", "classifier", "local", "stickyIdleMinutes", "cooldownMinutes", "unreachableMinutes"];
+const V2_TOP_KEYS = ["version", "exclude", "roles", "scopes", "accounts", "classifier", "demand", "switching", "local", "stickyIdleMinutes", "cooldownMinutes", "unreachableMinutes"];
 const SCOPE_KEYS: Readonly<Record<Scope, readonly string[]>> = { personal: ["levels", "fallback"], work: ["levels", "directories", "fallback"] };
 const LEVEL_KEYS = ["role", "describe", "describeFile"];
 const SCOPED_BINDING_KEYS = ["multiPassLabel", "native", "scope"];
@@ -630,11 +636,86 @@ function classifierSettings(value: unknown, exclude: readonly string[]): JevSett
   };
 }
 
+const DEMAND_KEYS = ["jevWeight", "heuristicsWeight", "minConfidence", "closeCall", "cuts", "deepSessionFloor", "weights"];
+const SWITCHING_KEYS = ["margin", "horizonCap", "cacheSurvival"];
+const WEIGHT = { default: 0, min: 0, max: 100 } as const;
+const JEV_WEIGHT = { ...WEIGHT, default: DEFAULT_DEMAND.jevWeight } as const;
+const HEURISTICS_WEIGHT = { ...WEIGHT, default: DEFAULT_DEMAND.heuristicsWeight } as const;
+const MIN_CONFIDENCE = { default: DEFAULT_DEMAND.minConfidence, min: 0, max: 1 } as const;
+const DEMAND_CLOSE_CALL = { default: DEFAULT_DEMAND.closeCall, min: 0, max: 0.5 } as const;
+const SWITCH_MARGIN = { default: DEFAULT_SWITCHING.margin, min: 0, max: 0.9 } as const;
+const HORIZON_CAP = { default: DEFAULT_SWITCHING.horizonCap, min: 1, max: 20 } as const;
+const SURVIVAL_PAIRS_MAX = 32;
+const CUTS_PROBLEM = "must be three numbers that ascend, each above 0 and below 3";
+const SURVIVAL_PROBLEM = `must be 1 to ${SURVIVAL_PAIRS_MAX} pairs of [seconds, chance], the seconds rising and the chances from 1 to 0 never rising`;
+
+const isNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
+
+/** Three cuts that ascend strictly, each above 0 and below 3; the default when absent. */
+function cutsOf(value: unknown): DemandSettings["cuts"] {
+  if (value === undefined) return DEFAULT_DEMAND.cuts;
+  if (!Array.isArray(value) || value.length !== 3) fail("demand.cuts", CUTS_PROBLEM);
+  const [first, second, third] = value as unknown[];
+  if (!isNumber(first) || !isNumber(second) || !isNumber(third) || !(first > 0 && first < second && second < third && third < 3)) fail("demand.cuts", CUTS_PROBLEM);
+  return [first, second, third];
+}
+
+/** The demand section, with every setting it leaves out given its default. */
+function demandSettings(value: unknown): DemandSettings {
+  if (value === undefined) return DEFAULT_DEMAND;
+  const section = object(value, "demand", DEMAND_KEYS);
+  const jevWeight = fraction(own(section, "jevWeight"), "demand.jevWeight", JEV_WEIGHT);
+  const heuristicsWeight = fraction(own(section, "heuristicsWeight"), "demand.heuristicsWeight", HEURISTICS_WEIGHT);
+  if (jevWeight === 0 && heuristicsWeight === 0) fail("demand", "jevWeight and heuristicsWeight cannot both be 0");
+  const floor = own(section, "deepSessionFloor");
+  if (floor !== undefined && !isTier(floor)) fail("demand.deepSessionFloor", `must be one of ${TIERS.join(", ")}`);
+  const given = own(section, "weights") === undefined ? {} : object(own(section, "weights"), "demand.weights", SIGNALS);
+  const weights: { -readonly [K in keyof DemandSettings["weights"]]: number } = { ...DEFAULT_DEMAND.weights };
+  for (const signal of SIGNALS) weights[signal] = fraction(own(given, signal), `demand.weights.${signal}`, { ...WEIGHT, default: weights[signal] });
+  if (SIGNALS.every((signal) => weights[signal] === 0)) fail("demand.weights", "cannot all be 0");
+  return {
+    jevWeight,
+    heuristicsWeight,
+    minConfidence: fraction(own(section, "minConfidence"), "demand.minConfidence", MIN_CONFIDENCE),
+    closeCall: fraction(own(section, "closeCall"), "demand.closeCall", DEMAND_CLOSE_CALL),
+    cuts: cutsOf(own(section, "cuts")),
+    deepSessionFloor: floor ?? DEFAULT_DEMAND.deepSessionFloor,
+    weights,
+  };
+}
+
+/** Pairs of [seconds, chance]: the seconds rise from above 0, the chances run from 1 down to 0 and never rise. */
+function survivalOf(value: unknown): SurvivalTable {
+  if (value === undefined) return DEFAULT_SWITCHING.cacheSurvival;
+  if (!Array.isArray(value) || value.length < 1 || value.length > SURVIVAL_PAIRS_MAX) fail("switching.cacheSurvival", SURVIVAL_PROBLEM);
+  let seconds = 0;
+  let chance = 1;
+  return (value as unknown[]).map((pair) => {
+    if (!Array.isArray(pair) || pair.length !== 2) fail("switching.cacheSurvival", SURVIVAL_PROBLEM);
+    const [after, odds] = pair as unknown[];
+    if (!isNumber(after) || !isNumber(odds) || !(after > seconds) || !(odds >= 0 && odds <= chance)) fail("switching.cacheSurvival", SURVIVAL_PROBLEM);
+    seconds = after;
+    chance = odds;
+    return [after, odds] as const;
+  });
+}
+
+/** The switching section, with every setting it leaves out given its default. */
+function switchingSettings(value: unknown): SwitchingSettings {
+  if (value === undefined) return DEFAULT_SWITCHING;
+  const section = object(value, "switching", SWITCHING_KEYS);
+  return {
+    margin: fraction(own(section, "margin"), "switching.margin", SWITCH_MARGIN),
+    horizonCap: count(own(section, "horizonCap"), "switching.horizonCap", HORIZON_CAP, "runs"),
+    cacheSurvival: survivalOf(own(section, "cacheSurvival")),
+  };
+}
+
 /**
  * Version 2, checked in this order: the keys, the exclusions, the roles, the accounts and their
  * scopes, the scopes and their levels, each scope's fallback chain, each level's and each chain's
  * accounts, the work alias's exclusion, the local
- * section, the classifier and the minutes. The checks it shares with version 1 are version 1's
+ * section, the classifier, the demand and switching sections and the minutes. The checks it shares with version 1 are version 1's
  * helpers, so they keep version 1's messages.
  */
 function validateV2(value: Record<string, unknown>): RosterV2 {
@@ -743,6 +824,8 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
   });
 
   const classifier = own(root, "classifier") === undefined ? undefined : classifierSettings(own(root, "classifier"), exclude);
+  const demand = demandSettings(own(root, "demand"));
+  const switching = switchingSettings(own(root, "switching"));
 
   return {
     version: 2,
@@ -755,6 +838,8 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
     ...unreachableField(root),
     scopes,
     ...(classifier === undefined ? {} : { classifier }),
+    demand,
+    switching,
   };
 }
 

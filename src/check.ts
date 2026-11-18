@@ -16,6 +16,7 @@ import { promptLines, promptProblem, promptReader, promptUses } from "./prompts.
 import type { PromptReader, PromptUse } from "./prompts.ts";
 import { autoRoles, candidatesOf, parseRoster, SCOPES, unreachableMinutesOf } from "./roster.ts";
 import type { Roster, RosterV1, RosterV2, Scope } from "./roster.ts";
+import { DEEP_SESSION_ENTRIES, DEEP_SESSION_TOKENS, SIGNALS } from "./settings.ts";
 import { tierLabel, TIERS } from "./tiers.ts";
 
 export interface CheckReport {
@@ -111,6 +112,39 @@ function promptSection(roster: Roster, uses: readonly PromptUse[]): string[] {
   return [`Jev's prompts${asked}: the question it is asked, and what each level means:`, ...promptLines(uses), ""];
 }
 
+/** A share as a percentage, without the noise of floating point. */
+const percent = (share: number): string => `${Math.round(share * 10_000) / 100}%`;
+
+/** A time as whole hours, else whole minutes, else seconds. */
+function duration(seconds: number): string {
+  if (seconds % 3600 === 0) return `${seconds / 3600} h`;
+  if (seconds % 60 === 0) return `${seconds / 60} min`;
+  return `${seconds} s`;
+}
+
+/** How a prompt's demand is weighed, in words. */
+function demandLines(roster: RosterV2): string[] {
+  const { jevWeight, heuristicsWeight, minConfidence, closeCall, cuts, deepSessionFloor, weights } = roster.demand;
+  const [low, medium, high] = cuts;
+  const listed = SIGNALS.map((signal) => [signal, weights[signal]] as const).sort((a, b) => b[1] - a[1]);
+  return [
+    `Demand: Jev's answer counts ${jevWeight} and the heuristics ${heuristicsWeight} at full confidence; under ${percent(minConfidence)} confidence the heuristics can only raise the level.`,
+    `  LOW under ${low}, MEDIUM under ${medium}, HIGH under ${high}, SUPER from there; within ${closeCall} under a cut takes the level above.`,
+    `  A conversation over ${DEEP_SESSION_TOKENS.toLocaleString("en-US")} tokens or ${DEEP_SESSION_ENTRIES.toLocaleString("en-US")} entries is never under ${tierLabel(deepSessionFloor)}.`,
+    `  Heuristic weights: ${listed.map(([signal, weight]) => `${signal} ${weight}`).join(", ")}.`,
+  ];
+}
+
+/** When a session moves to another model, in words. */
+function switchingLines(roster: RosterV2): string[] {
+  const { margin, horizonCap, cacheSurvival } = roster.switching;
+  const table = cacheSurvival.map(([seconds, chance]) => `${percent(chance)} up to ${duration(seconds)}`);
+  return [
+    `Switching: a move must cost at least ${percent(margin)} less than staying; lighter prompts in a row are priced up to ${horizonCap} runs ahead.`,
+    `  A model's cache is taken to survive ${table.join(", ")}, and not after.`,
+  ];
+}
+
 /**
  * What a valid roster routes to, for each selection and scope, in the order it tries, and where
  * Jev's prompts come from. `uses`: a version 2 roster's prompts as they are in effect.
@@ -118,6 +152,7 @@ function promptSection(roster: Roster, uses: readonly PromptUse[]): string[] {
 export function describeRouting(roster: Roster, uses: readonly PromptUse[] = []): string[] {
   return [
     ...(roster.version === 2 ? describeV2(roster) : describeV1(roster)),
+    ...(roster.version === 2 ? [...demandLines(roster), ...switchingLines(roster), ""] : []),
     ...localLines(roster),
     "",
     ...promptSection(roster, uses),

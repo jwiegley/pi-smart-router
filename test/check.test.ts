@@ -22,6 +22,16 @@ const TAIL = [
   "This reads the roster alone. Whether each model is in Pi's catalog on this host, available and has credentials is /smart-router status's to say.",
 ];
 
+/** What the checker says of a roster that leaves out the demand and switching sections: the defaults, in plain words. */
+const DEMAND_AND_SWITCHING = [
+  "Demand: Jev's answer counts 4 and the heuristics 1 at full confidence; under 60% confidence the heuristics can only raise the level.",
+  "  LOW under 0.75, MEDIUM under 1.5, HIGH under 2.25, SUPER from there; within 0.1 under a cut takes the level above.",
+  "  A conversation over 100,000 tokens or 1,000 entries is never under MEDIUM.",
+  "  Heuristic weights: triage_verdict 0.18, turn_type 0.18, complex_inverse 0.14, trivial_signal 0.1, cyclomatic_low 0.08, prompt_shortness 0.06, token_shortness 0.05, no_tool_context 0.05, message_shallow 0.03, prose_ratio 0.03, requirement_low 0, cluster_signal 0.",
+  "Switching: a move must cost at least 15% less than staying; lighter prompts in a row are priced up to 5 runs ahead.",
+  "  A model's cache is taken to survive 97% up to 1 min, 92% up to 5 min, 87% up to 20 min, 79% up to 30 min, 66% up to 1 h, 50% up to 2 h, 38% up to 6 h, 11% up to 24 h, and not after.",
+];
+
 /** What the checker says of John's roster of 2026-11-17, after its first line. */
 const JOHN_ROUTING = [
   "smart-router/auto in personal scope: a tag, else Jev (openrouter/typesafe/jev-1.14), else the keywords, pick the level; each level tries its own models in order:",
@@ -45,6 +55,8 @@ const JOHN_ROUTING = [
   "  no fallback: a level with no available model passes its run up to the next level; with none above, the run is refused",
   "  sessions under these directories are in work scope: /Users/johnw/src/positron",
   "  under the pin: refused, since smart-router/auto does not reach the local role in this scope; choose smart-router/local",
+  "",
+  ...DEMAND_AND_SWITCHING,
   "",
   "smart-router/local, in any scope, pinned or not: only these, in this order, never a cloud model:",
   "  1. omlx-hera/GLM-5.3-Flash-oQ4e-mtp  (role local, thinking max)",
@@ -77,7 +89,7 @@ describe("checking a roster's text", () => {
   test("a version 2 roster without a chain or a classifier, for one scope, says what the other scope and the pin do", () => {
     const report = checkRoster(fixture("roster-work.json"));
     assert.equal(report.ok, true);
-    assert.deepEqual(report.lines.slice(0, 13), [
+    assert.deepEqual(report.lines.slice(0, 12), [
       "OK: a valid version 2 roster.",
       "",
       "smart-router/auto in personal scope: refused, since the roster has no personal scope",
@@ -90,9 +102,9 @@ describe("checking a roster's text", () => {
       "  no fallback: a level with no available model passes its run up to the next level; with none above, the run is refused",
       "  under the pin: refused, since smart-router/auto does not reach the local role in this scope; choose smart-router/local",
       "",
-      "smart-router/local, in any scope, pinned or not:",
     ]);
-    assert.equal(report.lines[13], "  refused: the roster has no local section");
+    assert.deepEqual(report.lines.slice(12, 18), DEMAND_AND_SWITCHING, "the defaults are read back for a roster that gives neither section");
+    assert.deepEqual(report.lines.slice(18, 21), ["", "smart-router/local, in any scope, pinned or not:", "  refused: the roster has no local section"]);
   });
 
   test("a level with several models of its own lists them in order", () => {

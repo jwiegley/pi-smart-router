@@ -593,6 +593,8 @@ export interface RosterJsonV2 extends RosterJsonBase {
   version: 2;
   scopes: { personal?: ScopeJson; work?: ScopeJson & { directories?: string[] } };
   classifier?: { model?: string; timeoutMs?: number; closeCall?: number; context?: { messages?: number; messageChars?: number; totalChars?: number } };
+  demand?: { jevWeight?: number; heuristicsWeight?: number; minConfidence?: number; closeCall?: number; cuts?: number[]; deepSessionFloor?: string; weights?: Record<string, number> };
+  switching?: { margin?: number; horizonCap?: number; cacheSurvival?: Array<[number, number]> };
 }
 
 export type RosterJson = RosterJsonV1 | RosterJsonV2;
