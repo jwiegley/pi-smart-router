@@ -16,6 +16,7 @@
 import { createHmac, randomBytes } from "node:crypto";
 
 import type { Api, Model, Usage } from "@earendil-works/pi-ai";
+import { calculateContextTokens } from "@earendil-works/pi-coding-agent";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -36,6 +37,8 @@ import { COMMAND, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, LEVEL_ENTRY, LEVEL
 import type { VirtualId } from "./constants.ts";
 import { compactionFor, pickInRole, planUserTurn } from "./decide.ts";
 import type { Decision, LastResponder, LevelInput, Plan } from "./decide.ts";
+import { HEURISTIC_MESSAGES } from "./demand.ts";
+import type { PromptFacts } from "./demand.ts";
 import {
   directoryFailedNotice,
   directoryNotice,
@@ -72,7 +75,7 @@ import { promptProblem, promptStore, promptUses, scopePrompts } from "./prompts.
 import { footerText, levelRecord, readLevelRecord } from "./records.ts";
 import { clock, coolFrom, Cooldowns, coolsAccount, hasOutput, holdFrom, Holds, resolveContext } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
-import { afterFailure, boundedHistory, newRecord, planApplies, predict, requireBoundedHistory, routeOther, routeOwned } from "./route.ts";
+import { activeEntries, afterFailure, boundedHistory, newRecord, planApplies, predict, requireBoundedHistory, routeOther, routeOwned } from "./route.ts";
 import type { BoundedHistory, Failover, LastInput, RouteInput, SessionRecord } from "./route.ts";
 import { autoRoles, parseRef, roleOf, rosterFile, SCOPES, scopeSection, servesScope } from "./roster.ts";
 import type { Roster, RosterV2, Scope } from "./roster.ts";
@@ -169,6 +172,20 @@ function smallest(decisions: readonly Decision[]): Limits {
     contextWindow: Number.isFinite(contextWindow) ? contextWindow : DEFAULT_CONTEXT_WINDOW,
     maxTokens: Number.isFinite(maxTokens) ? maxTokens : DEFAULT_MAX_TOKENS,
   };
+}
+
+/**
+ * What the heuristics read of a window of the conversation: the roles of its latest
+ * HEURISTIC_MESSAGES messages, oldest first, with a tool result as "tool". Never their text.
+ */
+function rolesOf(window: readonly unknown[]): string[] {
+  const roles: string[] = [];
+  for (const entry of window) {
+    const message = isRecord(entry) ? own(entry, "message") : undefined;
+    const role = isRecord(message) ? own(message, "role") : undefined;
+    if (typeof role === "string") roles.push(role === "toolResult" ? "tool" : role);
+  }
+  return roles.slice(-HEURISTIC_MESSAGES);
 }
 
 const sameLimits = (a: Readonly<Record<VirtualId, Limits>>, b: Readonly<Record<VirtualId, Limits>>): boolean =>
@@ -610,18 +627,21 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
    * Jev's answer about a message, asked with what jevAsk gave. Jev reads the text without its tag
    * and the conversation before it (the message is not in the session yet), both redacted and then
    * cut to the classifier's caps, with the instructions and the scope's descriptions as the roster
-   * gives them, inline or from its prompt files (src/prompts.ts). Never rejects: a prompt file that
-   * cannot be used fails as `prompt`, and a request that cannot be built, such as for text too long
-   * to redact, as an error, both before anything is sent.
+   * gives them, inline or from its prompt files (src/prompts.ts). An untagged message's conversation
+   * is `window`, the one read its demand's heuristics share (planInput); a tagged message's opinion
+   * reads its own. Never rejects: a prompt file that cannot be used fails as `prompt`, and a request
+   * that cannot be built, such as for text too long to redact, as an error, both before anything is
+   * sent.
    */
-  const askFor = (ctx: ExtensionContext, ask: JevAsk, text: string, value: RosterV2, scope: Scope): Promise<JevOutcome> => {
+  const askFor = (ctx: ExtensionContext, ask: JevAsk, text: string, value: RosterV2, scope: Scope, window?: readonly unknown[]): Promise<JevOutcome> => {
     const { settings, history } = ask;
     try {
       const given = scopePrompts(value, scope, prompts.read);
       if (!given.ok) return Promise.resolve<JevOutcome>({ kind: "failure", model: settings.model, failure: "prompt", ms: 0 });
       const descriptions: Record<Tier, string> = given.descriptions;
       const { messages } = settings.context;
-      const recent = messages === 0 ? [] : recentMessages(history.getRecentActiveEntries({ type: "message", limit: messages * 4 }), messages);
+      const entries = messages === 0 ? [] : (window ?? history.getRecentActiveEntries({ type: "message", limit: messages * 4 }));
+      const recent = recentMessages(entries, messages);
       return askJev(ctx.modelRegistry, settings, buildContext(text, recent, descriptions, settings.context, given.instructions), now);
     } catch {
       return Promise.resolve<JevOutcome>({ kind: "failure", model: settings.model, failure: "error", ms: 0 });
@@ -636,8 +656,13 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       if (pending?.token === token) pending.jev = jev;
     };
 
-  /** Plan an idle input's run with the session as it is now: after a wait, its selection, scope and roster may have moved. */
-  const plan = (ctx: ExtensionContext, record: Session, text: string, digest: string, level: LevelInput, token: number): Plan | undefined => {
+  /**
+   * Plan an idle input's run with the session as it is now: after a wait, its selection, scope and
+   * roster may have moved. `roles`: what the heuristics read of the input's window (rolesOf), none
+   * for a run that read none; the conversation's size and the branch's entry count are read here,
+   * without a read of the history.
+   */
+  const plan = (ctx: ExtensionContext, record: Session, text: string, digest: string, level: LevelInput, token: number, roles: readonly string[]): Plan | undefined => {
     if (!ctx.isIdle()) return undefined;
     const { sessionManager } = ctx;
     const state = loaded(roster.current());
@@ -646,7 +671,9 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     // The selected model refuses this scope at the run's first request, so there is no run to plan.
     if (refusalFor(id, state.value, ctx) !== undefined) return undefined;
     const rc = contextFor(ctx, state.value, id);
-    const planned = planUserTurn({ rc, text, last: record.last, now: now(), compaction: compactionFor(pi.getSettings(), id), level });
+    const usage = record.last?.usage;
+    const facts: PromptFacts = { contextTokens: usage === undefined ? undefined : calculateContextTokens(usage), roles, entries: activeEntries(sessionManager) };
+    const planned = planUserTurn({ rc, text, last: record.last, now: now(), compaction: compactionFor(pi.getSettings(), id), level, facts });
     record.plan = planned;
     record.planDigest = digest;
     record.plannedToken = token;
@@ -705,14 +732,34 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     else record.remembered.delete(digest);
   };
 
+  /**
+   * The one bounded window of the conversation an untagged idle input on smart-router/auto reads,
+   * under a version 2 roster, in a scope that reads and that the roster serves: the latest
+   * HEURISTIC_MESSAGES messages, or four for each message Jev reads when that is more. Undefined
+   * where nothing is planned by level; empty when the read fails, so that the heuristics and Jev
+   * see no conversation rather than the input failing.
+   */
+  const demandWindow = (ctx: ExtensionContext, id: VirtualId | undefined, value: Roster | undefined, scope: ScopeState): readonly unknown[] | undefined => {
+    const history = boundedHistory(ctx.sessionManager);
+    if (!ctx.isIdle() || id !== "auto" || value?.version !== 2 || scope.kind !== "ok" || history === undefined) return undefined;
+    if (scopeSection(value, scope.scope) === undefined) return undefined;
+    const limit = Math.max(4 * (value.classifier?.context.messages ?? 0), HEURISTIC_MESSAGES);
+    try {
+      return history.getRecentActiveEntries({ type: "message", limit });
+    } catch {
+      return [];
+    }
+  };
+
   // The decision point: a prompt typed while the session is idle plans its run. Input that
   // arrives while a run starts or streams (steering, follow-ups) neither plans nor drops; its tag
   // is removed with a notice. A roster edit read here that lists the session's directory is
   // recorded before the run is planned, and nothing is planned for a scope smart-router/auto
   // refuses (plan()), where Jev is not asked either (jevAsk). A version 2 run on auto takes the
   // level its last input planned with when an extension resends that text (pi-idle-check), else
-  // its tag's, with Jev's opinion asked and recorded without waiting, else Jev's answer, waited for. The plan and its pending level carry the digest of the message's text,
-  // which binds them to the run the message's prompt starts.
+  // its tag's, with Jev's opinion asked and recorded without waiting, else its demand's, from Jev's
+  // answer, waited for, and the heuristics (demandWindow). The plan and its pending level carry the
+  // digest of the message's text, which binds them to the run the message's prompt starts.
   const planInput = async (event: InputEvent, ctx: ExtensionContext, tagged: Tagged | undefined, previous: LastInput | undefined): Promise<void> => {
     const tier = tagged?.tier;
     const text = tagged === undefined ? event.text : tagged.text;
@@ -757,6 +804,10 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     });
     // jevAsk gives an ask only under a version 2 roster, in a scope that reads: its request is built for both.
     const asked = ask !== undefined && value?.version === 2 && scope.kind === "ok" ? { ask, value, scope: scope.scope } : undefined;
+    // An untagged run's level is its demand's: one bounded read of the conversation serves both the
+    // heuristics and Jev's context. A tagged run, or one that reuses a tagged message's level, reads
+    // none for it; an extension's resend of an untagged message reads it again for its own facts.
+    const window = tier === undefined && reused?.tag === undefined ? demandWindow(ctx, id, value, scope) : undefined;
     // A level input counts only where levels route: planUserTurn ignores it under version 1 and on
     // smart-router/local, and plan() plans nothing off the router's models.
     let level: LevelInput = reused ?? (tier === undefined ? {} : { tag: tier });
@@ -769,20 +820,20 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
           // An opinion only feeds the record, so there is nothing to do when landing it fails.
         });
     } else if (asked !== undefined) {
-      const jev = await askFor(ctx, asked.ask, text, asked.value, asked.scope);
+      const jev = await askFor(ctx, asked.ask, text, asked.value, asked.scope, window);
       // The session ended during the wait, or a newer message has planned since. A stale token
       // alone does not stop it: an earlier message whose answer comes first plans its own run.
       if (records.get(sessionId) !== record || record.plannedToken > token) return;
       level = { jev };
     }
-    const planned = plan(ctx, record, text, digest, level, token);
+    const planned = plan(ctx, record, text, digest, level, token, window === undefined ? [] : rolesOf(window));
     const planLevel = planned?.level;
     if (planned === undefined || planLevel === undefined || planned.signal === "local") return;
     record.pendingLevel = { token, digest, level: planLevel, keyword: { signal: planned.signal, reason: planned.reason }, at: now(), jev: opinion ? "pending" : level.jev, started: false };
     record.lastInput = { digest, level };
     // A plan that found no model shows none: its run is refused at its first request.
     showLevel(ctx, record, planned.decision.ok ? footerText(planLevel, planned.decision.choice.model.id) : undefined);
-    if (planLevel.steppedUp && planned.decision.ok) notify(ctx, stepUpNotice(planLevel.start, planLevel.tier, planned.decision.choice.model.id), "info");
+    if (planLevel.steppedUp && planned.decision.ok) notify(ctx, stepUpNotice(planLevel.need, planLevel.tier, planned.decision.choice.model.id), "info");
     // A chain model is another vendor's or a LAN host's, so the run says where it goes.
     if (planLevel.fallback === true && planned.decision.ok) notify(ctx, fallbackNotice(planLevel.tier, planned.decision.choice.role, planned.decision.choice.model.id), "info");
   };

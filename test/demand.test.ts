@@ -27,7 +27,7 @@ const SUPER: Table = { low: 0.05, medium: 0.05, high: 0.1, super: 0.8 };
 
 function answer(p: Table): JevOutcome {
   const [choice] = [...TIERS].sort((a, b) => p[b] - p[a]) as [Tier];
-  return { kind: "answer", model: "jev", choice, tier: choice, probabilities: p, confidence: p[choice], ms: 10 };
+  return { kind: "answer", model: "jev", choice, probabilities: p, confidence: p[choice], ms: 10 };
 }
 
 function run(

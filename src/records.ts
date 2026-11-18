@@ -6,11 +6,12 @@
 // user message sits earlier in the same session, which is where a training review reads both, on
 // the host that made them.
 //
-// Also the words the footer and history use for a run's level: its scope, its tier, and what
+// Also the words the footer and history use for a run's level: its scope, its level, and what
 // decided it.
 import type { RiskyTrigger, Signal } from "./classify.ts";
 import { LEVEL_ENTRY } from "./constants.ts";
 import type { LevelSource, PlanLevel } from "./decide.ts";
+import type { Demand } from "./demand.ts";
 import { isRecord, own } from "./files.ts";
 import type { JevFailure } from "./jev.ts";
 import type { PendingLevel } from "./route.ts";
@@ -23,7 +24,7 @@ import type { Tier } from "./tiers.ts";
 export type JevRecord =
   | {
       readonly model: string;
-      /** The tier Jev chose, before the close-call rule. */
+      /** Jev's top choice. */
       readonly choice: Tier;
       readonly probabilities: Readonly<Record<Tier, number>>;
       readonly confidence: number;
@@ -38,15 +39,21 @@ export interface LevelRecord {
   /** When the run was planned, or the correction made, in milliseconds since the epoch. */
   readonly at: number;
   readonly scope: Scope;
-  readonly source: LevelSource | "correction";
+  /** What decided the run's level, or that the record is a correction. `keyword`: an earlier version's run that the keywords decided. */
+  readonly source: LevelSource | "keyword" | "correction";
   /** The tier planned for the run, or the one a correction says it should have gone to. */
   readonly tier: Tier;
-  /** The tier the tag, Jev or the keywords asked for, before the floor and any step-up. */
-  readonly asked?: Tier;
+  /**
+   * The level the run needed: its tag's, else its demand's after the guards. Read back from an
+   * earlier version's record, which wrote `asked` instead, it is the record's `tier`.
+   */
+  readonly need?: Tier;
   /** A tagged run's tag. */
   readonly tag?: Tier;
-  /** The risky operation that raised the run to the floor. */
+  /** The risky operation that raised the run to HIGH. */
   readonly trigger?: RiskyTrigger;
+  /** An untagged run's demand: numbers, level names, signal names and guard names, never text. */
+  readonly demand?: Demand;
   /** The keyword classifier's signal and reason for the message. */
   readonly keyword?: { readonly signal: Signal; readonly reason: string };
   /** Absent when Jev was not asked for the run. */
@@ -87,9 +94,10 @@ export function levelRecord(pending: PendingLevel, answeringRef: string | undefi
     scope: level.scope,
     source: level.source,
     tier: level.tier,
-    asked: level.asked,
-    ...(level.source === "tag" ? { tag: level.asked } : {}),
+    need: level.need,
+    ...(level.source === "tag" ? { tag: level.need } : {}),
     ...(level.trigger === undefined ? {} : { trigger: level.trigger }),
+    ...(level.demand === undefined ? {} : { demand: level.demand }),
     keyword: { signal: keyword.signal, reason: keyword.reason },
     ...(jev === undefined ? {} : { jev }),
     ...(answeringRef === undefined ? {} : { ref: answeringRef }),
@@ -106,15 +114,16 @@ export function correctionRecord(previous: LevelRecord, tier: Tier, at: number):
   return { v: 1, at, scope: previous.scope, source: "correction", tier, refers };
 }
 
-const SOURCES: ReadonlySet<string> = new Set<LevelRecord["source"]>(["tag", "jev", "keyword", "floor", "correction"]);
+const SOURCES: ReadonlySet<string> = new Set<LevelRecord["source"]>(["tag", "jev", "heuristics", "floor", "keyword", "correction"]);
 
 const isSource = (value: unknown): value is LevelRecord["source"] => typeof value === "string" && SOURCES.has(value);
 const isTime = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
 
 /**
- * What a correction reads of a level entry: its time, scope, source and tier, and a correction's
- * `refers`, as the router writes them. Undefined for anything else, a custom_message of the type
- * included.
+ * What a correction or a resumed session reads of a level entry: its time, scope, source and tier, a
+ * run's need and a correction's `refers`, as this version or an earlier one wrote them. An earlier
+ * version's run has `source: "keyword"` or `asked` and no `need`: its need is its tier. Undefined for
+ * anything else, a custom_message of the type included.
  */
 export function readLevelRecord(entry: unknown): LevelRecord | undefined {
   if (!isRecord(entry) || own(entry, "type") !== "custom" || own(entry, "customType") !== LEVEL_ENTRY) return undefined;
@@ -125,38 +134,35 @@ export function readLevelRecord(entry: unknown): LevelRecord | undefined {
   const source = own(data, "source");
   const tier = own(data, "tier");
   if (!isTime(at) || !isScope(scope) || !isSource(source) || !isTier(tier)) return undefined;
-  if (source !== "correction") return { v: 1, at, scope, source, tier };
+  if (source !== "correction") {
+    const need = own(data, "need");
+    if (need === undefined) return { v: 1, at, scope, source, tier, need: tier };
+    return isTier(need) ? { v: 1, at, scope, source, tier, need } : undefined;
+  }
   const refers = own(data, "refers");
   return isTime(refers) ? { v: 1, at, scope, source, tier, refers } : undefined;
 }
 
 /**
- * What decided a run's tier, in a few words: Jev with the probability it gave its tier, a tag, the
- * floor, or the keywords and why Jev did not decide. A step-up can take the run to another tier than
- * Jev's, and the note then names Jev's, so its probability is never read as the run's.
+ * What decided a run's level, in a few words: "tag"; else its demand to one decimal, then
+ * ", jev timeout" (or another failure) when Jev was asked and gave no answer, then ", floor" when a
+ * floor raised the level.
  */
 export function levelNote(level: PlanLevel): string {
-  const { jev } = level;
-  switch (level.source) {
-    case "tag":
-      return "tag";
-    case "floor":
-      return "floor";
-    case "jev": {
-      if (jev?.kind !== "answer") return "jev";
-      const share = `${Math.round(jev.probabilities[jev.tier] * 100)}%`;
-      return jev.tier === level.tier ? `jev ${share}` : `jev ${tierLabel(jev.tier)} ${share}`;
-    }
-    case "keyword":
-      return jev?.kind === "failure" ? `keywords; jev ${jev.failure}` : "keywords";
-  }
+  if (level.source === "tag") return "tag";
+  const { jev, demand } = level;
+  return [
+    demand === undefined ? "demand unknown" : `demand ${demand.value.toFixed(1)}`,
+    ...(jev?.kind === "failure" ? [`jev ${jev.failure}`] : []),
+    ...(level.source === "floor" ? ["floor"] : []),
+  ].join(", ");
 }
 
 /**
- * The footer's item for a run: its scope, its tier, the model, and what decided the tier.
- * `fallback`: whether the model is one of the scope's fallback chain, as the plan's pick was unless
- * the caller knows the model that answered.
+ * The footer's item for a run: its scope, the level it needs, the model, and what decided the
+ * level. `fallback`: whether the model is one of the scope's fallback chain, as the plan's pick was
+ * unless the caller knows the model that answered.
  */
 export function footerText(level: PlanLevel, modelId: string, fallback: boolean = level.fallback === true): string {
-  return `${level.scope} ${tierLabel(level.tier)} → ${modelId} (${levelNote(level)}${fallback ? "; fallback" : ""})`;
+  return `${level.scope} ${tierLabel(level.need)} → ${modelId} (${levelNote(level)}${fallback ? "; fallback" : ""})`;
 }

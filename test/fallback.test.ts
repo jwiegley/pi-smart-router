@@ -103,7 +103,8 @@ const ENABLED: CompactionFigures = { enabled: true, reserve: 16_384, keepRecent:
 const DISABLED: CompactionFigures = { ...ENABLED, enabled: false };
 
 function plan(rc: ResolveContext, level: LevelInput, options: { last?: LastResponder; text?: string; compaction?: CompactionFigures } = {}): Plan {
-  return planUserTurn({ rc, text: options.text ?? "What is the capital of France?", last: options.last, now: rc.now, compaction: options.compaction ?? ENABLED, level });
+  const facts = { contextTokens: undefined, roles: [], entries: undefined };
+  return planUserTurn({ rc, text: options.text ?? "What is the capital of France?", last: options.last, now: rc.now, compaction: options.compaction ?? ENABLED, level, facts });
 }
 
 const picked = (decision: Decision): readonly [string, string, string] | string =>
@@ -292,7 +293,7 @@ describe("planning with a fallback chain", () => {
       assert.deepEqual(picked(planned.decision), ["openrouter", OR_GLM, `fallback:${tier}→openrouter`], tier);
       // The plan keeps the level's role, so the run's first request picks in the level again.
       assert.equal(planned.role, tier);
-      assert.deepEqual(planned.level, { scope: "personal", tier, asked: tier, start: tier, source: "tag", steppedUp: false, returnedToFirst: false, fallback: true });
+      assert.deepEqual(planned.level, { scope: "personal", need: tier, tier, source: "tag", steppedUp: false, returnedToFirst: false, fallback: true });
     }
   });
 
@@ -355,10 +356,10 @@ describe("planning with a fallback chain", () => {
   test("a chain model holds no level: the next untagged run goes to its own level's model, a moment later too", () => {
     for (const ref of CHAIN) {
       const planned = plan(context(), {}, { last: { ref, at: NOW - MINUTE }, text: "Format this file" });
-      assert.deepEqual(picked(planned.decision), ["low", LUNA, "keyword"], ref);
+      assert.deepEqual(picked(planned.decision), ["low", LUNA, "heuristics"], `${ref}: without Jev the heuristics decide alone, and rate a trivial prompt LOW`);
     }
     // Nor does a level's own model.
-    assert.deepEqual(picked(plan(context(), {}, { last: { ref: ASTRA, at: NOW - MINUTE }, text: "Format this file" }).decision), ["low", LUNA, "keyword"], "nothing holds a session by time");
+    assert.deepEqual(picked(plan(context(), {}, { last: { ref: ASTRA, at: NOW - MINUTE }, text: "Format this file" }).decision), ["low", LUNA, "heuristics"], "nothing holds a session by time");
   });
 
   test("a move further down the chain is no return", () => {
@@ -524,7 +525,7 @@ describe("a run through the router with a fallback chain", () => {
     assert.deepEqual(others, []);
     // The keywords' reason and Jev's opinion (unavailable on this fake host) are not this test's.
     const { keyword: _keyword, jev: _jev, ...rest } = record ?? {};
-    assert.deepEqual(rest, { v: 1, at: NOW, scope: "personal", source: "tag", tier: "low", asked: "low", tag: "low" });
+    assert.deepEqual(rest, { v: 1, at: NOW, scope: "personal", source: "tag", tier: "low", need: "low", tag: "low" }, "a record writes need where it wrote asked");
     // The next run starts afresh: the local models are tried again.
     const next = await prompt(loaded, "rename bar to baz #low");
     assert.equal(routed(runtime.route("auto", request("user", { signal: next }))), GLM);
@@ -670,7 +671,11 @@ describe("a run through the router with a fallback chain", () => {
     state.clock = NOW + MINUTE;
     signal = await prompt(loaded, "Format this file");
     // The limit cooled the whole openai-codex-2 account, luna too, so LOW goes to the chain.
-    assert.equal(loaded.session.statuses.get(LEVEL_KEY), "personal LOW → z-ai/glm-5.3-flash (keywords; jev unavailable; fallback)", "nothing holds a session by time");
+    assert.equal(
+      loaded.session.statuses.get(LEVEL_KEY),
+      "personal LOW → z-ai/glm-5.3-flash (demand 0.6, jev unavailable; fallback)",
+      "nothing holds a session by time: without Jev the heuristics alone rate a trivial prompt LOW, 0.59 with the last response's 1,000 tokens",
+    );
     assert.deepEqual([routed(runtime.route("auto", request("user", { signal }))), lastHistory(loaded)?.code], [OR_GLM, "fallback:low→openrouter"], "nothing holds a session by time");
   });
 

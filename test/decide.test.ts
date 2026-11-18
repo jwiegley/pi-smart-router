@@ -8,7 +8,9 @@ import type { Labels } from "../src/accounts.ts";
 import { BUILTIN_EXCLUDES } from "../src/constants.ts";
 import type { VirtualId } from "../src/constants.ts";
 import { compactionFor, eligibleRole, fits, NO_LOCAL_SECTION, pickInRole, planUserTurn } from "../src/decide.ts";
-import type { Choice, CompactionFigures, Decision, LastResponder, LevelInput, Plan } from "../src/decide.ts";
+import type { Choice, CompactionFigures, Decision, LastResponder, LevelInput, Plan, PlanLevel } from "../src/decide.ts";
+import { HEURISTIC_MESSAGES } from "../src/demand.ts";
+import type { PromptFacts } from "../src/demand.ts";
 import type { Loaded } from "../src/files.ts";
 import type { JevOutcome } from "../src/jev.ts";
 import { baseUrlHost, checkLocal, isLocalHost, policyFromRoster } from "../src/local.ts";
@@ -55,8 +57,11 @@ function last(ref: string, ago: number, tokens?: number): LastResponder {
   return { ref, at: NOW - ago, ...(tokens === undefined ? {} : { usage: usage(tokens) }) };
 }
 
+/** A new session's facts: no usage, no messages, no entry count. */
+const FRESH: PromptFacts = { contextTokens: undefined, roles: [], entries: undefined };
+
 function plan(text: string, options: { last?: LastResponder; rc?: ResolveContext } = {}): Plan {
-  return planUserTurn({ rc: options.rc ?? heraContext(), text, last: options.last, now: NOW, compaction: ENABLED });
+  return planUserTurn({ rc: options.rc ?? heraContext(), text, last: options.last, now: NOW, compaction: ENABLED, facts: FRESH });
 }
 
 function chosen(decision: Decision): Choice {
@@ -432,7 +437,7 @@ describe("property-style invariants", () => {
     for (let seed = 1; seed <= 1000; seed += 1) {
       const { rc, text, last: lastResponder, compaction } = randomCase(seed);
       const where = `seed ${seed}`;
-      const result = planUserTurn({ rc, text, last: lastResponder, now: rc.now, compaction });
+      const result = planUserTurn({ rc, text, last: lastResponder, now: rc.now, compaction, facts: FRESH });
       assert.equal(result.localOnly, rc.localOnly, where);
       if (result.decision.ok) {
         assertSafeChoice(rc, result.decision.choice, `${where} plan`, true);
@@ -528,54 +533,152 @@ const v2Catalog = (): FakeCatalog =>
 const v2 = (catalog: FakeCatalog = v2Catalog(), overrides: Partial<Omit<ResolveContext, "available" | "catalog">> = {}): ResolveContext =>
   contextWith(catalog, { roster: V2, ...overrides });
 
-function planV2(text: string, options: { level?: LevelInput; last?: LastResponder; rc?: ResolveContext; compaction?: CompactionFigures } = {}): Plan {
+function planV2(text: string, options: { level?: LevelInput; last?: LastResponder; rc?: ResolveContext; compaction?: CompactionFigures; facts?: PromptFacts } = {}): Plan {
   const { level } = options;
-  return planUserTurn({ rc: options.rc ?? v2(), text, last: options.last, now: NOW, compaction: options.compaction ?? ENABLED, ...(level === undefined ? {} : { level }) });
+  return planUserTurn({
+    rc: options.rc ?? v2(),
+    text,
+    last: options.last,
+    now: NOW,
+    compaction: options.compaction ?? ENABLED,
+    facts: options.facts ?? FRESH,
+    ...(level === undefined ? {} : { level }),
+  });
 }
 
-/** Jev's answer: its top choice, and the tier the close-call rule made of it. */
-function answer(choice: Tier, tier: Tier = choice): JevOutcome {
+/** Jev's answer with these probabilities: its choice is the most probable level. */
+function jevOf(probabilities: Readonly<Record<Tier, number>>, ms = 140): JevOutcome {
+  const [choice] = [...TIERS].sort((a, b) => probabilities[b] - probabilities[a]) as [Tier];
+  return { kind: "answer", model: JEV, choice, probabilities: { ...probabilities }, confidence: probabilities[choice], ms };
+}
+
+/** Jev's sure answer: 0.85 on `choice`, 0.05 on each other level. On a neutral prompt the blend names `choice`. */
+function answer(choice: Tier): JevOutcome {
   const probabilities: Record<Tier, number> = { low: 0.05, medium: 0.05, high: 0.05, super: 0.05 };
-  probabilities[choice] = tier === choice ? 0.85 : 0.5;
-  if (tier !== choice) probabilities[tier] = 0.4;
-  return { kind: "answer", model: JEV, choice, tier, probabilities, confidence: probabilities[choice], ms: 140 };
+  probabilities[choice] = 0.85;
+  return jevOf(probabilities);
 }
 
-describe("v2 levels", () => {
-  test("an untagged run without Jev takes the first candidate of the keywords' tier", () => {
-    const result = planV2(FRANCE);
-    expectPlan(result, TERRA, "keyword");
-    assert.deepEqual([result.signal, result.role], ["default", "medium"]);
-    assert.deepEqual(result.level, { scope: "personal", tier: "medium", asked: "medium", start: "medium", source: "keyword", steppedUp: false, returnedToFirst: false });
+/** Task 3's 80% tables. */
+const EIGHTY: Readonly<Record<Tier, Readonly<Record<Tier, number>>>> = {
+  low: { low: 0.8, medium: 0.1, high: 0.05, super: 0.05 },
+  medium: { low: 0.1, medium: 0.8, high: 0.05, super: 0.05 },
+  high: { low: 0.05, medium: 0.1, high: 0.8, super: 0.05 },
+  super: { low: 0.05, medium: 0.05, high: 0.1, super: 0.8 },
+};
+
+/** Random probabilities for Jev's four levels, which sum to 1. */
+function randomTable(rand: () => number): Record<Tier, number> {
+  const raw = TIERS.map(() => rand() + 0.01);
+  const sum = raw.reduce((total, value) => total + value, 0);
+  return { low: (raw[0] ?? 0) / sum, medium: (raw[1] ?? 0) / sum, high: (raw[2] ?? 0) / sum, super: (raw[3] ?? 0) / sum };
+}
+
+/** A plan's level without its demand, which an untagged run always has and a tagged run never. */
+function levelOf(result: Plan): Omit<PlanLevel, "demand"> | undefined {
+  const { level } = result;
+  if (level === undefined) return undefined;
+  const { demand, ...rest } = level;
+  assert.equal(demand !== undefined, level.source !== "tag", `an untagged run has a demand, and a tagged run none: ${JSON.stringify(level)}`);
+  return rest;
+}
+
+function close(actual: number | undefined, expected: number, message: string): void {
+  assert.ok(actual !== undefined && Math.abs(actual - expected) < 0.01, `${message}: ${actual} is not within 0.01 of ${expected}`);
+}
+
+/** Task 3's planning prompt: the heuristics alone rate it HIGH, 2.02, in a new session. */
+const ARCHITECTURE = "Plan the architecture for a distributed payment service with migration strategy";
+/** A long session's latest twenty messages, a user prompt and a tool result in turn. */
+const ALTERNATING = Array.from({ length: HEURISTIC_MESSAGES }, (_, i) => (i % 2 === 0 ? "user" : "tool"));
+
+describe("the needed level", () => {
+  test("is the blend's when Jev answers", () => {
+    const sure = planV2("go ahead", { level: { jev: jevOf(EIGHTY.super) } });
+    expectPlan(sure, ASTRA, "jev");
+    assert.deepEqual([sure.level?.need, sure.level?.tier, sure.level?.source], ["super", "super", "jev"], "80% SUPER on a neutral prompt");
+    close(sure.level?.demand?.value, 2.23, "the blend of 80% SUPER and the heuristics");
+    assert.deepEqual(sure.level?.demand?.guards, ["close-call"], "2.23 is within 0.1 of the SUPER cut, so it takes SUPER");
+    const low = planV2("go ahead", { level: { jev: jevOf(EIGHTY.low) } });
+    expectPlan(low, LUNA, "jev");
+    assert.deepEqual([low.level?.need, low.level?.source], ["low", "jev"], "80% LOW on a neutral prompt");
   });
 
-  test("Jev's tier decides, not its choice; when Jev fails, the keywords decide and the failure is kept", () => {
-    const jev = answer("medium", "high");
-    const result = planV2(FRANCE, { level: { jev } });
-    expectPlan(result, SOL, "jev");
-    assert.deepEqual(result.level, { scope: "personal", tier: "high", asked: "high", start: "high", source: "jev", steppedUp: false, returnedToFirst: false, jev });
+  test("is the heuristics' when Jev fails or was not asked", () => {
     const failed: JevOutcome = { kind: "failure", model: JEV, failure: "timeout", ms: 1000 };
-    const keywords = planV2(FRANCE, { level: { jev: failed } });
-    expectPlan(keywords, TERRA, "keyword");
-    assert.deepEqual(keywords.level, { scope: "personal", tier: "medium", asked: "medium", start: "medium", source: "keyword", steppedUp: false, returnedToFirst: false, jev: failed });
+    const planning = planV2(ARCHITECTURE, { level: { jev: failed } });
+    expectPlan(planning, SOL, "heuristics");
+    assert.deepEqual([planning.level?.need, planning.level?.source, planning.level?.jev], ["high", "heuristics", failed], "the heuristics alone rate a planning prompt in a new session HIGH");
+    close(planning.level?.demand?.value, 2.02, "the heuristics alone rate a planning prompt in a new session HIGH: 2.02");
+    assert.equal(planning.level?.demand?.jev, undefined, "a failure has no term in the blend");
+    const typo = planV2("fix the typo in the README");
+    expectPlan(typo, LUNA, "heuristics");
+    assert.deepEqual([typo.level?.need, typo.level?.source, typo.level?.jev], ["low", "heuristics", undefined], "Jev was not asked: the heuristics alone rate a typo LOW");
+  });
+
+  test("is raised by the risky floor and by a very deep session, and says so", () => {
+    const risky = planV2("git rm the build directory", { level: { jev: jevOf(EIGHTY.low) } });
+    expectPlan(risky, SOL, "floor");
+    assert.deepEqual([risky.level?.need, risky.level?.source, risky.level?.trigger], ["high", "floor", "destructive-git"], "risky operations get at least HIGH");
+    assert.ok(risky.level?.demand?.guards.includes("risky"), "the risky guard applied");
+    const deep = planV2("continue", { level: { jev: jevOf(EIGHTY.low) }, facts: { contextTokens: 150_000, roles: ALTERNATING, entries: 400 } });
+    expectPlan(deep, TERRA, "floor");
+    assert.deepEqual([deep.level?.need, deep.level?.source, deep.level?.trigger], ["medium", "floor", undefined], "a very deep session gets at least MEDIUM");
+    assert.deepEqual(deep.level?.demand?.guards, ["deep-session"], "the deep-session guard alone applied");
+  });
+
+  test("is the tag's for a tagged run, which has no demand", () => {
+    const tagged = planV2("git rm the build directory", { level: { tag: "low" } });
+    expectPlan(tagged, LUNA, "tag");
+    assert.deepEqual([tagged.level?.need, tagged.level?.source, tagged.level?.trigger], ["low", "tag", undefined], "a tag decides alone; no floor raises it");
+    assert.equal(tagged.level !== undefined && "demand" in tagged.level, false, "a tagged run has no demand");
+  });
+});
+
+describe("v2 levels", () => {
+  test("an untagged run without Jev takes the first candidate of the heuristics' level", () => {
+    const result = planV2(FRANCE);
+    expectPlan(result, TERRA, "heuristics");
+    assert.deepEqual([result.signal, result.role], ["default", "medium"]);
+    assert.deepEqual(levelOf(result), { scope: "personal", need: "medium", tier: "medium", source: "heuristics", steppedUp: false, returnedToFirst: false }, "without Jev the heuristics decide alone: a plain question is MEDIUM, 0.89");
+  });
+
+  test("the blend decides, not Jev's choice; when Jev fails, the heuristics decide and the failure is kept", () => {
+    const jev = jevOf({ low: 0.05, medium: 0.5, high: 0.4, super: 0.05 });
+    const result = planV2(FRANCE, { level: { jev } });
+    expectPlan(result, TERRA, "jev");
+    assert.deepEqual(
+      levelOf(result),
+      { scope: "personal", need: "medium", tier: "medium", source: "jev", steppedUp: false, returnedToFirst: false, jev },
+      "an unsure Jev no longer takes the higher of two close leaders: the blend of 50% MEDIUM and 40% HIGH is 1.26, MEDIUM",
+    );
+    close(result.level?.demand?.value, 1.26, "the blend of an unsure answer");
+    const failed: JevOutcome = { kind: "failure", model: JEV, failure: "timeout", ms: 1000 };
+    const heuristics = planV2(FRANCE, { level: { jev: failed } });
+    expectPlan(heuristics, TERRA, "heuristics");
+    assert.deepEqual(levelOf(heuristics), { scope: "personal", need: "medium", tier: "medium", source: "heuristics", steppedUp: false, returnedToFirst: false, jev: failed }, "without an answer the heuristics decide alone");
   });
 
   test("a risky operation raises an untagged run to high, whatever Jev says", () => {
     const jev = answer("low");
     const result = planV2(FORCE_PUSH, { level: { jev } });
     expectPlan(result, SOL, "floor");
-    assert.deepEqual(result.level, { scope: "personal", tier: "high", asked: "low", start: "high", source: "floor", trigger: "destructive-git", steppedUp: false, returnedToFirst: false, jev });
+    assert.deepEqual(levelOf(result), { scope: "personal", need: "high", tier: "high", source: "floor", trigger: "destructive-git", steppedUp: false, returnedToFirst: false, jev });
   });
 
   test("the floor never lowers a run, and never raises a tagged one", () => {
-    // "force push" is one of the planning patterns too, so the keywords ask for super.
-    const keywords = planV2(FORCE_PUSH);
-    expectPlan(keywords, ASTRA, "keyword");
-    assert.deepEqual(keywords.level, { scope: "personal", tier: "super", asked: "super", start: "super", source: "keyword", steppedUp: false, returnedToFirst: false });
+    // "force push" is one of the planning patterns too, so the heuristics alone rate it HIGH, 1.71,
+    // where the floor has nothing to raise: the level is the heuristics', with no trigger.
+    const heuristics = planV2(FORCE_PUSH);
+    expectPlan(heuristics, SOL, "heuristics");
+    assert.deepEqual(levelOf(heuristics), { scope: "personal", need: "high", tier: "high", source: "heuristics", steppedUp: false, returnedToFirst: false }, "the heuristics alone rate a planning prompt in a new session HIGH: the floor raises nothing");
     expectPlan(planV2(FORCE_PUSH, { level: { jev: answer("high") } }), SOL, "jev");
+    const above = planV2(FORCE_PUSH, { level: { jev: answer("super") } });
+    expectPlan(above, ASTRA, "jev");
+    assert.equal(above.level?.need, "super", "a demand above the floor keeps its level: the floor never lowers a run");
     const tagged = planV2(FORCE_PUSH, { level: { tag: "low" } });
     expectPlan(tagged, LUNA, "tag");
-    assert.deepEqual(tagged.level, { scope: "personal", tier: "low", asked: "low", start: "low", source: "tag", steppedUp: false, returnedToFirst: false });
+    assert.deepEqual(levelOf(tagged), { scope: "personal", need: "low", tier: "low", source: "tag", steppedUp: false, returnedToFirst: false });
     // A tag outranks Jev, and a tagged run waits for no answer, so its plan keeps none.
     assert.deepEqual(planV2(FORCE_PUSH, { level: { tag: "low", jev: answer("super") } }), tagged);
   });
@@ -586,7 +689,7 @@ describe("v2 levels", () => {
     const jev = answer("low");
     const down = planV2(PLAIN, { level: { jev }, last: astra });
     expectPlan(down, LUNA, "jev");
-    assert.deepEqual(down.level, { scope: "personal", tier: "low", asked: "low", start: "low", source: "jev", steppedUp: false, returnedToFirst: false, jev }, "nothing holds a session by time");
+    assert.deepEqual(levelOf(down), { scope: "personal", need: "low", tier: "low", source: "jev", steppedUp: false, returnedToFirst: false, jev }, "nothing holds a session by time");
   });
 
   test("a latest response from the other scope's roles changes nothing either", () => {
@@ -602,36 +705,36 @@ describe("v2 levels", () => {
     cooldowns.cool(WORK_ASTRA, 2, NOW, 30);
     const catalog = v2Catalog();
     catalog.unavailable.add(KIMI);
-    const MEDIUM = { tier: "medium", asked: "medium", start: "medium", source: "keyword", steppedUp: false, returnedToFirst: false } as const;
+    const MEDIUM = { need: "medium", tier: "medium", source: "heuristics", steppedUp: false, returnedToFirst: false } as const;
     const work = planV2(FRANCE, { rc: v2(catalog, { cooldowns, scope: "work" }), last: last(WORK_ASTRA, MINUTE) });
-    expectPlan(work, WORK_TERRA, "keyword");
-    assert.deepEqual(work.level, { scope: "work", ...MEDIUM });
+    expectPlan(work, WORK_TERRA, "heuristics");
+    assert.deepEqual(levelOf(work), { scope: "work", ...MEDIUM });
     const personal = planV2(FRANCE, { rc: v2(catalog, { cooldowns }), last: last(ASTRA, MINUTE) });
-    expectPlan(personal, TERRA, "keyword");
-    assert.deepEqual(personal.level, { scope: "personal", ...MEDIUM });
+    expectPlan(personal, TERRA, "heuristics");
+    assert.deepEqual(levelOf(personal), { scope: "personal", ...MEDIUM });
     // Luna is too small for the conversation. With compaction enabled the run takes it, and Pi compacts.
     const small = v2Catalog().add(codex(LUNA, { contextWindow: 128_000 }));
     small.unavailable.add(KIMI);
     const jev = answer("low");
     const compacted = planV2(PLAIN, { rc: v2(small, { cooldowns }), level: { jev }, last: last(ASTRA, 6 * MINUTE, 120_000) });
     expectPlan(compacted, LUNA, "jev");
-    assert.deepEqual(compacted.level, { scope: "personal", tier: "low", asked: "low", start: "low", source: "jev", steppedUp: false, returnedToFirst: false, jev }, "with compaction enabled a too-small model is compacted for");
+    assert.deepEqual(levelOf(compacted), { scope: "personal", need: "low", tier: "low", source: "jev", steppedUp: false, returnedToFirst: false, jev }, "with compaction enabled a too-small model is compacted for");
     // With compaction disabled, the run climbs from low to the first tier that fits.
     const fit = planV2(PLAIN, { rc: v2(small, { cooldowns }), level: { jev }, last: last(ASTRA, 6 * MINUTE, 120_000), compaction: DISABLED });
     expectPlan(fit, TERRA, "step-up");
-    assert.deepEqual(fit.level, { scope: "personal", tier: "medium", asked: "low", start: "low", source: "jev", steppedUp: true, returnedToFirst: false, jev });
-    // The floor stays a minimum: a risky run climbs again from high, not from the tier it asked for.
+    assert.deepEqual(levelOf(fit), { scope: "personal", need: "low", tier: "medium", source: "jev", steppedUp: true, returnedToFirst: false, jev });
+    // The floor stays a minimum: a risky run climbs again from high, not from the demand's level.
     const floored = planV2(FORCE_PUSH, { rc: v2(catalog, { cooldowns }), level: { jev }, last: last(ASTRA, MINUTE) });
     expectPlan(floored, SOL, "floor");
-    assert.deepEqual(floored.level, { scope: "personal", tier: "high", asked: "low", start: "high", source: "floor", trigger: "destructive-git", steppedUp: false, returnedToFirst: false, jev });
+    assert.deepEqual(levelOf(floored), { scope: "personal", need: "high", tier: "high", source: "floor", trigger: "destructive-git", steppedUp: false, returnedToFirst: false, jev });
   });
 
   test("a run whose own tier and every tier above it have no available candidate is refused, whatever tier answered last", () => {
     const catalog = v2Catalog();
     for (const ref of [TERRA, DEEPSEEK, SOL, GLM_CLOUD, ASTRA, KIMI]) catalog.unavailable.add(ref);
     const result = planV2(FRANCE, { rc: v2(catalog), last: last(ASTRA, MINUTE) });
-    assert.deepEqual([result.role, result.code], [undefined, "keyword"]);
-    assert.deepEqual(result.level, { scope: "personal", tier: "medium", asked: "medium", start: "medium", source: "keyword", steppedUp: false, returnedToFirst: false });
+    assert.deepEqual([result.role, result.code], [undefined, "heuristics"]);
+    assert.deepEqual(levelOf(result), { scope: "personal", need: "medium", tier: "medium", source: "heuristics", steppedUp: false, returnedToFirst: false });
     assert.ok(!result.decision.ok, JSON.stringify(result.decision));
     // Low's candidates are available, but a run never goes below its own tier.
     assert.deepEqual(result.decision.attempts.map((attempt) => attempt.role), ["medium", "high", "super"]);
@@ -647,7 +750,7 @@ describe("v2 levels", () => {
     const result = planV2(PLAIN, { rc: v2(catalog), level: { tag: "low" }, last: last(SOL, MINUTE, 100_000), compaction: DISABLED });
     expectPlan(result, TERRA, "step-up");
     assert.equal(result.role, "medium");
-    assert.deepEqual(result.level, { scope: "personal", tier: "medium", asked: "low", start: "low", source: "tag", steppedUp: true, returnedToFirst: false });
+    assert.deepEqual(levelOf(result), { scope: "personal", need: "low", tier: "medium", source: "tag", steppedUp: true, returnedToFirst: false });
   });
 
   test("a run moves up past a tier with no available candidate, whatever tier answered last", () => {
@@ -656,18 +759,18 @@ describe("v2 levels", () => {
     const jev = answer("low");
     const result = planV2(PLAIN, { rc: v2(catalog), level: { jev } });
     expectPlan(result, TERRA, "step-up");
-    assert.deepEqual(result.level, { scope: "personal", tier: "medium", asked: "low", start: "low", source: "jev", steppedUp: true, returnedToFirst: false, jev });
+    assert.deepEqual(levelOf(result), { scope: "personal", need: "low", tier: "medium", source: "jev", steppedUp: true, returnedToFirst: false, jev });
     // Version 1 refuses a run whose role cannot take it; a tier passes it up instead.
     const after = planV2(PLAIN, { rc: v2(catalog), level: { jev }, last: last(ASTRA, 10_000) });
     expectPlan(after, TERRA, "step-up");
-    assert.equal(after.level?.start, "low", "nothing holds a session by time");
+    assert.equal(after.level?.need, "low", "nothing holds a session by time");
   });
 
   test("a level returns to its first candidate as soon as that is available again", () => {
     const jev = answer("high");
     const back = planV2(PLAIN, { level: { jev }, last: last(GLM_CLOUD, MINUTE) });
     expectPlan(back, SOL, "jev");
-    assert.deepEqual(back.level, { scope: "personal", tier: "high", asked: "high", start: "high", source: "jev", steppedUp: false, returnedToFirst: true, jev });
+    assert.deepEqual(levelOf(back), { scope: "personal", need: "high", tier: "high", source: "jev", steppedUp: false, returnedToFirst: true, jev });
     const cooldowns = new Cooldowns();
     cooldowns.cool(SOL, 1, NOW, 30);
     const cooled = planV2(PLAIN, { rc: v2(v2Catalog(), { cooldowns }), level: { jev }, last: last(GLM_CLOUD, MINUTE) });
@@ -686,22 +789,22 @@ describe("v2 levels", () => {
 
   test("a work-scope run takes its tier's work-account model", () => {
     const result = planV2(FRANCE, { rc: v2(v2Catalog(), { scope: "work" }) });
-    expectPlan(result, WORK_TERRA, "keyword");
-    assert.deepEqual([result.role, result.level], ["work-medium", { scope: "work", tier: "medium", asked: "medium", start: "medium", source: "keyword", steppedUp: false, returnedToFirst: false }]);
+    expectPlan(result, WORK_TERRA, "heuristics");
+    assert.deepEqual([result.role, levelOf(result)], ["work-medium", { scope: "work", need: "medium", tier: "medium", source: "heuristics", steppedUp: false, returnedToFirst: false }]);
   });
 
-  test("the start tier is where the upward pick began, after the floor", () => {
+  test("the need is where the upward pick began, after the floor", () => {
     // High has no available candidate, so a run that starts there goes on to super.
     const catalog = v2Catalog();
     catalog.unavailable.add(SOL).add(GLM_CLOUD);
     const jev = answer("low");
     const floored = planV2(FORCE_PUSH, { rc: v2(catalog), level: { jev } });
     expectPlan(floored, ASTRA, "step-up");
-    assert.deepEqual(floored.level, { scope: "personal", tier: "super", asked: "low", start: "high", source: "floor", trigger: "destructive-git", steppedUp: true, returnedToFirst: false, jev });
+    assert.deepEqual(levelOf(floored), { scope: "personal", need: "high", tier: "super", source: "floor", trigger: "destructive-git", steppedUp: true, returnedToFirst: false, jev });
     // Sol answered a minute ago: the run still starts at its own tier, low, which can take it.
     const after = planV2(PLAIN, { rc: v2(catalog), level: { jev }, last: last(SOL, MINUTE) });
     expectPlan(after, LUNA, "jev");
-    assert.deepEqual(after.level, { scope: "personal", tier: "low", asked: "low", start: "low", source: "jev", steppedUp: false, returnedToFirst: false, jev }, "nothing holds a session by time");
+    assert.deepEqual(levelOf(after), { scope: "personal", need: "low", tier: "low", source: "jev", steppedUp: false, returnedToFirst: false, jev }, "nothing holds a session by time");
   });
 
   test("with compaction disabled, when no tier's first available candidate fits, the highest tier with an available candidate takes the run", () => {
@@ -713,7 +816,7 @@ describe("v2 levels", () => {
     const result = planV2(PLAIN, { level: { tag: "low" }, last: huge, compaction: DISABLED });
     expectPlan(result, ASTRA, "step-up");
     assert.equal(result.role, "super");
-    assert.deepEqual(result.level, { scope: "personal", tier: "super", asked: "low", start: "low", source: "tag", steppedUp: true, returnedToFirst: false });
+    assert.deepEqual(levelOf(result), { scope: "personal", need: "low", tier: "super", source: "tag", steppedUp: true, returnedToFirst: false });
     // With no super candidate available, high is the highest tier that has one.
     const catalog = v2Catalog();
     catalog.unavailable.add(ASTRA).add(KIMI);
@@ -729,7 +832,7 @@ describe("v2 levels", () => {
     for (const ref of [LUNA, NYX_QWEN, HERA_QWEN, TERRA, DEEPSEEK, SOL, GLM_CLOUD, ASTRA, KIMI]) catalog.unavailable.add(ref);
     const result = planV2(PLAIN, { rc: v2(catalog), level: { tag: "low" }, last: last(SOL, MINUTE, 100_000) });
     assert.deepEqual([result.role, result.code], [undefined, "tag"]);
-    assert.deepEqual(result.level, { scope: "personal", tier: "low", asked: "low", start: "low", source: "tag", steppedUp: false, returnedToFirst: false });
+    assert.deepEqual(levelOf(result), { scope: "personal", need: "low", tier: "low", source: "tag", steppedUp: false, returnedToFirst: false });
     assert.ok(!result.decision.ok, JSON.stringify(result.decision));
     assert.equal(result.decision.problem, undefined);
     assert.deepEqual(
@@ -773,7 +876,7 @@ describe("v2 levels", () => {
   test("a version 1 plan carries no level, and a level input changes nothing in it", () => {
     const planned = plan(PLANNING);
     assert.deepEqual(Object.keys(planned), ["virtualId", "localOnly", "signal", "reason", "role", "code", "decision"]);
-    assert.deepEqual(planUserTurn({ rc: heraContext(), text: PLANNING, last: undefined, now: NOW, compaction: ENABLED, level: { tag: "low", jev: answer("low") } }), planned);
+    assert.deepEqual(planUserTurn({ rc: heraContext(), text: PLANNING, last: undefined, now: NOW, compaction: ENABLED, facts: FRESH, level: { tag: "low", jev: answer("low") } }), planned);
   });
 
   test("200 random runs in each scope pick only that scope's accounts, each the first candidate of its role that resolves", (t) => {
@@ -800,7 +903,7 @@ describe("v2 levels", () => {
         roll < 0.3
           ? { tag: one(TIERS) }
           : roll < 0.65
-            ? { jev: answer(one(TIERS), one(TIERS)) }
+            ? { jev: jevOf(randomTable(rand)) }
             : roll < 0.8
               ? { jev: { kind: "failure", model: JEV, failure: one(["timeout", "error", "malformed"] as const), ms: 1000 } }
               : {};
@@ -821,17 +924,20 @@ describe("v2 levels", () => {
         : undefined;
       if (latest !== undefined && chance(0.35)) cool(latest.ref);
       const compaction = chance(0.5) ? ENABLED : DISABLED;
-      const shown = JSON.stringify({ text, level, last: latest, unavailable: [...catalog.unavailable], cooled, compaction: compaction.enabled });
+      // A tenth of the sessions are very deep, which the deep-session floor raises to MEDIUM.
+      const facts: PromptFacts = chance(0.1) ? { contextTokens: 150_000, roles: ALTERNATING, entries: 1_200 } : FRESH;
+      const shown = JSON.stringify({ text, level, last: latest, unavailable: [...catalog.unavailable], cooled, compaction: compaction.enabled, facts: facts.entries !== undefined });
       for (const scope of SCOPES) {
         const section = V2.scopes[scope];
         assert.ok(section !== undefined);
         const rc = v2(catalog, { scope, cooldowns });
-        const result = planUserTurn({ rc, text, last: latest, now: NOW, compaction, level });
+        const result = planUserTurn({ rc, text, last: latest, now: NOW, compaction, level, facts });
         const where = `seed ${seed} (case ${index} of ${CASES}, ${scope} scope): ${shown}`;
         const planned = result.level;
         assert.ok(planned !== undefined && planned.scope === scope, where);
-        // The run's own tier, which nothing lowers: the one it asked for, or the floor.
-        const own: Tier = planned.source === "floor" ? "high" : planned.asked;
+        // The run's own level, which nothing lowers: its need, after the floors.
+        const own: Tier = planned.need;
+        if (planned.trigger !== undefined) assert.ok(tierRank(own) >= tierRank("high"), `${where}: a risky run needs at least HIGH`);
         const available = (tier: Tier): boolean => pickInRole(rc, section.levels[tier].role, { fallback: false, code: "t" }).ok;
         const from = (tier: Tier): readonly Tier[] => TIERS.slice(tierRank(tier));
         if (result.decision.ok) {
@@ -871,7 +977,7 @@ describe("v2 levels", () => {
     // The run is not vacuous: both scopes picked and refused, and every source, step-up, and
     // oversized pick with compaction disabled and enabled happened.
     t.diagnostic(JSON.stringify(seen));
-    for (const name of ["personal picked", "personal refused", "work picked", "work refused", "oversized", "compacted for", "step-up", "step-up with compaction", "tag", "jev", "keyword", "floor"]) {
+    for (const name of ["personal picked", "personal refused", "work picked", "work refused", "oversized", "compacted for", "step-up", "step-up with compaction", "tag", "jev", "heuristics", "floor"]) {
       assert.ok((seen[name] ?? 0) > 0, `no ${name} in ${CASES} cases from seed ${SEED}: ${JSON.stringify(seen)}`);
     }
   });
@@ -895,15 +1001,15 @@ describe("nothing holds a session by time", () => {
     const low = answer("low");
     const down = planV2(PLAIN, { level: { jev: low }, last: last(ASTRA, 10_000) });
     expectPlan(down, LUNA, "jev");
-    assert.deepEqual(down.level, { scope: "personal", tier: "low", asked: "low", start: "low", source: "jev", steppedUp: false, returnedToFirst: false, jev: low }, "nothing holds a session by time");
+    assert.deepEqual(levelOf(down), { scope: "personal", need: "low", tier: "low", source: "jev", steppedUp: false, returnedToFirst: false, jev: low }, "nothing holds a session by time");
     const high = answer("super");
     const up = planV2(PLAIN, { level: { jev: high }, last: last(LUNA, 10_000) });
     expectPlan(up, ASTRA, "jev");
     assert.equal(up.level?.tier, "super", "a run that rates higher moves up at once, as before");
-    // Without an answer the keywords decide, and they too move the session down at once.
-    const keywords = planV2(FRANCE, { last: last(ASTRA, 10_000) });
-    expectPlan(keywords, TERRA, "keyword");
-    assert.equal(keywords.level?.tier, "medium", "nothing holds a session by time");
+    // Without an answer the heuristics decide, and they too move the session down at once.
+    const heuristics = planV2(FRANCE, { last: last(ASTRA, 10_000) });
+    expectPlan(heuristics, TERRA, "heuristics");
+    assert.equal(heuristics.level?.tier, "medium", "nothing holds a session by time");
   });
 });
 
@@ -916,14 +1022,14 @@ describe("a conversation too large for a model", () => {
     const result = planV2(PLAIN, { rc: v2(smallLow()), level: { tag: "low" }, last: huge, compaction: ENABLED });
     expectPlan(result, LUNA, "tag");
     assert.equal(result.role, "low");
-    assert.deepEqual(result.level, { scope: "personal", tier: "low", asked: "low", start: "low", source: "tag", steppedUp: false, returnedToFirst: false }, "with compaction enabled a too-small model is compacted for");
+    assert.deepEqual(levelOf(result), { scope: "personal", need: "low", tier: "low", source: "tag", steppedUp: false, returnedToFirst: false }, "with compaction enabled a too-small model is compacted for");
   });
 
   test("with compaction disabled, a tagged run steps up to the first level whose model fits", () => {
     const result = planV2(PLAIN, { rc: v2(smallLow()), level: { tag: "low" }, last: huge, compaction: DISABLED });
     expectPlan(result, TERRA, "step-up");
     assert.equal(result.role, "medium");
-    assert.deepEqual(result.level, { scope: "personal", tier: "medium", asked: "low", start: "low", source: "tag", steppedUp: true, returnedToFirst: false });
+    assert.deepEqual(levelOf(result), { scope: "personal", need: "low", tier: "medium", source: "tag", steppedUp: true, returnedToFirst: false });
   });
 
   test("with compaction disabled and no level that fits, the highest available level takes it", () => {

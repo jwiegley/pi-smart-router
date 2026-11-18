@@ -248,13 +248,12 @@ const goodAnswer = {
 };
 
 describe("interpret", () => {
-  test("takes the higher tier of a close call", () => {
-    const outcome = interpret(stopResult(goodAnswer), 0.15, "m", 12);
+  test("keeps Jev's choice and all four probabilities, and makes no level of them: the demand does", () => {
+    const outcome = interpret(stopResult(goodAnswer), "m", 12);
     assert.deepEqual(outcome, {
       kind: "answer",
       model: "m",
       choice: "medium",
-      tier: "high",
       probabilities: goodAnswer.probabilities,
       confidence: 0.8,
       ms: 12,
@@ -273,13 +272,13 @@ describe("interpret", () => {
       undefined,
     ];
     for (const answer of cases) {
-      assert.deepEqual(interpret(stopResult(answer), 0.15, "m", 1), { kind: "failure", model: "m", failure: "malformed", ms: 1 });
+      assert.deepEqual(interpret(stopResult(answer), "m", 1), { kind: "failure", model: "m", failure: "malformed", ms: 1 });
     }
   });
 
   test("names timeouts, other errors and aborts", () => {
     const failure = (r: ClassifierResult) => {
-      const outcome = interpret(r, 0.15, "m", 1);
+      const outcome = interpret(r, "m", 1);
       return outcome.kind === "failure" ? outcome.failure : outcome.kind;
     };
     assert.equal(failure(failedResult("error", "Request timed out after 1000ms")), "timeout");
@@ -290,7 +289,7 @@ describe("interpret", () => {
 });
 
 describe("askJev", () => {
-  const settings: JevSettings = { model: "openrouter/typesafe/jev-1.14", timeoutMs: 1000, closeCall: 0.15, context: caps };
+  const settings: JevSettings = { model: "openrouter/typesafe/jev-1.14", timeoutMs: 1000, context: caps };
   const model = { id: "typesafe/jev-1.14" } as unknown as ClassifierModel<ClassifierApi>;
   const context = buildContext("hi", [], descriptions, caps);
 

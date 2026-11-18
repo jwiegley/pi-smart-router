@@ -979,7 +979,11 @@ test("L1 an untagged run rated lower moves down at once; a tag routes at once, n
   world.jev.answer(JEV.high);
   await pi.prompt("Check the error paths");
   assert.equal(answered(pi), PERSONAL.high, "nothing holds a session by time");
-  assert.equal(await lastDecision(pi), "smart-router/auto user: high → openai-codex-2/gpt-6.1-sol (jev, triage:no_fast_path) [personal HIGH (jev 80%)]", "nothing holds a session by time");
+  assert.equal(
+    await lastDecision(pi),
+    "smart-router/auto user: high → openai-codex-2/gpt-6.1-sol (jev, triage:no_fast_path) [personal HIGH (demand 1.6)]",
+    "nothing holds a session by time: the blend of 80% HIGH and the heuristics is 1.6",
+  );
 
   // A tagged message goes to HIGH at once. Jev's opinion of it is asked, and the run does not wait for it.
   world.jev.hang();
@@ -1062,7 +1066,7 @@ test("L2 a tagged level too small for the conversation is compacted for, not ste
     "with compaction enabled a too-small model is compacted for",
   );
   // A record names a step-up only when there was one.
-  const record = { source: "tag", tag: "low", asked: "low", tier: "low", steppedUp: undefined, ref: PERSONAL.low };
+  const record = { source: "tag", tag: "low", need: "low", tier: "low", steppedUp: undefined, ref: PERSONAL.low };
   assert.deepEqual(fields(runRecords(pi).at(-1), record), record, "with compaction enabled a too-small model is compacted for");
 });
 
@@ -1074,51 +1078,50 @@ test("L2b with compaction disabled, a tagged level steps up, with a notice, when
   assert.deepEqual(requestsOf(traceFrom(world, mark)), [[PERSONAL.medium, "run"]], "with compaction disabled, MEDIUM's model takes the run and nothing is summarized");
   assert.equal(answered(pi), PERSONAL.medium);
   assert.equal(notice(pi, /can take this run/), "pi-smart-router: no LOW model can take this run, so it goes to MEDIUM (gpt-6.1-terra).");
-  assert.equal(pi.ui.status(LEVEL_KEY), "personal MEDIUM → gpt-6.1-terra (tag)");
+  assert.equal(pi.ui.status(LEVEL_KEY), "personal LOW → gpt-6.1-terra (tag)", "the footer names the level the prompt needs, beside the step-up notice");
   assert.equal(await lastDecision(pi), "smart-router/auto user: medium → openai-codex-2/gpt-6.1-terra (step-up, triage:keyword_economical) [personal MEDIUM (tag)]");
-  const record = { source: "tag", tag: "low", asked: "low", tier: "medium", steppedUp: true, ref: PERSONAL.medium };
+  const record = { source: "tag", tag: "low", need: "low", tier: "medium", steppedUp: true, ref: PERSONAL.medium };
   assert.deepEqual(fields(runRecords(pi).at(-1), record), record);
   assert.deepEqual(pi.eventsOf("compaction_start"), [], "compaction is disabled");
   assert.deepEqual(world.refCounts(), { [PERSONAL.medium]: 1 }, "LOW's model received nothing, and nothing was compacted");
 });
 
-test("L3 untagged runs follow Jev; a close call goes higher; failure, refusal and timeout fall back to keywords", TIMEOUT, async (t) => {
+test("L3 untagged runs follow the blend with Jev; an unsure close call stays lower; failure, refusal and timeout leave the heuristics to decide", TIMEOUT, async (t) => {
   const world = levelsWorld(t);
   const pi = await world.start({ select: "smart-router/auto" });
   const footer = (): string | undefined => pi.ui.status(LEVEL_KEY);
-  // Each run's tier is at least the one before it.
   world.jev.fail("System One API error (500): upstream connect error");
   await pi.prompt(PROMPTS.trivial);
   assert.equal(answered(pi), PERSONAL.low);
-  assert.equal(footer(), "personal LOW → gpt-6-luna (keywords; jev error)");
+  assert.equal(footer(), "personal LOW → gpt-6-luna (demand 0.5, jev error)", "without an answer the heuristics decide alone: a trivial prompt is LOW");
   // pi-ai has no refusal branch: OpenRouter's refusal reaches the router as an error.
   world.jev.fail('System One API error (403): {"error":{"message":"The request was refused"}}');
   await pi.prompt(PROMPTS.plain);
   assert.equal(answered(pi), PERSONAL.medium);
-  assert.equal(footer(), "personal MEDIUM → gpt-6.1-terra (keywords; jev error)");
-  // A close call: MEDIUM leads HIGH by less than closeCall, so the run goes to HIGH.
+  assert.equal(footer(), "personal MEDIUM → gpt-6.1-terra (demand 0.9, jev error)", "without an answer the heuristics decide alone: a plain prompt is MEDIUM");
+  // MEDIUM leads HIGH by little: an unsure Jev no longer takes the higher of two close leaders.
   world.jev.answer({ low: 0.05, medium: 0.45, high: 0.4, super: 0.1 });
   await pi.prompt("Walk me through the cache layer");
-  assert.equal(answered(pi), PERSONAL.high);
-  assert.equal(footer(), "personal HIGH → gpt-6.1-sol (jev 40%)");
-  // A classifier that answers nothing: the run goes on with the keywords' tier once timeoutMs passes.
+  assert.equal(answered(pi), PERSONAL.medium, "an unsure Jev no longer takes the higher of two close leaders: the blend is 1.34, MEDIUM");
+  assert.equal(footer(), "personal MEDIUM → gpt-6.1-terra (demand 1.3)", "an unsure Jev no longer takes the higher of two close leaders: the blend is 1.34");
+  // A classifier that answers nothing: the run goes on with the heuristics' level once timeoutMs passes.
   world.jev.hang();
   const started = Date.now();
   await pi.prompt(PROMPTS.complex);
   const waited = Date.now() - started;
   assert.ok(waited < 1_500, `the run went on after ${waited} ms`);
   assert.equal(answered(pi), PERSONAL.high);
-  assert.equal(footer(), "personal HIGH → gpt-6.1-sol (keywords; jev timeout)");
-  // Jev's tier, where the keywords would say MEDIUM.
+  assert.equal(footer(), "personal HIGH → gpt-6.1-sol (demand 1.8, jev timeout)", "without an answer the heuristics decide alone: a complex prompt here is HIGH, 1.77");
+  // A sure answer carries four fifths of the blend, where the heuristics alone would say MEDIUM.
   world.jev.answer(JEV.super);
   await pi.prompt("Hello again");
   assert.equal(answered(pi), PERSONAL.super);
-  assert.equal(footer(), "personal SUPER → gpt-6-astra (jev 80%)");
+  assert.equal(footer(), "personal SUPER → gpt-6-astra (demand 2.3)", "the blend of 80% SUPER and the heuristics is 2.25, SUPER");
   // A choice outside the four tiers is a failure too.
   world.jev.answer(JEV.low, "other");
   await pi.prompt(PROMPTS.planning);
-  assert.equal(answered(pi), PERSONAL.super);
-  assert.equal(footer(), "personal SUPER → gpt-6-astra (keywords; jev malformed)");
+  assert.equal(answered(pi), PERSONAL.high, "the heuristics alone rate a planning prompt HIGH, not SUPER: 1.81");
+  assert.equal(footer(), "personal HIGH → gpt-6.1-sol (demand 1.8, jev malformed)", "the heuristics alone rate a planning prompt HIGH, not SUPER: 1.81");
 
   // Every request reached the classifier with the roster's deadline and no retries.
   assert.deepEqual(
@@ -1132,13 +1135,14 @@ test("L3 untagged runs follow Jev; a close call goes higher; failure, refusal an
       return [record.source, record.tier, jev?.failure ?? jev?.choice];
     }),
     [
-      ["keyword", "low", "error"],
-      ["keyword", "medium", "error"],
-      ["jev", "high", "medium"],
-      ["keyword", "high", "timeout"],
+      ["heuristics", "low", "error"],
+      ["heuristics", "medium", "error"],
+      ["jev", "medium", "medium"],
+      ["heuristics", "high", "timeout"],
       ["jev", "super", "super"],
-      ["keyword", "super", "malformed"],
+      ["heuristics", "high", "malformed"],
     ],
+    "without an answer the heuristics decide alone; an unsure close call stays at the blend's MEDIUM; a planning prompt alone is HIGH",
   );
 });
 
@@ -1207,7 +1211,7 @@ test("L4 no classifier call on local, for a steer, or without a classifier; PI_S
     const pi = await world.start({ select: "smart-router/auto" });
     await pi.prompt(PROMPTS.plain);
     assert.equal(answered(pi), PERSONAL.medium);
-    assert.equal(pi.ui.status(LEVEL_KEY), "personal MEDIUM → gpt-6.1-terra (keywords)");
+    assert.equal(pi.ui.status(LEVEL_KEY), "personal MEDIUM → gpt-6.1-terra (demand 0.9)", "without a classifier the heuristics decide alone: 0.89, MEDIUM");
     await pi.prompt("Fix the parser #high");
     assert.equal(answered(pi), PERSONAL.high);
     assert.deepEqual(world.jev.calls, []);
@@ -1431,18 +1435,21 @@ test("L7 one smart-router.level record per run; /smart-router was appends a corr
   const ms = (a?.jev as { readonly ms?: unknown } | undefined)?.ms;
   assert.equal(typeof a?.at, "number");
   assert.equal(typeof ms, "number");
-  assert.deepEqual(a, {
+  const { demand, ...rest } = a ?? {};
+  assert.deepEqual(rest, {
     v: 1,
     at: a?.at,
     scope: "personal",
     source: "jev",
     tier: "medium",
-    asked: "medium",
+    need: "medium",
     keyword: { signal: "default", reason: "triage:no_fast_path" },
     jev: { model: JEV_MODEL, choice: "medium", probabilities: JEV.medium, confidence: 0.8, ms },
     ref: PERSONAL.medium,
   });
-  assert.equal(pi.ui.status(LEVEL_KEY), "personal MEDIUM → gpt-6.1-terra (jev 80%)");
+  const value = (demand as { readonly value?: unknown } | undefined)?.value;
+  assert.ok(typeof value === "number" && Math.abs(value - 1.01) < 0.01, `the record holds the run's demand, the blend of 80% MEDIUM and the heuristics: ${String(value)}`);
+  assert.equal(pi.ui.status(LEVEL_KEY), "personal MEDIUM → gpt-6.1-terra (demand 1.0)", "the blend of 80% MEDIUM and the heuristics is 1.01");
   // A command and a run without a level of its own add none, and that run shows no level.
   await pi.command("status");
   await pi.custom();
@@ -1539,8 +1546,8 @@ test("L8 the risky floor raises a Jev LOW to HIGH, and a tag overrides it", TIME
   world.jev.answer(JEV.low);
   await pi.prompt(risky);
   assert.equal(answered(pi), PERSONAL.high);
-  assert.equal(pi.ui.status(LEVEL_KEY), "personal HIGH → gpt-6.1-sol (floor)");
-  const floor = { source: "floor", trigger: "destructive-git", asked: "low", tier: "high" };
+  assert.equal(pi.ui.status(LEVEL_KEY), "personal HIGH → gpt-6.1-sol (demand 0.7, floor)", "the blend of 80% LOW and the heuristics, 0.7, is raised to HIGH by the risky floor");
+  const floor = { source: "floor", trigger: "destructive-git", need: "high", tier: "high" };
   assert.deepEqual(fields(runRecords(pi).at(-1), floor), floor);
   assert.equal((runRecords(pi).at(-1)?.jev as { readonly choice?: unknown } | undefined)?.choice, "low", "Jev said LOW");
   // Tagged, the same text goes where the tag says, down from HIGH at once.

@@ -5,11 +5,13 @@
 // table, whichever model answered last and however long ago. Nothing holds a session on a model by
 // time: a run that classifies lower moves down at once, as one that classifies higher moves up.
 //
-// Version 2 plans a tier in the session's scope instead: a trailing tag's, else Jev's, else the
-// keywords'. An untagged run rises to at least high when it names a risky operation; a tagged run
-// does not. The tier's role takes its first available candidate, not the latest response's. A tier
-// with no available candidate passes the run up to the next tier: a run is refused only when
-// neither its own tier nor any above it has an available one.
+// Version 2 plans a tier in the session's scope instead: the level the prompt needs, a trailing
+// tag's, else its demand's (demand.ts), which blends Jev's answer with the heuristics, or takes the
+// heuristics alone when Jev gave none. The demand's guards raise an untagged run to at least high
+// when it names a risky operation, and a very deep session to the roster's floor; a tagged run is
+// raised by neither. The tier's role takes its first available candidate, not the latest
+// response's. A tier with no available candidate passes the run up to the next tier: a run is
+// refused only when neither its own tier nor any above it has an available one.
 //
 // A conversation larger than a candidate's window neither removes the candidate nor holds the
 // session while Pi's compaction is enabled: the run goes to its tier, and Pi compacts before it
@@ -29,13 +31,15 @@ import { classify, riskyTrigger } from "./classify.ts";
 import type { RiskyTrigger, Signal } from "./classify.ts";
 import { PROVIDER } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
+import { demandOf } from "./demand.ts";
+import type { Demand, PromptFacts } from "./demand.ts";
 import { isRecord, own } from "./files.ts";
 import type { JevOutcome } from "./jev.ts";
 import { HELD_REASON, resolveCandidate } from "./resolve.ts";
 import type { Resolution, ResolveContext } from "./resolve.ts";
 import { autoRoles, candidatesOf, fallbackAfter, roleOf, scopeSection } from "./roster.ts";
-import type { Scope, ScopeSection } from "./roster.ts";
-import { keywordTier, tierAbove, tierRank } from "./tiers.ts";
+import type { RosterV2, Scope, ScopeSection } from "./roster.ts";
+import { tierAbove, tierRank } from "./tiers.ts";
 import type { Tier } from "./tiers.ts";
 
 /** The latest successful physical response of a session. */
@@ -166,24 +170,24 @@ export interface LevelInput {
   readonly jev?: JevOutcome;
 }
 
-/** What decided a version 2 run's tier: a tag, Jev, the keywords, or the risky-operations floor. */
-export type LevelSource = "tag" | "jev" | "keyword" | "floor";
+/** What decided a version 2 run's level: a tag, the blend with Jev's answer, the heuristics alone, or a floor that raised it. */
+export type LevelSource = "tag" | "jev" | "heuristics" | "floor";
 
 /** Why a version 2 run on auto went to its tier. Never prompt text. */
 export interface PlanLevel {
   readonly scope: Scope;
-  /** The tier whose role the plan picked in; when it picked none, `start`. */
+  /** The level the prompt needs: its tag's, else its demand's after the guards. */
+  readonly need: Tier;
+  /** The level whose model takes the run: `need`, or a higher one. When the plan picked none, `need`. */
   readonly tier: Tier;
-  /** The tier the tag, Jev or the keywords asked for, before the floor and any step-up. */
-  readonly asked: Tier;
-  /** The tier the upward pick began at: `asked` after the floor. */
-  readonly start: Tier;
   readonly source: LevelSource;
-  /** The risky operation that raised the run to the floor. */
+  /** The risky operation that raised the run to HIGH. */
   readonly trigger?: RiskyTrigger;
+  /** An untagged run's demand. */
+  readonly demand?: Demand;
   /**
-   * Whether `tier` ranks above `start`: each tier from `start` below it had no available candidate,
-   * or, with compaction disabled, its first available candidate was too small for the conversation.
+   * Whether `tier` is above `need` because each level between had no available model, or none that
+   * fits with compaction disabled.
    */
   readonly steppedUp: boolean;
   /**
@@ -208,7 +212,7 @@ export interface Plan {
   readonly role: string | undefined;
   /**
    * The history code of the decision: `signal:*` or `local`. A version 2 run on auto has its level's
-   * source (`tag`, `jev`, `keyword` or `floor`), `step-up` when its pick moved up a tier, or
+   * source (`tag`, `jev`, `heuristics` or `floor`), `step-up` when its pick moved up a tier, or
    * `no-scope` when the roster does not serve the session's scope.
    */
   readonly code: string;
@@ -228,6 +232,8 @@ export interface PlanInput {
   readonly compaction: CompactionFigures;
   /** A version 2 run's tag and Jev outcome; version 1 and local-only runs ignore it. */
   readonly level?: LevelInput;
+  /** What the heuristics read of the session before the prompt; only an untagged version 2 run on auto uses them. */
+  readonly facts: PromptFacts;
 }
 
 /** The role of a ref that may take this request: the local role when local-only, else for auto a role auto can reach. */
@@ -246,8 +252,6 @@ export function noScopeSection(scope: Scope): string {
   return `the roster has no ${scope} scope`;
 }
 
-/** The tier an untagged run that names a risky operation rises to, at least. */
-const FLOOR: Tier = "high";
 const STEP_UP = "step-up";
 const NO_SCOPE = "no-scope";
 
@@ -287,32 +291,42 @@ function climb(p: PlanInput, section: ScopeSection, start: Tier, code: string, c
   return highest ?? { tier: start, decision: { ok: false, attempts } };
 }
 
+/**
+ * The level a version 2 run on auto needs, and what decided it: a tag's, which no floor raises;
+ * else the demand's, after its guards. A guard that raised the level, the risky one or the deep
+ * session's, makes the source `floor`; else the blend with Jev's answer is `jev`, and the heuristics
+ * alone are `heuristics`.
+ */
+function needOf(p: PlanInput, roster: RosterV2, signal: Signal): Pick<PlanLevel, "need" | "source" | "trigger" | "demand"> {
+  const tag = p.level?.tag;
+  if (tag !== undefined) return { need: tag, source: "tag" };
+  const risky = riskyTrigger(p.text);
+  const demand = demandOf({ text: p.text, planning: signal === "planning", risky: risky !== undefined, jev: p.level?.jev, facts: p.facts }, roster.demand);
+  const raised = demand.guards.includes("risky") || demand.guards.includes("deep-session");
+  const source: LevelSource = raised ? "floor" : demand.jev !== undefined ? "jev" : "heuristics";
+  return { need: demand.tier, source, ...(risky !== undefined && demand.guards.includes("risky") ? { trigger: risky } : {}), demand };
+}
+
 /** A version 2 run on auto, in a scope the roster serves. A refusal keeps no role, so the run's request does not pick in one again. */
-function planLevel(p: PlanInput, section: ScopeSection, signal: Signal): Pick<Plan, "role" | "code" | "decision"> & { readonly level: PlanLevel } {
+function planLevel(p: PlanInput, roster: RosterV2, section: ScopeSection, signal: Signal): Pick<Plan, "role" | "code" | "decision"> & { readonly level: PlanLevel } {
   const { rc, last } = p;
   const tag = p.level?.tag;
   const jev = p.level?.jev;
-  const [asked, given]: readonly [Tier, LevelSource] =
-    tag !== undefined ? [tag, "tag"] : jev?.kind === "answer" ? [jev.tier, "jev"] : [keywordTier(signal), "keyword"];
-  const risky = tag === undefined ? riskyTrigger(p.text) : undefined;
-  const trigger = risky !== undefined && tierRank(asked) < tierRank(FLOOR) ? risky : undefined;
-  const source: LevelSource = trigger === undefined ? given : "floor";
-  // The run's own tier: the one it asked for, or the floor. Whichever tier answered last, the pick
-  // starts here.
-  const start = trigger === undefined ? asked : FLOOR;
-  const { tier, decision } = climb(p, section, start, source, !p.compaction.enabled);
+  const { need, source, trigger, demand } = needOf(p, roster, signal);
+  // Whichever tier answered last, the pick starts at the level the prompt needs.
+  const { tier, decision } = climb(p, section, need, source, !p.compaction.enabled);
   const choice = decision.ok ? decision.choice : undefined;
   // The tier's own role, whichever role the pick is in: a chain model's role is not the run's.
   const levelRole = section.levels[tier].role;
   const viaChain = choice !== undefined && choice.role !== levelRole;
   const level: PlanLevel = {
     scope: rc.scope,
+    need,
     tier,
-    asked,
-    start,
     source,
     ...(trigger === undefined ? {} : { trigger }),
-    steppedUp: tierRank(tier) > tierRank(start),
+    ...(demand === undefined ? {} : { demand }),
+    steppedUp: tierRank(tier) > tierRank(need),
     returnedToFirst: choice !== undefined && last !== undefined && ranksBefore(rc, section, tier, choice, last.ref),
     ...(tag !== undefined || jev === undefined ? {} : { jev }),
     ...(viaChain ? { fallback: true as const } : {}),
@@ -342,7 +356,7 @@ export function planUserTurn(p: PlanInput): Plan {
   if (rc.roster.version === 2) {
     const section = scopeSection(rc.roster, rc.scope);
     if (section === undefined) return plan(signal, reason, undefined, NO_SCOPE, { ok: false, attempts: [], problem: noScopeSection(rc.scope) });
-    const { role, code, decision, level } = planLevel(p, section, signal);
+    const { role, code, decision, level } = planLevel(p, rc.roster, section, signal);
     return plan(signal, reason, role, code, decision, level);
   }
   const role = rc.roster.routing[signal];

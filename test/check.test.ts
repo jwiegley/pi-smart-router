@@ -34,7 +34,7 @@ const DEMAND_AND_SWITCHING = [
 
 /** What the checker says of John's roster of 2026-11-17, after its first line. */
 const JOHN_ROUTING = [
-  "smart-router/auto in personal scope: a tag, else Jev (openrouter/typesafe/jev-1.14), else the keywords, pick the level; each level tries its own models in order:",
+  "smart-router/auto in personal scope: a tag, else the demand from Jev (openrouter/typesafe/jev-1.14) and the heuristics, pick the level; each level tries its own models in order:",
   "  LOW    openai-codex-2/gpt-6-luna  (role low)",
   "  MEDIUM openai-codex-2/gpt-6.1-terra  (role medium)",
   "  HIGH   openai-codex-2/gpt-6.1-sol  (role high)",
@@ -46,7 +46,7 @@ const JOHN_ROUTING = [
   `    4. ${NYX_QWEN}  (role local, thinking max)`,
   "    5. omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp  (role local, thinking max)",
   "",
-  "smart-router/auto in work scope: a tag, else Jev (openrouter/typesafe/jev-1.14), else the keywords, pick the level; each level tries its own models in order:",
+  "smart-router/auto in work scope: a tag, else the demand from Jev (openrouter/typesafe/jev-1.14) and the heuristics, pick the level; each level tries its own models in order:",
   "  LOW    openai-codex-3/gpt-6-luna  (role work-low)",
   "  MEDIUM openai-codex-3/gpt-6.1-terra  (role work-medium)",
   "  HIGH   openai-codex-3/gpt-6.1-sol  (role work-high)",
@@ -76,7 +76,10 @@ const JOHN_ROUTING = [
   "Accounts:",
   '  openai-codex-2: the Multi-Pass label "personal", personal scope',
   '  openai-codex-3: the Multi-Pass label "Positron work", work scope',
-  ...TAIL,
+  ...TAIL.slice(0, -1),
+  // John's roster gives classifier.closeCall, which the demand's closeCall replaces.
+  "classifier.closeCall is accepted and ignored: demand.closeCall decides a close call.",
+  ...TAIL.slice(-1),
 ];
 
 describe("checking a roster's text", () => {
@@ -92,7 +95,7 @@ describe("checking a roster's text", () => {
       "",
       "smart-router/auto in personal scope: refused, since the roster has no personal scope",
       "",
-      "smart-router/auto in work scope: a tag, else the keywords, pick the level; each level tries its own models in order:",
+      "smart-router/auto in work scope: a tag, else the demand the heuristics give, pick the level; each level tries its own models in order:",
       "  LOW    openai-codex/gpt-6-luna  (role work-low)",
       "  MEDIUM openai-codex/gpt-6.1-terra  (role work-medium)",
       "  HIGH   openai-codex/gpt-6.1-sol  (role work-high)",
@@ -120,6 +123,16 @@ describe("checking a roster's text", () => {
       assert.ok(report.lines.includes(IGNORED), `${name}: ${report.lines.join("\n")}`);
       assert.ok(!checkRoster(fixture(name)).lines.some((line) => /stickyIdleMinutes/.test(line)), `${name} without it`);
     }
+  });
+
+  test("a roster whose classifier gives closeCall is told it is ignored; one without it is told nothing", () => {
+    const IGNORED = "classifier.closeCall is accepted and ignored: demand.closeCall decides a close call.";
+    const given = JSON.parse(fixture("roster-hera-v2.json"));
+    given.classifier.closeCall = 0.15;
+    const report = checkRoster(JSON.stringify(given));
+    assert.equal(report.ok, true, report.lines[0]);
+    assert.ok(report.lines.includes(IGNORED), report.lines.join("\n"));
+    assert.ok(!checkRoster(fixture("roster-hera-v2.json")).lines.some((line) => /classifier\.closeCall/.test(line)), "without it");
   });
 
   test("a version 1 roster reads back as its routing table and one-hop fallbacks", () => {

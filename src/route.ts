@@ -145,6 +145,25 @@ export function boundedHistory(sessionManager: unknown): BoundedHistory | undefi
     : undefined;
 }
 
+/**
+ * The branch's entry count from Pi's history metrics, where this Pi has them: John's Pi gives
+ * `getHistoryMetrics().session_active_entries` without reading the history. Pi 1.5.0's npm types
+ * lack it, so it is detected; undefined when it is absent, throws, or gives anything but a finite
+ * count of zero or more.
+ */
+export function activeEntries(sessionManager: unknown): number | undefined {
+  if (typeof sessionManager !== "object" || sessionManager === null) return undefined;
+  try {
+    const { getHistoryMetrics } = sessionManager as { readonly getHistoryMetrics?: unknown };
+    if (typeof getHistoryMetrics !== "function") return undefined;
+    const metrics: unknown = getHistoryMetrics.call(sessionManager);
+    const count = typeof metrics === "object" && metrics !== null ? (metrics as { readonly session_active_entries?: unknown }).session_active_entries : undefined;
+    return typeof count === "number" && Number.isFinite(count) && count >= 0 ? count : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function requireBoundedHistory(id: VirtualId, sessionManager: unknown): BoundedHistory {
   const view = boundedHistory(sessionManager);
   if (view === undefined) throw noBoundedHistory(id);

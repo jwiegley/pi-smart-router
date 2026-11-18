@@ -227,7 +227,7 @@ function topOf(probabilities: Readonly<Record<Tier, number>>): Tier {
 
 function outcomeOf(run: Run, probabilities: Readonly<Record<Tier, number>>): JevOutcome {
   const choice = topOf(probabilities);
-  return { kind: "answer", model: run.model, choice, tier: choice, probabilities, confidence: probabilities[choice], ms: run.ms };
+  return { kind: "answer", model: run.model, choice, probabilities, confidence: probabilities[choice], ms: run.ms };
 }
 
 /** Replays one session file's recorded runs. Reads the file's lines; contacts nothing. */

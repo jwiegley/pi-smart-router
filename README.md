@@ -405,7 +405,7 @@ session uses only the work account.
 `node src/check-cli.ts` reads it back as:
 
 ```text
-smart-router/auto in personal scope: a tag, else Jev (openrouter/typesafe/jev-1.14), else the keywords, pick the level; each level tries its own models in order:
+smart-router/auto in personal scope: a tag, else the demand from Jev (openrouter/typesafe/jev-1.14) and the heuristics, pick the level; each level tries its own models in order:
   LOW    openai-codex-2/gpt-6-luna  (role low)
   MEDIUM openai-codex-2/gpt-6.1-terra  (role medium)
   HIGH   openai-codex-2/gpt-6.1-sol  (role high)

@@ -325,8 +325,8 @@ function onFallbackLine(roster: RosterV2, last: HistoryEntry | undefined): strin
 function classifierLine(roster: RosterV2): string {
   const settings = roster.classifier;
   return settings === undefined
-    ? "Classifier: none, so the keyword classifier decides every level"
-    : `Classifier: ${settings.model}, ${settings.timeoutMs} ms, close call ${settings.closeCall}`;
+    ? "Classifier: none, so the heuristics alone weigh every prompt's demand"
+    : `Classifier: ${settings.model}, ${settings.timeoutMs} ms`;
 }
 
 /**

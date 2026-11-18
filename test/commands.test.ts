@@ -335,7 +335,7 @@ describe("status under a version 2 roster", () => {
         '  openai-codex-3: bound to the Multi-Pass label "Positron work"; refused: the roster binds openai-codex-3 to the work scope, but this session is in the personal scope; auth configured (stored)',
         `Levels (personal): LOW → ${LUNA} not-in-catalog, ${NYX_QWEN} not-in-catalog, ${HERA_QWEN} not-in-catalog; MEDIUM → ${TERRA} not-in-catalog, ${DEEPSEEK} ok; HIGH → ${SOL} ok, ${GLM_CLOUD} ok; SUPER → ${ASTRA} ok, ${KIMI} ok`,
         `Levels (work): LOW → ${WORK_LUNA} not-in-catalog; MEDIUM → ${WORK_TERRA} not-in-catalog; HIGH → ${WORK_SOL} ok; SUPER → ${WORK_ASTRA} not-in-catalog`,
-        `Classifier: ${JEV}, 1000 ms, close call 0.15`,
+        `Classifier: ${JEV}, 1000 ms`,
         "Prompts: the built-in instructions, and each level's describe from the roster",
         "Last decision: none yet",
         EGRESS_JEV,
@@ -361,7 +361,7 @@ describe("status under a version 2 roster", () => {
     delete roster.classifier;
     const none = await hera(t, { roster: JSON.stringify(roster) });
     const lines = (await answer(none, "status")).message.split("\n");
-    assert.ok(lines.includes("Classifier: none, so the keyword classifier decides every level"), lines.join("\n"));
+    assert.ok(lines.includes("Classifier: none, so the heuristics alone weigh every prompt's demand"), lines.join("\n"));
     assert.equal(lines.at(-1), EGRESS);
   });
 });

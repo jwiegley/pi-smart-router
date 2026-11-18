@@ -628,7 +628,8 @@ function classifierSettings(value: unknown, exclude: readonly string[]): JevSett
   const pattern = excludedBy(exclude, model);
   if (pattern !== undefined) fail("classifier.model", `"${model}" is excluded by ${pattern}`);
   const timeoutMs = count(own(section, "timeoutMs"), "classifier.timeoutMs", CLASSIFIER_TIMEOUT_MS, "milliseconds");
-  const closeCall = fraction(own(section, "closeCall"), "classifier.closeCall", CLASSIFIER_CLOSE_CALL);
+  // Accepted within its old range and ignored (classifierIgnored): the demand's closeCall decides a close call.
+  fraction(own(section, "closeCall"), "classifier.closeCall", CLASSIFIER_CLOSE_CALL);
   const caps: Record<string, unknown> = own(section, "context") === undefined ? {} : object(own(section, "context"), "classifier.context", CONTEXT_KEYS);
   // The question Jev is asked: the built-in one unless the roster gives its own, inline or in a file.
   // Each is checked for itself first, so that a null or a number is named, not taken for "both".
@@ -639,7 +640,6 @@ function classifierSettings(value: unknown, exclude: readonly string[]): JevSett
   return {
     model,
     timeoutMs,
-    closeCall,
     context: {
       messages: count(own(caps, "messages"), "classifier.context.messages", CLASSIFIER_MESSAGES, "messages"),
       messageChars: count(own(caps, "messageChars"), "classifier.context.messageChars", CLASSIFIER_MESSAGE_CHARS, "characters"),
@@ -648,6 +648,11 @@ function classifierSettings(value: unknown, exclude: readonly string[]): JevSett
     ...(instructions === undefined ? {} : { instructions }),
     ...(instructionsFile === undefined ? {} : { instructionsFile }),
   };
+}
+
+/** The classifier settings the roster gives that are accepted and ignored, by path. */
+function classifierIgnored(value: unknown): string[] {
+  return isRecord(value) && own(value, "closeCall") !== undefined ? ["classifier.closeCall"] : [];
 }
 
 const DEMAND_KEYS = ["jevWeight", "heuristicsWeight", "minConfidence", "closeCall", "cuts", "deepSessionFloor", "weights"];
@@ -847,7 +852,7 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
     roles,
     accounts,
     ...(local === undefined ? {} : { local }),
-    ignored: ignoredSettings(root),
+    ignored: [...ignoredSettings(root), ...classifierIgnored(own(root, "classifier"))],
     cooldownMinutes: minutes(own(root, "cooldownMinutes"), "cooldownMinutes", COOLDOWN_MINUTES),
     ...unreachableField(root),
     scopes,

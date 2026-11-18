@@ -64,7 +64,6 @@ describe("John's version 2 rosters", () => {
     assert.deepEqual(roster.classifier, {
       model: "openrouter/typesafe/jev-1.14",
       timeoutMs: 1000,
-      closeCall: 0.15,
       context: { messages: 6, messageChars: 1500, totalChars: 12000 },
     });
     assert.deepEqual(roster, {
@@ -95,7 +94,6 @@ describe("John's version 2 rosters", () => {
       classifier: {
         model: "openrouter/typesafe/jev-1.14",
         timeoutMs: 1000,
-        closeCall: 0.15,
         context: { messages: 6, messageChars: 1500, totalChars: 12000 },
       },
       demand: DEFAULT_DEMAND,
@@ -659,7 +657,7 @@ describe("exclusions in version 2", () => {
 });
 
 describe("the classifier", () => {
-  const DEFAULTS = { model: "openrouter/typesafe/jev-1.14", timeoutMs: 1000, closeCall: 0.15, context: { messages: 6, messageChars: 1500, totalChars: 12000 } };
+  const DEFAULTS = { model: "openrouter/typesafe/jev-1.14", timeoutMs: 1000, context: { messages: 6, messageChars: 1500, totalChars: 12000 } };
 
   test("is optional, and every field it leaves out takes its default", () => {
     const none = valid(edited((r) => delete r.classifier));
@@ -677,18 +675,21 @@ describe("the classifier", () => {
         r.classifier = { model: "openrouter/typesafe/jev-1.15", closeCall: 0, context: { messages: 0 } };
       }),
     );
-    assert.deepEqual(some.classifier, { ...DEFAULTS, model: "openrouter/typesafe/jev-1.15", closeCall: 0, context: { ...DEFAULTS.context, messages: 0 } });
+    assert.deepEqual(some.classifier, { ...DEFAULTS, model: "openrouter/typesafe/jev-1.15", context: { ...DEFAULTS.context, messages: 0 } }, "closeCall is accepted and ignored: demand.closeCall decides a close call");
+    assert.deepEqual(some.ignored, ["classifier.closeCall"], "and the roster says it was given");
     for (const bounds of [
       { model: "openrouter/typesafe/jev-1.14", timeoutMs: 100, closeCall: 0.5, context: { messages: 20, messageChars: 8000, totalChars: 32000 } },
       { model: "openrouter/typesafe/jev-1.14", timeoutMs: 1000, closeCall: 0, context: { messages: 0, messageChars: 200, totalChars: 1000 } },
     ]) {
+      const { closeCall: _ignored, ...kept } = bounds;
       assert.deepEqual(
         valid(
           edited((r) => {
             r.classifier = bounds;
           }),
         ).classifier,
-        bounds,
+        kept,
+        "closeCall is accepted and ignored: demand.closeCall decides a close call",
       );
     }
   });
@@ -750,7 +751,7 @@ describe("the classifier", () => {
     }
   });
 
-  test("closeCall is a number from 0 to 0.5", () => {
+  test("closeCall is still checked as a number from 0 to 0.5, and a valid one is ignored", () => {
     for (const closeCall of [0.6, 0.5000001, -0.01, "0.15", null, true]) {
       invalid(
         edited((r) => {
@@ -760,6 +761,12 @@ describe("the classifier", () => {
       );
     }
     invalid(HERA.replace('"classifier": {', '"classifier": { "closeCall": 1e999,'), "classifier.closeCall: must be a number from 0 to 0.5");
+    const given = valid(
+      edited((r) => {
+        r.classifier.closeCall = 0.2;
+      }),
+    );
+    assert.deepEqual([given.ignored, given.classifier !== undefined && "closeCall" in given.classifier], [["classifier.closeCall"], false], "demand.closeCall decides a close call");
   });
 
   test("the context caps are whole numbers within their ranges", () => {

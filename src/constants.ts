@@ -71,8 +71,8 @@ export const COOLDOWN_MINUTES = { default: 30, min: 1, max: 1440 } as const;
 export const UNREACHABLE_MINUTES = { default: 5, min: 1, max: 60 } as const;
 
 /**
- * The version 2 classifier's defaults and allowed ranges. The model names a Jev version, so that a
- * tuned closeCall keeps its meaning until the roster moves to another.
+ * The version 2 classifier's defaults and allowed ranges. The model names a Jev version. closeCall
+ * is accepted within its old range and ignored: demand.closeCall decides a close call.
  */
 export const CLASSIFIER_MODEL = "openrouter/typesafe/jev-1.14";
 export const CLASSIFIER_TIMEOUT_MS = { default: 1000, min: 100, max: 1000 } as const;

@@ -195,7 +195,7 @@ describe("the built-in text", () => {
 describe("the roster's prompt fields", () => {
   test("a roster that names no file and gives no instructions parses as before: no new key appears", () => {
     const roster = rosterFixtureV2("roster-hera-v2.json");
-    assert.deepEqual(Object.keys(roster.classifier ?? {}), ["model", "timeoutMs", "closeCall", "context"]);
+    assert.deepEqual(Object.keys(roster.classifier ?? {}), ["model", "timeoutMs", "context"], "closeCall is accepted and ignored: demand.closeCall decides a close call");
     assert.deepEqual(Object.keys(roster.scopes.personal?.levels.low ?? {}), ["role", "describe"]);
   });
 
@@ -425,19 +425,19 @@ describe("prompts from files", () => {
     assert.deepEqual(criteria, ["Renames, formatting and lookups.", "Renames only."]);
   });
 
-  test("a file that cannot be used stops no route: Jev is not asked, the keywords decide, and the session, the footer, status and the checker say why", async (t) => {
+  test("a file that cannot be used stops no route: Jev is not asked, the heuristics decide alone, and the session, the footer, status and the checker say why", async (t) => {
     const { "personal-high.md": _missing, ...rest } = FILES;
     const loaded = await session(t, WITH_FILES, rest);
     const path = `${loaded.dir}/smart-router/personal-high.md`;
-    const problem = `${path} does not exist. Jev is not asked in personal scope until it is fixed, and the keywords decide every level there.`;
+    const problem = `${path} does not exist. Jev is not asked in personal scope until it is fixed, and the heuristics alone weigh every prompt's demand there.`;
     assert.deepEqual(loaded.session.notices, [{ type: "warning", message: `pi-smart-router: a prompt for the classifier cannot be used: ${problem} smart-router/auto still routes.` }]);
     await say(loaded, "Format this file");
     assert.equal(loaded.runtime.classifyCalls.length, 0, "nothing is sent to Jev");
-    assert.equal(loaded.session.statuses.get(LEVEL_KEY), "personal LOW → gpt-6-luna (keywords; jev prompt)");
+    assert.equal(loaded.session.statuses.get(LEVEL_KEY), "personal LOW → gpt-6-luna (demand 0.5, jev prompt)", "without Jev the heuristics alone rate a trivial prompt LOW: 0.51");
     assert.equal(firstRequest(loaded), "openai-codex-2/gpt-6-luna");
     await loaded.host.emit("agent_settled", { aborted: false });
     const record = loaded.session.entries.find((entry) => entry.customType === LEVEL_ENTRY)?.data as { jev?: unknown; source?: string };
-    assert.deepEqual([record.source, record.jev], ["keyword", { model: JEV, failure: "prompt", ms: 0 }]);
+    assert.deepEqual([record.source, record.jev], ["heuristics", { model: JEV, failure: "prompt", ms: 0 }], "without Jev the heuristics decide alone");
 
     await loaded.host.command("smart-router", "status");
     const status = (loaded.session.notices.at(-1)?.message ?? "").split("\n");
@@ -523,8 +523,8 @@ describe("a hostile prompt changes nothing but what Jev reads", () => {
       assert.equal(question.type, "choice");
       assert.equal(question.instructions, HOSTILE);
       assert.deepEqual(Object.keys(question.criteria), ["low", "medium", "high", "super"]);
-      // The answer is malformed, so the keywords decide: a trivial message goes to the personal LOW model.
-      assert.equal(loaded.session.statuses.get(LEVEL_KEY), "personal LOW → gpt-6-luna (keywords; jev malformed)");
+      // The answer is malformed, so the heuristics decide alone: a trivial message goes to the personal LOW model.
+      assert.equal(loaded.session.statuses.get(LEVEL_KEY), "personal LOW → gpt-6-luna (demand 0.5, jev malformed)", "without an answer the heuristics alone rate a trivial prompt LOW: 0.51");
       assert.equal(firstRequest(loaded), "openai-codex-2/gpt-6-luna");
       await loaded.host.emit("agent_settled", { aborted: false });
       loaded.session.endRun();

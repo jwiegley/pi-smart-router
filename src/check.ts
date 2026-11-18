@@ -66,7 +66,7 @@ function describeV2(roster: RosterV2): string[] {
       lines.push(`smart-router/auto in ${scope} scope: refused, since the roster has no ${scope} scope`, "");
       continue;
     }
-    const decides = roster.classifier === undefined ? "the keywords" : `Jev (${roster.classifier.model}), else the keywords`;
+    const decides = roster.classifier === undefined ? "the demand the heuristics give" : `the demand from Jev (${roster.classifier.model}) and the heuristics`;
     lines.push(`smart-router/auto in ${scope} scope: a tag, else ${decides}, pick the level; each level tries its own models in order:`);
     for (const tier of TIERS) {
       const role = section.levels[tier].role;
@@ -140,6 +140,7 @@ function switchingLines(roster: RosterV2): string[] {
 /** Why the settings a roster may give and this version ignores are ignored, by path. */
 const IGNORED_BECAUSE: Readonly<Record<string, string>> = {
   stickyIdleMinutes: "nothing holds a session on a model by time.",
+  "classifier.closeCall": "demand.closeCall decides a close call.",
 };
 
 /** One line for each setting the roster gives that is accepted and ignored. */

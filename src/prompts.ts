@@ -21,8 +21,8 @@
 // A prompt file is read with the roster's own safe reader and refreshed with the roster. In it,
 // HTML comments (<!-- ... -->) are John's notes and are not sent. A file that is missing, unsafe,
 // empty, too long, or still holds a placeholder is an error: Jev is then not asked in the scopes
-// that need it, the keywords decide their levels, and status and the checker say why. Nothing
-// falls back to an older text.
+// that need it, the heuristics alone weigh their prompts' demand, and status and the checker say
+// why. Nothing falls back to an older text.
 import { DESCRIBE_MAX_CHARS, INSTRUCTIONS_MAX_CHARS, PROMPT_DIR, PROMPT_FILE_MAX_BYTES } from "./constants.ts";
 import { agentFile, readUserFile } from "./files.ts";
 import type { AgentFile, FileSystem, Parsed } from "./files.ts";
@@ -224,5 +224,5 @@ export function promptProblem(uses: readonly PromptUse[]): string | undefined {
   if (first === undefined) return undefined;
   const everywhere = broken.some((use) => use.scope === undefined);
   const scopes = everywhere ? "any scope" : `${[...new Set(broken.map((use) => use.scope))].join(" and ")} scope`;
-  return `${first.error ?? ""}. Jev is not asked in ${scopes} until it is fixed, and the keywords decide every level there.`;
+  return `${first.error ?? ""}. Jev is not asked in ${scopes} until it is fixed, and the heuristics alone weigh every prompt's demand there.`;
 }

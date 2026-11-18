@@ -10,9 +10,11 @@ import type { ModelRouteReason } from "@earendil-works/pi-coding-agent";
 
 import { planUserTurn } from "../src/decide.ts";
 import type { Choice, CompactionFigures } from "../src/decide.ts";
+import { demandOf } from "../src/demand.ts";
+import type { PromptFacts } from "../src/demand.ts";
 import { noBoundedHistory } from "../src/errors.ts";
 import type { ResolveContext } from "../src/resolve.ts";
-import { assertSafe, newRecord, predict, routeOther, routeOwned } from "../src/route.ts";
+import { activeEntries, assertSafe, newRecord, predict, routeOther, routeOwned } from "../src/route.ts";
 import type { RouteInput, SessionRecord } from "../src/route.ts";
 import {
   ASTRA,
@@ -44,6 +46,8 @@ const TRIVIAL = "Format this file";
 const HERA = rosterFixture("roster-hera.json");
 /** The compaction settings a plan made here is given; no plan here has a conversation to fit. */
 const COMPACTION: CompactionFigures = { enabled: true, reserve: 0, keepRecent: 20_000 };
+/** A new session's facts, as the router reads them: no usage, no messages, no entry count. */
+const FRESH: PromptFacts = { contextTokens: undefined, roles: [], entries: undefined };
 
 /** A Codex model, as Hera's catalog lists them. */
 const codex = (ref: string): Model<Api> => model(ref, { api: "openai-codex-responses", baseUrl: CHATGPT, contextWindow: 272_000, maxTokens: 128_000 });
@@ -522,7 +526,7 @@ describe("a version 1 roster in work scope, past prepare()'s own refusal", () =>
   test("smart-router/auto refuses on every path that can reach a model, and nothing is sent or recorded", () => {
     const rc = heraContext({ scope: "work" });
     const planned = newRecord();
-    planned.plan = planUserTurn({ rc, text: PLANNING, last: undefined, now: NOW, compaction: COMPACTION });
+    planned.plan = planUserTurn({ rc, text: PLANNING, last: undefined, now: NOW, compaction: COMPACTION, facts: FRESH });
     assert.ok(planned.plan.decision.ok && planned.plan.decision.choice.ref === ASTRA, "the prompt planned astra");
     const paths: Array<[string, SessionRecord, (record: SessionRecord) => unknown]> = [
       ["the owned run", planned, (record) => routeOwned(input(rc, "user", record))],
@@ -644,7 +648,15 @@ describe("a version 2 run's plan", () => {
   const WORK_TERRA = "openai-codex-3/gpt-6.1-terra";
   const HERA_V2 = rosterFixtureV2("roster-hera-v2.json");
   const VIRTUAL = model("smart-router/auto", { api: "pi-virtual", baseUrl: "" });
-  const KEYWORD_MEDIUM = { tier: "medium", asked: "medium", start: "medium", source: "keyword", steppedUp: false, returnedToFirst: false } as const;
+  /** A plain question's level without Jev: the heuristics alone rate it MEDIUM, 0.89, in a new session. */
+  const HEURISTICS_MEDIUM = {
+    need: "medium",
+    tier: "medium",
+    source: "heuristics",
+    steppedUp: false,
+    returnedToFirst: false,
+    demand: demandOf({ text: FRANCE, planning: false, risky: false, jev: undefined, facts: FRESH }, HERA_V2.demand),
+  } as const;
   const v2Catalog = (): FakeCatalog => new FakeCatalog([...heraModels(), codex(TERRA), codex(WORK_TERRA)]);
   const owned = (rc: ResolveContext, record: SessionRecord): RouteInput => ({
     id: rc.virtualId,
@@ -665,10 +677,10 @@ describe("a version 2 run's plan", () => {
       trigger: "triage:no_fast_path",
       role: "medium",
       ref: TERRA,
-      code: "keyword",
+      code: "heuristics",
       foreign: false,
-      // This runtime's registry has no Jev, so the keywords decided, and the level says why.
-      level: { scope: "personal", ...KEYWORD_MEDIUM, jev: { kind: "failure", model: "openrouter/typesafe/jev-1.14", failure: "unavailable", ms: 0 } },
+      // This runtime's registry has no Jev, so the heuristics decided alone, and the level says why.
+      level: { scope: "personal", ...HEURISTICS_MEDIUM, jev: { kind: "failure", model: "openrouter/typesafe/jev-1.14", failure: "unavailable", ms: 0 } },
     });
   });
 
@@ -676,7 +688,7 @@ describe("a version 2 run's plan", () => {
     const personal = heraContext({ roster: HERA_V2, catalog: v2Catalog() });
     const work = heraContext({ roster: HERA_V2, catalog: v2Catalog(), scope: "work" });
     const record = newRecord();
-    record.plan = planUserTurn({ rc: personal, text: FRANCE, last: undefined, now: NOW, compaction: COMPACTION });
+    record.plan = planUserTurn({ rc: personal, text: FRANCE, last: undefined, now: NOW, compaction: COMPACTION, facts: FRESH });
     assert.ok(record.plan.decision.ok && record.plan.decision.choice.ref === TERRA, "the prompt planned terra in personal scope");
     // By the run's first request the session is in work scope: the plan is dropped, and the run sticks there.
     assert.equal(routed(routeOwned(owned(work, record))), WORK_TERRA);
@@ -691,23 +703,23 @@ describe("a version 2 run's plan", () => {
       code: "stick:default",
       foreign: false,
     });
-    record.plan = planUserTurn({ rc: work, text: FRANCE, last: undefined, now: NOW, compaction: COMPACTION });
+    record.plan = planUserTurn({ rc: work, text: FRANCE, last: undefined, now: NOW, compaction: COMPACTION, facts: FRESH });
     assert.equal(routed(routeOwned(owned(work, record))), WORK_TERRA);
-    assert.deepEqual([record.history.at(-1)?.code, record.history.at(-1)?.level], ["keyword", { scope: "work", ...KEYWORD_MEDIUM }]);
+    assert.deepEqual([record.history.at(-1)?.code, record.history.at(-1)?.level], ["heuristics", { scope: "work", ...HEURISTICS_MEDIUM }], "without Jev the heuristics decide alone");
   });
 
   test("is never used under a version 1 roster, nor a version 1 plan under a version 2 roster", () => {
     const v2 = heraContext({ roster: HERA_V2, catalog: v2Catalog() });
     const v1 = heraContext({ catalog: v2Catalog() });
     const record = newRecord();
-    record.plan = planUserTurn({ rc: v2, text: FRANCE, last: undefined, now: NOW, compaction: COMPACTION });
+    record.plan = planUserTurn({ rc: v2, text: FRANCE, last: undefined, now: NOW, compaction: COMPACTION, facts: FRESH });
     assert.ok(record.plan.level !== undefined, "a version 2 plan carries its level");
     // The roster became version 1 before the run's first request: the plan is dropped, and the run sticks.
     assert.equal(routed(routeOwned(owned(v1, record))), DEEPSEEK);
     assert.deepEqual([record.history.at(-1)?.role, record.history.at(-1)?.code], ["worker", "stick:default"]);
     // And the other way: a version 1 plan, which has no level, is dropped under a version 2 roster.
     const other = newRecord();
-    other.plan = planUserTurn({ rc: v1, text: FRANCE, last: undefined, now: NOW, compaction: COMPACTION });
+    other.plan = planUserTurn({ rc: v1, text: FRANCE, last: undefined, now: NOW, compaction: COMPACTION, facts: FRESH });
     assert.equal(other.plan.level, undefined);
     assert.equal(routed(routeOwned(owned(v2, other))), TERRA);
     assert.deepEqual([other.history.at(-1)?.role, other.history.at(-1)?.code], ["medium", "stick:default"]);
@@ -716,9 +728,36 @@ describe("a version 2 run's plan", () => {
   test("a local-only plan, which has no level, is used as before", () => {
     const local = heraContext({ roster: HERA_V2, virtualId: "local" });
     const record = newRecord();
-    record.plan = planUserTurn({ rc: local, text: FRANCE, last: undefined, now: NOW, compaction: COMPACTION });
+    record.plan = planUserTurn({ rc: local, text: FRANCE, last: undefined, now: NOW, compaction: COMPACTION, facts: FRESH });
     assert.equal(record.plan.level, undefined);
     assert.equal(routed(routeOwned(owned(local, record))), GLM);
     assert.deepEqual([record.history.at(-1)?.code, "level" in (record.history.at(-1) ?? {})], ["local", false]);
+  });
+});
+
+describe("activeEntries", () => {
+  test("is the branch's entry count from Pi's history metrics, where this Pi has them", () => {
+    assert.equal(activeEntries({ getHistoryMetrics: () => ({ session_active_entries: 1_200 }) }), 1_200);
+    assert.equal(activeEntries({ getHistoryMetrics: () => ({ session_active_entries: 0 }) }), 0, "an empty branch counts none");
+  });
+
+  test("is undefined where Pi has no metrics, its reader throws, or the count is not a finite count", () => {
+    const throwing = () => {
+      throw new Error("the index is locked");
+    };
+    for (const [name, manager] of [
+      ["no session manager", undefined],
+      ["Pi 1.5.0's session manager, without metrics", { getRecentActiveEntries: () => [] }],
+      ["a reader that throws", { getHistoryMetrics: throwing }],
+      ["a getter that throws", Object.defineProperty({}, "getHistoryMetrics", { get: throwing })],
+      ["metrics that are not an object", { getHistoryMetrics: () => 1_200 }],
+      ["metrics without the count", { getHistoryMetrics: () => ({}) }],
+      ["a negative count", { getHistoryMetrics: () => ({ session_active_entries: -1 }) }],
+      ["an infinite count", { getHistoryMetrics: () => ({ session_active_entries: Number.POSITIVE_INFINITY }) }],
+      ["a count that is not a number", { getHistoryMetrics: () => ({ session_active_entries: "1200" }) }],
+      ["a count that is NaN", { getHistoryMetrics: () => ({ session_active_entries: Number.NaN }) }],
+    ] as const) {
+      assert.equal(activeEntries(manager), undefined, name);
+    }
   });
 });
