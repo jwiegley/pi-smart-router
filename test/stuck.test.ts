@@ -73,6 +73,13 @@ describe("stuck", () => {
     assert.equal(stuck([user(), calling(), image, calling(), fail("bash", "No such file"), calling(), image]), true, "a block that is not text is passed over");
   });
 
+  test("a user message ends the run under way, an extension's custom message included, which Pi sends as one", () => {
+    // What a route request carries: Pi converts a custom message to a user message for the model.
+    const custom = { role: "user", content: [{ type: "text", text: "continue toward the goal" }], timestamp: NOW };
+    const messages = [user(), calling(), fail("bash", "No such file"), calling(), fail("bash", "No such file"), calling(), fail("bash", "No such file"), custom, calling(), fail("bash", "No such file")];
+    assert.equal(stuck(messages), false, "the previous run's three failures do not count toward the next run's");
+  });
+
   test("only the run under way counts: results before the latest user message do not", () => {
     const messages = [user(), calling(), fail("bash", "No such file"), calling(), fail("bash", "No such file"), user("go on"), calling(), fail("bash", "No such file")];
     assert.equal(stuck(messages), false, "two failures, a user message, one failure");
@@ -85,6 +92,8 @@ describe("stuck", () => {
     assert.equal(stuck(parallel), true, "three parallel calls that failed the same way");
     const odd = [user(), calling(), fail("bash", "No such file"), undefined, 7, {}, null, "text", [], calling(), fail("bash", "No such file"), { role: "toolResult" }, calling(), fail("bash", "No such file")];
     assert.doesNotThrow(() => stuck(odd), "undefined, 7, {} and the like do not throw");
+    const between = [user(), calling(), fail("bash", "No such file"), undefined, calling(), fail("bash", "No such file"), 7, {}, calling(), fail("bash", "No such file"), null, "text", []];
+    assert.equal(stuck(between), true, "undefined, 7, {} and the like between three identical failures are passed over");
     const malformed: unknown[] = [
       { role: "toolResult", toolName: "bash", content: "No such file", isError: true },
       { role: "toolResult", toolName: "bash", content: [null, 7, { type: "text" }, { type: "text", text: 7 }], isError: true },
@@ -97,7 +106,7 @@ describe("stuck", () => {
     }
     assert.equal(stuck([user(), calling(), malformed[3], calling(), malformed[3], calling(), malformed[3]]), false, "isError must be true itself");
     assert.equal(stuck([user(), calling(), malformed[2], calling(), malformed[2], calling(), malformed[2]]), false, "a result without a tool name is no failure of a tool");
-    const hostile = Object.defineProperty({ role: "toolResult" }, "content", {
+    const hostile = Object.defineProperty({ role: "toolResult", toolName: "bash", isError: true }, "content", {
       get() {
         throw new Error("boom");
       },

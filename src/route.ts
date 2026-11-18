@@ -39,12 +39,13 @@ import type { Classification } from "./classify.ts";
 import { VIRTUAL_API } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { chooseModel, eligibleRole, NO_LOCAL_SECTION, noScopeSection, pickInRole } from "./decide.ts";
-import type { Choice, CompactionFigures, CostFigures, Decision, LastResponder, LevelInput, Plan, PlanLevel } from "./decide.ts";
+import type { Choice, CompactionFigures, CostFigures, CostTerms, Decision, LastResponder, LevelInput, Plan, PlanLevel } from "./decide.ts";
 import { invariant, noBoundedHistory, unroutable } from "./errors.ts";
 import type { JevOutcome } from "./jev.ts";
 import { newLedger, notePrompt } from "./ledger.ts";
 import type { Ledger } from "./ledger.ts";
 import { checkLocal } from "./local.ts";
+import type { NeedRun } from "./records.ts";
 import { clock, coolFrom, failureKind, holdFrom, refOf, resolveCandidate } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
 import { autoRoles, excludedBy, excludesFor, isWorkBound, roleLevel, roleOf, scopeSection } from "./roster.ts";
@@ -146,6 +147,8 @@ export interface SessionRecord {
   runTagged: boolean;
   /** Whether the run under way has moved up once for being stuck; cleared when the agent settles. */
   escalated: boolean;
+  /** The run under way's run:need choice, for its footer, when its first request had no plan; cleared when the agent settles. */
+  needRun: NeedRun | undefined;
   last: LastResponder | undefined;
   readonly history: HistoryEntry[];
   /** The planned version 2 run's level, until its record is written. */
@@ -164,6 +167,7 @@ export function newRecord(): SessionRecord {
     runTier: undefined,
     runTagged: false,
     escalated: false,
+    needRun: undefined,
     last: undefined,
     history: [],
     pendingLevel: undefined,
@@ -263,12 +267,17 @@ function stick(rc: ResolveContext, previous: string | undefined, record: Session
 }
 
 /**
- * What an owner continuation without a previous model would pick now: the run's pick, else the
- * last responder, its role or that role's fallback, else the default role. No side effects; the
- * pi-cache-optimizer adapter reports it.
+ * What the owner loop's next request without a previous model would pick now, as routeOwned would
+ * pick it: with no run pick, on smart-router/auto under a version 2 roster, a session that has a
+ * need takes the run:need choice (chooseForNeed), priced with `figures` and `compaction`; else the
+ * run's pick, else the last responder, its role or that role's fallback, else the default role. No
+ * side effects: nothing of the record or its ledger changes. The pi-cache-optimizer adapter reports
+ * it.
  */
-export function predict(rc: ResolveContext, record: SessionRecord): Decision {
-  return stick(rc, undefined, record);
+export function predict(rc: ResolveContext, record: SessionRecord, figures: CostFigures | undefined, compaction: CompactionFigures): Decision {
+  const section = levelSection(rc);
+  const chosen = section === undefined || record.runPick !== undefined ? undefined : chooseForNeed(rc, record, section, figures, compaction);
+  return chosen?.decision ?? stick(rc, undefined, record);
 }
 
 function retry(rc: ResolveContext, request: ModelRouteRequest, record: SessionRecord): Decision {
@@ -358,10 +367,11 @@ function levelSection(rc: ResolveContext): ScopeSection | undefined {
   return scopeSection(rc.roster, rc.scope);
 }
 
-/** A decision that puts the run at a level: the level whose model takes it. */
+/** A decision that puts the run at a level: the level whose model takes it, and what the cost rule decided. */
 interface Leveled {
   readonly decision: Decision;
   readonly tier: Tier;
+  readonly cost?: CostTerms;
 }
 
 /**
@@ -370,22 +380,11 @@ interface Leveled {
  * run makes, priced with the session's figures and nothing for a prompt. Undefined when the
  * session never planned a run: it continues as before.
  */
-function runNeed(input: RouteInput, section: ScopeSection): Leveled | undefined {
-  const { rc, record } = input;
+function chooseForNeed(rc: ResolveContext, record: SessionRecord, section: ScopeSection, figures: CostFigures | undefined, compaction: CompactionFigures): Leveled | undefined {
   const { need } = record;
   if (need === undefined) return undefined;
-  const { tier, decision } = chooseModel({
-    rc,
-    section,
-    need,
-    code: "run:need",
-    last: record.last,
-    promptTokens: 0,
-    compaction: input.compaction,
-    figures: input.figures,
-    priced: true,
-  });
-  return { tier, decision };
+  const { tier, decision, cost } = chooseModel({ rc, section, need, code: "run:need", last: record.last, promptTokens: 0, compaction, figures, priced: true });
+  return { tier, decision, ...(cost === undefined ? {} : { cost }) };
 }
 
 /**
@@ -514,7 +513,7 @@ export function routeOwned(input: RouteInput): ModelRoute {
   let plan: Plan | undefined;
   if (request.reason === "user") plan = takePlan(record, id, rc);
   const section = levelSection(rc);
-  const unplanned = section === undefined || plan !== undefined || request.reason === "retry" ? undefined : starts ? runNeed(input, section) : undefined;
+  const unplanned = section === undefined || plan !== undefined || request.reason === "retry" ? undefined : starts ? chooseForNeed(rc, record, section, input.figures, input.compaction) : undefined;
   const escalated = section === undefined || plan !== undefined || unplanned !== undefined ? undefined : escalation(input, section);
   if (plan !== undefined) decision = fromPlan(rc, plan);
   else if (request.reason === "retry") decision = retry(rc, request, record);
@@ -531,10 +530,12 @@ export function routeOwned(input: RouteInput): ModelRoute {
     record.need = need;
     record.runTier = tier;
     record.runTagged = source === "tag";
+    record.needRun = undefined;
   } else if (unplanned !== undefined && record.need !== undefined) {
     notePrompt(record.ledger, record.need, unplanned.tier);
     record.runTier = unplanned.tier;
     record.runTagged = false;
+    record.needRun = { scope: rc.scope, need: record.need, ...(unplanned.cost === undefined ? {} : { cost: unplanned.cost }) };
   } else if (escalated !== undefined) {
     record.runTier = escalated.tier;
     record.escalated = true;

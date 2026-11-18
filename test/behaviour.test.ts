@@ -1451,11 +1451,16 @@ test("L7 one smart-router.level record per run; /smart-router was appends a corr
   const value = (demand as { readonly value?: unknown } | undefined)?.value;
   assert.ok(typeof value === "number" && Math.abs(value - 1.01) < 0.01, `the record holds the run's demand, the blend of 80% MEDIUM and the heuristics: ${String(value)}`);
   assert.equal(pi.ui.status(LEVEL_KEY), "personal MEDIUM → gpt-6.1-terra (demand 1.0; cost unknown)", "the blend of 80% MEDIUM and the heuristics is 1.01; with no usage yet a missing figure is said: cost unknown");
-  // A command and a run without a level of its own add none, and that run shows no level.
+  // A command and a run without a prompt add no record. That run shows a footer of its own: the
+  // level its session last needed, the model its choice took, and "run".
   await pi.command("status");
   await pi.custom();
   assert.equal(runRecords(pi).length, 1);
-  assert.equal(pi.ui.status(LEVEL_KEY), undefined);
+  assert.equal(
+    pi.ui.status(LEVEL_KEY),
+    "personal MEDIUM → gpt-6.1-terra (run; cost unknown)",
+    "a run without a prompt shows its own footer at its first request (the controller's footer ruling, Task 11 fix round 1): run A's MEDIUM, terra, and the cost unknown, as this runtime's level models carry no price",
+  );
   // Run B, tagged.
   await pi.prompt("Answer the zebra question #high");
   assert.equal(runRecords(pi).length, 2);

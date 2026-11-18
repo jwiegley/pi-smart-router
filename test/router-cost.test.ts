@@ -18,13 +18,14 @@ import type { Candidate, Rates, Workload } from "../src/cost.ts";
 import type { CostTerms, PlanLevel } from "../src/decide.ts";
 import { escalationNotice, fallbackMoveNotice, stepUpNotice } from "../src/errors.ts";
 import { effortOf } from "../src/ledger.ts";
-import { decisionLines } from "../src/records.ts";
+import { decisionLines, readLevelRecord, runFooterText } from "../src/records.ts";
 import { scopeEntry } from "../src/scope.ts";
 import { DEFAULT_SWITCHING, RUN_DEFAULTS } from "../src/settings.ts";
 import { tierLabel, TIERS } from "../src/tiers.ts";
 import type { Tier } from "../src/tiers.ts";
 import { ASTRA, CHATGPT, FakeCatalog, GLM, HERA_LAN, heraModels, model, NOW, SOL, WORK_SOL } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
+import { resolveActiveRoute } from "./support/co.ts";
 import { agentDir, assistant, FakeRuntime, previous, request, resetSlot, routed, start } from "./support/pi.ts";
 import type { Loaded, LoadOptions } from "./support/pi.ts";
 
@@ -723,11 +724,13 @@ describe("a run that starts without a prompt", () => {
     const during = await unprompted(state, TERRA);
     assert.deepEqual([routed(during), lastCode(state)], [OR_GLM, "fallback:medium→openrouter"], "while terra cools the run takes MEDIUM's chain, as a prompt's run would");
     assert.equal(recordOf(state).runTier, "medium", "the run is at MEDIUM, on the chain");
+    assert.equal(footer(state), "personal MEDIUM → z-ai/glm-5.3-flash (run; fallback)", "the footer names the run's need and its chain model; the chain is not priced");
     await answer(state, OR_GLM);
     state.clock += 31 * MINUTE;
     const back = await unprompted(state, OR_GLM);
     assert.deepEqual([routed(back), lastCode(state)], [TERRA, "run:need"], "with terra back, MEDIUM's own model, by the choice a prompt's run makes");
     assert.equal(recordOf(state).history.at(-1)?.level, undefined, "a run without a prompt has no level record of its own");
+    assert.equal(footer(state), "personal MEDIUM → gpt-6.1-terra (run)", "the needed level's own model chosen with no current candidate: no cost note");
     assert.deepEqual(
       recordOf(state).ledger.needs,
       [
@@ -756,6 +759,11 @@ describe("a run that starts without a prompt", () => {
     const route = await unprompted(state, ASTRA);
     assert.deepEqual([routed(route), lastCode(state)], [ASTRA, "run:need"], "the run stays on astra, by cost");
     assert.equal(recordOf(state).runTier, "super", "the run is on SUPER's model");
+    assert.equal(
+      footer(state),
+      `personal MEDIUM → gpt-6-astra (run; stayed, ${money(expected.astra)} vs ${money(Math.min(expected.terra, expected.sol))})`,
+      "a run that stays on the session's model still says so in its own footer",
+    );
     assert.deepEqual(recordOf(state).ledger.needs.at(-1), { need: "medium", took: "super" }, "it needed MEDIUM and SUPER's model took it");
   });
 
@@ -774,6 +782,7 @@ describe("a run that starts without a prompt", () => {
     const route = await unprompted(state, ASTRA);
     assert.deepEqual([routed(route), lastCode(state)], [TERRA, "run:need"], "the run moves to terra");
     assert.equal(recordOf(state).runTier, "medium", "the run is on MEDIUM's model");
+    assert.equal(footer(state), `personal MEDIUM → gpt-6.1-terra (run; moved, ${money(expected.terra)} vs ${money(expected.astra)})`, "the footer says the run moved, and the two costs");
   });
 
   test("is priced at the thinking level its request carries", async (t) => {
@@ -799,12 +808,25 @@ describe("a run that starts without a prompt", () => {
     assert.deepEqual([routed(route), lastCode(state)], [ASTRA, "run:need"], "the run is routed and priced as with Pi's defaults: it stays on astra");
   });
 
+  test("at SUPER, with no other candidate, says nothing of the cost", async (t) => {
+    const state = await session(t);
+    await threeSuperRuns(state);
+    const before = footer(state);
+    const route = await unprompted(state, ASTRA);
+    assert.deepEqual([routed(route), lastCode(state)], [ASTRA, "run:need"], "SUPER's astra");
+    assert.equal(footer(state), "personal SUPER → gpt-6-astra (run)", `the run's own footer, in place of the last planned run's: ${before}`);
+    assert.equal(runFooterText({ scope: "personal", need: "super" }, "gpt-6-astra", false, false), "personal SUPER → gpt-6-astra (run)", "runFooterText gives the same text");
+    await answer(state, ASTRA);
+    assert.equal(levelRecords(state), 3, "the run without a prompt writes no level record");
+  });
+
   test("a session that never planned a run sticks to its last responder, as before", async (t) => {
     const state = await session(t);
     assert.equal(recordOf(state).need, undefined, "no run was planned");
     const route = await unprompted(state, ASTRA);
     assert.deepEqual([routed(route), lastCode(state)], [ASTRA, "stick:previous"], "the run stays where it was");
     assert.deepEqual([recordOf(state).runTier, recordOf(state).ledger.needs], [undefined, []], "no level, and no prompt's need counted");
+    assert.equal(footer(state), undefined, "no level, so no footer");
   });
 
   test("after a run that stepped up, goes through the choice at the level it needed: its own model once back, a step-up while it is away", async (t) => {
@@ -838,6 +860,7 @@ describe("a run that starts without a prompt", () => {
     assert.deepEqual([recordOf(state).last?.ref, recordOf(state).last?.usage], [ASTRA, undefined], "the size is unknown until the next answer");
     const route = await unprompted(state, ASTRA);
     assert.deepEqual([routed(route), lastCode(state), recordOf(state).runTier], [TERRA, "run:need", "medium"], "no usage yet: the needed level's own model, not astra by a size the conversation no longer has");
+    assert.equal(footer(state), "personal MEDIUM → gpt-6.1-terra (run; cost unknown)", "a missing figure is said: cost unknown");
   });
 
   test("in the other scope than the need's, carries the need, a level name, and chooses in the current scope: a work session never leaves the work account", async (t) => {
@@ -857,8 +880,9 @@ describe("escalation", () => {
       "the notice names the levels and the model",
     );
     const state = await session(t);
-    await say(state, "go on", ANSWER_MEDIUM);
+    const level = await say(state, "go on", ANSWER_MEDIUM);
     assert.equal(routed(await route(state, "go on")), TERRA, "a MEDIUM run on terra");
+    assert.equal(footer(state), `personal MEDIUM → gpt-6.1-terra (${demandNote(level)}; cost unknown)`, "the planned run's footer, as before");
     const before = state.loaded.session.notices.length;
     const differ = continuation(state, TERRA, failures(3, [TOOL_TEXT, `${TOOL_TEXT} again`]));
     assert.deepEqual([routed(differ), lastCode(state)], [TERRA, "stick:previous"], "three failures that differ are ordinary work");
@@ -866,10 +890,48 @@ describe("escalation", () => {
     assert.deepEqual([routed(up), lastCode(state)], [SOL, "escalate"], "three identical failures move the run to HIGH's model");
     assert.deepEqual(state.loaded.session.notices.slice(before), [{ type: "info", message: escalationNotice("medium", "high", "gpt-6.1-sol") }], "said once, where it happens");
     assert.deepEqual([recordOf(state).runTier, recordOf(state).escalated], ["high", true], "the run is at HIGH now, and escalated");
+    const escalatedFooter = `personal MEDIUM → gpt-6.1-sol (${demandNote(level)}; escalated)`;
+    assert.equal(footer(state), escalatedFooter, "from the escalated request on, the footer names sol and says escalated in place of the cost");
+    await answered(state, SOL, 4_000);
+    assert.equal(footer(state), escalatedFooter, "and at each later answer of the run");
     const again = continuation(state, SOL, failures(6));
     assert.deepEqual([routed(again), lastCode(state)], [SOL, "stick:previous"], "three more failures: the run stays on sol, once per run");
     assert.equal(state.loaded.session.notices.length, before + 1, "no second notice");
+    await settled(state);
+    const records = state.loaded.session.entries.filter((entry) => entry.customType === LEVEL_ENTRY);
+    assert.equal((records.at(-1)?.data as Record<string, unknown> | undefined)?.escalated, true, "the planned run's record says it escalated");
+    assert.ok(readLevelRecord(records.at(-1)) !== undefined, "and still reads");
     holdsNoToolText(state);
+  });
+
+  test("a planned run that did not escalate keeps its footer, and its record has no flag", async (t) => {
+    const state = await session(t);
+    const level = await say(state, "go on", ANSWER_MEDIUM);
+    assert.equal(routed(await route(state, "go on")), TERRA);
+    const planned = `personal MEDIUM → gpt-6.1-terra (${demandNote(level)}; cost unknown)`;
+    assert.equal(footer(state), planned);
+    continuation(state, TERRA, failures(2));
+    await answered(state, TERRA, 3_000);
+    assert.equal(footer(state), planned, "nothing escalated: the footer is the plan's");
+    await settled(state);
+    const record = state.loaded.session.entries.filter((entry) => entry.customType === LEVEL_ENTRY).at(-1);
+    assert.equal("escalated" in ((record?.data ?? {}) as object), false, "the flag is absent, not false");
+    assert.ok(readLevelRecord(record) !== undefined, "the record reads");
+  });
+
+  test("a run without a prompt that escalates says so in its footer", async (t) => {
+    const state = await session(t);
+    assert.equal(await run(state, "go on", ANSWER_MEDIUM), TERRA);
+    assert.equal(routed(await unprompted(state, TERRA)), TERRA, "the run without a prompt stays on terra");
+    assert.match(footer(state) ?? "", /^personal MEDIUM → gpt-6\.1-terra \(run[;)]/, "its own footer");
+    const before = state.loaded.session.notices.length;
+    assert.equal(routed(continuation(state, TERRA, failures(3))), SOL, "the stuck run moves up");
+    assert.deepEqual(state.loaded.session.notices.slice(before), [{ type: "info", message: escalationNotice("medium", "high", "gpt-6.1-sol") }]);
+    assert.equal(footer(state), "personal MEDIUM → gpt-6.1-sol (run; escalated)", "the footer names sol and says escalated");
+    await answered(state, SOL, 4_000);
+    assert.equal(footer(state), "personal MEDIUM → gpt-6.1-sol (run; escalated)", "and at each later answer of the run");
+    await settled(state);
+    assert.equal(levelRecords(state), 1, "a run without a prompt writes no level record, escalated or not");
   });
 
   test("a run at SUPER, a tagged run, smart-router/local and a version 1 roster are never escalated", async (t) => {
@@ -938,12 +1000,14 @@ describe("escalation", () => {
     assert.deepEqual([routed(continuation(state, TERRA, failures(3))), lastCode(state), recordOf(state).runTier], [OR_GLM, "escalate", "high"], "HIGH takes its chain before it passes the run up");
     assert.deepEqual(
       state.loaded.session.notices.slice(before),
-      [
-        { type: "info", message: escalationNotice("medium", "high", "z-ai/glm-5.3-flash") },
-        { type: "info", message: fallbackMoveNotice("gpt-6.1-terra", "openrouter", "z-ai/glm-5.3-flash") },
-      ],
-      "the move up is said, and so is the move onto the chain",
+      [{ type: "info", message: escalationNotice("medium", "high", "z-ai/glm-5.3-flash") }],
+      "an escalation shows one true notice, naming the level and the model the run reached: terra can still take the run, so the chain-move notice would be false",
     );
+    assert.ok(
+      !state.loaded.session.notices.some((notice) => notice.message === fallbackMoveNotice("gpt-6.1-terra", "openrouter", "z-ai/glm-5.3-flash")),
+      "no chain-move notice for an escalation",
+    );
+    assert.match(footer(state) ?? "", /^personal MEDIUM → z-ai\/glm-5\.3-flash \(demand \d\.\d; escalated; fallback\)$/, "the footer says the run escalated, onto the chain");
     await settled(state);
 
     for (const ref of CHAIN) cat.unavailable.add(ref);
@@ -992,5 +1056,89 @@ describe("/smart-router status after the latest decision", () => {
     await unprompted(state, TERRA);
     continuation(state, TERRA);
     assert.deepEqual(await terms(state), [], "the run without a prompt has no terms of its own, and the older run's are not shown");
+  });
+});
+
+describe("what pi-cache-optimizer is told before a run without a prompt", () => {
+  /** The adapter's answer for the session, as pi-cache-optimizer reads it. */
+  const told = (state: Session): string | undefined => {
+    const snapshot = resolveActiveRoute(state.loaded.session.ctx);
+    return snapshot === undefined ? undefined : `${snapshot.provider}/${snapshot.modelId}`;
+  };
+  /** What the record and its ledger hold that a prediction must not change. */
+  const held = (state: Session) => {
+    const record = recordOf(state);
+    return structuredClone({
+      needs: record.ledger.needs,
+      runs: record.ledger.runs,
+      seen: [...record.ledger.seen],
+      need: record.need,
+      runTier: record.runTier,
+      runTagged: record.runTagged,
+      escalated: record.escalated,
+      runPick: record.runPick,
+      history: record.history,
+      footer: footer(state),
+    });
+  };
+
+  test("after a run that stepped up, with LOW's model back: LOW's model, which the route then picks", async (t) => {
+    const cat = catalog();
+    for (const ref of [LUNA, ...CHAIN]) cat.unavailable.add(ref);
+    const state = await session(t, { catalog: cat });
+    await say(state, "rename foo to bar", ANSWER_LOW);
+    assert.equal(routed(await route(state, "rename foo to bar")), TERRA, "LOW's run stepped up to terra");
+    await answer(state, TERRA);
+    assert.equal(told(state), TERRA, "with luna away, the step-up's terra");
+    cat.unavailable.delete(LUNA);
+    assert.equal(told(state), LUNA, "the session needs LOW, and luna is back: the prediction is the run:need choice, not the last responder");
+    assert.equal(routed(await unprompted(state, TERRA)), LUNA, "and the route agrees");
+  });
+
+  test("a session the cost would move: terra, which the route then picks", async (t) => {
+    const state = await session(t, {
+      setup: (s) => {
+        s.appendCustom(LEVEL_ENTRY, { v: 1, at: NOW - 30_000, scope: "personal", source: "jev", tier: "super", need: "medium", ref: ASTRA });
+        s.appendAssistant(assistant(ASTRA, { usage: usageOf(150_000), timestamp: NOW - 90_000, thinkingLevel: "high" }), new Date(NOW - 30_000).toISOString());
+      },
+    });
+    assert.equal(told(state), TERRA, "the ledger says the run is long: terra, not astra, the last responder");
+    assert.equal(routed(await unprompted(state, ASTRA)), TERRA, "and the route agrees");
+  });
+
+  test("a session the cost keeps on astra: astra", async (t) => {
+    const state = await session(t);
+    await threeSuperRuns(state);
+    assert.equal(await run(state, "go on", ANSWER_MEDIUM), ASTRA);
+    assert.equal(told(state), ASTRA);
+    assert.equal(routed(await unprompted(state, ASTRA)), ASTRA, "and the route agrees");
+  });
+
+  test("the prediction changes nothing", async (t) => {
+    const state = await session(t);
+    await threeSuperRuns(state);
+    assert.equal(await run(state, "go on", ANSWER_MEDIUM), ASTRA);
+    const before = held(state);
+    told(state);
+    told(state);
+    assert.deepEqual(held(state), before, "the ledger's needs, runs and caches, the need, the run's level and marks, the pick, the history and the footer are as they were");
+  });
+
+  test("a session with no recorded need, smart-router/local and a version 1 roster are told as before", async (t) => {
+    const fresh = await session(t, { id: "fresh" });
+    await fresh.loaded.host.emit("message_end", { message: assistant(ASTRA, { usage: usageOf(150_000) }) });
+    assert.equal(recordOf(fresh).need, undefined, "no run was planned");
+    assert.equal(told(fresh), ASTRA, "no need: the last responder, as before");
+
+    resetSlot();
+    const local = await session(t, { id: "local", select: "local" });
+    (recordOf(local) as { need: Tier | undefined }).need = "medium";
+    assert.equal(told(local), GLM, "smart-router/local: the local role, whatever the record says");
+
+    resetSlot();
+    const v1 = await session(t, { id: "v1", roster: fixture("roster-hera.json"), catalog: new FakeCatalog(heraModels()) });
+    await v1.loaded.host.emit("message_end", { message: assistant(SOL) });
+    (recordOf(v1) as { need: Tier | undefined }).need = "low";
+    assert.equal(told(v1), SOL, "a version 1 roster: the last responder, whatever the record says");
   });
 });

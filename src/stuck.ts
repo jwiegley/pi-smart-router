@@ -6,6 +6,10 @@
 // text are a run going round in circles. Upstream compares a hash of each text's first 256
 // characters; comparing the characters themselves is the same test without the hash. The texts are
 // held only while they are compared.
+//
+// The run under way is what follows the latest user message. A route request's messages are Pi's
+// model-facing messages, in which an extension's custom message (a goal continuation's, a loop's)
+// is already a user message, so a run without a prompt is bounded the same way.
 
 /** How many failed tool results in a row make a run stuck. */
 export const STUCK_FAILURES = 3;

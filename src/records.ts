@@ -97,6 +97,8 @@ export interface LevelRecord {
   readonly returnedToFirst?: true;
   /** The model that answered is one of the scope's fallback chain, not one of the tier's own; `tier` is still the run's. */
   readonly fallback?: true;
+  /** The run moved up a level because its last three tool calls failed the same way. */
+  readonly escalated?: true;
   readonly aborted?: true;
   /** A correction's: the `at` of the run it corrects. */
   readonly refers?: number;
@@ -127,7 +129,7 @@ function jevRecord(jev: PendingLevel["jev"]): JevRecord | undefined {
  * A settled run's record, from the level its input planned. Neither the digest nor anything else of
  * the text goes in. `fallback`: whether the answering model is one of the scope's fallback chain.
  */
-export function levelRecord(pending: PendingLevel, answeringRef: string | undefined, aborted: boolean, fallback = false): LevelRecord {
+export function levelRecord(pending: PendingLevel, answeringRef: string | undefined, aborted: boolean, fallback = false, escalated = false): LevelRecord {
   const { level, keyword } = pending;
   const jev = jevRecord(pending.jev);
   const cost = costRecord(level.cost);
@@ -148,6 +150,7 @@ export function levelRecord(pending: PendingLevel, answeringRef: string | undefi
     ...(level.steppedUp ? { steppedUp: true as const } : {}),
     ...(level.returnedToFirst ? { returnedToFirst: true as const } : {}),
     ...(fallback ? { fallback: true as const } : {}),
+    ...(escalated ? { escalated: true as const } : {}),
     ...(aborted ? { aborted: true as const } : {}),
   };
 }
@@ -229,14 +232,18 @@ export function costNote(cost: CostTerms | undefined): string {
  * floor raised the level, then what the cost rule compared (costNote).
  */
 export function levelNote(level: PlanLevel): string {
+  return `${decidedNote(level)}${level.source === "tag" ? "" : costNote(level.cost)}`;
+}
+
+/** What decided a run's level, without the cost: "tag", or the demand with its Jev and floor marks. */
+function decidedNote(level: PlanLevel): string {
   if (level.source === "tag") return "tag";
   const { jev, demand } = level;
-  const decided = [
+  return [
     demand === undefined ? "demand unknown" : `demand ${demand.value.toFixed(1)}`,
     ...(jev?.kind === "failure" ? [`jev ${jev.failure}`] : []),
     ...(level.source === "floor" ? ["floor"] : []),
   ].join(", ");
-  return `${decided}${costNote(level.cost)}`;
 }
 
 /**
@@ -279,8 +286,27 @@ export function decisionLines(level: PlanLevel): string[] {
 /**
  * The footer's item for a run: its scope, the level it needs, the model, and what decided the
  * level. `fallback`: whether the model is one of the scope's fallback chain, as the plan's pick was
- * unless the caller knows the model that answered.
+ * unless the caller knows the model that answered. `escalated`: the run moved up for being stuck,
+ * which the footer says in place of what the cost rule compared, since the cost no longer decides
+ * its model.
  */
-export function footerText(level: PlanLevel, modelId: string, fallback: boolean = level.fallback === true): string {
-  return `${level.scope} ${tierLabel(level.need)} → ${modelId} (${levelNote(level)}${fallback ? "; fallback" : ""})`;
+export function footerText(level: PlanLevel, modelId: string, fallback: boolean = level.fallback === true, escalated = false): string {
+  const note = escalated ? `${decidedNote(level)}; escalated` : levelNote(level);
+  return `${level.scope} ${tierLabel(level.need)} → ${modelId} (${note}${fallback ? "; fallback" : ""})`;
+}
+
+/** What a run without a plan of its own (run:need) shows: its scope, the level its session last needed, and what the cost rule decided. */
+export interface NeedRun {
+  readonly scope: Scope;
+  readonly need: Tier;
+  readonly cost?: CostTerms;
+}
+
+/**
+ * The footer's item for a run without a plan of its own: its scope, the level its session last
+ * needed, the model, "run", and what the cost rule compared (costNote), or "; escalated" once the
+ * run moved up for being stuck; then "; fallback" for a model of the scope's chain.
+ */
+export function runFooterText(run: NeedRun, modelId: string, fallback: boolean, escalated: boolean): string {
+  return `${run.scope} ${tierLabel(run.need)} → ${modelId} (run${escalated ? "; escalated" : costNote(run.cost)}${fallback ? "; fallback" : ""})`;
 }

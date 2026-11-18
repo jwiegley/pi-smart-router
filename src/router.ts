@@ -76,7 +76,7 @@ import { policyFromRoster } from "./local.ts";
 import { healDisplaced, isLive, isLiveOwner, join, leave, leaveScopeHandoff, ownerBySignal, rememberedRoster, rememberRoster, scopeLatched, sessionHash, takeScopeHandoff } from "./owners.ts";
 import type { Owner, OwnerRouter, RosterMemory, Slot } from "./owners.ts";
 import { promptProblem, promptStore, promptUses, scopePrompts } from "./prompts.ts";
-import { footerText, levelRecord, readLevelRecord } from "./records.ts";
+import { footerText, levelRecord, readLevelRecord, runFooterText } from "./records.ts";
 import { clock, coolFrom, Cooldowns, coolsAccount, hasOutput, holdFrom, Holds, resolveContext } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
 import { activeEntries, afterFailure, boundedHistory, newRecord, planApplies, predict, requireBoundedHistory, routeOther, routeOwned } from "./route.ts";
@@ -402,6 +402,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   const refusalFor = (id: VirtualId, value: Roster, ctx: ExtensionContext): RouterError | undefined => (id === "auto" ? scopeRefusal(value, ctx) : undefined);
 
   /** Pi's settings, for the compaction figures a route prices with; Pi's defaults (compactionFor) when they cannot be read. */
+  // The input path lets a settings throw surface, through its handler's report; a route cannot
+  // report and go on, and a throw here would fail the request, so it answers with Pi's defaults.
   const settingsNow = (): unknown => {
     try {
       return pi.getSettings();
@@ -534,7 +536,9 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         const ref = parseRef(runPick.ref);
         return ref === undefined ? undefined : { provider: ref.provider, modelId: ref.id, api: rc.catalog.find(ref.provider, ref.id)?.api, status: "selected", at };
       }
-      const predicted = predict(rc, record);
+      // No request exists yet: the price assumes the selected thinking level, which Pi sends.
+      const figures: CostFigures = { ledger: record.ledger, thinking: pi.getThinkingLevel() };
+      const predicted = predict(rc, record, figures, compactionFor(settingsNow(), id));
       return predicted.ok ? answer(predicted.choice.model, "selected") : undefined;
     } catch {
       return undefined;
@@ -557,6 +561,17 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     } catch {
       // The footer is a courtesy.
     }
+  };
+
+  /**
+   * The footer of the run under way on the model `ref` (`modelId` without its provider): a planned
+   * run's level, or a run:need choice's, each saying whether the run escalated and whether the
+   * model is one of the scope's chain. Undefined for a run with neither.
+   */
+  const runFooter = (record: Session, ref: string, modelId: string): string | undefined => {
+    const { pendingLevel: pending, needRun } = record;
+    if (pending !== undefined) return footerText(pending.level, modelId, inChain(pending.level.scope, ref), record.escalated);
+    return needRun === undefined ? undefined : runFooterText(needRun, modelId, inChain(needRun.scope, ref), record.escalated);
   };
 
   /**
@@ -970,9 +985,9 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     // The footer names the model that answered a run's level, when the run's own route picked it.
     const record = records.get(sessionId);
     const pick = record?.runPick;
-    if (record?.pendingLevel !== undefined && pick?.id === "auto" && pick.ref === ref) {
-      const { level } = record.pendingLevel;
-      showLevel(ctx, record, footerText(level, message.model, inChain(level.scope, ref)));
+    if (record !== undefined && pick?.id === "auto" && pick.ref === ref) {
+      const text = runFooter(record, ref, message.model);
+      if (text !== undefined) showLevel(ctx, record, text);
     }
     if (record !== undefined) record.answered = ref;
     if (message.stopReason === "aborted") return;
@@ -991,7 +1006,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
    * nothing.
    */
   const settle = (record: Session, aborted: boolean): void => {
-    const { pendingLevel: pending, answered } = record;
+    const { pendingLevel: pending, answered, escalated } = record;
     record.plan = undefined;
     record.planDigest = undefined;
     record.runPick = undefined;
@@ -1001,8 +1016,9 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     record.runTier = undefined;
     record.runTagged = false;
     record.escalated = false;
+    record.needRun = undefined;
     noteRunEnd(record.ledger);
-    if (pending !== undefined) pi.appendEntry(LEVEL_ENTRY, levelRecord(pending, answered, aborted, answered !== undefined && inChain(pending.level.scope, answered)));
+    if (pending !== undefined) pi.appendEntry(LEVEL_ENTRY, levelRecord(pending, answered, aborted, answered !== undefined && inChain(pending.level.scope, answered), escalated));
   };
 
   /**
@@ -1081,15 +1097,25 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   const api: Router = {
     routeOwned: (id, request, ctx) => {
       const input = prepare(id, request, ctx);
-      const before = input.record.runPick;
-      const { runTier: from, escalated } = input.record;
+      const record = recordOf(ctx.sessionManager.getSessionId());
+      const before = record.runPick;
+      const { runTier: from, escalated } = record;
       const route = routeOwned(input);
-      // A stuck run that moves up says so, where it happens: the levels and the model, nothing of its tools' output.
-      const to = input.record.runTier;
-      if (!escalated && input.record.escalated && from !== undefined && to !== undefined) notify(ctx, escalationNotice(from, to, route.model.id), "info");
+      const after = record.runPick;
+      const movedUp = !escalated && record.escalated;
+      // A stuck run that moves up says so, where it happens, once: the level and the model it reached,
+      // nothing of its tools' output. The model it left could still take the run, so no chain-move
+      // notice is shown for it.
+      const to = record.runTier;
+      if (movedUp && from !== undefined && to !== undefined) notify(ctx, escalationNotice(from, to, route.model.id), "info");
+      // The footer follows the run: from an escalated request on, and from the first request of a run
+      // without a plan of its own, whose choice the last planned run's footer does not name.
+      if (after !== undefined && (movedUp || (before === undefined && record.needRun !== undefined))) {
+        const text = runFooter(record, after.ref, route.model.id);
+        if (text !== undefined) showLevel(ctx, record, text);
+      }
       // A run under way that moves from its model onto the scope's chain says so, where it happens.
-      const after = input.record.runPick;
-      if (id === "auto" && !input.rc.localOnly && before !== undefined && after !== undefined && before.ref !== after.ref) {
+      if (!movedUp && id === "auto" && !input.rc.localOnly && before !== undefined && after !== undefined && before.ref !== after.ref) {
         const { scope } = input.rc;
         if (!inChain(scope, before.ref) && inChain(scope, after.ref)) {
           notify(ctx, fallbackMoveNotice(parseRef(before.ref)?.id ?? before.ref, after.role, route.model.id), "info");
