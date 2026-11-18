@@ -255,6 +255,8 @@ export class FakeSession {
   readonly notices: Array<{ readonly type: string; readonly message: string }> = [];
   readonly entries: Array<Record<string, unknown>> = [];
   readonly boundedReads: unknown[] = [];
+  /** The ids of entries that are not on the active branch, as after /tree to a branch without them (leaveBranch). */
+  readonly offBranch = new Set<string>();
   wholeHistoryReads = 0;
   /** The status items, as setStatus left them. */
   readonly statuses = new Map<string, string | undefined>();
@@ -290,6 +292,7 @@ export class FakeSession {
         const matching = session.entries.filter((entry) => {
           const message = entry.message as { role?: string } | undefined;
           return (
+            !session.offBranch.has(String(entry.id)) &&
             (filter.type === undefined || entry.type === filter.type) &&
             (filter.messageRole === undefined || message?.role === filter.messageRole) &&
             (filter.customType === undefined || entry.customType === filter.customType)
@@ -299,7 +302,11 @@ export class FakeSession {
       };
       manager.getLatestCustomEntry = (customType: string, options?: { scope?: "all" | "active" }) => {
         session.boundedReads.push({ customType, ...options });
-        return latest(session.entries, (entry) => (entry.type === "custom" || entry.type === "custom_message") && entry.customType === customType);
+        const active = options?.scope === "active";
+        return latest(
+          session.entries,
+          (entry) => (entry.type === "custom" || entry.type === "custom_message") && entry.customType === customType && !(active && session.offBranch.has(String(entry.id))),
+        );
       };
       manager.getLatestMessage = (role?: string) =>
         latest(session.entries, (entry) => entry.type === "message" && (role === undefined || (entry.message as { role?: string }).role === role));
@@ -401,6 +408,11 @@ export class FakeSession {
   /** Append a custom entry, as Pi's appendEntry does. */
   appendCustom(customType: string, data: unknown, type: "custom" | "custom_message" = "custom"): void {
     this.entries.push({ type, customType, data, id: `e${this.entries.length}`, parentId: null, timestamp: new Date(NOW).toISOString() });
+  }
+
+  /** Move to a branch that holds none of the entries so far, as /tree to an earlier point does: scope "all" still reads them. */
+  leaveBranch(): void {
+    for (const entry of this.entries) this.offBranch.add(String(entry.id));
   }
 
   /** Force the selection without a model_select, as writing session.agent.state.model does. */

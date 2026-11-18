@@ -111,8 +111,8 @@ export interface Session extends SessionRecord {
   directoryTried: boolean;
   /** The token of the latest input that planned: an input that waited for Jev plans only if no newer input has planned since. */
   plannedToken: number;
-  /** Whether this instance has said that the session's old pin entry is ignored (pinEntryNotice). It says so once. */
-  pinEntryTold: boolean;
+  /** Whether this instance has looked for the session's old pin entry (pinEntryNotice). It looks once, on smart-router/auto. */
+  pinEntryChecked: boolean;
   /** Whether the footer shows a level item this instance set: only then does a run without a level clear it. */
   levelShown: boolean;
   /** The model of the current run's last assistant message that ended without an error: the one its record names. */
@@ -210,7 +210,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         ...newRecord(),
         directoryTried: false,
         plannedToken: 0,
-        pinEntryTold: false,
+        pinEntryChecked: false,
         levelShown: false,
         answered: undefined,
         planDigest: undefined,
@@ -485,12 +485,14 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
 
   /**
    * Whether the session's latest pin entry, which an earlier version wrote, says it was pinned. The
-   * pin has been removed and the entry is ignored; it is read only to say so. Never throws: an entry
-   * that cannot be read, or that says anything else, says nothing.
+   * pin was session-wide, so the entry is read over the whole session (scope "all"), as the scope's
+   * is: a /tree move to a branch without it left the session pinned. The pin has been removed and
+   * the entry is ignored; it is read only to say so. Never throws: an entry that cannot be read, or
+   * that says anything else, says nothing.
    */
   const pinnedBefore = (ctx: ExtensionContext): boolean => {
     try {
-      const entry = boundedHistory(managerOf(ctx))?.getLatestCustomEntry(PIN_ENTRY, { scope: "active" });
+      const entry = boundedHistory(managerOf(ctx))?.getLatestCustomEntry(PIN_ENTRY, { scope: "all" });
       const data = isRecord(entry) ? own(entry, "data") : undefined;
       return isRecord(data) && own(data, "on") === true;
     } catch {
@@ -499,16 +501,17 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   };
 
   /**
-   * Say once in a session that its old pin entry is ignored: the first time, at session start or at
-   * an idle input, that smart-router/auto is selected and the entry says the session was pinned.
-   * Only smart-router/auto now routes where the pin would not have: smart-router/local still routes
-   * locally, and a model picked by hand was always sent as it is.
+   * Look once in a session for an old pin entry, and say that it is ignored when it says the session
+   * was pinned: at session start when smart-router/auto is selected, else at the first idle input on
+   * it. After that one look the entry is never read again, whatever it said. Only smart-router/auto
+   * now routes where the pin would not have: smart-router/local still routes locally, and a model
+   * picked by hand was always sent as it is.
    */
   const tellPinEntry = (ctx: ExtensionContext): void => {
     const record = recordOf(ctx.sessionManager.getSessionId());
-    if (record.pinEntryTold || virtualIdOf(ctx.model) !== "auto" || !pinnedBefore(ctx)) return;
-    record.pinEntryTold = true;
-    notify(ctx, pinEntryNotice(), "warning");
+    if (record.pinEntryChecked || virtualIdOf(ctx.model) !== "auto") return;
+    record.pinEntryChecked = true;
+    if (pinnedBefore(ctx)) notify(ctx, pinEntryNotice(), "warning");
   };
 
   /** Append a scope entry, and say whether it was recorded. */
@@ -986,7 +989,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         const result: InputEventResult | undefined = tagged === undefined ? undefined : tagged.text === "" ? HANDLED : { action: "transform", text: tagged.text };
         try {
           const previous = guarded("input", ctx, () => resetInput(ctx));
-          // An old pin entry is said to be ignored at the first idle input on smart-router/auto, unless session_start said it.
+          // An old pin entry is looked for at the first idle input on smart-router/auto, unless session_start looked.
           guarded("input", ctx, () => {
             if (ctx.isIdle()) tellPinEntry(ctx);
           });

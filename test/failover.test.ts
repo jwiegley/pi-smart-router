@@ -269,4 +269,15 @@ describe("a real usage limit: the run ends, the notice says what to do, and the 
     ]);
     assert.doesNotMatch(notices.join("\n"), /choose a work Codex model/);
   });
+
+  test("on smart-router/local, an unreachable server with no other local model left: the notice says to send again, and that it is tried again", async (t) => {
+    const { loaded, cat } = await session(t, { select: "local" });
+    cat.remove(NYX_QWEN);
+    cat.remove(HERA_QWEN);
+    const signal = await prompt(loaded, "rename foo to bar");
+    assert.equal(routed(loaded.runtime.route("local", request("user", { signal }))), GLM);
+    assert.deepEqual(await fails(loaded, GLM, "read ECONNRESET"), [
+      "warning: pi-smart-router: GLM-5.3-Flash-oQ4e-mtp could not take this run (its server could not be reached), and nothing was answered. No other model can take it now: send the request again, and it is tried again, or choose a model with /model.",
+    ]);
+  });
 });

@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
-import test, { afterEach, beforeEach } from "node:test";
+import test, { afterEach, beforeEach, describe } from "node:test";
 
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import smartRouter, { install } from "../index.ts";
-import { ROUTING_REGISTRY_KEY } from "../src/constants.ts";
+import { LEVEL_ENTRY, ROUTING_REGISTRY_KEY } from "../src/constants.ts";
 import { processSlot } from "../src/owners.ts";
-import { createRouter } from "../src/router.ts";
-import { ASTRA, DEEPSEEK, KIMI, NOW } from "./support/catalog.ts";
+import { createRouter, DEFAULT_LIMITS } from "../src/router.ts";
+import { ASTRA, DEEPSEEK, KIMI, NOW, SOL } from "./support/catalog.ts";
+import { fixture } from "./support/fixtures.ts";
 import { agentDir, assistant, FakeHost, FakeRuntime, FakeSession, load, request, resetSlot, routed, start } from "./support/pi.ts";
+import type { Loaded, LoadOptions } from "./support/pi.ts";
 
 const HANDLERS = [
   "session_start",
@@ -212,21 +214,148 @@ test("no timer, socket or other handle outlives a session", async (t) => {
   assert.deepEqual(process.getActiveResourcesInfo().sort(), before);
 });
 
-test("a session_start step that fails leaves the others to run", async (t) => {
-  // Another extension's pi.routing.registry.v1: it passes pi-cache-optimizer's shape check, but its registerRouter throws.
-  const broken = () => {
-    throw new Error("broken registry");
+describe("a session_start step that fails leaves the others to run", () => {
+  const throwing = (message: string) => () => {
+    throw new Error(message);
   };
-  (globalThis as Record<symbol, unknown>)[Symbol.for(ROUTING_REGISTRY_KEY)] = { version: 1, registerRouter: broken, getRouter: () => undefined };
-  const loaded = load({ dir: agentDir(t), runtime: new FakeRuntime() });
-  loaded.session.appendAssistant(assistant(KIMI, { timestamp: NOW - 60_000 }));
-  loaded.session.select("auto");
-  await loaded.host.emit("session_start", { reason: "resume" });
-  assert.ok(
-    loaded.session.notices.some((notice) => notice.message === "pi-smart-router: the session_start handler failed: broken registry"),
-    "the failed step is reported",
-  );
-  assert.deepEqual(loaded.router?.limits(), { auto: { contextWindow: 128_000, maxTokens: 32_000 }, local: { contextWindow: 262_144, maxTokens: 81_920 } }, "the roster was read");
-  assert.equal(loaded.runtime.find("smart-router", "local")?.contextWindow, 262_144, "both models were registered again with its limits");
-  assert.equal(loaded.router?.record(loaded.session.id)?.last?.ref, KIMI, "the last responder was seeded");
+  /** A seed read that fails, as a locked or damaged session index does. */
+  const failSeed = (message: string) => (loaded: Loaded): void => {
+    (loaded.session.ctx.sessionManager as unknown as Record<string, unknown>).getRecentActiveEntries = throwing(message);
+  };
+  /** Another extension's pi.routing.registry.v1: it passes pi-cache-optimizer's shape check, but its registerRouter throws. */
+  const breakRegistry = (): void => {
+    (globalThis as Record<symbol, unknown>)[Symbol.for(ROUTING_REGISTRY_KEY)] = { version: 1, registerRouter: throwing("broken registry"), getRouter: () => undefined };
+  };
+  const ROSTER_LIMITS = { auto: { contextWindow: 128_000, maxTokens: 32_000 }, local: { contextWindow: 262_144, maxTokens: 81_920 } };
+  /** Hera's version 2 roster, under which a resumed session's level is seeded after the last responder. */
+  const HERA_V2 = fixture("roster-hera-v2.json");
+  const V2_LIMITS = { auto: { contextWindow: 128_000, maxTokens: 32_000 }, local: { contextWindow: 262_144, maxTokens: 81_920 } };
+  /** The level record a session at HIGH left, which session_start reads after the seed. */
+  const heldHigh = (session: Loaded["session"]): void => session.appendCustom(LEVEL_ENTRY, { v: 1, at: NOW - 60_000, scope: "personal", source: "tag", tier: "high", asked: "high", tag: "high", ref: SOL });
+  const conflict = "Virtual model smart-router/auto conflicts with a registered model";
+
+  interface Case {
+    readonly name: string;
+    readonly reason: "new" | "fork" | "resume";
+    /** The selection the session starts on, which the router must leave as it is. */
+    readonly restored: string;
+    /** What breaks, after the factory ran and before session_start. */
+    readonly breaks: (loaded: Loaded) => void;
+    readonly options?: Partial<LoadOptions>;
+    readonly roster?: string | null;
+    /** The level role session_start seeds after the last responder, when the row's session holds one (heldHigh). */
+    readonly held?: string;
+    /** The failure reported, or undefined when no notice can be shown at all. */
+    readonly failure: string | undefined;
+    /** Whether the roster is read: false where the agent directory cannot be found, or no roster file exists. */
+    readonly rosterRead: boolean;
+    /** Whether session_start registers both models again: not when registering is what throws. */
+    readonly registersAgain: boolean;
+    /** Whether the last responder is seeded: not when the seed read is what throws. */
+    readonly seeded: boolean;
+  }
+
+  const cases: readonly Case[] = [
+    {
+      name: "/new, when the seed read of the new session throws",
+      reason: "new",
+      restored: KIMI,
+      breaks: failSeed("database is locked"),
+      roster: HERA_V2,
+      held: "high",
+      failure: "database is locked",
+      rosterRead: true,
+      registersAgain: true,
+      seeded: false,
+    },
+    { name: "a fork, when another extension's routing registry throws", reason: "fork", restored: KIMI, breaks: breakRegistry, failure: "broken registry", rosterRead: true, registersAgain: true, seeded: true },
+    {
+      name: "/new, when registering the models again throws",
+      reason: "new",
+      restored: KIMI,
+      breaks: (loaded) => {
+        loaded.host.api.registerVirtualModel = throwing(conflict);
+      },
+      failure: conflict,
+      rosterRead: true,
+      registersAgain: false,
+      seeded: true,
+    },
+    {
+      name: "/new, when Pi's agent directory cannot be found",
+      reason: "new",
+      restored: KIMI,
+      breaks: () => {},
+      options: { build: (pi, options) => createRouter(pi, { ...options, agentDir: throwing("HOME is not set") }) },
+      failure: "HOME is not set",
+      rosterRead: false,
+      registersAgain: true,
+      seeded: true,
+    },
+    {
+      name: "/new, when no notice can be shown and the roster is missing",
+      reason: "new",
+      restored: KIMI,
+      breaks: (loaded) => {
+        (loaded.session.ctx.ui as unknown as Record<string, unknown>).notify = throwing("the terminal is gone");
+      },
+      roster: null,
+      failure: undefined,
+      rosterRead: false,
+      registersAgain: true,
+      seeded: true,
+    },
+    {
+      name: "a resume, when the seed read throws, restored on a model picked by hand",
+      reason: "resume",
+      restored: KIMI,
+      breaks: failSeed("Cycle in session ancestry at e3"),
+      roster: HERA_V2,
+      held: "high",
+      failure: "Cycle in session ancestry at e3",
+      rosterRead: true,
+      registersAgain: true,
+      seeded: false,
+    },
+    {
+      name: "a resume, when the seed read throws, restored on smart-router/local",
+      reason: "resume",
+      restored: "smart-router/local",
+      breaks: failSeed("Cycle in session ancestry at e3"),
+      roster: HERA_V2,
+      held: "high",
+      failure: "Cycle in session ancestry at e3",
+      rosterRead: true,
+      registersAgain: true,
+      seeded: false,
+    },
+  ];
+
+  for (const row of cases) {
+    test(row.name, async (t) => {
+      const loaded = load({ dir: agentDir(t, row.roster === undefined ? {} : { roster: row.roster }), runtime: new FakeRuntime(), now: () => NOW, ...row.options });
+      loaded.session.appendAssistant(assistant(DEEPSEEK, { timestamp: NOW - 60_000 }));
+      if (row.held !== undefined) heldHigh(loaded.session);
+      row.breaks(loaded);
+      loaded.session.select(row.restored);
+      const registrations = loaded.runtime.registrations;
+      await loaded.host.emit("session_start", { reason: row.reason });
+      const messages = loaded.session.notices.map((notice) => notice.message);
+      if (row.failure === undefined) {
+        assert.deepEqual(messages, [], "no notice can be shown, and the handler's failure reaches nothing");
+      } else {
+        assert.ok(messages.includes(`pi-smart-router: the session_start handler failed: ${row.failure}`), `the failed step is reported: ${JSON.stringify(messages)}`);
+      }
+      const limits = row.roster === HERA_V2 ? V2_LIMITS : ROSTER_LIMITS;
+      assert.deepEqual(loaded.router?.limits(), row.rosterRead ? limits : { auto: DEFAULT_LIMITS, local: DEFAULT_LIMITS }, row.rosterRead ? "the roster was read" : "no roster could be read");
+      assert.equal(loaded.runtime.registrations - registrations, row.registersAgain ? 2 : 0, row.registersAgain ? "both models were registered again" : "registering again failed");
+      for (const id of ["auto", "local"] as const) assert.ok(loaded.runtime.find("smart-router", id) !== undefined, `smart-router/${id} is registered`);
+      if (row.registersAgain) {
+        assert.equal(loaded.runtime.find("smart-router", "local")?.contextWindow, (row.rosterRead ? limits : { local: DEFAULT_LIMITS }).local.contextWindow, "with the limits the roster gave");
+      }
+      assert.equal(loaded.router?.record(loaded.session.id)?.last?.ref, row.seeded ? DEEPSEEK : undefined, row.seeded ? "the last responder was seeded" : "the seed read failed");
+      if (row.held !== undefined) assert.equal(loaded.router?.record(loaded.session.id)?.levelRole, row.held, "the step after the failed seed still ran: the session's level was seeded");
+      assert.deepEqual([`${loaded.session.model?.provider}/${loaded.session.model?.id}`, loaded.host.selections.length], [row.restored, 0], "the selection the session started on is left as it is");
+    });
+  }
 });

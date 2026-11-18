@@ -1239,8 +1239,9 @@ elsewhere, the latch included:
   not reach them. Run work in a work directory or in a latched process, which reach a child that
   loads the router as they reach any session.
 - **Rollout order.** Write the version 2 work roster before setting `PI_SMART_ROUTER_SCOPE=work`: in
-  a latched process with a version 1 roster, or with no roster loaded, `smart-router/auto` sends
-  nothing, and `smart-router/local` sends only to the local models.
+  a latched process with a version 1 roster, `smart-router/auto` sends nothing, and
+  `smart-router/local` sends only to the local models; with no roster loaded, both refuse every
+  request.
 
 ## Routing locally
 
@@ -1265,10 +1266,13 @@ nobody believes an old pin still keeps a session local:
 - **`PI_SMART_ROUTER_LOCAL_ONLY` is ignored, with a notice.** While a process has seen it set, each
   session start says "PI_SMART_ROUTER_LOCAL_ONLY is set, but the local-only pin has been removed and
   keeps nothing local. Select smart-router/local to route locally." It selects and routes nothing.
-- **An old pin entry is ignored, with a notice.** A session an earlier version pinned is told once,
-  the first time it is on `smart-router/auto`, at its start or at an idle prompt, that "The pin has
-  been removed and is ignored: smart-router/auto routes by level here." Its entry stays in the
-  session, unread otherwise, and a fork or `/new` carries nothing of it.
+- **An old pin entry is ignored, with a notice.** The router looks for one once per session, over
+  the whole session as the pin was session-wide: at its start when `smart-router/auto` is selected,
+  else at its first idle prompt there. A session an earlier version pinned is then told "The pin
+  has been removed and is ignored: smart-router/auto routes by level here." The entry stays in the
+  session and is not read again. A fork copies the entries of the branch it is made from, the old
+  pin entry among them when it lies there (`pi --fork` copies the whole session), so the new
+  session is told the same, once; `/new` starts without it.
 
 ## Records and training
 

@@ -201,6 +201,46 @@ describe("the pin of earlier versions", () => {
   });
 });
 
+describe("reading an old pin entry", () => {
+  /** The session's reads of the old pin entry, as its bounded reader received them. */
+  const pinReads = (loaded: Loaded): unknown[] =>
+    loaded.session.boundedReads.filter((read) => typeof read === "object" && read !== null && (read as { customType?: unknown }).customType === PIN_ENTRY);
+  const SESSION_WIDE = { customType: PIN_ENTRY, scope: "all" };
+
+  test("reads it session-wide: a pinned session moved to a branch without the entry is still told, once", async (t) => {
+    const loaded = await hera(t, {
+      setup: (session) => {
+        session.appendCustom(PIN_ENTRY, OLD_PIN);
+        // /tree to a point before the pin entry: the branch no longer holds it, the session does.
+        session.leaveBranch();
+      },
+    });
+    assert.equal(told(loaded, pinEntryNotice()), 1, "the pin was session-wide, so a branch without its entry is told too");
+    assert.equal(await lowRun(loaded), LUNA, "and smart-router/auto routes it by level");
+    assert.equal(told(loaded, pinEntryNotice()), 1, "once");
+  });
+
+  test("checks once per session: a session without an entry reads it exactly once across three prompts on smart-router/auto", async (t) => {
+    const loaded = await hera(t);
+    for (const text of ["rename foo to bar", "and the tests", "and the docs"]) assert.equal(await lowRun(loaded, text), LUNA, text);
+    assert.deepEqual(pinReads(loaded), [SESSION_WIDE], "one session-wide read, at session start, and none at the prompts");
+    assert.equal(told(loaded, pinEntryNotice()), 0, "and nothing is said");
+  });
+
+  test("a session started on another selection is checked at its first idle input on smart-router/auto, and then never again", async (t) => {
+    const loaded = await hera(t, { select: "local", setup: (session) => session.appendCustom(PIN_ENTRY, OLD_PIN) });
+    assert.deepEqual(await loaded.host.emit("input", { text: "go ahead", source: "interactive" }), [undefined]);
+    assert.deepEqual(pinReads(loaded), [], "nothing is read at start or at an input on smart-router/local");
+    await loaded.host.choose("smart-router/auto");
+    assert.deepEqual(pinReads(loaded), [], "nor at the selection itself");
+    assert.equal(await lowRun(loaded), LUNA, "the first idle input on smart-router/auto routes by level");
+    assert.deepEqual([pinReads(loaded), told(loaded, pinEntryNotice())], [[SESSION_WIDE], 1], "it reads the entry session-wide once, and says so once");
+    await lowRun(loaded, "and the tests");
+    await lowRun(loaded, "and the docs");
+    assert.deepEqual([pinReads(loaded).length, told(loaded, pinEntryNotice())], [1, 1], "the later prompts read and say nothing more");
+  });
+});
+
 describe("/smart-router local", () => {
   test("answers that the pin is gone, whatever follows", async (t) => {
     for (const select of ["auto", "local", KIMI]) {
@@ -209,7 +249,9 @@ describe("/smart-router local", () => {
       const entries = loaded.session.entries.length;
       for (const args of ["local", "local on", "local off", "local status", "local on now", " local   off "]) {
         loaded.session.dialogKeys = ["down", "enter"];
+        const before = loaded.session.notices.length;
         await loaded.host.command("smart-router", args);
+        assert.equal(loaded.session.notices.length, before + 1, `${select}, ${args}: the command shows exactly one notice`);
         assert.deepEqual(loaded.session.notices.at(-1), { type: "warning", message: PIN_REMOVED }, `${select}, ${args}: the answer`);
       }
       assert.equal(loaded.session.entries.length, entries, `${select}: no entry is appended`);

@@ -392,18 +392,18 @@ describe("session state", () => {
     assert.equal(record(loaded)?.last?.ref, KIMI);
     assert.equal(record(loaded)?.last?.at, NOW - 60_000);
     const SEED = { type: "message", messageRole: "assistant", limit: 16 };
-    // The latest pin entry on the branch, which an earlier version wrote, is read only to say it is ignored.
-    const PIN = { customType: "smart-router.pin", scope: "active" };
+    // The latest pin entry of the session, which an earlier version wrote, is read once, only to say it is ignored.
+    const PIN = { customType: "smart-router.pin", scope: "all" };
     const SCOPE = { customType: "smart-router.scope", scope: "all" };
     // The level a resumed session held: its latest level record, one bounded read of the branch.
     const LEVEL = { customType: "smart-router.level", scope: "active" };
     const reads = loaded.session.boundedReads;
     assert.equal(reads.filter((read) => isDeepStrictEqual(read, SEED)).length, 1, "one read of the branch: the seed's");
     assert.equal(reads.filter((read) => isDeepStrictEqual(read, LEVEL)).length, 1, "and one of its latest level record");
-    assert.ok(reads.some((read) => isDeepStrictEqual(read, PIN)), "session_start on smart-router/auto reads the latest pin entry on the branch");
+    assert.equal(reads.filter((read) => isDeepStrictEqual(read, PIN)).length, 1, "session_start on smart-router/auto reads the latest pin entry once, over the whole session");
     assert.ok(reads.some((read) => isDeepStrictEqual(read, SCOPE)), "and the scope");
     for (const read of reads) {
-      assert.ok([SEED, LEVEL, PIN, SCOPE].some((allowed) => isDeepStrictEqual(read, allowed)), `${JSON.stringify(read)}: every other read is the old pin entry's, on the branch, or the scope's, over the whole session`);
+      assert.ok([SEED, LEVEL, PIN, SCOPE].some((allowed) => isDeepStrictEqual(read, allowed)), `${JSON.stringify(read)}: every other read is the old pin entry's or the scope's, over the whole session`);
     }
     assert.equal(loaded.session.wholeHistoryReads, 0);
   });
