@@ -70,7 +70,7 @@ import { isRecord, own } from "./files.ts";
 import type { FileSystem, Loaded } from "./files.ts";
 import { askJev, buildContext, jevAsk, recentMessages } from "./jev.ts";
 import type { JevAsk, JevOutcome } from "./jev.ts";
-import { answerOf, forgetBranch, forgetCaches, noteAnswer, noteRunEnd, seedAnswer } from "./ledger.ts";
+import { answerOf, forgetBranch, forgetCaches, noteAnswer, noteRunEnd, seedAnswer, usable } from "./ledger.ts";
 import type { Ledger } from "./ledger.ts";
 import { policyFromRoster } from "./local.ts";
 import { healDisplaced, isLive, isLiveOwner, join, leave, leaveScopeHandoff, ownerBySignal, rememberedRoster, rememberRoster, scopeLatched, sessionHash, takeScopeHandoff } from "./owners.ts";
@@ -168,10 +168,6 @@ const SEED_ENTRIES = 16;
 
 const virtualIdOf = (model: Model<Api> | undefined): VirtualId | undefined =>
   model?.provider === PROVIDER && (model.id === "auto" || model.id === "local") ? model.id : undefined;
-
-function isUsage(value: unknown): value is Usage {
-  return isRecord(value) && ["input", "output", "cacheRead", "cacheWrite", "totalTokens"].every((key) => typeof value[key] === "number");
-}
 
 const THINKING_LEVELS: ReadonlySet<string> = new Set(ALL_LEVELS);
 const isThinkingLevel = (value: unknown): value is ModelThinkingLevel => typeof value === "string" && THINKING_LEVELS.has(value);
@@ -487,7 +483,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     if (stopReason === "error" || stopReason === "aborted") return undefined;
     const stamp = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
     const at = Number.isFinite(stamp) ? stamp : typeof message.timestamp === "number" ? message.timestamp : now();
-    return { ref: `${provider}/${model}`, at, usage: isUsage(message.usage) ? message.usage : undefined };
+    return { ref: `${provider}/${model}`, at, usage: usable(message.usage) ? message.usage : undefined };
   };
 
   /**
@@ -1003,7 +999,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     if (message.stopReason === "aborted") return;
     const at = now();
     const session = recordOf(sessionId);
-    session.last = { ref, at, usage: message.usage };
+    // A usage that is not numbers is none: the next choice's cost is unknown, and the ledger records nothing.
+    session.last = { ref, at, usage: usable(message.usage) ? message.usage : undefined };
     // Whichever selection sent it, a model picked by hand's included: its cache and the run's shape.
     noteAnswer(session.ledger, answerOf(message, ctx.modelRegistry.find(message.provider, message.model), at));
   };

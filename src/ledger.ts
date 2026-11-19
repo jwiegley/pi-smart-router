@@ -90,6 +90,22 @@ export function answerOf(
   };
 }
 
+const USAGE_FIGURES = ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] as const;
+
+/**
+ * Whether a usage's figures are all numbers that can be counted: finite and not negative. A usage
+ * with any other figure (undefined, NaN, infinite, negative, not a number) is no usage at all: the
+ * ledger records nothing from it, and the cost rule treats the session as having none yet.
+ */
+export function usable(usage: unknown): usage is Usage {
+  if (typeof usage !== "object" || usage === null) return false;
+  const figures = usage as Record<string, unknown>;
+  return USAGE_FIGURES.every((key) => {
+    const value = figures[key];
+    return typeof value === "number" && Number.isFinite(value) && value >= 0;
+  });
+}
+
 function promptTokens(usage: Usage): number {
   return usage.input + usage.cacheRead + usage.cacheWrite;
 }
@@ -106,8 +122,9 @@ function remember(ledger: Ledger, answer: Answer): number {
   return tokens;
 }
 
-/** An answer that ended without an error: the model's cache, the provider's writes, the run under way. */
+/** An answer that ended without an error: the model's cache, the provider's writes, the run under way. Nothing from a usage that is not numbers. */
 export function noteAnswer(ledger: Ledger, answer: Answer): void {
+  if (!usable(answer.usage)) return;
   const tokens = remember(ledger, answer);
   // A run whose first answers reported no usage takes its first prompt size from the first that did.
   const open = ledger.run ?? { startedAt: answer.startedAt, requests: 0, output: 0, first: tokens, last: tokens, endedAt: answer.at, before: 0 };
@@ -124,6 +141,7 @@ export function noteAnswer(ledger: Ledger, answer: Answer): void {
 
 /** The same for an answer read back at session start: caches and writes, no run. */
 export function seedAnswer(ledger: Ledger, answer: Answer): void {
+  if (!usable(answer.usage)) return;
   remember(ledger, answer);
 }
 

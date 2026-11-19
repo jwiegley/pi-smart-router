@@ -229,6 +229,23 @@ describe("missing figures", () => {
     assert.deepEqual(unmeasured.cost, { outcome: "unknown", why: "no usage yet" }, "a last response without usage is no usage, whatever the prompt's size");
   });
 
+  test("a usage with a figure that is not a finite number of zero or more is no usage: the cost is unknown, and no NaN reaches it", () => {
+    const cases: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
+      ["an undefined output", { output: undefined }],
+      ["an undefined output and total", { output: undefined, totalTokens: undefined }],
+      ["a NaN input and no total", { input: Number.NaN, totalTokens: undefined }],
+      ["an infinite cache read", { cacheRead: Number.POSITIVE_INFINITY }],
+      ["a negative total", { totalTokens: -150_000 }],
+    ];
+    for (const [name, figures] of cases) {
+      const usage = { ...usageOf(150_000), ...figures } as Usage;
+      const chosen = choose({ last: { ref: ASTRA, at: NOW - 30_000, usage }, promptTokens: 50 });
+      assert.deepEqual(pickOf(chosen), [TERRA, "medium", "heuristics"], `${name}: no usage yet, so the needed level's own model`);
+      assert.deepEqual(chosen.cost, { outcome: "unknown", why: "no usage yet" }, `${name}: a usage that is not numbers is no usage, so the cost is unknown`);
+      assert.ok(!JSON.stringify(chosen).includes("null"), `${name}: no NaN reaches the choice: ${JSON.stringify(chosen.cost)}`);
+    }
+  });
+
   test("a model without a price makes the cost unknown", () => {
     const free = codex(SOL, { cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
     const chosen = choose({ rc: context({ catalog: catalog(free) }) });

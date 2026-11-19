@@ -219,6 +219,26 @@ describe("the ledger's feed", () => {
     }
   });
 
+  test("an answer whose usage is not numbers is no usage: nothing is noted, the next cost is unknown, and no NaN reaches the footer", async (t) => {
+    const state = await session(t);
+    assert.equal(await run(state, "go on", ANSWER_MEDIUM), TERRA, "a first run, measured");
+    const before = structuredClone({ seen: [...recordOf(state).ledger.seen], runs: recordOf(state).ledger.runs });
+    await say(state, "go on with it", ANSWER_MEDIUM);
+    const ref = routed(await route(state, "go on with it"));
+    const usage = { ...usageOf(150_000), output: undefined, totalTokens: undefined } as unknown as Usage;
+    await state.loaded.host.emit("message_end", { message: assistant(ref, { usage, timestamp: state.clock }) });
+    state.clock += 60_000;
+    await settled(state);
+    const after = { seen: [...recordOf(state).ledger.seen], runs: recordOf(state).ledger.runs };
+    assert.deepEqual(after, before, "an answer with an undefined output: the ledger records nothing from it, and the run shape is untouched");
+    assert.equal(recordOf(state).last?.usage, undefined, "the last responder has no usage");
+    await say(state, "and the next part", ANSWER_MEDIUM);
+    routed(await route(state, "and the next part"));
+    const shown = footer(state) ?? "";
+    assert.match(shown, /; cost unknown\)$/, `a usage that is not numbers is none: the cost is unknown: ${shown}`);
+    assert.ok(!shown.includes("NaN"), `no NaN reaches the footer: ${shown}`);
+  });
+
   test("a run's shape is noted when the agent settles", async (t) => {
     const state = await session(t);
     for (let i = 0; i < 3; i++) await run(state, `go on with part ${i}`, ANSWER_MEDIUM);

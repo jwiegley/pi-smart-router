@@ -45,7 +45,7 @@ import { demandOf } from "./demand.ts";
 import type { Demand, PromptFacts } from "./demand.ts";
 import { isRecord, own } from "./files.ts";
 import type { JevOutcome } from "./jev.ts";
-import { againChance, effortOf, horizonFor, runShape } from "./ledger.ts";
+import { againChance, effortOf, horizonFor, runShape, usable } from "./ledger.ts";
 import type { Ledger } from "./ledger.ts";
 import { HELD_REASON, resolveCandidate } from "./resolve.ts";
 import type { Resolution, ResolveContext } from "./resolve.ts";
@@ -399,8 +399,8 @@ export function chooseModel(input: {
     steppedUp: false,
     cost: { outcome: "unknown", why },
   });
-  // The history alone: a prompt is no usage.
-  if (last?.usage === undefined || historyOf(last) === 0) return unknown("no usage yet");
+  // The history alone: a prompt is no usage, nor is a usage that is not numbers (historyOf).
+  if (last === undefined || historyOf(last) === 0) return unknown("no usage yet");
   const { ledger, thinking } = figures;
   // A candidate that compacts first is sent the conversation Pi leaves, so it is priced at that size.
   const after = compaction.keepRecent + SUMMARY_TOKENS;
@@ -566,9 +566,9 @@ export function fits(p: Pick<PlanInput, "last" | "text" | "now"> & { readonly re
   return fitsSize(historyOf(p.last) + promptTokensOf(p.text, p.now), p.reserve, model);
 }
 
-/** The conversation's size as the latest response measured it; 0 without one. */
+/** The conversation's size as the latest response measured it; 0 without one, or with a usage that is not numbers. */
 function historyOf(last: LastResponder | undefined): number {
-  return last?.usage === undefined ? 0 : calculateContextTokens(last.usage);
+  return last?.usage === undefined || !usable(last.usage) ? 0 : calculateContextTokens(last.usage);
 }
 
 /** The new prompt's size, by Pi's estimate of a user message holding its text. */

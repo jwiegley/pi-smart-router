@@ -144,6 +144,32 @@ describe("a model's cache", () => {
     assert.equal(ledger.seen.get("p/a")?.tokens, 15, "an empty usage leaves the earlier figure");
   });
 
+  test("records nothing from a usage with a figure that is not a finite number of zero or more", () => {
+    const bad = (figures: Record<string, unknown>): Usage => ({ ...usageOf({ input: 1_000, cacheRead: 150_000, output: 800 }), ...figures }) as Usage;
+    const cases: ReadonlyArray<readonly [string, Usage]> = [
+      ["an undefined output", bad({ output: undefined })],
+      ["a NaN input", bad({ input: Number.NaN })],
+      ["an infinite cache read", bad({ cacheRead: Number.POSITIVE_INFINITY })],
+      ["a negative cache write", bad({ cacheWrite: -5 })],
+      ["a negative total", bad({ totalTokens: -1 })],
+      ["an output given as a string", bad({ output: "800" })],
+    ];
+    for (const [name, usage] of cases) {
+      const ledger = newLedger();
+      runOf(ledger, [100_000, 101_000], [800, 800], 60);
+      noteAnswer(ledger, answer("p/a", { tokens: 102_000, output: 800, at: T + 70_000 }));
+      const before = structuredClone({ seen: [...ledger.seen], writes: [...ledger.writes], runs: ledger.runs, run: ledger.run, latest: ledger.latest });
+      noteAnswer(ledger, { ...answer("p/a", { at: T + 80_000 }), usage });
+      seedAnswer(ledger, { ...answer("q/b", { at: T + 90_000 }), usage });
+      const after = { seen: [...ledger.seen], writes: [...ledger.writes], runs: ledger.runs, run: ledger.run, latest: ledger.latest };
+      assert.deepEqual(after, before, `${name}: a usage that is not numbers is no usage, and the ledger records nothing from it`);
+      noteRunEnd(ledger);
+      const shape = JSON.stringify(ledger.runs);
+      assert.ok(!shape.includes("null") && ledger.runs.every((run) => Object.values(run).every(Number.isFinite)), `${name}: the run shape holds no NaN: ${shape}`);
+      assert.deepEqual(ledger.runs.at(-1), { requests: 1, output: 800, growth: 0, seconds: 70 }, `${name}: the open run is measured from its good answer only, which started at T and ended 70 s later`);
+    }
+  });
+
   test("a run whose first answer reports no usage takes its first prompt size from the first one that does", () => {
     const ledger = newLedger();
     noteAnswer(ledger, { ...answer("p/a"), usage: usageOf() });
