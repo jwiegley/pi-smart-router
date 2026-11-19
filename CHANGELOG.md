@@ -5,6 +5,20 @@ All notable changes to this fork are recorded here, in the form of
 the base is the latest upstream release merged into the fork's history, and `jw.<n>` counts the
 fork's releases on that base. Releases are signed tags; nothing is published to npm.
 
+## [Unreleased]
+
+### Changed
+
+- **The README is upstream's again**, as it stands at v1.4.0 (`54bee53d`), with one added section,
+  "This fork", that says how the fork differs: what it keeps of upstream, a table of the
+  differences, how to install it, one example roster and its commands. John asked for this on
+  2026-11-19: the README's size had got out of hand.
+- **The fork's manual is `docs/manual.md`.** It is the README of 1.4.0-jw.5, changed only in its
+  title, a pointer to the README and its relative links, so the README sections that the entries
+  below cite are in the manual. The tests that held the README's rosters and redaction tables to
+  the code now hold the manual's, and one more holds the README's roster to the checker.
+- The package ships `README.md` as before and not `docs/`: the manual is in the repository only.
+
 ## [1.4.0-jw.5] - 2026-11-18
 
 Weighted demand and cost-aware switching. On 2026-11-17 and 11-18 John asked that

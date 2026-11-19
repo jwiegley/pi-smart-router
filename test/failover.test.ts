@@ -1,7 +1,7 @@
 // The path a real usage limit takes. Pi retries neither Codex's usage-limit text nor a spent
 // credit, so the router never gets a retry to move: the run ends unanswered at message_end, the
 // account cools, and the request must be sent again. The router says so at that moment, with what
-// a resend will get, and registers no handler that would send it again itself (the README's "A
+// a resend will get, and registers no handler that would send it again itself (the manual's "A
 // fallback chain" says why). The roster is John's of 2026-11-17. Unit tests on the fake host of
 // test/support/pi.ts; no Pi runtime is started.
 import assert from "node:assert/strict";

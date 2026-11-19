@@ -132,8 +132,8 @@ export interface ResendFacts {
 /**
  * Shown when a run ends because its model failed, before any output of that request, on its
  * account's limit or an unreachable server, with an error Pi does not retry. The router cannot go
- * on by itself (README, "A fallback chain"), so it says exactly what happened and what to do, and
- * never something that cannot work:
+ * on by itself (docs/manual.md, "A fallback chain"), so it says exactly what happened and what to
+ * do, and never something that cannot work:
  * - a run with nothing done is to be sent again, and the notice names where that goes;
  * - a run that had answered or run tools stopped partway: what it did stands, so it is to be asked
  *   to continue, not sent again;
