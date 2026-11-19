@@ -12,7 +12,7 @@ import type { TestContext } from "node:test";
 import type { Api, ClassifierResult, Message, Model, Usage } from "@earendil-works/pi-ai";
 import { estimateTokens } from "@earendil-works/pi-coding-agent";
 
-import { LEVEL_ENTRY, LEVEL_KEY, SCOPE_ENTRY } from "../src/constants.ts";
+import { EFFORT_KEY, LEVEL_ENTRY, LEVEL_KEY, SCOPE_ENTRY } from "../src/constants.ts";
 import { runCost, survivalOf } from "../src/cost.ts";
 import type { Candidate, Rates, Workload } from "../src/cost.ts";
 import type { CostTerms, PlanLevel } from "../src/decide.ts";
@@ -136,11 +136,14 @@ async function say(state: Session, text: string, jev: Record<Tier, number>): Pro
   return level;
 }
 
-/** The prompt's run starts and its first request routes, at the selected level unless given. */
+/** A user message holding `text`, as Pi sends a prompt to the model. */
+const userMessage = (text: string, timestamp = NOW): Message => ({ role: "user", content: [{ type: "text", text }], timestamp });
+
+/** The prompt's run starts and its first request routes, at the selected level unless given, with the prompt last, as Pi sends it. */
 async function route(state: Session, text: string, thinkingLevel = state.loaded.host.thinking) {
   const signal = state.loaded.session.startRun();
   await state.loaded.host.emit("before_agent_start", { messageType: "user", prompt: text });
-  return state.loaded.runtime.route("auto", request("user", { signal, thinkingLevel }));
+  return state.loaded.runtime.route("auto", request("user", { signal, thinkingLevel, messages: [userMessage(text, state.clock)] }));
 }
 
 /** The run's one request answers a minute after it started, with `tokens` in all, and the run settles; the next prompt comes 30 seconds later. */
@@ -565,7 +568,11 @@ describe("a planned run", () => {
     const priced = knownCost(level).priced.find((entry) => entry.ref === ASTRA);
     assert.equal(priced?.cached, 0, "astra at the newly selected level is priced with nothing cached");
     const sent = await route(state, "design the rest");
-    assert.deepEqual([routed(sent), sent.thinkingLevel], [ASTRA, "low"], "the request goes to astra at the level the price assumed");
+    assert.deepEqual(
+      [routed(sent), sent.thinkingLevel],
+      [ASTRA, "medium"],
+      "the request goes to astra at the level the price assumed: a planning turn raises the selected low to medium (John, 2026-11-18: thinking effort exactly as upstream, adaptive-reasoning.ts:335-345)",
+    );
     await answer(state, ASTRA, 150_000, sent.thinkingLevel);
     const again = await say(state, "design one more part", ANSWER_SUPER);
     assert.equal(knownCost(again).priced.find((entry) => entry.ref === ASTRA)?.cached, 149_000, "answered at that level, astra is warm for it");
@@ -734,17 +741,17 @@ const lastCode = (state: Session): string | undefined => recordOf(state).history
  * A run that starts without a prompt (an extension's own, such as a goal continuation): its first
  * request has no plan, and the model that answered last is `on`.
  */
-async function unprompted(state: Session, on: string, thinkingLevel = state.loaded.host.thinking) {
+async function unprompted(state: Session, on: string, thinkingLevel = state.loaded.host.thinking, messages: readonly Message[] = []) {
   await state.loaded.host.emit("before_agent_start", { messageType: "custom" });
   const signal = state.loaded.session.startRun();
-  return state.loaded.runtime.route("auto", request("continuation", { signal, previous: previous(state.loaded.runtime, on), thinkingLevel }));
+  return state.loaded.runtime.route("auto", request("continuation", { signal, previous: previous(state.loaded.runtime, on), thinkingLevel, messages }));
 }
 
-/** A continuation of the run under way on smart-router/<id>, after `on` answered, with these messages. */
+/** A continuation of the run under way on smart-router/<id>, after `on` answered, with these messages, at the selected level. */
 function continuation(state: Session, on: string, messages: readonly Message[] = [], id: "auto" | "local" = "auto") {
   const signal = state.loaded.session.controller?.signal;
   assert.ok(signal !== undefined, "a run is under way");
-  return state.loaded.runtime.route(id, request("continuation", { signal, previous: previous(state.loaded.runtime, on), messages }));
+  return state.loaded.runtime.route(id, request("continuation", { signal, previous: previous(state.loaded.runtime, on), messages, thinkingLevel: state.loaded.host.thinking }));
 }
 
 /** An answer of `tokens` from `ref` inside the run under way: no settle. */
@@ -886,11 +893,34 @@ describe("a run that starts without a prompt", () => {
     assert.equal(await run(state, "go on", ANSWER_MEDIUM), ASTRA, "a MEDIUM prompt stays on the warm astra, answered at high");
     lastPromptsNeeded(state, "medium");
     const astraModel = state.loaded.runtime.physical(ASTRA);
-    assert.notEqual(effortOf(astraModel, "low"), effortOf(astraModel, "high"), "astra sends low and high as two efforts");
+    assert.notEqual(effortOf(astraModel, "medium"), effortOf(astraModel, "high"), "astra sends medium and high as two efforts");
     assert.equal(state.loaded.host.thinking, "high", "the session's selected level is still high");
-    // The request carries low: at that effort astra has nothing cached, and terra is cheaper.
-    const route = await unprompted(state, ASTRA, "low");
-    assert.deepEqual([routed(route), lastCode(state), route.thinkingLevel], [TERRA, "run:need", "low"], "the price and the request agree: a change of effort leaves astra cold");
+    // The request carries medium, and its extension's message asks for planning: astra, on SUPER,
+    // would be sent medium (John, 2026-11-18: effort exactly as upstream, planning before the
+    // frontier), at which it has nothing cached, and terra is cheaper.
+    const route = await unprompted(state, ASTRA, "medium", [userMessage("plan the rest of the review")]);
+    assert.deepEqual(
+      [routed(route), lastCode(state), route.thinkingLevel],
+      [TERRA, "run:need", "medium"],
+      "the price and the request agree: a change of effort leaves astra cold, and terra is sent the planning turn's medium (adaptive-reasoning.ts:213)",
+    );
+  });
+
+  test("is priced at the effort the turn's type gives each candidate (John, 2026-11-18: exactly upstream)", async (t) => {
+    const state = await session(t);
+    await threeSuperRuns(state);
+    assert.equal(await run(state, "go on", ANSWER_MEDIUM), ASTRA, "a MEDIUM prompt stays on the warm astra, answered at high");
+    lastPromptsNeeded(state, "medium");
+    // An ordinary message at medium: astra, on SUPER, is sent high, the effort of its last answer,
+    // so its cache counts and it keeps the run; that request carries high.
+    const route = await unprompted(state, ASTRA, "medium", [userMessage("continue the review")]);
+    assert.deepEqual(
+      [routed(route), lastCode(state), route.thinkingLevel],
+      [ASTRA, "run:need", "high"],
+      "the price and the request agree: on SUPER an ordinary turn is sent high (adaptive-reasoning.ts:192-197), astra's last effort, so astra stays warm",
+    );
+    const cost = recordOf(state).runTerms;
+    assert.ok(cost?.kind === "need" && cost.run.cost?.outcome === "stayed", `astra stayed by cost: ${JSON.stringify(cost)}`);
   });
 
   test("routes with Pi's default compaction settings when Pi's settings cannot be read", async (t) => {
@@ -1505,5 +1535,148 @@ describe("what pi-cache-optimizer is told before a run without a prompt", () => 
     await v1.loaded.host.emit("message_end", { message: assistant(SOL) });
     (recordOf(v1) as { need: Tier | undefined }).need = "low";
     assert.equal(told(v1), SOL, "a version 1 roster: the last responder, whatever the record says");
+  });
+});
+
+// Thinking effort by turn type, exactly as upstream (John, 2026-11-18): each request the router
+// routes carries upstream's adaptive reasoning for its turn type (src/effort.ts), and the footer's
+// effort item says which level and why. AR is upstream's adaptive-reasoning.ts at v1.4.0.
+describe("thinking effort by turn type", () => {
+  const effortItem = (state: Session): string | undefined => state.loaded.session.statuses.get(EFFORT_KEY);
+
+  /** `messages` ending with a tool call `on` made and its successful result. */
+  const afterTool = (messages: readonly Message[], on: string): Message[] => [
+    ...messages,
+    assistant(on, { content: [{ type: "toolCall", id: "call-read", name: "read", arguments: { path: "notes.md" } }], stopReason: "toolUse" }),
+    { role: "toolResult", toolCallId: "call-read", toolName: "read", content: [{ type: "text", text: "ok" }], isError: false, timestamp: NOW },
+  ];
+
+  /** A message typed at the session's level, its run's first request and a tool result's continuation: the two levels sent. */
+  async function twoRequests(state: Session, text: string, jev: Record<Tier, number>): Promise<{ readonly ref: string; readonly first: string; readonly afterTool: string }> {
+    await say(state, text, jev);
+    const first = await route(state, text);
+    const ref = routed(first);
+    const next = continuation(state, ref, afterTool([userMessage(text)], ref));
+    assert.equal(routed(next), ref, `${text}: the run stays on its model`);
+    return { ref, first: first.thinkingLevel, afterTool: next.thinkingLevel };
+  }
+
+  test("at medium, Pi's default, each request carries the table's level for its turn type, and the footer says it", async (t) => {
+    const state = await session(t);
+    state.loaded.host.thinking = "medium";
+    assert.deepEqual(await twoRequests(state, "rename foo to bar", ANSWER_LOW), { ref: LUNA, first: "low", afterTool: "minimal" }, "AR:212: an ordinary turn low, a request after a tool result minimal");
+    assert.equal(effortItem(state), "thinking minimal (after a tool result)", "the footer names the level the latest request carried, and why");
+    await settled(state);
+    assert.deepEqual(await twoRequests(state, "Plan the cache layer", ANSWER_LOW), { ref: LUNA, first: "medium", afterTool: "minimal" }, "AR:213-214: a planning turn medium, on any level");
+    await settled(state);
+    assert.deepEqual(await twoRequests(state, "survey the options", ANSWER_SUPER), { ref: ASTRA, first: "high", afterTool: "high" }, "AR:192-197, AR:215-216: every request to SUPER's model high, whatever its turn type");
+    assert.equal(effortItem(state), "thinking high (SUPER)");
+    await settled(state);
+    assert.deepEqual(await twoRequests(state, "design the store", ANSWER_SUPER), { ref: ASTRA, first: "medium", afterTool: "high" }, "AR:185-190: planning comes before the frontier");
+  });
+
+  test("off counts as no level, as Pi passes it to a provider: the table's level alone", async (t) => {
+    const state = await session(t);
+    state.loaded.host.thinking = "off";
+    assert.deepEqual(await twoRequests(state, "rename foo to bar", ANSWER_LOW), { ref: LUNA, first: "low", afterTool: "minimal" }, "AR:358-362, with Pi's agent.js:310");
+  });
+
+  test("at high, xhigh and max nothing changes: an explicit level is never lowered, and the table reaches no higher", async (t) => {
+    for (const level of ["high", "xhigh", "max"] as const) {
+      resetSlot();
+      const state = await session(t, { id: `at-${level}` });
+      state.loaded.host.thinking = level;
+      assert.deepEqual(await twoRequests(state, "rename foo to bar", ANSWER_LOW), { ref: LUNA, first: level, afterTool: level }, `AR:335-345 at ${level}, LOW`);
+      await settled(state);
+      assert.deepEqual(await twoRequests(state, "Plan the cache layer", ANSWER_SUPER), { ref: ASTRA, first: level, afterTool: level }, `AR:335-345 at ${level}, SUPER and planning`);
+      assert.equal(effortItem(state), `thinking ${level} (as selected, never lowered)`, `${level}: the footer says the selected level was kept`);
+    }
+  });
+
+  test("at low, a level John chose is never lowered, and is raised where the turn asks for more, as upstream raises it", async (t) => {
+    const state = await session(t);
+    state.loaded.host.thinking = "low";
+    assert.deepEqual(await twoRequests(state, "Plan the cache layer", ANSWER_LOW), { ref: LUNA, first: "medium", afterTool: "low" }, "AR:337-344: planning raises low to medium; minimal never lowers low");
+    assert.equal(effortItem(state), "thinking low (as selected, never lowered)");
+  });
+
+  test("a role that fixes its level keeps it", async (t) => {
+    const state = await session(t, { select: "local" });
+    state.loaded.host.thinking = "medium";
+    await state.loaded.host.emit("input", { text: "go ahead", source: "interactive" });
+    const signal = state.loaded.session.startRun();
+    await state.loaded.host.emit("before_agent_start", { messageType: "user", prompt: "go ahead" });
+    const first = state.loaded.runtime.route("local", request("user", { signal, thinkingLevel: "medium", messages: [userMessage("go ahead")] }));
+    assert.deepEqual([routed(first), first.thinkingLevel], [GLM, "max"], "the local role fixes max: an ordinary turn does not lower it");
+    const next = continuation(state, GLM, afterTool([userMessage("go ahead")], GLM), "local");
+    assert.equal(next.thinkingLevel, "max", "nor does a tool result");
+    assert.equal(effortItem(state), "thinking max (the role's own level)");
+  });
+
+  test("a stuck run is upstream's loop escalation: high from its move on, for the rest of the run", async (t) => {
+    const state = await session(t);
+    state.loaded.host.thinking = "medium";
+    await say(state, "go on", ANSWER_MEDIUM);
+    assert.deepEqual([routed(await route(state, "go on"))], [TERRA]);
+    const up = continuation(state, TERRA, failures(3));
+    assert.deepEqual([routed(up), lastCode(state), up.thinkingLevel], [SOL, "escalate", "high"], "AR:192-197: the escalated request high");
+    assert.equal(effortItem(state), "thinking high (a stuck run)");
+    const later = continuation(state, SOL, thenSucceeded(failures(3)));
+    assert.deepEqual([routed(later), later.thinkingLevel], [SOL, "high"], "and the run's later requests, a tool result's included");
+    await settled(state);
+    await say(state, "and the docs", ANSWER_MEDIUM);
+    const fresh = await route(state, "and the docs");
+    assert.equal(fresh.thinkingLevel, "low", "the next run is no longer escalated: an ordinary turn low");
+  });
+
+  test("the roster's off switch, floor and ceiling", async (t) => {
+    const withSection = (section: unknown): string => JSON.stringify({ ...JSON.parse(ROSTER), adaptiveReasoning: section });
+    const cases: ReadonlyArray<readonly [unknown, string, { readonly ref: string; readonly first: string; readonly afterTool: string }, string]> = [
+      [{ enabled: false }, "rename foo to bar", { ref: LUNA, first: "medium", afterTool: "medium" }, "AR:271-277: off sends the selected level"],
+      [{ minLevel: "low" }, "rename foo to bar", { ref: LUNA, first: "low", afterTool: "low" }, "AR:313-315: minimal raised to the floor"],
+      [{ maxLevel: "low" }, "survey the options", { ref: ASTRA, first: "low", afterTool: "low" }, "AR:316-321: high capped at the ceiling"],
+    ];
+    for (const [section, text, expected, why] of cases) {
+      resetSlot();
+      const state = await session(t, { id: JSON.stringify(section), roster: withSection(section) });
+      state.loaded.host.thinking = "medium";
+      assert.deepEqual(await twoRequests(state, text, text === "survey the options" ? ANSWER_SUPER : ANSWER_LOW), expected, why);
+    }
+  });
+
+  test("a request outside the owner's loop carries the table's level too, and leaves the footer alone", async (t) => {
+    const state = await session(t);
+    const direct = state.loaded.runtime.route("auto", request("direct", { thinkingLevel: "medium", messages: [userMessage("Summarize the conversation so far")] }));
+    assert.deepEqual([routed(direct), direct.thinkingLevel], [TERRA, "low"], "a compaction's summary on the default level's model: an ordinary turn, low");
+    assert.equal(effortItem(state), undefined, "no run of the owner's loop: the footer shows no effort");
+  });
+
+  test("a model picked by hand is never touched, and shows no effort", async (t) => {
+    const state = await session(t);
+    state.loaded.host.thinking = "medium";
+    await twoRequests(state, "rename foo to bar", ANSWER_LOW);
+    await settled(state);
+    assert.equal(effortItem(state), "thinking minimal (after a tool result)", "the last routed request's effort, until the next run starts");
+    // A model picked by hand is never routed (Pi sends it as it is, at its own level): its run
+    // starts and no route follows.
+    await state.loaded.host.choose(ASTRA);
+    await state.loaded.host.emit("input", { text: "and the docs", source: "interactive" });
+    state.loaded.session.startRun();
+    await state.loaded.host.emit("before_agent_start", { messageType: "user", prompt: "and the docs" });
+    assert.equal(effortItem(state), undefined, "its run shows no effort of the router's");
+    assert.equal(recordOf(state).effort, undefined, "and the router keeps none for it");
+    await state.loaded.host.command("smart-router", "status");
+    assert.ok(!(state.loaded.session.notices.at(-1)?.message ?? "").includes("Thinking sent"), "and status says none");
+  });
+
+  test("/smart-router status says the effort the latest request carried, and nothing keeps the prompt's text", async (t) => {
+    const state = await session(t);
+    state.loaded.host.thinking = "medium";
+    await twoRequests(state, `Plan the ${MARK} layer`, ANSWER_LOW);
+    await state.loaded.host.command("smart-router", "status");
+    const status = state.loaded.session.notices.at(-1)?.message ?? "";
+    assert.ok(status.split("\n").includes("Thinking sent on the latest request: minimal (after a tool result)"), status);
+    const kept = JSON.stringify([recordOf(state).effort, recordOf(state).history, [...state.loaded.session.statuses.values()]]);
+    assert.ok(!kept.includes(MARK), `the turn type is kept, never the text: ${kept}`);
   });
 });

@@ -43,13 +43,15 @@ import { chooseByCost, positive, ratesOf } from "./cost.ts";
 import type { Candidate, Priced, Rates, Workload } from "./cost.ts";
 import { demandOf } from "./demand.ts";
 import type { Demand, PromptFacts } from "./demand.ts";
+import { sentEffort } from "./effort.ts";
+import type { EffortSignal, SentEffort, TurnType } from "./effort.ts";
 import { isRecord, own } from "./files.ts";
 import type { JevOutcome } from "./jev.ts";
 import { againChance, effortOf, horizonFor, runShape, usable } from "./ledger.ts";
 import type { Ledger } from "./ledger.ts";
 import { HELD_REASON, resolveCandidate } from "./resolve.ts";
 import type { Resolution, ResolveContext } from "./resolve.ts";
-import { autoRoles, candidatesOf, fallbackAfter, roleLevel, roleOf, scopeSection } from "./roster.ts";
+import { autoRoles, candidatesOf, effortSettingsOf, fallbackAfter, fixedLevel, roleLevel, roleOf, scopeSection } from "./roster.ts";
 import type { RosterV2, Scope, ScopeSection } from "./roster.ts";
 import { AGAIN_DEFAULT, DEFAULT_SWITCHING, SUMMARY_TOKENS } from "./settings.ts";
 import { tierAbove, tierRank } from "./tiers.ts";
@@ -320,6 +322,32 @@ export interface CostFigures {
   readonly ledger: Ledger;
   /** The thinking level selected for the session; a role may fix another (roleLevel). */
   readonly thinking: ModelThinkingLevel;
+  /**
+   * The turn type of the request the choice is made for (src/effort.ts): each candidate is priced at
+   * the effort that turn sends it (effortFor). Without one, as upstream without a turn signal, the
+   * selected level or the role's is priced.
+   */
+  readonly turn?: TurnType;
+}
+
+/**
+ * Whether a role is the strongest level's, upstream's frontier tier: the SUPER level's role of the
+ * session's scope, on smart-router/auto under a version 2 roster. Version 1 and smart-router/local
+ * have no levels, so no request of theirs is on it.
+ */
+export function isFrontier(rc: ResolveContext, role: string): boolean {
+  if (rc.virtualId !== "auto" || rc.localOnly) return false;
+  return scopeSection(rc.roster, rc.scope)?.levels.super.role === role;
+}
+
+/**
+ * The thinking effort a request to `model` in `role` carries (src/effort.ts): the role's fixed level,
+ * or upstream's adaptive reasoning for the turn, from the selected level, under the roster's knobs.
+ * The route sends it and the cost choice prices it, so the two are one.
+ */
+export function effortFor(rc: ResolveContext, role: string, model: Model<Api>, selected: ModelThinkingLevel, turn: TurnType, escalated: boolean): SentEffort {
+  const signal: EffortSignal = { turnType: turn, frontier: isFrontier(rc, role), escalated };
+  return sentEffort({ model, fixed: fixedLevel(rc.roster, role), selected, signal, settings: effortSettingsOf(rc.roster) });
 }
 
 /** What the cost rule decided, for the run's record: model refs, numbers, level names and outcome names, never prompt text. */
@@ -401,7 +429,7 @@ export function chooseModel(input: {
   });
   // The history alone: a prompt is no usage, nor is a usage that is not numbers (historyOf).
   if (last === undefined || historyOf(last) === 0) return unknown("no usage yet");
-  const { ledger, thinking } = figures;
+  const { ledger, thinking, turn } = figures;
   // A candidate that compacts first is sent the conversation Pi leaves, so it is priced at that size.
   const after = compaction.keepRecent + SUMMARY_TOKENS;
   const rated: Array<{ readonly tier: Tier; readonly choice: Choice; readonly rates: Rates; readonly compacts: boolean }> = [];
@@ -416,7 +444,9 @@ export function chooseModel(input: {
 
   const candidates = rated.map(({ tier, choice, rates, compacts }): Candidate => {
     const seen = ledger.seen.get(choice.ref);
-    const effort = effortOf(choice.model, roleLevel(rc.roster, choice.role, thinking));
+    // The effort this candidate would be sent: a cost choice is made for no escalated request.
+    const level = turn === undefined ? roleLevel(rc.roster, choice.role, thinking) : effortFor(rc, choice.role, choice.model, thinking, turn, false).level;
+    const effort = effortOf(choice.model, level);
     const sameEffort = seen?.effort === undefined || seen.effort === effort;
     return {
       ref: choice.ref,

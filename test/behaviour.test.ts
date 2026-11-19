@@ -35,7 +35,7 @@ import { createBashToolDefinition, estimateTokens, SessionManager } from "@earen
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 
 import type { RoutingRegistry } from "../src/cache-optimizer.ts";
-import { ENV_SCOPE, LEVEL_ENTRY, LEVEL_KEY, ROUTING_REGISTRY_KEY, SCOPE_ENTRY, SLOT_KEY, VIRTUAL_IDS } from "../src/constants.ts";
+import { EFFORT_KEY, ENV_SCOPE, LEVEL_ENTRY, LEVEL_KEY, ROUTING_REGISTRY_KEY, SCOPE_ENTRY, SLOT_KEY, VIRTUAL_IDS } from "../src/constants.ts";
 import { runCost } from "../src/cost.ts";
 import type { Rates, Workload } from "../src/cost.ts";
 import type { Owner, Slot } from "../src/owners.ts";
@@ -1546,8 +1546,12 @@ test("L7 one smart-router.level record per run; /smart-router was appends a corr
   const recorded = JSON.stringify(entriesOf(pi, LEVEL_ENTRY));
   assert.doesNotMatch(recorded, /zebra/i);
   assert.doesNotMatch(recorded, /[A-Za-z0-9+/]{43}=/);
-  // The footer's level item has its own key, smart-router-level, and no other key ever carried text.
-  assert.deepEqual([...new Set(pi.ui.statusLog.filter((item) => item.text !== undefined).map((item) => item.key))], ["smart-router-level"]);
+  // The footer's level item has its own key, smart-router-level, and the effort item its own,
+  // smart-router-effort (John, 2026-11-18: thinking effort exactly as upstream, which the footer
+  // names); no other key ever carried text, and neither holds a prompt's text.
+  const shown = pi.ui.statusLog.filter((item) => item.text !== undefined);
+  assert.deepEqual([...new Set(shown.map((item) => item.key))], ["smart-router-level", "smart-router-effort"], "the level item, then from the first routed request on the effort item");
+  assert.doesNotMatch(JSON.stringify(shown), /zebra/i, "no footer item holds a prompt's text");
   assert.equal(pi.ui.status("smart-router"), undefined, "the key the removed pin's item used is never set");
 });
 
@@ -1570,7 +1574,7 @@ test("L8 the risky floor raises a Jev LOW to HIGH, and a tag overrides it", TIME
   assert.deepEqual(fields(runRecords(pi).at(-1), tagged), tagged);
 });
 
-test("L9 a version 1 roster keeps its history and status text byte-identical, but for the removed pin's line and the egress line's opening", TIMEOUT, async (t) => {
+test("L9 a version 1 roster keeps its history and status text byte-identical, but for the removed pin's line, the egress line's opening and the thinking effort's line", TIMEOUT, async (t) => {
   const world = new World(t);
   const pi = await world.start({ select: "smart-router/auto" });
   await pi.prompt(PROMPTS.complex);
@@ -1602,6 +1606,9 @@ test("L9 a version 1 roster keeps its history and status text byte-identical, bu
       "  architect: codex-like/m ok",
       "Routing: default worker, trivial worker, complex engineer, planning architect; fallback engineer → coder",
       "Last decision: <time> smart-router/auto user: worker → cloud-b/m (signal:default, triage:no_fast_path)",
+      // John, 2026-11-18: thinking effort exactly as upstream, under a version 1 roster too. The
+      // worker's model does not reason, so upstream's rule leaves the selected level (AR:280-286).
+      "Thinking sent on the latest request: medium (as selected)",
       "Besides the models smart-router/auto and smart-router/local route to, these can send data off this machine: a model picked by hand with /model, which is sent as it is; Pi's own /share, /export and /bug.",
     ].join("\n"),
   );
@@ -2432,13 +2439,64 @@ test("C16 a request carries the thinking level its price assumed", TIMEOUT, asyn
   );
   assert.deepEqual(
     routes.map((route) => [route.thinkingLevel, route.ref, route.routedLevel]),
-    [["medium", PERSONAL.medium, "medium"]],
-    "the router returned the level the request carried",
+    [["medium", PERSONAL.medium, "low"]],
+    "John, 2026-11-18, thinking effort exactly as upstream: at medium an ordinary turn is sent low (adaptive-reasoning.ts:212), the effort the price assumed",
   );
   assert.deepEqual(
     codex.calls.slice(mark).map((call) => [call.ref, call.reasoning]),
-    [[PERSONAL.medium, "medium"]],
-    "a request carries the thinking level its price assumed: the faux provider received medium",
+    [[PERSONAL.medium, "low"]],
+    "a request carries the thinking level its price assumed: the faux provider received low",
   );
-  assert.equal(pi.lastAssistant()?.thinkingLevel, "medium");
+  assert.equal(pi.lastAssistant()?.thinkingLevel, "low");
+});
+
+// ─── Thinking effort by turn type, in Pi's runtime ──────────────────────────
+//
+// John, 2026-11-18: "Exactly as upstream: effort follows each request's turn type." What Pi itself
+// sends the provider, for a prompt's first request and for the request after its tool result.
+
+/** A MEDIUM run on terra whose model reads one file and then answers; the levels the faux provider received, in order. */
+async function readThenAnswerAt(t: TestContext, level: "medium" | "high"): Promise<{ readonly pi: Pi; readonly received: ReadonlyArray<readonly [string, string | undefined]> }> {
+  const world = levelsWorld(t, { fleet: pricedLevelsFleet() });
+  writeFileSync(join(world.cwd, "notes.txt"), "the lock order is a, then b\n");
+  const codex = world.faux("openai-codex-2");
+  const pi = await world.start({ select: "smart-router/auto", tools: ["read"] });
+  pi.session.setThinkingLevel(level);
+  assert.equal(pi.session.thinkingLevel, level, `the session is at ${level}`);
+  world.jev.answer(JEV.medium);
+  codex.respond(fauxAssistantMessage([fauxToolCall("read", { path: "notes.txt" }, { id: "read-1" })], { stopReason: "toolUse" }), fauxAssistantMessage("a, then b"));
+  await pi.prompt("Tidy the zebra notes");
+  return { pi, received: codex.calls.map((call) => [call.ref, call.reasoning] as const) };
+}
+
+test("C17 at medium, Pi sends each request the effort its turn type gives: low for the prompt, minimal after the tool result", TIMEOUT, async (t) => {
+  const { pi, received } = await readThenAnswerAt(t, "medium");
+  assert.deepEqual(
+    received,
+    [
+      [PERSONAL.medium, "low"],
+      [PERSONAL.medium, "minimal"],
+    ],
+    "adaptive-reasoning.ts:212: an ordinary turn low, the request after a tool result minimal; the faux provider received each",
+  );
+  assert.deepEqual(
+    pi.assistants().map((message) => message.thinkingLevel),
+    ["low", "minimal"],
+    "Pi records the level each answer was sent at, which the ledger reads as its effort",
+  );
+  assert.equal(pi.ui.status(EFFORT_KEY), "thinking minimal (after a tool result)", "the footer says which effort the latest request carried, and why");
+  assert.equal(pi.ui.status(LEVEL_KEY), "personal MEDIUM → gpt-6.1-terra (demand 1.0; cost unknown)", "the level item is unchanged");
+});
+
+test("C18 at any other level, here high, nothing changes: every request carries the selected level", TIMEOUT, async (t) => {
+  const { pi, received } = await readThenAnswerAt(t, "high");
+  assert.deepEqual(
+    received,
+    [
+      [PERSONAL.medium, "high"],
+      [PERSONAL.medium, "high"],
+    ],
+    "adaptive-reasoning.ts:335-345: a level other than medium is never lowered, and the table reaches no higher than high",
+  );
+  assert.equal(pi.ui.status(EFFORT_KEY), "thinking high (as selected, never lowered)");
 });

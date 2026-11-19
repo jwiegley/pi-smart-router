@@ -33,12 +33,13 @@ import { registerAdapter, unregisterAdapter } from "./cache-optimizer.ts";
 import type { ActiveRoute } from "./cache-optimizer.ts";
 import { smartRouterCommand } from "./commands.ts";
 import type { CommandHost, Files } from "./commands.ts";
-import { ALL_LEVELS, COMMAND, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, LEVEL_ENTRY, LEVEL_KEY, PROVIDER, SCOPE_ENTRY, VIRTUAL_API, VIRTUAL_IDS } from "./constants.ts";
+import { ALL_LEVELS, COMMAND, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, EFFORT_KEY, LEVEL_ENTRY, LEVEL_KEY, PROVIDER, SCOPE_ENTRY, VIRTUAL_API, VIRTUAL_IDS } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { compactionFor, pickInRole, planUserTurn } from "./decide.ts";
 import type { CostFigures, Decision, LastResponder, LevelInput, Plan } from "./decide.ts";
 import { HEURISTIC_MESSAGES, rolesOf } from "./demand.ts";
 import type { PromptFacts, SessionDepth } from "./demand.ts";
+import { effortText, turnTypeOf, turnTypeOfText } from "./effort.ts";
 import {
   directoryFailedNotice,
   directoryNotice,
@@ -129,6 +130,8 @@ export interface Session extends SessionRecord {
   plannedToken: number;
   /** Whether the footer shows a level item this instance set: only then does a run without a level clear it. */
   levelShown: boolean;
+  /** Whether the footer shows an effort item this instance set: only then does a run's start clear it. */
+  effortShown: boolean;
   /** The model of the current run's last assistant message that ended without an error: the one its record names. */
   answered: string | undefined;
   /** The digest of the text, without its tag, of the message whose plan `plan` holds; meaningful only while `plan` is set. */
@@ -283,6 +286,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         directoryTried: false,
         plannedToken: 0,
         levelShown: false,
+        effortShown: false,
         answered: undefined,
         planDigest: undefined,
         inputsSinceRun: 0,
@@ -438,8 +442,9 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     const refused = refusalFor(id, state.value, ctx);
     if (refused !== undefined) throw refused;
     const record = recordOf(sessionManager.getSessionId());
-    // The thinking level this request carries: the price assumes the effort the request is sent at.
-    const figures: CostFigures = { ledger: record.ledger, thinking: request.thinkingLevel };
+    // The thinking level this request carries and its turn type: the price assumes the effort the
+    // route sends (effortFor), which follows both.
+    const figures: CostFigures = { ledger: record.ledger, thinking: request.thinkingLevel, turn: turnTypeOf(request.messages) };
     return { id, request, rc: contextFor(ctx, state.value, id), record, figures, compaction: compactionFor(settingsNow(), id), depth: depthOf(record, sessionManager) };
   };
 
@@ -556,8 +561,10 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         const ref = parseRef(runPick.ref);
         return ref === undefined ? undefined : { provider: ref.provider, modelId: ref.id, api: rc.catalog.find(ref.provider, ref.id)?.api, status: "selected", at };
       }
-      // No request exists yet: the price assumes the selected thinking level, which Pi sends.
-      const figures: CostFigures = { ledger: record.ledger, thinking: pi.getThinkingLevel() };
+      // No request exists yet: the price assumes the selected thinking level, which Pi sends, for a
+      // run without a prompt, which starts with an extension's message: an ordinary turn unless its
+      // text says planning, which is not known here.
+      const figures: CostFigures = { ledger: record.ledger, thinking: pi.getThinkingLevel(), turn: "main_loop" };
       const predicted = predict(rc, record, figures, compactionFor(settingsNow(), id), depthOf(record, ctx.sessionManager));
       return predicted.ok ? answer(predicted.choice.model, "selected") : undefined;
     } catch {
@@ -587,6 +594,20 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     record.levelShown = text !== undefined;
     try {
       ctx.ui.setStatus(LEVEL_KEY, text);
+    } catch {
+      // The footer is a courtesy.
+    }
+  };
+
+  /**
+   * The footer's effort item, under its own key: the thinking effort the owner loop's latest request
+   * carried and why, or none. A session that shows none is not told so again.
+   */
+  const showEffort = (ctx: ExtensionContext, record: Session, text: string | undefined): void => {
+    if (text === undefined && !record.effortShown) return;
+    record.effortShown = text !== undefined;
+    try {
+      ctx.ui.setStatus(EFFORT_KEY, text);
     } catch {
       // The footer is a courtesy.
     }
@@ -744,8 +765,10 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     if (refusalFor(id, state.value, ctx) !== undefined) return undefined;
     const rc = contextFor(ctx, state.value, id);
     const facts: PromptFacts = { ...depthOf(record, sessionManager), roles };
-    // The thinking level the run's requests carry: Pi sends the selected one, and the price assumes it too.
-    const figures: CostFigures = { ledger: record.ledger, thinking: pi.getThinkingLevel() };
+    // The thinking level the run's first request carries: Pi sends the selected one, the route turns
+    // it into the effort for that request's turn, whose last message is this prompt, and the price
+    // assumes that effort too.
+    const figures: CostFigures = { ledger: record.ledger, thinking: pi.getThinkingLevel(), turn: turnTypeOfText(text) };
     const planned = planUserTurn({ rc, text, last: record.last, now: now(), compaction: compactionFor(pi.getSettings(), id), level, facts, figures });
     record.plan = planned;
     record.planDigest = digest;
@@ -1096,6 +1119,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       const { runTier: from, escalated } = record;
       const route = routeOwned(input);
       const after = record.runPick;
+      // Each request of the owner's loop says the effort it carries, and why.
+      showEffort(ctx, record, record.effort === undefined ? undefined : effortText(record.effort));
       const movedUp = !escalated && record.escalated;
       // A stuck run that moves up says so, where it happens, once: the level and the model it reached,
       // nothing of its tools' output. The model it left could still take the run, so no chain-move
@@ -1182,8 +1207,11 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
             record.inputsSinceRun = 0;
             forgetOne(record, prompt);
           }
-          // A run without a level of its own shows none, rather than an earlier run's.
+          // A run without a level of its own shows none, rather than an earlier run's; and no run
+          // shows an earlier run's effort, so a model picked by hand, which is never routed, shows none.
           if (record.pendingLevel === undefined) showLevel(ctx, record, undefined);
+          record.effort = undefined;
+          showEffort(ctx, record, undefined);
         });
         // Every run starts here, so a run without an input (a custom message's, a goal-x
         // continuation's) records the work directories' scope too.

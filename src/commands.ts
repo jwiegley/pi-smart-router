@@ -6,7 +6,7 @@
 // candidates on this host with the resolver's verdict and the catalog price, the account bindings
 // checked in the session's scope, with each provider's auth source (never a credential), a version 1
 // roster's routing table or a version 2 roster's levels and fallback chain in each scope and its
-// classifier, the last decision with the terms behind the latest planned level, whether the last request went to a fallback chain's model, what can still send data off the machine, and a warning for any version 1 fallback that
+// classifier, the last decision with the terms behind the latest planned level, the thinking effort the latest request carried and why, whether the last request went to a fallback chain's model, what can still send data off the machine, and a warning for any version 1 fallback that
 // moves a run onto Codex's API from another one. It replaces upstream's doctor, plan, stats, pricing
 // and mode commands.
 //
@@ -24,6 +24,8 @@ import { describeRouting } from "./check.ts";
 import type { Labels } from "./accounts.ts";
 import { LEVEL_ENTRY, PROVIDER, SCOPE_ENTRY } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
+import { effortWords } from "./effort.ts";
+import type { SentEffort } from "./effort.ts";
 import { firstLine, rosterNamed } from "./errors.ts";
 import type { Loaded } from "./files.ts";
 import { promptLines, promptProblem, promptUses } from "./prompts.ts";
@@ -53,6 +55,8 @@ export interface SessionView {
   readonly history: readonly HistoryEntry[];
   readonly pendingLevel: PendingLevel | undefined;
   readonly runTerms: RunTerms | undefined;
+  /** The thinking effort the owner loop's latest request carried, and why. */
+  readonly effort: SentEffort | undefined;
 }
 
 /** What the command needs of its router instance. */
@@ -397,6 +401,9 @@ export function statusText(host: CommandHost, ctx: ExtensionContext): string {
   // without a prompt's need, and what each candidate would cost. The run's later requests do not
   // hide them, and a run that had no level of its own shows none rather than an older run's.
   lines.push(...termsLines(session, ctx.model));
+  // The effort the owner loop's latest request carried, and why; none while a model picked by hand
+  // is selected, which is sent as it is.
+  if (session?.effort !== undefined && ownModel(ctx.model) !== undefined) lines.push(`Thinking sent on the latest request: ${session.effort.level} (${effortWords(session.effort)})`);
   const onFallback = roster.kind === "ok" && roster.value.version === 2 ? onFallbackLine(roster.value, last) : undefined;
   if (onFallback !== undefined) lines.push(onFallback);
   lines.push(egress(host.pi, classifierOf(roster)));

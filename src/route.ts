@@ -34,7 +34,10 @@
 //
 // Every route ends with the same assertions, never returns router state, and keeps a short history
 // of model ids and codes, never prompt text.
-import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+//
+// Every route sends the thinking effort upstream's adaptive reasoning gives the request's turn type
+// (src/effort.ts; John, 2026-11-18: "Exactly as upstream"), or its role's fixed level: the same
+// effort the cost choice priced (effortFor).
 import type { ModelRoute, ModelRouteReason, ModelRouteRequest } from "@earendil-works/pi-coding-agent";
 
 import { isWorkCodex, subscriptionKind } from "./accounts.ts";
@@ -43,8 +46,10 @@ import { isDeepSession } from "./demand.ts";
 import type { SessionDepth } from "./demand.ts";
 import { VIRTUAL_API } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
-import { chooseModel, eligibleRole, escalationTarget, NO_LOCAL_SECTION, noScopeSection, pickInRole } from "./decide.ts";
+import { chooseModel, effortFor, eligibleRole, escalationTarget, NO_LOCAL_SECTION, noScopeSection, pickInRole } from "./decide.ts";
 import type { Choice, CompactionFigures, CostFigures, CostTerms, Decision, LastResponder, LevelInput, Plan, PlanLevel } from "./decide.ts";
+import { turnTypeOf } from "./effort.ts";
+import type { SentEffort } from "./effort.ts";
 import { invariant, noBoundedHistory, unroutable } from "./errors.ts";
 import type { JevOutcome } from "./jev.ts";
 import { newLedger, notePlanned, notePrompt, recentNeed } from "./ledger.ts";
@@ -53,7 +58,7 @@ import { checkLocal } from "./local.ts";
 import type { NeedRun } from "./records.ts";
 import { clock, coolFrom, failureKind, holdFrom, refOf, resolveCandidate } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
-import { autoRoles, excludedBy, excludesFor, isWorkBound, roleLevel, roleOf, scopeSection } from "./roster.ts";
+import { autoRoles, excludedBy, excludesFor, isWorkBound, roleOf, scopeSection } from "./roster.ts";
 import type { ScopeSection } from "./roster.ts";
 import { stuck } from "./stuck.ts";
 import { higherTier, tierAbove } from "./tiers.ts";
@@ -172,6 +177,8 @@ export interface SessionRecord {
   pendingLevel: PendingLevel | undefined;
   /** What an extension's resend of the same text (pi-idle-check) plans with again. */
   lastInput: LastInput | undefined;
+  /** The thinking effort the owner loop's latest request carried, and why: levels and names, never text. */
+  effort: SentEffort | undefined;
 }
 
 export function newRecord(): SessionRecord {
@@ -190,6 +197,7 @@ export function newRecord(): SessionRecord {
     history: [],
     pendingLevel: undefined,
     lastInput: undefined,
+    effort: undefined,
   };
 }
 
@@ -501,11 +509,6 @@ export function assertSafe(id: VirtualId, rc: ResolveContext, choice: Choice): v
   if (problem !== undefined) throw invariant(id, choice.ref, problem, workSession(rc));
 }
 
-/** The level a role sends: the selected one, or the role's fixed level (roleLevel). Pi clamps it to the model. */
-export function levelFor(rc: ResolveContext, roleName: string, selected: ModelThinkingLevel): ModelThinkingLevel {
-  return roleLevel(rc.roster, roleName, selected);
-}
-
 /** The first cooling account that a refusal's candidates wait for, and the time it stops, as HH:MM. */
 function coolingAccount(rc: ResolveContext, decision: Decision & { readonly ok: false }): { readonly provider: string; readonly until: string } | undefined {
   const refs = decision.attempts.flatMap((attempt) => attempt.candidates.map((candidate) => candidate.ref));
@@ -596,7 +599,10 @@ export function routeOwned(input: RouteInput): ModelRoute {
     ...(plan?.level === undefined ? {} : { level: plan.level }),
     ...(starts ? {} : { continuesRun: true as const }),
   });
-  return { model: choice.model, thinkingLevel: levelFor(rc, choice.role, request.thinkingLevel) };
+  // A run that moved up for being stuck is upstream's loop escalation from that request on.
+  const effort = effortFor(rc, choice.role, choice.model, request.thinkingLevel, turnTypeOf(request.messages), record.escalated);
+  record.effort = effort;
+  return { model: choice.model, thinkingLevel: effort.level };
 }
 
 /** A `direct` request, or a loop request of a session without its own router instance. */
@@ -632,5 +638,6 @@ export function routeOther(input: RouteInput): ModelRoute {
     code: choice.code,
     foreign: !direct,
   });
-  return { model: choice.model, thinkingLevel: levelFor(rc, choice.role, request.thinkingLevel) };
+  // Such a request belongs to no run of the owner's loop, so it is never an escalated run's.
+  return { model: choice.model, thinkingLevel: effortFor(rc, choice.role, choice.model, request.thinkingLevel, turnTypeOf(request.messages), false).level };
 }

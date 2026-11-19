@@ -305,6 +305,37 @@ describe("a change of effort zeroes the cached size", () => {
   });
 });
 
+describe("the effort the turn's type sends each candidate is the one priced (John, 2026-11-18: effort exactly as upstream)", () => {
+  const atMedium = (turn: "main_loop" | "planning" | "tool_result"): Chosen => choose({ figures: { ledger: ledgerOf(), thinking: "medium", turn } });
+
+  test("an ordinary turn sends astra, on SUPER, high, the effort of its last answer: its cache counts", () => {
+    const chosen = atMedium("main_loop");
+    assert.equal(entryOf(chosen, ASTRA).cached, 149_000, "adaptive-reasoning.ts:192-197: on the frontier tier an ordinary turn is high");
+    assert.equal(chosen.cost?.outcome, "stayed", "a warm astra keeps a short MEDIUM run");
+  });
+
+  test("a request after a tool result sends astra high too", () => {
+    assert.equal(entryOf(atMedium("tool_result"), ASTRA).cached, 149_000, "adaptive-reasoning.ts:192-197: the frontier comes before a routine turn");
+  });
+
+  test("a planning turn sends astra medium, another effort: nothing of its cache counts", () => {
+    const chosen = atMedium("planning");
+    assert.equal(entryOf(chosen, ASTRA).cached, 0, "adaptive-reasoning.ts:185-190, 213: planning is medium, even on SUPER, and astra's last answer was at high");
+    assert.deepEqual(pickOf(chosen), [TERRA, "medium", "heuristics"], "a cold astra no longer keeps a short MEDIUM run");
+  });
+
+  test("at a level John chose that the table never lowers, the turn changes nothing", () => {
+    const chosen = choose({ figures: { ledger: ledgerOf(), thinking: "high", turn: "planning" } });
+    assert.equal(entryOf(chosen, ASTRA).cached, 149_000, "adaptive-reasoning.ts:335-345: high is kept, astra's last effort");
+  });
+
+  test("with the roster's off switch, the selected level is priced", () => {
+    const roster: RosterV2 = { ...ROSTER, adaptiveReasoning: { enabled: false } };
+    const chosen = choose({ rc: context({ roster }), section: personal(roster), figures: { ledger: ledgerOf(), thinking: "medium", turn: "main_loop" } });
+    assert.equal(entryOf(chosen, ASTRA).cached, 0, "adaptive-reasoning.ts:271-277: medium is sent, and astra's last answer was at high");
+  });
+});
+
 describe("the needed level without a model of its own", () => {
   test("goes to the scope's chain, then up, as before, with no cost", () => {
     const cooldowns = new Cooldowns();

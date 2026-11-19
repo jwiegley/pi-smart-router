@@ -174,10 +174,20 @@ export function roleOf(roster: Pick<Roster, "roles">, ref: string): Role | undef
   return roster.roles.find((role) => role.models.includes(ref));
 }
 
+/** The thinking level a role fixes, if it fixes one. */
+export function fixedLevel(roster: Roster, roleName: string): ModelThinkingLevel | undefined {
+  const role = roster.roles.find((entry) => entry.name === roleName);
+  return role === undefined || role.thinking === "selected" ? undefined : role.thinking;
+}
+
 /** The thinking level a role sends: its fixed one, or the selected one. Pi clamps it to the model. */
 export function roleLevel(roster: Roster, roleName: string, selected: ModelThinkingLevel): ModelThinkingLevel {
-  const role = roster.roles.find((entry) => entry.name === roleName);
-  return role === undefined || role.thinking === "selected" ? selected : role.thinking;
+  return fixedLevel(roster, roleName) ?? selected;
+}
+
+/** Upstream's adaptive reasoning knobs under a roster: a version 2 roster's section, else upstream's defaults. */
+export function effortSettingsOf(roster: Roster): EffortSettings {
+  return roster.version === 2 ? roster.adaptiveReasoning : DEFAULT_EFFORT;
 }
 
 /** A role's position on the ladder, or -1. */
