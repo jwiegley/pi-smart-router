@@ -26,7 +26,7 @@ accepted and ignored. These are visible without a roster change:
   `personal MEDIUM → gpt-6.1-terra (demand 1.3; moved, $0.63 vs $2.00)`, and `/smart-router status`
   shows the terms behind the last decision.
 - A run without a prompt, such as a goal continuation, takes the highest level of the branch's
-  last three prompts, at least MEDIUM in a very deep session.
+  last three planned prompts, at least MEDIUM in a very deep session.
 - A run whose last three tool calls in a row failed, whatever the tool and the text, moves one
   level up to that level's own model, with a notice, or stays when that model is not available.
 - `/smart-router local on|off|status` is gone: `local` is an unknown subcommand, answered with the
@@ -145,8 +145,10 @@ Jev's request is unchanged, byte for byte, at `classifier.context.messages` of 5
 - **A run without a prompt**, and a prompt's run whose plan cannot be matched to it, takes the
   highest level of the branch's last three planned prompts (with none known, the level its session
   last needed), raised to the deep-session floor in a very deep session, through the same choice,
-  instead of the model used last or the level's first model. pi-cache-optimizer is told the model
-  that choice will take. Such a run writes no level record.
+  instead of the model used last or the level's first model. A prompt another extension sends and
+  the router plans, such as pi-idle-check's resend of the latest message, counts among those
+  prompts; a run without a prompt does not. pi-cache-optimizer is told the model that choice will
+  take. Such a run writes no level record.
 - A level record writes `need` where earlier versions wrote `asked`; records with `asked` or
   `source: "keyword"` still read.
 - **A version 1 role no longer prefers the model that answered last.** The preference went with the

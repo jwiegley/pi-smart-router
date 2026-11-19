@@ -328,7 +328,7 @@ export interface NeedRun {
   readonly need: Tier;
   /** How many of the branch's last prompts the level was taken from; absent: the session's last need. */
   readonly prompts?: number;
-  /** The deep-session floor raised the session's last need to `need`. */
+  /** The deep-session floor raised the level the run took (from the last prompts or the session's need) to `need`. */
   readonly floor?: true;
   readonly cost?: CostTerms;
 }

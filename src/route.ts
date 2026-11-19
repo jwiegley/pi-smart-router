@@ -554,7 +554,8 @@ export function routeOwned(input: RouteInput): ModelRoute {
   const choice = settle(input, decision);
   // A planned run's prompt: its need and the level whose model took it go in the ledger, and the
   // need is the session's until the next planned run. A run without a prompt counts as a prompt
-  // that needed the session's level, raised to the deep-session floor where it was, and leaves the
+  // that needed its run:need level (the highest of the last prompts, else the session's), raised
+  // to the deep-session floor where it was, adds nothing to the last prompts, and leaves the
   // session's need as it was.
   if (plan?.level !== undefined) {
     const { need, tier, source } = plan.level;

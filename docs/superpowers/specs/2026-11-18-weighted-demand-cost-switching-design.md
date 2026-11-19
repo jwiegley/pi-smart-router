@@ -679,9 +679,10 @@ John to confirm or overrule. Where a line differs from the text above, the line 
   again from the defaults. The first lighter prompt is then priced as a run of five requests and
   may move down where a run of one request would have stayed.
 - **Unattended runs take the highest of the last three prompts (John, 2026-11-18).** A run
-  without a prompt takes the highest level among the last three prompts John typed on the
-  branch, raised to the deep-session floor as before. One short question in a goal session no
-  longer drops the continuations to LOW; three light prompts in a row do.
+  without a prompt takes the highest level among the last three planned prompts on the branch,
+  raised to the deep-session floor as before. A prompt another extension sends and the router
+  plans, such as pi-idle-check's resend of the latest message, counts too. One short question in a
+  goal session no longer drops the continuations to LOW; three light prompts in a row do.
 
 ### Thinking effort
 

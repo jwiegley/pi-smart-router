@@ -1148,8 +1148,8 @@ in any case and inside a longer word, is a *planning* turn; anything else is an 
   full input price. The cost choice prices each candidate at the effort it would be sent, so the
   request carries the effort its price assumed.
 - **The footer** shows the effort the latest request carried, and why, under a key of its own,
-  `smart-router-effort`: `thinking minimal (after a tool result)`, `thinking low (an ordinary turn)`,
-  `thinking medium (planning)`, `thinking high (SUPER)`, `thinking high (a stuck run)`,
+  `smart-router-effort`: `thinking minimal (after a tool result)`,
+  `thinking low (an ordinary turn)`, `thinking medium (planning)`, `thinking high (SUPER)`, `thinking high (a stuck run)`,
   `thinking max (as selected, never lowered)`, `thinking medium (raised from the selected level for
   planning)`, `thinking max (the role's own level)`, or `(the roster's floor)` and `(the roster's
   ceiling)`, and `(as selected)` where the rule leaves the level, as for a model that does not
@@ -1227,8 +1227,8 @@ shows the level it needed, where that level came from and the level that took it
 demand line, as in `  Need HIGH → HIGH: a run without a prompt, at the highest of the last 3
 prompts.`, then its cost line. With fewer prompts known it says `the highest of the last 2 prompts`
 or `the level of the last prompt`; with none known, `the level the session last needed`; and
-`, raised to the deep-session floor` when the floor raised it. A tagged run shows no terms, since nothing was weighed, and a model picked by hand shows
-none.
+`, raised to the deep-session floor` when the floor raised it. A tagged run shows no terms, since
+nothing was weighed, and a model picked by hand shows none.
 
 Two things the footer shows that are not faults:
 
@@ -1236,9 +1236,10 @@ Two things the footer shows that are not faults:
   again from the defaults. The first lighter prompt is then priced as a run of five requests and
   may move down where a run of one request would have stayed.
 - **Unattended runs take the highest of the last three prompts.** A run without a prompt takes the
-  highest level among the last three prompts John typed on the branch, raised to the deep-session
-  floor as before. One short question in a goal session no longer drops the continuations to LOW;
-  three light prompts in a row do.
+  highest level among the last three planned prompts on the branch, raised to the deep-session
+  floor as before. A prompt another extension sends and the router plans, such as pi-idle-check's
+  resend of the latest message, counts too. One short question in a goal session no longer drops
+  the continuations to LOW; three light prompts in a row do.
 
 ## Jev
 
@@ -1671,7 +1672,7 @@ kept both of the router's models on local models. John's decision of 2026-11-18 
 A run that still holds a level when it settles leaves one `smart-router.level` entry in its session,
 however it ended. A message that arrives on `smart-router/local`, on a physical model or under a
 version 1 roster gets no level, and a run without a level leaves no entry; nor does a run without a
-prompt, which takes its session's level but plans none of its own.
+prompt, which takes its level from the last prompts but plans none of its own.
 
 The router can drop a level before its run settles, and a run can record a level that another
 message planned. These can happen when messages overlap, as when several wait for Jev together or a
