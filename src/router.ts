@@ -39,7 +39,7 @@ import type { VirtualId } from "./constants.ts";
 import { compactionFor, pickInRole, planUserTurn } from "./decide.ts";
 import type { CostFigures, Decision, LastResponder, LevelInput, Plan } from "./decide.ts";
 import { HEURISTIC_MESSAGES, rolesOf } from "./demand.ts";
-import type { PromptFacts } from "./demand.ts";
+import type { PromptFacts, SessionDepth } from "./demand.ts";
 import {
   directoryFailedNotice,
   directoryNotice,
@@ -107,6 +107,17 @@ export interface RouterOptions {
   /** Test seams for the file reader. */
   readonly uid?: number | undefined;
   readonly fs?: FileSystem | undefined;
+}
+
+/**
+ * How deep the session is, as the deep-session floor reads it (isDeepSession): the conversation's
+ * size from the last response's usage, unknown right after a compaction, and the branch's entry
+ * count, both without a read of the history. A prompt's facts and a run without a prompt read the
+ * same.
+ */
+function depthOf(record: SessionRecord, sessionManager: unknown): SessionDepth {
+  const usage = record.last?.usage;
+  return { contextTokens: usage === undefined ? undefined : calculateContextTokens(usage), entries: activeEntries(sessionManager) };
 }
 
 /**
@@ -423,7 +434,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     const record = recordOf(sessionManager.getSessionId());
     // The thinking level this request carries: the price assumes the effort the request is sent at.
     const figures: CostFigures = { ledger: record.ledger, thinking: request.thinkingLevel };
-    return { id, request, rc: contextFor(ctx, state.value, id), record, figures, compaction: compactionFor(settingsNow(), id) };
+    return { id, request, rc: contextFor(ctx, state.value, id), record, figures, compaction: compactionFor(settingsNow(), id), depth: depthOf(record, sessionManager) };
   };
 
   // auto declares the smallest window and output budget among the first available candidate of
@@ -538,7 +549,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       }
       // No request exists yet: the price assumes the selected thinking level, which Pi sends.
       const figures: CostFigures = { ledger: record.ledger, thinking: pi.getThinkingLevel() };
-      const predicted = predict(rc, record, figures, compactionFor(settingsNow(), id));
+      const predicted = predict(rc, record, figures, compactionFor(settingsNow(), id), depthOf(record, ctx.sessionManager));
       return predicted.ok ? answer(predicted.choice.model, "selected") : undefined;
     } catch {
       return undefined;
@@ -750,8 +761,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     // The selected model refuses this scope at the run's first request, so there is no run to plan.
     if (refusalFor(id, state.value, ctx) !== undefined) return undefined;
     const rc = contextFor(ctx, state.value, id);
-    const usage = record.last?.usage;
-    const facts: PromptFacts = { contextTokens: usage === undefined ? undefined : calculateContextTokens(usage), roles, entries: activeEntries(sessionManager) };
+    const facts: PromptFacts = { ...depthOf(record, sessionManager), roles };
     // The thinking level the run's requests carry: Pi sends the selected one, and the price assumes it too.
     const figures: CostFigures = { ledger: record.ledger, thinking: pi.getThinkingLevel() };
     const planned = planUserTurn({ rc, text, last: record.last, now: now(), compaction: compactionFor(pi.getSettings(), id), level, facts, figures });

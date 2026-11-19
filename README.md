@@ -917,8 +917,10 @@ is not asked at all and its outcome is the failure `error`.
 - **A very deep session gets at least MEDIUM**, `demand.deepSessionFloor`: a conversation over
   100,000 tokens by the latest usage, or over 1,000 entries on its branch where Pi counts them.
   This is upstream's planned floor for the terse "continue" in a long session, which no classifier
-  rates well. With this default, a prompt in a conversation over 100,000 tokens never routes to LOW
-  unless its tag says so. `"deepSessionFloor": "low"` turns the floor off.
+  rates well. The floor holds for a run without a prompt too
+  ([Runs without a prompt](#runs-without-a-prompt)), so with this default no run in a conversation
+  over 100,000 tokens routes to LOW unless its tag says so. `"deepSessionFloor": "low"` turns the
+  floor off.
 
 The record of a run says what decided its level: `tag`, `jev` (the blend with Jev's answer),
 `heuristics` (the heuristics alone) or `floor` (a risky operation or a deep session raised it).
@@ -1047,11 +1049,19 @@ it goes on down the chain. A retry never goes to another level.
 A run that starts without a prompt (a goal continuation, a loop's, any extension's message), and a
 prompt's run whose plan cannot be matched to it (another extension changed its text, or Pi expanded
 it while two messages were pending), take the level the session last needed: that of its latest
-planned run, or, in a resumed session, of its latest level record. The run goes through the same
-choice a prompt's run makes, priced with nothing added for a prompt, and counts, for the horizon
-and for the chance a level is needed again, as a prompt that needed that level. Jev is not asked,
-and the run writes no level record. Its footer says `run` where a prompt's says its demand. A
-session that has planned no run yet keeps the model it used last, as it always did.
+planned run, or, in a resumed session, of its latest level record. In a very deep session that
+level is raised to the deep-session floor, as a prompt's demand is: over 100,000 tokens by the
+latest usage, or over 1,000 entries on the branch. Right after a compaction no answer has measured
+the conversation yet, so its size is unknown and counts as not over, and only the count of entries
+can raise the level. The risky floor needs a prompt's text and does not apply. The session's own
+need is not raised: the next run without a prompt starts from it again.
+
+The run goes through the same choice a prompt's run makes, priced with nothing added for a prompt,
+and counts, for the horizon and for the chance a level is needed again, as a prompt that needed
+its level. Jev is not asked, and the run writes no level record. Its footer says `run` where a
+prompt's says its demand, and `run, floor` when the floor raised the level:
+`personal MEDIUM → gpt-6.1-terra (run, floor; cost unknown)`. A session that has planned no run
+yet keeps the model it used last, as it always did.
 
 ### A stuck run
 
@@ -1097,7 +1107,7 @@ so `personal MEDIUM → gpt-6-astra` is a MEDIUM prompt that stayed on astra.
 | `personal HIGH → gpt-6-astra (demand 1.8; chose, $0.14 vs $0.31)` | No current model was a candidate, and a stronger, warm model cost less than the needed level's own: the chosen model's cost against that one's. |
 | `personal MEDIUM → gpt-6.1-terra (demand 1.0; cost unknown)` | A figure was missing, so the needed level's own model took the run. |
 | `personal LOW → gpt-6.1-terra (demand 0.4)` | Nothing to compare: the run stepped up or went to the chain, or took the needed level's own model with no current model among the candidates, or stayed with no other candidate. |
-| `personal MEDIUM → gpt-6.1-terra (run; moved, $0.23 vs $0.33)` | A run without a prompt, at the level its session last needed; also `(run; cost unknown)`, and `(run)` when nothing was compared. |
+| `personal MEDIUM → gpt-6.1-terra (run; moved, $0.23 vs $0.33)` | A run without a prompt, at the level its session last needed; also `(run; cost unknown)`, and `(run)` when nothing was compared. `run, floor`, as in `(run, floor; cost unknown)`, when the deep-session floor raised that level. |
 | `personal MEDIUM → gpt-6.1-sol (demand 1.0; escalated)` | A stuck run moved up a level; `escalated` replaces the cost, as in `(run; escalated)`. |
 
 Two marks can follow the demand, and one closes the brackets:

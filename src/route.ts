@@ -12,8 +12,9 @@
 //                       follow-ups)
 //   owner run start     on smart-router/auto under a version 2 roster, a run's first request
 //                       without a plan (an extension's run, which has no prompt) takes the level
-//                       its session last needed, through the choice a prompt's run makes
-//                       (run:need); a session that never planned a run continues as below
+//                       its session last needed, raised to the deep-session floor in a deep
+//                       session, through the choice a prompt's run makes (run:need); a session
+//                       that never planned a run continues as below
 //   owner continuation  a stuck run (src/stuck.ts) on smart-router/auto under a version 2 roster
 //                       moves up one level, once per run, unless its level is SUPER or its tag's
 //                       (escalate); else previous, else the run's pick, else the last responder:
@@ -36,6 +37,8 @@ import type { ModelRoute, ModelRouteReason, ModelRouteRequest } from "@earendil-
 
 import { isWorkCodex, subscriptionKind } from "./accounts.ts";
 import type { Classification } from "./classify.ts";
+import { isDeepSession } from "./demand.ts";
+import type { SessionDepth } from "./demand.ts";
 import { VIRTUAL_API } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { chooseModel, eligibleRole, NO_LOCAL_SECTION, noScopeSection, pickInRole } from "./decide.ts";
@@ -51,7 +54,7 @@ import type { ResolveContext } from "./resolve.ts";
 import { autoRoles, excludedBy, excludesFor, isWorkBound, roleLevel, roleOf, scopeSection } from "./roster.ts";
 import type { ScopeSection } from "./roster.ts";
 import { stuck } from "./stuck.ts";
-import { tierAbove } from "./tiers.ts";
+import { higherTier, tierAbove } from "./tiers.ts";
 import type { Tier } from "./tiers.ts";
 
 /** The model the owner loop's last route picked in the current run. */
@@ -224,6 +227,8 @@ export interface RouteInput {
   readonly figures: CostFigures | undefined;
   /** Pi's compaction settings under the selection. */
   readonly compaction: CompactionFigures;
+  /** How deep the session is: a run without a prompt takes at least the deep-session floor in a deep one. */
+  readonly depth: SessionDepth;
 }
 
 const previousRef = (request: ModelRouteRequest): string | undefined =>
@@ -269,14 +274,14 @@ function stick(rc: ResolveContext, previous: string | undefined, record: Session
 /**
  * What the owner loop's next request without a previous model would pick now, as routeOwned would
  * pick it: with no run pick, on smart-router/auto under a version 2 roster, a session that has a
- * need takes the run:need choice (chooseForNeed), priced with `figures` and `compaction`; else the
- * run's pick, else the last responder, its role or that role's fallback, else the default role. No
- * side effects: nothing of the record or its ledger changes. The pi-cache-optimizer adapter reports
- * it.
+ * need takes the run:need choice (chooseForNeed), priced with `figures` and `compaction` and floored
+ * by `depth`; else the run's pick, else the last responder, its role or that role's fallback, else
+ * the default role. No side effects: nothing of the record or its ledger changes. The
+ * pi-cache-optimizer adapter reports it.
  */
-export function predict(rc: ResolveContext, record: SessionRecord, figures: CostFigures | undefined, compaction: CompactionFigures): Decision {
+export function predict(rc: ResolveContext, record: SessionRecord, figures: CostFigures | undefined, compaction: CompactionFigures, depth: SessionDepth): Decision {
   const section = levelSection(rc);
-  const chosen = section === undefined || record.runPick !== undefined ? undefined : chooseForNeed(rc, record, section, figures, compaction);
+  const chosen = section === undefined || record.runPick !== undefined ? undefined : chooseForNeed(rc, record, section, figures, compaction, depth);
   return chosen?.decision ?? stick(rc, undefined, record);
 }
 
@@ -374,17 +379,26 @@ interface Leveled {
   readonly cost?: CostTerms;
 }
 
+/** A run:need choice: its level, the need it was chosen for, and whether the deep-session floor raised that need. */
+interface NeedChoice extends Leveled {
+  readonly need: Tier;
+  readonly floor: boolean;
+}
+
 /**
  * A run that starts without a prompt (an extension's own, such as a goal continuation or a loop's)
- * has no plan: it takes the level its session last needed and goes through the choice a prompt's
- * run makes, priced with the session's figures and nothing for a prompt. Undefined when the
- * session never planned a run: it continues as before.
+ * has no plan: it takes the level its session last needed, raised to the roster's deep-session
+ * floor when the session is deep (isDeepSession: the risky floor needs prompt text, so it does not
+ * apply), and goes through the choice a prompt's run makes, priced with the session's figures and
+ * nothing for a prompt. The session's need itself is not changed. Undefined when the session never
+ * planned a run: it continues as before.
  */
-function chooseForNeed(rc: ResolveContext, record: SessionRecord, section: ScopeSection, figures: CostFigures | undefined, compaction: CompactionFigures): Leveled | undefined {
-  const { need } = record;
-  if (need === undefined) return undefined;
+function chooseForNeed(rc: ResolveContext, record: SessionRecord, section: ScopeSection, figures: CostFigures | undefined, compaction: CompactionFigures, depth: SessionDepth): NeedChoice | undefined {
+  if (record.need === undefined) return undefined;
+  const lowest = rc.roster.version === 2 && isDeepSession(depth) ? rc.roster.demand.deepSessionFloor : record.need;
+  const need = higherTier(record.need, lowest);
   const { tier, decision, cost } = chooseModel({ rc, section, need, code: "run:need", last: record.last, promptTokens: 0, compaction, figures, priced: true });
-  return { tier, decision, ...(cost === undefined ? {} : { cost }) };
+  return { tier, decision, need, floor: need !== record.need, ...(cost === undefined ? {} : { cost }) };
 }
 
 /**
@@ -513,7 +527,7 @@ export function routeOwned(input: RouteInput): ModelRoute {
   let plan: Plan | undefined;
   if (request.reason === "user") plan = takePlan(record, id, rc);
   const section = levelSection(rc);
-  const unplanned = section === undefined || plan !== undefined || request.reason === "retry" ? undefined : starts ? chooseForNeed(rc, record, section, input.figures, input.compaction) : undefined;
+  const unplanned = section === undefined || plan !== undefined || request.reason === "retry" ? undefined : starts ? chooseForNeed(rc, record, section, input.figures, input.compaction, input.depth) : undefined;
   const escalated = section === undefined || plan !== undefined || unplanned !== undefined ? undefined : escalation(input, section);
   if (plan !== undefined) decision = fromPlan(rc, plan);
   else if (request.reason === "retry") decision = retry(rc, request, record);
@@ -523,7 +537,8 @@ export function routeOwned(input: RouteInput): ModelRoute {
   const choice = settle(input, decision);
   // A planned run's prompt: its need and the level whose model took it go in the ledger, and the
   // need is the session's until the next planned run. A run without a prompt counts as a prompt
-  // that needed the session's level.
+  // that needed the session's level, raised to the deep-session floor where it was, and leaves the
+  // session's need as it was.
   if (plan?.level !== undefined) {
     const { need, tier, source } = plan.level;
     notePrompt(record.ledger, need, tier);
@@ -531,11 +546,11 @@ export function routeOwned(input: RouteInput): ModelRoute {
     record.runTier = tier;
     record.runTagged = source === "tag";
     record.needRun = undefined;
-  } else if (unplanned !== undefined && record.need !== undefined) {
-    notePrompt(record.ledger, record.need, unplanned.tier);
+  } else if (unplanned !== undefined) {
+    notePrompt(record.ledger, unplanned.need, unplanned.tier);
     record.runTier = unplanned.tier;
     record.runTagged = false;
-    record.needRun = { scope: rc.scope, need: record.need, ...(unplanned.cost === undefined ? {} : { cost: unplanned.cost }) };
+    record.needRun = { scope: rc.scope, need: unplanned.need, ...(unplanned.floor ? { floor: true as const } : {}), ...(unplanned.cost === undefined ? {} : { cost: unplanned.cost }) };
   } else if (escalated !== undefined) {
     record.runTier = escalated.tier;
     record.escalated = true;

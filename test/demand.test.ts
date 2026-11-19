@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test, { describe } from "node:test";
 
 import { capText, classify } from "../src/classify.ts";
-import { demandOf, HEURISTIC_MESSAGES, rolesOf, tierOfDemand } from "../src/demand.ts";
+import { demandOf, HEURISTIC_MESSAGES, isDeepSession, rolesOf, tierOfDemand } from "../src/demand.ts";
 import type { Demand, DemandInput, PromptFacts } from "../src/demand.ts";
 import type { JevOutcome } from "../src/jev.ts";
 import { DEFAULT_DEMAND, SIGNALS } from "../src/settings.ts";
@@ -206,6 +206,35 @@ describe("the guards", () => {
 
     const noJev = run("what is 2+2 ?", FRESH, { jev: answer(HIGH), settings: { jevWeight: 0 } });
     close(noJev.value, without.heuristics.value, "jevWeight 0: the heuristics' value");
+  });
+});
+
+describe("isDeepSession", () => {
+  test("is over 100,000 tokens or over 1,000 entries, and an unknown figure is not over", () => {
+    for (const [contextTokens, entries, deep] of [
+      [100_000, undefined, false],
+      [100_001, undefined, true],
+      [undefined, 1_000, false],
+      [undefined, 1_001, true],
+      [100_000, 1_000, false],
+      [100_001, 1_000, true],
+      [100_000, 1_001, true],
+      [undefined, undefined, false],
+    ] as const) {
+      assert.equal(
+        isDeepSession({ contextTokens, entries }),
+        deep,
+        `${String(contextTokens)} tokens and ${String(entries)} entries: deep only over DEEP_SESSION_TOKENS tokens or DEEP_SESSION_ENTRIES entries, and an unknown size (right after a compaction) is not over`,
+      );
+    }
+  });
+
+  test("is the test demandOf's deep-session guard applies", () => {
+    const sure = { low: 0.9, medium: 0.1, high: 0, super: 0 };
+    for (const facts of [DEEP, SHALLOW, { ...SHALLOW, entries: 1_001 }, { ...SHALLOW, entries: 1_000, contextTokens: 100_000 }, FRESH]) {
+      const demand = run("continue", facts, { jev: answer(sure) });
+      assert.equal(demand.guards.includes("deep-session"), isDeepSession(facts), `${JSON.stringify(facts)}: the guard applies exactly when the session is deep`);
+    }
   });
 });
 

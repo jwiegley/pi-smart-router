@@ -714,6 +714,24 @@ function holdsNoToolText(state: Session): void {
 
 const levelRecords = (state: Session): number => state.loaded.session.entries.filter((entry) => entry.customType === LEVEL_ENTRY).length;
 
+const ANSWER_HIGH: Record<Tier, number> = { low: 0, medium: 0, high: 1, super: 0 };
+/** An answer's size in a session that is not deep: under DEEP_SESSION_TOKENS, so the deep-session floor raises no run without a prompt. */
+const SHALLOW_TOKENS = 30_000;
+
+/**
+ * A session whose first prompt needed LOW and went to luna, planned with no usage yet, after which
+ * luna answered with `tokens` in all (150,000 unless given): a run without a prompt then starts.
+ */
+async function lowThenDeep(t: TestContext, options: { readonly roster?: string; readonly tokens?: number } = {}): Promise<Session> {
+  const state = await session(t, options.roster === undefined ? {} : { roster: options.roster });
+  const level = await say(state, "rename foo to bar", ANSWER_LOW);
+  assert.deepEqual([level.need, level.demand?.guards.includes("deep-session")], ["low", false], "the first prompt needs LOW: no usage yet, so no deep-session floor");
+  assert.equal(routed(await route(state, "rename foo to bar")), LUNA, "the LOW run goes to luna");
+  await answer(state, LUNA, options.tokens ?? 150_000);
+  assert.equal(recordOf(state).need, "low", "the session last needed LOW");
+  return state;
+}
+
 describe("a run that starts without a prompt", () => {
   test("takes the level its session last needed, through the same choice", async (t) => {
     const state = await session(t);
@@ -836,12 +854,14 @@ describe("a run that starts without a prompt", () => {
     const level = await say(state, "rename foo to bar", ANSWER_LOW);
     assert.deepEqual([level.need, level.tier, level.steppedUp], ["low", "medium", true], "LOW's model and the chain are away: the prompt's run steps up to MEDIUM");
     assert.equal(routed(await route(state, "rename foo to bar")), TERRA);
-    await answer(state, TERRA);
+    // A session that is not deep: in one over 100,000 tokens the deep-session floor would raise the
+    // LOW need to MEDIUM, which the tests of the floor below cover.
+    await answer(state, TERRA, SHALLOW_TOKENS);
     assert.deepEqual([recordOf(state).need, recordOf(state).ledger.needs.at(-1)], ["low", { need: "low", took: "medium" }], "the session needed LOW; MEDIUM's model took it");
 
     const away = await unprompted(state, TERRA);
-    assert.deepEqual([routed(away), lastCode(state), recordOf(state).runTier], [TERRA, "step-up", "medium"], "with luna still away, the run steps up as a prompt's run would");
-    await answer(state, TERRA);
+    assert.deepEqual([routed(away), lastCode(state), recordOf(state).runTier], [TERRA, "step-up", "medium"], "with luna still away, the run steps up as a prompt's run would: 30,000 tokens is not a deep session, so the need stays LOW");
+    await answer(state, TERRA, SHALLOW_TOKENS);
 
     cat.unavailable.delete(LUNA);
     const back = await unprompted(state, TERRA);
@@ -869,6 +889,63 @@ describe("a run that starts without a prompt", () => {
     await state.loaded.host.command("smart-router", "scope work");
     const route = await unprompted(state, TERRA);
     assert.deepEqual([routed(route), lastCode(state), recordOf(state).runTier], [WORK_TERRA, "run:need", "medium"], "MEDIUM in the work section: the work account's terra");
+  });
+
+  test("in a session over 100,000 tokens, takes at least the deep-session floor; the session's need is not rewritten", async (t) => {
+    const state = await lowThenDeep(t);
+    const route = await unprompted(state, LUNA);
+    assert.deepEqual(
+      [routed(route), lastCode(state), recordOf(state).runTier],
+      [TERRA, "run:need", "medium"],
+      "150,000 tokens is a deep session: the run without a prompt takes the session's LOW raised to the deep-session floor, MEDIUM, and luna is no candidate",
+    );
+    assert.equal(footer(state), "personal MEDIUM → gpt-6.1-terra (run, floor)", "the footer names the raised level and says the floor raised it; the needed level's own model chosen with no current candidate: no cost note");
+    assert.deepEqual(recordOf(state).ledger.needs.at(-1), { need: "medium", took: "medium" }, "the ledger counts the run as a prompt that needed the raised level");
+    assert.equal(recordOf(state).need, "low", "a run without a prompt does not rewrite the level the session last needed");
+    assert.equal(
+      runFooterText({ scope: "personal", need: "medium", floor: true, cost: { outcome: "unknown", why: "no usage yet" } }, "gpt-6.1-terra", false, false),
+      "personal MEDIUM → gpt-6.1-terra (run, floor; cost unknown)",
+      "runFooterText puts the floor after run and before the cost phrase",
+    );
+  });
+
+  test("with the roster's deep-session floor at LOW, keeps the session's LOW in a deep session", async (t) => {
+    const roster = JSON.parse(ROSTER) as Record<string, unknown>;
+    roster.demand = { ...(roster.demand as object | undefined), deepSessionFloor: "low" };
+    const state = await lowThenDeep(t, { roster: JSON.stringify(roster) });
+    const route = await unprompted(state, LUNA);
+    assert.deepEqual([routed(route), recordOf(state).runTier], [LUNA, "low"], "a deep-session floor of LOW raises nothing: the session's LOW stands");
+    assert.match(footer(state) ?? "", /^personal LOW → gpt-6-luna \(run[;)]/, "the footer names LOW");
+    assert.ok(!(footer(state) ?? "").includes("floor"), `no floor raised the level, so the footer does not say floor: ${footer(state)}`);
+  });
+
+  test("right after a compaction, with few entries, keeps the session's LOW: the size is unknown and counts as not over", async (t) => {
+    const state = await lowThenDeep(t);
+    await state.loaded.host.emit("session_compact", {});
+    assert.equal(recordOf(state).last?.usage, undefined, "right after the compaction the last response has no usage");
+    const route = await unprompted(state, LUNA);
+    assert.deepEqual([routed(route), recordOf(state).runTier], [LUNA, "low"], "the size before the compaction is not read: an unknown size is not over 100,000, so the session's LOW stands");
+    assert.equal(footer(state), "personal LOW → gpt-6-luna (run; cost unknown)", "no floor; the size is unknown, so a missing figure is said: cost unknown");
+  });
+
+  test("on a branch of more than 1,000 entries, takes at least the deep-session floor whatever the size", async (t) => {
+    const state = await lowThenDeep(t, { tokens: 30_000 });
+    (state.loaded.session.ctx.sessionManager as unknown as Record<string, unknown>).getHistoryMetrics = () => ({ session_active_entries: 1_001 });
+    const route = await unprompted(state, LUNA);
+    assert.deepEqual([routed(route), recordOf(state).runTier], [TERRA, "medium"], "30,000 tokens but 1,001 entries on the branch: a deep session, raised to the floor, MEDIUM");
+    assert.equal(footer(state), "personal MEDIUM → gpt-6.1-terra (run, floor)", "the footer says the floor raised the level");
+    assert.equal(recordOf(state).need, "low", "the session's need is not rewritten");
+  });
+
+  test("in a deep session, a need above the floor is not lowered to it", async (t) => {
+    const state = await session(t);
+    await say(state, "go on", ANSWER_HIGH);
+    assert.equal(routed(await route(state, "go on")), SOL, "a first prompt that needs HIGH goes to sol");
+    await answer(state, SOL, 150_000);
+    const promptless = await unprompted(state, SOL);
+    assert.deepEqual([routed(promptless), recordOf(state).runTier, recordOf(state).ledger.needs.at(-1)?.need], [SOL, "high", "high"], "HIGH is above the deep-session floor: the run takes HIGH");
+    assert.match(footer(state) ?? "", /^personal HIGH → gpt-6\.1-sol \(run[;)]/, "the footer names HIGH");
+    assert.ok(!(footer(state) ?? "").includes("floor"), `the floor raised nothing: ${footer(state)}`);
   });
 });
 
@@ -1088,10 +1165,10 @@ describe("what pi-cache-optimizer is told before a run without a prompt", () => 
     const state = await session(t, { catalog: cat });
     await say(state, "rename foo to bar", ANSWER_LOW);
     assert.equal(routed(await route(state, "rename foo to bar")), TERRA, "LOW's run stepped up to terra");
-    await answer(state, TERRA);
+    await answer(state, TERRA, SHALLOW_TOKENS);
     assert.equal(told(state), TERRA, "with luna away, the step-up's terra");
     cat.unavailable.delete(LUNA);
-    assert.equal(told(state), LUNA, "the session needs LOW, and luna is back: the prediction is the run:need choice, not the last responder");
+    assert.equal(told(state), LUNA, "the session needs LOW, 30,000 tokens is not a deep session, and luna is back: the prediction is the run:need choice, not the last responder");
     assert.equal(routed(await unprompted(state, TERRA)), LUNA, "and the route agrees");
   });
 
@@ -1122,6 +1199,14 @@ describe("what pi-cache-optimizer is told before a run without a prompt", () => 
     told(state);
     told(state);
     assert.deepEqual(held(state), before, "the ledger's needs, runs and caches, the need, the run's level and marks, the pick, the history and the footer are as they were");
+  });
+
+  test("a deep session whose last need was LOW: the floor's MEDIUM model, which the route then picks", async (t) => {
+    const state = await lowThenDeep(t);
+    const before = held(state);
+    assert.equal(told(state), TERRA, "150,000 tokens: the prediction raises the session's LOW to the deep-session floor, as the route does");
+    assert.deepEqual(held(state), before, "and changes nothing");
+    assert.equal(routed(await unprompted(state, LUNA)), TERRA, "and the route agrees");
   });
 
   test("a session with no recorded need, smart-router/local and a version 1 roster are told as before", async (t) => {

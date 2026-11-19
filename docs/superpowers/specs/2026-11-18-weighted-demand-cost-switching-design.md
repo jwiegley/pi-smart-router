@@ -624,6 +624,11 @@ John to confirm or overrule. Where a line differs from the text above, the line 
   expanded it while two messages were pending) is treated as a run without a prompt: it takes the
   level the session last needed, through the same choice. Before, such a run stayed on the model
   used last.
+- **The deep-session floor holds for a run without a prompt too.** Such a run takes the level
+  the session last needed, raised to the deep-session floor when the conversation is over 100,000
+  tokens or 1,000 entries. A conversation of that size therefore never routes to LOW without a
+  tag, as the guards above promise. Its footer then says `run, floor`. Right after a compaction
+  the size is unknown, and only the count of entries can raise the level.
 - **pi-cache-optimizer is told the same choice.** Before a run starts, the router tells
   pi-cache-optimizer which model the run will reach, and that extension decides from the answer
   whether to rewrite the system prompt. For a run without a prompt the answer is now the choice the

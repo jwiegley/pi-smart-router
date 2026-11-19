@@ -523,6 +523,7 @@ describe("a version 1 roster in work scope, past prepare()'s own refusal", () =>
     record,
     figures: undefined,
     compaction: COMPACTION,
+    depth: FRESH,
   });
 
   test("smart-router/auto refuses on every path that can reach a model, and nothing is sent or recorded", () => {
@@ -598,10 +599,10 @@ describe("a version 2 session's scope in the final assertions", () => {
 
 describe("a version 2 roster's default role", () => {
   test("is the personal scope's medium level, and without a personal scope there is none", () => {
-    const hera = predict(heraContext({ roster: rosterFixtureV2("roster-hera-v2.json") }), newRecord(), undefined, COMPACTION);
+    const hera = predict(heraContext({ roster: rosterFixtureV2("roster-hera-v2.json") }), newRecord(), undefined, COMPACTION, FRESH);
     assert.ok(hera.ok, JSON.stringify(hera));
     assert.deepEqual([hera.choice.role, hera.choice.ref, hera.choice.code], ["medium", DEEPSEEK, "stick:default"], "terra is not in Hera's test catalog");
-    assert.deepEqual(predict(heraContext({ roster: rosterFixtureV2("roster-work.json") }), newRecord(), undefined, COMPACTION), {
+    assert.deepEqual(predict(heraContext({ roster: rosterFixtureV2("roster-work.json") }), newRecord(), undefined, COMPACTION, FRESH), {
       ok: false,
       attempts: [],
       problem: "the roster has no personal scope",
@@ -610,15 +611,15 @@ describe("a version 2 roster's default role", () => {
 
   test("is the session scope's medium level, and without that scope there is none", () => {
     const catalog = new FakeCatalog([...heraModels(), codex("openai-codex-3/gpt-6.1-terra"), codex("openai-codex/gpt-6.1-terra")]);
-    const hera = predict(heraContext({ roster: rosterFixtureV2("roster-hera-v2.json"), scope: "work", catalog }), newRecord(), undefined, COMPACTION);
+    const hera = predict(heraContext({ roster: rosterFixtureV2("roster-hera-v2.json"), scope: "work", catalog }), newRecord(), undefined, COMPACTION, FRESH);
     assert.ok(hera.ok, JSON.stringify(hera));
     assert.deepEqual([hera.choice.role, hera.choice.ref, hera.choice.code], ["work-medium", "openai-codex-3/gpt-6.1-terra", "stick:default"]);
-    const work = predict(heraContext({ roster: rosterFixtureV2("roster-work.json"), scope: "work", catalog }), newRecord(), undefined, COMPACTION);
+    const work = predict(heraContext({ roster: rosterFixtureV2("roster-work.json"), scope: "work", catalog }), newRecord(), undefined, COMPACTION, FRESH);
     assert.ok(work.ok, JSON.stringify(work));
     assert.deepEqual([work.choice.role, work.choice.ref], ["work-medium", "openai-codex/gpt-6.1-terra"]);
     const v2 = rosterFixtureV2("roster-hera-v2.json");
     const { work: _work, ...personalScope } = v2.scopes;
-    assert.deepEqual(predict(heraContext({ roster: { ...v2, scopes: personalScope }, scope: "work", catalog }), newRecord(), undefined, COMPACTION), {
+    assert.deepEqual(predict(heraContext({ roster: { ...v2, scopes: personalScope }, scope: "work", catalog }), newRecord(), undefined, COMPACTION, FRESH), {
       ok: false,
       attempts: [],
       problem: "the roster has no work scope",
@@ -628,10 +629,10 @@ describe("a version 2 roster's default role", () => {
   test("a continuation holds the last responder only when the session's scope reaches it", () => {
     const hera = rosterFixtureV2("roster-hera-v2.json");
     const record = { ...newRecord(), last: { ref: WORK_SOL, at: NOW } };
-    const work = predict(heraContext({ roster: hera, scope: "work" }), record, undefined, COMPACTION);
+    const work = predict(heraContext({ roster: hera, scope: "work" }), record, undefined, COMPACTION, FRESH);
     assert.ok(work.ok, JSON.stringify(work));
     assert.deepEqual([work.choice.role, work.choice.ref, work.choice.code], ["work-high", WORK_SOL, "stick:last"]);
-    const personal = predict(heraContext({ roster: hera, scope: "personal" }), record, undefined, COMPACTION);
+    const personal = predict(heraContext({ roster: hera, scope: "personal" }), record, undefined, COMPACTION, FRESH);
     assert.ok(personal.ok, JSON.stringify(personal));
     assert.deepEqual([personal.choice.role, personal.choice.ref, personal.choice.code], ["medium", DEEPSEEK, "stick:default"]);
   });
@@ -667,6 +668,7 @@ describe("a version 2 run's plan", () => {
     record,
     figures: undefined,
     compaction: COMPACTION,
+    depth: FRESH,
   });
 
   test("puts its level in the run's history entry", async (t) => {
@@ -773,6 +775,7 @@ describe("a stuck run's move up, by the rules alone", () => {
     record,
     figures: undefined,
     compaction: COMPACTION,
+    depth: FRESH,
   });
 
   test("smart-router/auto under a version 2 roster moves a stuck MEDIUM run to HIGH: the control", () => {

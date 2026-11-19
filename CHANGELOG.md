@@ -25,7 +25,8 @@ accepted and ignored. These are visible without a roster change:
 - The footer shows the demand and the costs compared, as in
   `personal MEDIUM → gpt-6.1-terra (demand 1.3; moved, $0.63 vs $2.00)`, and `/smart-router status`
   shows the terms behind the last decision.
-- A run without a prompt, such as a goal continuation, takes the level its session last needed.
+- A run without a prompt, such as a goal continuation, takes the level its session last needed,
+  at least MEDIUM in a very deep session.
 - A run whose last three tool calls failed the same way moves up one level, with a notice.
 - `/smart-router local on|off|status` and `PI_SMART_ROUTER_LOCAL_ONLY` do nothing but say that the
   pin is gone.
@@ -39,7 +40,8 @@ Jev's request is unchanged, byte for byte.
   upstream's heuristics, `(4·c·Jev + 1·heuristics) / (4·c + 1)`. Guards: under 60% confidence the
   heuristics can only raise it; within 0.1 under a cut (0.75, 1.5, 2.25) it takes the level above;
   a risky operation gets at least HIGH, as before; and a conversation over 100,000 tokens or 1,000
-  entries gets at least MEDIUM, so it never routes to LOW without a tag. Without an answer from
+  entries gets at least MEDIUM. That floor holds for a prompt and for a run without a prompt, so
+  such a conversation never routes to LOW without a tag. Without an answer from
   Jev, or when the conversation cannot be read, the heuristics decide alone. The heuristics count
   the latest 20 messages as Pi would send them to the model (`src/demand.ts`).
 - **The cost choice.** Among the first available model of the needed level and of each level above

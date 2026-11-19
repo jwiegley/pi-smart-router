@@ -295,18 +295,25 @@ export function footerText(level: PlanLevel, modelId: string, fallback: boolean 
   return `${level.scope} ${tierLabel(level.need)} → ${modelId} (${note}${fallback ? "; fallback" : ""})`;
 }
 
-/** What a run without a plan of its own (run:need) shows: its scope, the level its session last needed, and what the cost rule decided. */
+/**
+ * What a run without a plan of its own (run:need) shows: its scope, the level its session last
+ * needed, raised to the deep-session floor where `floor` says so, and what the cost rule decided.
+ */
 export interface NeedRun {
   readonly scope: Scope;
   readonly need: Tier;
+  /** The deep-session floor raised the session's last need to `need`. */
+  readonly floor?: true;
   readonly cost?: CostTerms;
 }
 
 /**
- * The footer's item for a run without a plan of its own: its scope, the level its session last
- * needed, the model, "run", and what the cost rule compared (costNote), or "; escalated" once the
- * run moved up for being stuck; then "; fallback" for a model of the scope's chain.
+ * The footer's item for a run without a plan of its own: its scope, its level, the model, "run",
+ * ", floor" when the deep-session floor raised the level, and what the cost rule compared
+ * (costNote), or "; escalated" once the run moved up for being stuck; then "; fallback" for a model
+ * of the scope's chain.
  */
 export function runFooterText(run: NeedRun, modelId: string, fallback: boolean, escalated: boolean): string {
-  return `${run.scope} ${tierLabel(run.need)} → ${modelId} (run${escalated ? "; escalated" : costNote(run.cost)}${fallback ? "; fallback" : ""})`;
+  const floor = run.floor === true ? ", floor" : "";
+  return `${run.scope} ${tierLabel(run.need)} → ${modelId} (run${floor}${escalated ? "; escalated" : costNote(run.cost)}${fallback ? "; fallback" : ""})`;
 }

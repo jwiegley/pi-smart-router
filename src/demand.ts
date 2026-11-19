@@ -47,6 +47,22 @@ export function rolesOf(messages: readonly unknown[]): string[] {
 
 export type DemandGuard = "low-confidence" | "close-call" | "risky" | "deep-session";
 
+/** What says how deep a session is: the conversation's size and the branch's entry count, each undefined when unknown. */
+export type SessionDepth = Pick<PromptFacts, "contextTokens" | "entries">;
+
+/**
+ * Whether a session is deep enough for the deep-session floor: more than DEEP_SESSION_TOKENS tokens
+ * in the conversation or more than DEEP_SESSION_ENTRIES entries on the branch. An unknown figure,
+ * such as the size right after a compaction, is not over. The demand's guard and a run without a
+ * prompt (src/route.ts) both use it.
+ */
+export function isDeepSession(depth: SessionDepth): boolean {
+  return (
+    (depth.contextTokens !== undefined && depth.contextTokens > DEEP_SESSION_TOKENS) ||
+    (depth.entries !== undefined && depth.entries > DEEP_SESSION_ENTRIES)
+  );
+}
+
 export interface Demand {
   /** 0 (LOW) to 3 (SUPER), before the floors. */
   readonly value: number;
@@ -135,10 +151,7 @@ export function demandOf(input: DemandInput, settings: DemandSettings): Demand {
     tier = "high";
     guards.push("risky");
   }
-  const deep =
-    (facts.contextTokens !== undefined && facts.contextTokens > DEEP_SESSION_TOKENS) ||
-    (facts.entries !== undefined && facts.entries > DEEP_SESSION_ENTRIES);
-  if (deep && higherTier(tier, settings.deepSessionFloor) !== tier) {
+  if (isDeepSession(facts) && higherTier(tier, settings.deepSessionFloor) !== tier) {
     tier = settings.deepSessionFloor;
     guards.push("deep-session");
   }
