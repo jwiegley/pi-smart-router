@@ -57,7 +57,8 @@ export const ROSTER_MAX_BYTES = 64 * 1024;
 export const MULTI_PASS_FILE = "multi-pass.json";
 export const MULTI_PASS_MAX_BYTES = 256 * 1024;
 
-/** Roster defaults and their allowed ranges, in whole minutes. */
+// Roster defaults and their allowed ranges, in whole minutes.
+/** stickyIdleMinutes is accepted and ignored, and still refused outside this range; its default is never used. */
 export const STICKY_IDLE_MINUTES = { default: 5, min: 0, max: 1440 } as const;
 export const COOLDOWN_MINUTES = { default: 30, min: 1, max: 1440 } as const;
 /**
@@ -70,8 +71,8 @@ export const COOLDOWN_MINUTES = { default: 30, min: 1, max: 1440 } as const;
 export const UNREACHABLE_MINUTES = { default: 5, min: 1, max: 60 } as const;
 
 /**
- * The version 2 classifier's defaults and allowed ranges. The model names a Jev version, so that a
- * tuned closeCall keeps its meaning until the roster moves to another.
+ * The version 2 classifier's defaults and allowed ranges. The model names a Jev version. closeCall
+ * is accepted within its old range and ignored: demand.closeCall decides a close call.
  */
 export const CLASSIFIER_MODEL = "openrouter/typesafe/jev-1.14";
 export const CLASSIFIER_TIMEOUT_MS = { default: 1000, min: 100, max: 1000 } as const;
@@ -92,20 +93,19 @@ export const PROMPT_FILE_NAME = /^[a-z0-9][a-z0-9._-]{0,63}\.(?:md|txt)$/;
 export const PROMPT_FILE_MAX_BYTES = 16 * 1024;
 export const INSTRUCTIONS_MAX_CHARS = 4000;
 
-/** The pin's session entry, the environment switch, the status item, the command and the process slots. */
-export const PIN_ENTRY = "smart-router.pin";
+/** The command and the process slots. */
 export const COMMAND = "smart-router";
-export const ENV_PIN = "PI_SMART_ROUTER_LOCAL_ONLY";
-export const STATUS_KEY = "smart-router";
 export const SLOT_KEY = "jwiegley.pi-smart-router.v1";
 export const ROUTING_REGISTRY_KEY = "pi.routing.registry.v1";
 
 /**
  * The scope's session entry and its environment switch, whose one value `work` puts every session
  * of the process in work scope; the session entry that records each routed run's level, and the
- * status item that shows it, which is never the pin's.
+ * status item that shows it; and the status item that shows the thinking effort the owner loop's
+ * latest request carried, and why (src/effort.ts).
  */
 export const SCOPE_ENTRY = "smart-router.scope";
 export const ENV_SCOPE = "PI_SMART_ROUTER_SCOPE";
 export const LEVEL_ENTRY = "smart-router.level";
 export const LEVEL_KEY = "smart-router-level";
+export const EFFORT_KEY = "smart-router-effort";

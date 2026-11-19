@@ -13,7 +13,6 @@ import {
   loadFailed,
   loadFailedNotice,
   looksRetryable,
-  PIN_POLICY_CHANGED,
   noBoundedHistory,
   refusal,
   RouterError,
@@ -46,24 +45,23 @@ function templates(id: VirtualId, ref: string, reason: string): Array<readonly [
     ["roster unsafe", rosterRefusal(id, { kind: "unsafe", path: `/agent/${ref}/smart-router.json`, error: reason })],
     ["roster invalid", rosterRefusal(id, { kind: "invalid", path: "/agent/smart-router.json", error: `roles[0].models[0]: "${ref}" ${reason}` })],
     ["noBoundedHistory", noBoundedHistory(id)],
-    ["unroutable", unroutable(id, { attempts: attempts(ref, reason) }, { localOnly: false, pinned: false })],
-    ["unroutable local", unroutable(id, { attempts: attempts(ref, reason) }, { localOnly: true, pinned: false })],
-    ["unroutable pinned", unroutable(id, { attempts: attempts(ref, reason) }, { localOnly: true, pinned: true })],
-    ["unroutable missing role", unroutable(id, { attempts: [{ role: reason, exists: false, candidates: [] }] }, { localOnly: false, pinned: false })],
-    ["unroutable problem", unroutable(id, { attempts: [], problem: `${ref} ${reason}` }, { localOnly: true, pinned: true })],
+    ["unroutable", unroutable(id, { attempts: attempts(ref, reason) }, { localOnly: false })],
+    ["unroutable local", unroutable(id, { attempts: attempts(ref, reason) }, { localOnly: true })],
+    ["unroutable missing role", unroutable(id, { attempts: [{ role: reason, exists: false, candidates: [] }] }, { localOnly: false })],
+    ["unroutable problem", unroutable(id, { attempts: [], problem: `${ref} ${reason}` }, { localOnly: true })],
     ["stale", stale(id)],
     ["invariant", invariant(id, ref, reason)],
     ["scope unreadable", scopeUnreadable(id, reason)],
     ["scope unserved", scopeUnserved(id, "personal", 2)],
-    // In work scope, outside the pin, where a way out names only the models of the work account.
+    // In work scope, where a way out names only the models of the work account.
     ["roster missing in work scope", rosterRefusal(id, { kind: "missing", path: `/agent/${ref}/smart-router.json`, error: reason }, true)],
     ["roster invalid in work scope", rosterRefusal(id, { kind: "invalid", path: "/agent/smart-router.json", error: `roles[0].models[0]: "${ref}" ${reason}` }, true)],
     ["scope unreadable in work scope", scopeUnreadable(id, reason, true)],
     ["scope unserved in work scope", scopeUnserved(id, "work", 1, true)],
     ["scope unserved in work scope, outside the latch", scopeUnserved(id, "work", 2, true, true)],
-    ["unroutable in work scope", unroutable(id, { attempts: attempts(ref, reason) }, { localOnly: false, pinned: false, work: true })],
-    ["unroutable local in work scope", unroutable(id, { attempts: attempts(ref, reason) }, { localOnly: true, pinned: false, work: true })],
-    ["unroutable problem in work scope", unroutable(id, { attempts: [], problem: `${ref} ${reason}` }, { localOnly: false, pinned: false, work: true })],
+    ["unroutable in work scope", unroutable(id, { attempts: attempts(ref, reason) }, { localOnly: false, work: true })],
+    ["unroutable local in work scope", unroutable(id, { attempts: attempts(ref, reason) }, { localOnly: true, work: true })],
+    ["unroutable problem in work scope", unroutable(id, { attempts: [], problem: `${ref} ${reason}` }, { localOnly: false, work: true })],
     ["invariant in work scope", invariant(id, ref, reason, true)],
   ];
 }
@@ -116,7 +114,7 @@ describe("every refusal", () => {
   });
 
   test("an unroutable refusal lists each role and candidate in the router's words", () => {
-    const error = unroutable("auto", { attempts: attempts("openai-codex-2/gpt-6.1-sol", "not among the available models") }, { localOnly: false, pinned: false });
+    const error = unroutable("auto", { attempts: attempts("openai-codex-2/gpt-6.1-sol", "not among the available models") }, { localOnly: false });
     assert.equal(
       error.message,
       "smart-router/auto: no model can take this request (engineer: openai-codex-2/gpt-6.1-sol: not among the available models; fallback coder: openai-codex-2/gpt-6.1-sol-b: cooling down until 14:05 (not among the available models)). Nothing was sent. See /smart-router status, or choose a model with /model.",
@@ -124,16 +122,16 @@ describe("every refusal", () => {
     const local = unroutable(
       "local",
       { attempts: [{ role: "local", exists: true, candidates: [{ ok: false, ref: "omlx-hera/GLM-5.3-Flash-oQ4e-mtp", reason: "not-in-catalog", detail: "not in the catalog" }] }] },
-      { localOnly: true, pinned: true },
+      { localOnly: true },
     );
     assert.equal(
       local.message,
-      "smart-router/local: no local model can take this request while this session is pinned to local models (local: omlx-hera/GLM-5.3-Flash-oQ4e-mtp: not in the catalog). Nothing was sent. Start the local model server and send the prompt again, or run /smart-router local off.",
+      "smart-router/local: no local model can take this request (local: omlx-hera/GLM-5.3-Flash-oQ4e-mtp: not in the catalog). Nothing was sent. Start the local model server and send the prompt again, or choose another model with /model.",
     );
   });
 });
 
-describe("in work scope, outside the pin", () => {
+describe("in work scope", () => {
   const MISSING = { kind: "missing", path: "/agent/smart-router.json", error: "" } as const;
   const INVALID = { kind: "invalid", path: "/agent/smart-router.json", error: "JSON syntax error" } as const;
   const ATTEMPTS: Attempt[] = [{ role: "work-medium", exists: true, candidates: [{ ok: false, ref: "openai-codex-3/gpt-6.1-terra", reason: "not-in-catalog", detail: "not in the catalog" }] }];
@@ -144,9 +142,9 @@ describe("in work scope, outside the pin", () => {
         rosterRefusal("auto", MISSING, true),
         rosterRefusal("local", INVALID, true),
         scopeUnreadable("auto", "the latest smart-router.scope entry is not one the router wrote", true),
-        unroutable("auto", { attempts: ATTEMPTS }, { localOnly: false, pinned: false, stepUps: true, work: true }),
-        unroutable("auto", { attempts: [], problem: "the roster has no work scope" }, { localOnly: false, pinned: false, work: true }),
-        unroutable("local", { attempts: [], problem: "the roster has no local section" }, { localOnly: true, pinned: false, work: true }),
+        unroutable("auto", { attempts: ATTEMPTS }, { localOnly: false, stepUps: true, work: true }),
+        unroutable("auto", { attempts: [], problem: "the roster has no work scope" }, { localOnly: false, work: true }),
+        unroutable("local", { attempts: [], problem: "the roster has no local section" }, { localOnly: true, work: true }),
         invariant("auto", "openrouter/z-ai/glm-5.3", "is outside this session's work scope", true),
         invariant("local", "openrouter/z-ai/glm-5.3", "is not local", true),
       ].map((error) => error.message),
@@ -183,36 +181,14 @@ describe("in work scope, outside the pin", () => {
       scopeUnserved("auto", "work", 2, true, true).message,
       "smart-router/auto: this session is in work scope, which the roster does not serve. Nothing was sent. Give the roster a work scope, run /smart-router scope personal, or choose a work Codex model with /model.",
     );
-    // Under the pin, the pin's rules apply, and the words are as they were.
-    assert.equal(
-      scopeUnserved("auto", "work", 1, false, true).message,
-      "smart-router/auto: this session is in work scope, which a version 1 roster does not serve. Nothing was sent. Give the roster a work scope (version 2), or choose a model with /model.",
-    );
   });
 
-  test("outside work scope, or under the pin, the texts are as they were", () => {
-    for (const error of [rosterRefusal("auto", MISSING), scopeUnreadable("auto", "x"), scopeUnserved("auto", "work", 1), unroutable("auto", { attempts: ATTEMPTS }, { localOnly: false, pinned: false }), invariant("auto", "a/b", "c")]) {
+  test("outside work scope, the texts are as they were", () => {
+    for (const error of [rosterRefusal("auto", MISSING), scopeUnreadable("auto", "x"), scopeUnserved("auto", "work", 1), unroutable("auto", { attempts: ATTEMPTS }, { localOnly: false }), invariant("auto", "a/b", "c")]) {
       assert.doesNotMatch(error.message, /work Codex/, error.message);
       assert.match(error.message, /[Cc]hoose a model with \/model\.$/, error.message);
     }
-    assert.match(unroutable("local", { attempts: [], problem: "x" }, { localOnly: true, pinned: true, work: false }).message, /or run \/smart-router local off\.$/);
-  });
-});
-
-describe("the router's own models, where their policy sends nothing", () => {
-  const LOCAL_ATTEMPTS: Attempt[] = [{ role: "worker", exists: true, candidates: [{ ok: false, ref: "openrouter/deepseek/deepseek-v4.1-flash-1017", reason: "not-local", detail: "host openrouter.ai is not a local host" }] }];
-
-  test("smart-router/auto under the pin names smart-router/local and /smart-router local off; smart-router/local under the pin keeps its words", () => {
-    assert.equal(
-      unroutable("auto", { attempts: LOCAL_ATTEMPTS }, { localOnly: true, pinned: true }).message,
-      "smart-router/auto: no local model can take this request while this session is pinned to local models (worker: openrouter/deepseek/deepseek-v4.1-flash-1017: host openrouter.ai is not a local host). Nothing was sent. Choose smart-router/local with /model, or run /smart-router local off.",
-    );
-    assert.match(unroutable("local", { attempts: LOCAL_ATTEMPTS }, { localOnly: true, pinned: true }).message, /Nothing was sent\. Start the local model server and send the prompt again, or run \/smart-router local off\.$/);
-    // A roster whose local role changed after the pin says so on both models.
-    const changed: Attempt[] = [{ role: "local", exists: true, candidates: [{ ok: false, ref: "omlx-hera/GLM-5.3-Flash-oQ4e-mtp", reason: "not-local", detail: PIN_POLICY_CHANGED }] }];
-    for (const id of ["auto", "local"] as const) {
-      assert.match(unroutable(id, { attempts: changed }, { localOnly: true, pinned: true }).message, /Nothing was sent\. Run \/smart-router local on to accept the roster's local role, or run \/smart-router local off\.$/);
-    }
+    assert.match(unroutable("local", { attempts: [], problem: "x" }, { localOnly: true, work: false }).message, /Fix the roster and send the prompt again, or choose another model with \/model\.$/);
   });
 });
 
@@ -221,6 +197,10 @@ describe("notices and helpers", () => {
     for (const notice of [loadFailedNotice("boom"), rosterNotice({ kind: "missing", path: "/agent/smart-router.json", error: "" }), historyNotice()]) {
       assert.match(notice, /smart-router\/auto and smart-router\/local refuse every request/);
     }
+  });
+
+  test("a Pi without bounded history is told nothing of a pin", () => {
+    assert.doesNotMatch(historyNotice(), /pin/, "a Pi without bounded history is told nothing of a pin");
   });
 
   test("firstLine keeps the first line, at most 300 characters", () => {

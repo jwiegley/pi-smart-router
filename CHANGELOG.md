@@ -5,6 +5,220 @@ All notable changes to this fork are recorded here, in the form of
 the base is the latest upstream release merged into the fork's history, and `jw.<n>` counts the
 fork's releases on that base. Releases are signed tags; nothing is published to npm.
 
+## [1.4.0-jw.5] - 2026-11-18
+
+Weighted demand and cost-aware switching. On 2026-11-17 and 11-18 John asked that
+`smart-router/auto` choose a model the way the original pi-smart-router set out to, "a weighting,
+and Jev is one input into the 13-stage process", and that the session not "stay on the stronger
+model unless the cache economics dictate that it's cheaper to do so". The design is
+`docs/superpowers/specs/2026-11-18-weighted-demand-cost-switching-design.md`.
+
+Upgrading from 1.4.0-jw.4: no roster change is needed. A roster without the new sections gets the
+defaults, and the `stickyIdleMinutes` and `classifier.closeCall` that John's rosters carry are
+accepted and ignored. These are visible without a roster change:
+
+- An untagged prompt's level comes from its demand, Jev and the heuristics together, not from Jev
+  alone or the keywords.
+- A prompt that needs a stronger model than the current one moves up at once; otherwise the session
+  leaves its model only when another adequate one costs more than 15% less for the coming work.
+  Nothing holds it by time.
+- The footer shows the demand and the costs compared, as in
+  `personal MEDIUM → gpt-6.1-terra (demand 1.3; moved, $0.63 vs $2.00)`, and `/smart-router status`
+  shows the terms behind the last decision.
+- A run without a prompt, such as a goal continuation, takes the highest level of the branch's
+  last three planned prompts, at least MEDIUM in a very deep session.
+- A run whose last three tool calls in a row failed, whatever the tool and the text, moves one
+  level up to that level's own model, with a notice, or stays when that model is not available.
+- `/smart-router local on|off|status` is gone: `local` is an unknown subcommand, answered with the
+  usage. `PI_SMART_ROUTER_LOCAL_ONLY` and an old session's pin entry are ignored, with no notice.
+- Each request's thinking effort follows its turn type, as upstream's adaptive reasoning sets it:
+  at `/thinking medium` (Pi's default) or `off`, `minimal` after a tool result, `low` for an
+  ordinary turn, `medium` for planning, `high` on SUPER or in a run that moved up; any other level
+  is never lowered, and a role's fixed `thinking` is kept. A change of effort costs that model's
+  prompt cache. The footer's new `smart-router-effort` item says which effort and why.
+
+Jev's request is unchanged, byte for byte, at `classifier.context.messages` of 5 or more; at 1 to
+4 it may now carry earlier messages, since its read is the heuristics' 20-message window.
+
+### Added
+
+- **The demand.** An untagged prompt on `smart-router/auto` under a version 2 roster gets a number
+  from 0 (LOW) to 3 (SUPER): Jev's expected level, weighted by its confidence, blended with
+  upstream's heuristics, `(4·c·Jev + 1·heuristics) / (4·c + 1)`. Guards: under 60% confidence the
+  heuristics can only raise it; within 0.1 under a cut (0.75, 1.5, 2.25) it takes the level above;
+  a risky operation gets at least HIGH, as before; and a conversation over 100,000 tokens, or whose
+  active context holds over 1,000 entries (Pi counts them from the last compaction, an extension's
+  own entries included), gets at least MEDIUM. That floor holds for a prompt and for a run without a
+  prompt, so once the session has planned a run a conversation known to be that large never routes
+  to LOW without a tag; before that, a run without a prompt stays on the model used last. The size
+  is unknown right after a compaction, after a move to another leaf and after an answer whose usage
+  could not be read; until the next answer only the count of entries can raise the level, and after
+  a compaction that count has started again. Without an answer from Jev, or when the conversation
+  cannot be read, the heuristics decide alone. The heuristics count the latest 20 messages as Pi
+  would send them to the model, and an extension's own entry, which is not a message entry, is not
+  read (`src/demand.ts`).
+- **The cost choice.** Among the first available model of the needed level and of each level above
+  it, the run goes to the one its expected run costs least on (`src/cost.ts`): the first request
+  at the cached-input price for what survives in the model's cache, by a survival table measured on
+  Hera, and the rest at the input price; later requests mostly at the cached-input price; output at
+  the output price; priced for a run shaped like the branch's recent runs, over a horizon that grows
+  with lighter prompts in a row. Leaving the current model adds the cost of its cache, should its
+  level be needed again. The current model keeps the run unless another is cheaper by more than the
+  margin. A change of thinking effort counts as a lost cache. With a figure missing (no usage yet, a
+  usage whose figures are not finite numbers of zero or more, a model without a price, a clock that
+  went backwards, or right after a compaction or a move in the session tree), the needed level's
+  own model takes the run and the footer says `cost unknown`.
+- **The ledger** (`src/ledger.ts`): what each session has measured, kept in memory: each model's
+  cached size, time and effort, keyed by `provider/id`; which providers report cache writes; the
+  shape of the branch's last ten runs; the level each of its last ten runs needed; and the needs
+  of its last three planned prompts, from which a run without a prompt takes its level. A resumed
+  session seeds it from one bounded read, so a warm model is priced warm; an answer older than the
+  branch's latest compaction seeds nothing. A compaction forgets the caches; a move to another leaf
+  forgets the branch's figures too, even when the new leaf is an ancestor of the old one. A usage
+  whose figures are not finite numbers of zero or more is recorded as nothing.
+- **Escalation** (`src/stuck.ts`): after three failed tool calls in a row, whatever the tool and
+  whatever the text, as upstream counts them below its top tier, the run's next request moves one
+  level up, to that level's own model, once per run, never from SUPER and never for a tagged run,
+  with the notice "pi-smart-router: this run's last three tool calls failed, so it moves up from
+  MEDIUM to HIGH (gpt-6.1-sol)." and `escalated` in the footer and the record. A successful result
+  among the last three means the run is not stuck. A stuck run never moves to a fallback chain and
+  never looks further up: when the level above's own model is not available it stays, nothing is
+  shown, and a later request of the same run can still move.
+- **Two optional roster sections**, `demand` (`jevWeight`, `heuristicsWeight`, `minConfidence`,
+  `closeCall`, `cuts`, `deepSessionFloor`, `weights`) and `switching` (`margin`, `horizonCap`,
+  `cacheSurvival`), with the defaults above (`src/settings.ts`). The checker reads both back in
+  words and refuses weights that are negative or all zero, cuts that do not ascend, and a survival
+  table whose seconds do not rise or whose chances rise.
+- **Thinking effort by turn type** (`src/effort.ts`; John, 2026-11-18: "Exactly as upstream: effort
+  follows each request's turn type"). Upstream v1.4.0's adaptive reasoning, ported rule for rule:
+  the turn type from the request's last message (a tool result; a user message holding "plan",
+  "architect" or "design"; anything else), its table (`minimal`, `low`, `medium`, and `high` on
+  SUPER's model or in a run that moved up for being stuck), and its merge: at `medium` or `off` the
+  table's level is sent, any other level is never lowered and is raised when the turn asks for
+  more, a floor and then a ceiling bound the table's level, and a model that does not reason, or
+  supports no level up to the turn's, gets the selected level. A role's fixed `thinking` is kept.
+  It applies to every routed request, a compaction's summary included, under both roster versions.
+  The cost choice prices each candidate at the effort the request would be sent on it, so the
+  request carries the effort its price assumed. The footer's `smart-router-effort` item and
+  `/smart-router status` say which effort the latest request carried, and why, as in
+  `thinking minimal (after a tool result)`. On John's ChatGPT-account models each change of effort
+  between two requests to one model costs a full-price read of the conversation.
+- **The `adaptiveReasoning` roster section**, version 2: `enabled` (default `true`), `minLevel`
+  and `maxLevel`, each one of `minimal` to `max`, the floor never above the ceiling; upstream's
+  defaults without it, and always under version 1, which has no off switch. The checker reads the
+  rule back in words.
+- **The review script**, `scripts/review-demand.ts`: it replays the rated runs of the session files
+  it is given and reports how often the heuristics, Jev and the blend named the level John meant.
+  It reads only those files, sends nothing, prints no prompt text, and is not shipped. It runs on
+  John's sessions only at his word.
+- **Upstream's low-intensity scoring**, vendored: `src/triage/tier-features.ts` from v1.4.0
+  (`54bee53d`), changed only in its imports and a header, with its types in `src/triage/types.ts`.
+  `scripts/vendor-drift.mjs` compares it with upstream, as it does the triage engine.
+- **Records** of a level carry `need`, the run's `demand` and its `cost` terms, and `escalated`;
+  the source `heuristics` marks a level the heuristics decided alone.
+- **Footers** for every outcome: `(demand 1.2; stayed, $0.10 vs $0.16)`,
+  `(demand 1.8; chose, $0.14 vs $0.31)`, `(demand 1.0; cost unknown)`, and for a run without a
+  prompt `(run; moved, $0.23 vs $0.33)`, `(run; cost unknown)` and `(run)`; with `, jev <failure>`,
+  `, floor`, `; escalated` and `; fallback` as marks. `/smart-router status` shows the terms of the
+  run the last decision belongs to, a run without a prompt included, however many requests the run
+  has made: the demand's terms, or a run without a prompt's need, where it came from and its level,
+  every guard that applied, and each candidate's cost, cache and survival. A hand-picked model
+  shows none. `/smart-router history` shows each planned run in the footer's form.
+
+### Changed
+
+- **Levels come from the blend.** The keywords no longer decide a version 2 level when Jev fails:
+  the heuristics do. Jev's four probabilities are all used, not only its top choice. The footer's
+  `(jev 82%)`, `(keywords; jev timeout)` and `(floor)` give way to the forms above.
+- **`stickyIdleMinutes` and `classifier.closeCall` are accepted and ignored**, within their old
+  ranges, and the checker says so: nothing holds a session by time, and `demand.closeCall` decides a
+  close call on the demand's scale.
+- **Compaction before a move.** With Pi's compaction enabled, a model too small for the conversation
+  is still a candidate, priced with one summary request on the current model and the conversation
+  the compaction leaves; if it wins, Pi compacts first. Pi writes the summary with a request of its
+  own that no cache serves, so its input is priced at the writing model's uncached input price, on
+  the conversation less what the compaction keeps (`keepRecentTokens`): an upper bound, which errs
+  toward staying. Its output is priced at 4,000 tokens. When Pi's cut falls inside a turn it writes
+  two summaries; the second one's output is not priced. The reasoning a summary may add, the wait
+  before the answer and the detail a summary loses are not priced. With compaction disabled, such a
+  model is passed over and a too-small level steps up, as before. A version 1 roster, which has no
+  fit rule left, sends a request too large for its model as it is when compaction is disabled.
+- **A run without a prompt**, and a prompt's run whose plan cannot be matched to it, takes the
+  highest level of the branch's last three planned prompts (with none known, the level its session
+  last needed), raised to the deep-session floor in a very deep session, through the same choice,
+  instead of the model used last or the level's first model. A prompt another extension sends and
+  the router plans, such as pi-idle-check's resend of the latest message, counts among those
+  prompts; a run without a prompt does not. pi-cache-optimizer is told the model that choice will
+  take. Such a run writes no level record.
+- A level record writes `need` where earlier versions wrote `asked`; records with `asked` or
+  `source: "keyword"` still read.
+- **A version 1 role no longer prefers the model that answered last.** The preference went with the
+  level hold: a new run planned onto the role of the model that answered last now takes that role's
+  first available model, not the last responder. Within a run, requests still stay on the run's
+  model.
+- AGENTS.md: the classifier rule no longer mentions the pin, and `scripts/` holds development
+  scripts that never run in a session.
+- The package version is `1.4.0-jw.5`.
+
+### Removed
+
+- **The local-only pin**: `/smart-router local on|off|status`, `PI_SMART_ROUTER_LOCAL_ONLY` and the
+  `smart-router.pin` entry, with every "under the pin" branch. `/smart-router local` is an unknown
+  subcommand, answered with the usage, as any other. Nothing reads the variable and nothing looks
+  for an old pin entry, and neither produces a notice; a session that holds one still loads and
+  routes by level.
+- **The level hold**, the five-minute rule, in both roster versions, with its history codes
+  `hold:sticky` and `reopen:idle`.
+- **The fit hold** (`hold:fit`), and, with compaction enabled, the step-up for fit.
+
+### Decided on 2026-11-18
+
+John answered the design's five open decisions and approved it for building on a local branch:
+
+1. **Requests that follow a tool call** stay on the model the run started on.
+2. **Jev joins "the 13-stage process" as a weight**: one weighted term beside upstream's own
+   heuristics, after which the roster maps the result to a model.
+3. **The local-only pin is removed**: "Let's drop this pin feature since we added it but it has no
+   value."
+4. **A stuck run moves up**: one level, after three identical failed tool calls in a row. His
+   ruling after the build counts any three failures in a row, as upstream does below its top tier
+   (below).
+5. **Thinking effort by turn type**: "Yes, as upstream does." The same day the design found that a
+   change of effort discards the prompt cache on his ChatGPT-account models, so this one was held
+   for his word again with that finding before him. He chose the design's third choice, twice, the
+   second time with the cache cost stated: "Exactly as upstream: effort follows each request's turn
+   type." This release builds it (above).
+
+### Decided during the build
+
+The build met cases the design did not settle; the designer's calls on them, for John to confirm or
+overrule, are in the design's last section, "Decided during the build", under these headings:
+
+- The demand
+- The cost choice
+- Runs without a prompt, and a stuck run
+- What John sees
+- Thinking effort
+- Rosters and the review script
+
+On 2026-11-18 John overruled four of those calls, and the design's last section now carries his
+rulings: a run is stuck when its last three tool calls in a row failed, whatever the tool and the
+text, exactly as upstream counts them below its top tier; a stuck run goes one level up to that
+level's own model or stays; a run without a prompt takes the highest level of the last three
+prompts; and `PI_SMART_ROUTER_LOCAL_ONLY` and an old pin entry are ignored with no notice.
+
+### Unchanged
+
+- A tagged run takes its level at once and is never priced or raised.
+- The roster's levels, fallback chains, scopes, account bindings and exclusions; a work session on
+  `smart-router/auto` reaches only the work-bound Codex account.
+- `smart-router/local` routes only to the local role, in every scope, with no demand and no cost.
+- A model picked by hand is sent as it is.
+- Jev is asked once per prompt, through Pi, after redaction, within its 1 s limit, never on
+  `smart-router/local`, for a steer or follow-up, or for a run without a prompt.
+- Runtime code opens no connection, starts no process, sets no timer and writes no file, and keeps
+  no prompt text.
+
 ## [1.4.0-jw.4] - 2026-11-17
 
 A scope's fallback chain, a roster checker, and Jev's prompts as files John edits. On 2026-11-17

@@ -19,26 +19,42 @@ beettlle/pi-smart-router to the virtual models of Pi 1.5. `CLAUDE.md` is a link 
 - Runtime code opens no network connection of its own, starts no process and sets no timer;
   `test/scan.test.ts` holds `index.ts` and `src/` to that, comments included. Its one request off
   the machine is the classifier's, made by Pi: `ctx.modelRegistry.findOfType` and
-  `ctx.modelRegistry.classify` with `{ timeoutMs, maxRetries: 0 }`, once per routed run on
-  `smart-router/auto` when a version 2 roster has a classifier, and never under the pin, on
+  `ctx.modelRegistry.classify` with `{ timeoutMs, maxRetries: 0 }`, once per prompt on
+  `smart-router/auto` when a version 2 roster has a classifier, and never on
   `smart-router/local`, for a steer or follow-up, or without a classifier. The message and the
   earlier messages it sends go through redaction first (`src/redact.ts`).
 - Runtime code keeps no prompt text: a plan is bound to its message by a keyed digest, and no entry
   the router writes holds text or a digest.
 - Runtime code never reads a session's whole history: no `getEntries()` or `getBranch()`. It uses
-  the bounded readers `getLatestCustomEntry` and `getRecentActiveEntries`.
+  the bounded readers `getLatestCustomEntry` and `getRecentActiveEntries`, and Pi's
+  `getHistoryMetrics` where Pi has it. One call the source scan cannot see reads more:
+  `ctx.getContextUsage()`, made once at session start to learn whether the session starts right
+  after a compaction, builds the session's projection in a compacted session and walks the whole
+  branch in npm's Pi 1.5.2. Make no other such call, and none per request.
 - Runtime code does no I/O relative to the working directory or HOME, and it writes no files: its
-  session entries (the pin's, the scope's and the level records) go through `pi.appendEntry`. It
+  session entries (the scope's and the level records) go through `pi.appendEntry`. It
   reads only the roster, Multi-Pass's subscription labels and the prompt files the roster names in
   `smart-router/`, all under Pi's agent directory and all through `src/files.ts`, and compares
   `ctx.cwd` with the roster's work directories as text.
 - A prompt file is guidance for Jev and nothing else reads it. The request's shape, the four level
-  names, what counts as an answer, the scope and the pin are fixed in code: no roster text or
+  names, what counts as an answer and the scope are fixed in code: no roster text or
   prompt file may reach them (`test/prompts.test.ts`, "a hostile prompt").
 - `src/check-cli.ts` is the standalone roster checker, not runtime code: `index.ts` never imports
   it. It may take a path relative to the working directory and write to standard output. It and
   everything it imports stay free of Pi's packages (`test/check.test.ts` walks its imports), so
   that it runs without Pi and without credentials.
+- `scripts/` holds development scripts. None of them runs in a session: `index.ts` and `src/`
+  never import them, and the package does not ship them. `scripts/review-demand.ts` reads only the
+  session files named on its command line, and sends and prints no prompt text; running it on
+  John's sessions, which are under Pi's agent directory, needs his word.
+- The thinking effort of every routed request is upstream's adaptive reasoning, as John ruled on
+  2026-11-18 ("Exactly as upstream: effort follows each request's turn type"): `src/effort.ts`
+  ports upstream v1.4.0's table and merge rule by rule, and `test/effort.test.ts` cites the upstream
+  line each expectation comes from. Change it only to follow upstream, never to invent a rule of
+  the fork's own. The route and the cost choice both take the effort from `effortFor`
+  (`src/decide.ts`), so the effort a request is sent at is the one its price assumed; a change of
+  effort costs that model's whole prompt cache. A role's fixed `thinking` is never changed, and the
+  roster's `adaptiveReasoning` section holds upstream's off switch, floor and ceiling.
 - Signed commits only (`git commit -S`), one logical change each, with explicit paths staged.
   Never bypass hooks, and never stash, reset or rewrite published history.
 - Pushing, tagging and creating remotes need John's explicit authorization.

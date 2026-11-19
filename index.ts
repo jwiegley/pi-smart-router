@@ -6,16 +6,16 @@
 // back to a physical one. Until the router is built, and for good if building it fails, both
 // models refuse every request. The router's handlers are wired only after it is built, so a
 // failure leaves the two refusing models and no handler bound to a half-built router. The factory
-// does no I/O; it reads two environment variables, the pin's and the scope's switches. It never
-// uses the value an API call returns, so it also works through nix-config's managed entry, which
-// stages on() and register*() calls.
+// does no I/O; it reads one environment variable, the scope's switch. It never uses the value an
+// API call returns, so it also works through nix-config's managed entry, which stages on() and
+// register*() calls.
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionVirtualModel } from "@earendil-works/pi-coding-agent";
 
-import { ALL_LEVELS, ENV_PIN, ENV_SCOPE, NAMES, PROVIDER, VIRTUAL_IDS } from "./src/constants.ts";
+import { ALL_LEVELS, ENV_SCOPE, NAMES, PROVIDER, VIRTUAL_IDS } from "./src/constants.ts";
 import type { VirtualId } from "./src/constants.ts";
 import { firstLine, loadFailed, loadFailedNotice } from "./src/errors.ts";
-import { latchEnvPin, latchEnvScope, processSlot } from "./src/owners.ts";
+import { latchEnvScope, processSlot } from "./src/owners.ts";
 import { createRouter, DEFAULT_LIMITS } from "./src/router.ts";
 import type { Limits, Router, RouterOptions } from "./src/router.ts";
 
@@ -43,7 +43,6 @@ export function install(pi: ExtensionAPI, build: BuildRouter = createRouter): vo
   try {
     for (const id of VIRTUAL_IDS) register(id, DEFAULT_LIMITS);
     const slot = processSlot();
-    latchEnvPin(slot, process.env[ENV_PIN]);
     latchEnvScope(slot, process.env[ENV_SCOPE]);
     router = build(pi, { slot, register, agentDir: getAgentDir, now: Date.now });
     router.wire(pi);

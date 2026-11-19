@@ -7,6 +7,8 @@
 // whole file invalid, and nothing routes by a last-known-good copy (the scope keeps only the last
 // valid roster's work directories, src/router.ts). Unknown keys are refused at every level, so the
 // file has nowhere to hold a key, token, header, base URL or environment.
+import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+
 import { isWorkCodex, subscriptionKind } from "./accounts.ts";
 import {
   ALL_LEVELS,
@@ -34,7 +36,9 @@ import { agentFile, isRecord, message, own } from "./files.ts";
 import type { AgentFile, FileSystem, Parsed } from "./files.ts";
 import type { JevSettings } from "./jev.ts";
 import { canonicalHost, isLocalHost } from "./local.ts";
-import { TIERS } from "./tiers.ts";
+import { DEFAULT_DEMAND, DEFAULT_EFFORT, DEFAULT_SWITCHING, isReasoningLevel, REASONING_LEVELS, SIGNALS } from "./settings.ts";
+import type { DemandSettings, EffortSettings, SurvivalTable, SwitchingSettings } from "./settings.ts";
+import { isTier, TIERS } from "./tiers.ts";
 import type { Tier } from "./tiers.ts";
 
 /** The level a role sends: the selected level, or a fixed one. */
@@ -93,8 +97,9 @@ export interface ScopeSection {
 export type ScopedBinding = AccountBinding & { readonly scope: Scope };
 
 /**
- * The local role and what counts as local. There is no field for tools: the pin pins the model
- * only (John's decision Q7), so a roster cannot ask for a tool block the router would not apply.
+ * The local role and what counts as local. There is no field for tools: smart-router/local routes
+ * the model only (John's decision Q7), so a roster cannot ask for a tool block the router would not
+ * apply.
  */
 export interface LocalSection {
   readonly role: string;
@@ -112,10 +117,11 @@ export interface RosterV1 {
   readonly routing: Routing;
   readonly accounts: ReadonlyMap<string, AccountBinding>;
   readonly local?: LocalSection;
-  readonly stickyIdleMinutes: number;
   readonly cooldownMinutes: number;
   /** How long a local model whose server could not be reached is skipped; absent, the default (unreachableMinutesOf). */
   readonly unreachableMinutes?: number;
+  /** The settings the file gives that this version accepts and ignores, by path (ignoredSettings). */
+  readonly ignored: readonly string[];
 }
 
 export interface RosterV2 {
@@ -126,14 +132,21 @@ export interface RosterV2 {
   readonly roles: readonly Role[];
   readonly accounts: ReadonlyMap<string, ScopedBinding>;
   readonly local?: LocalSection;
-  readonly stickyIdleMinutes: number;
   readonly cooldownMinutes: number;
   /** As in version 1. */
   readonly unreachableMinutes?: number;
+  /** As in version 1. */
+  readonly ignored: readonly string[];
   /** The scopes the roster serves, at least one. Each level has a role of its own. */
   readonly scopes: Readonly<Partial<Record<Scope, ScopeSection>>>;
   /** Jev's settings, with every default filled in. Without them, Jev is never asked. */
   readonly classifier?: JevSettings;
+  /** How a prompt's demand is weighed, with every default filled in. */
+  readonly demand: DemandSettings;
+  /** When a session moves to another model, with every default filled in. */
+  readonly switching: SwitchingSettings;
+  /** Upstream's adaptive reasoning knobs: on by default, with no floor and no ceiling (src/effort.ts). */
+  readonly adaptiveReasoning: EffortSettings;
 }
 
 export type Roster = RosterV1 | RosterV2;
@@ -159,6 +172,22 @@ export function excludedBy(patterns: readonly string[], ref: string): string | u
 /** The role a ref belongs to. */
 export function roleOf(roster: Pick<Roster, "roles">, ref: string): Role | undefined {
   return roster.roles.find((role) => role.models.includes(ref));
+}
+
+/** The thinking level a role fixes, if it fixes one. */
+export function fixedLevel(roster: Roster, roleName: string): ModelThinkingLevel | undefined {
+  const role = roster.roles.find((entry) => entry.name === roleName);
+  return role === undefined || role.thinking === "selected" ? undefined : role.thinking;
+}
+
+/** The thinking level a role sends: its fixed one, or the selected one. Pi clamps it to the model. */
+export function roleLevel(roster: Roster, roleName: string, selected: ModelThinkingLevel): ModelThinkingLevel {
+  return fixedLevel(roster, roleName) ?? selected;
+}
+
+/** Upstream's adaptive reasoning knobs under a roster: a version 2 roster's section, else upstream's defaults. */
+export function effortSettingsOf(roster: Roster): EffortSettings {
+  return roster.version === 2 ? roster.adaptiveReasoning : DEFAULT_EFFORT;
 }
 
 /** A role's position on the ladder, or -1. */
@@ -205,8 +234,7 @@ function scopeRoles(section: ScopeSection | undefined): string[] {
  * chain after one of its level roles, the rest of the chain after one of the chain's roles, and
  * nothing after any other role, in a scope without a chain or under version 1 (whose one-hop
  * routing.fallback is pickInRole's). The chain only ever moves forward: no role leads back to a
- * level. The helper knows no session, so its callers apply it only to smart-router/auto outside the
- * pin.
+ * level. The helper knows no session, so its callers apply it only to smart-router/auto.
  */
 export function fallbackAfter(roster: Roster, scope: Scope, roleName: string): readonly string[] {
   const section = scopeSection(roster, scope);
@@ -226,7 +254,7 @@ export interface Candidate {
 /**
  * Every model a pick that starts in `roleName` can reach in a session's scope, in the order it
  * tries them: the role's own models, then each role fallbackAfter gives, each in its own order.
- * It is what smart-router/auto tries outside the pin; status and the checker print it.
+ * It is what smart-router/auto tries; status and the checker print it.
  */
 export function candidatesOf(roster: Roster, scope: Scope, roleName: string): readonly Candidate[] {
   return [roleName, ...fallbackAfter(roster, scope, roleName)].flatMap((name) =>
@@ -356,6 +384,18 @@ function count(value: unknown, path: string, range: Range, unit: string): number
 
 function minutes(value: unknown, path: string, range: Range): number {
   return count(value, path, range, "minutes");
+}
+
+/**
+ * The settings the roster gives that are accepted and ignored, by path. stickyIdleMinutes is still
+ * checked against its old range, since every roster in use carries it, and its value is dropped:
+ * nothing holds a session on a model by time.
+ */
+function ignoredSettings(root: Record<string, unknown>): string[] {
+  const given = own(root, "stickyIdleMinutes");
+  if (given === undefined) return [];
+  minutes(given, "stickyIdleMinutes", STICKY_IDLE_MINUTES);
+  return ["stickyIdleMinutes"];
 }
 
 /** The roster's unreachableMinutes, when it gives one: the parsed roster holds the field only then. */
@@ -547,7 +587,7 @@ function validate(value: unknown): Roster {
     routing,
     accounts,
     ...(local === undefined ? {} : { local }),
-    stickyIdleMinutes: minutes(own(root, "stickyIdleMinutes"), "stickyIdleMinutes", STICKY_IDLE_MINUTES),
+    ignored: ignoredSettings(root),
     cooldownMinutes: minutes(own(root, "cooldownMinutes"), "cooldownMinutes", COOLDOWN_MINUTES),
     ...unreachableField(root),
   };
@@ -555,7 +595,7 @@ function validate(value: unknown): Roster {
 
 // ─── Version 2 ───────────────────────────────────────────────────────────────
 
-const V2_TOP_KEYS = ["version", "exclude", "roles", "scopes", "accounts", "classifier", "local", "stickyIdleMinutes", "cooldownMinutes", "unreachableMinutes"];
+const V2_TOP_KEYS = ["version", "exclude", "roles", "scopes", "accounts", "classifier", "demand", "switching", "adaptiveReasoning", "local", "stickyIdleMinutes", "cooldownMinutes", "unreachableMinutes"];
 const SCOPE_KEYS: Readonly<Record<Scope, readonly string[]>> = { personal: ["levels", "fallback"], work: ["levels", "directories", "fallback"] };
 const LEVEL_KEYS = ["role", "describe", "describeFile"];
 const SCOPED_BINDING_KEYS = ["multiPassLabel", "native", "scope"];
@@ -608,7 +648,8 @@ function classifierSettings(value: unknown, exclude: readonly string[]): JevSett
   const pattern = excludedBy(exclude, model);
   if (pattern !== undefined) fail("classifier.model", `"${model}" is excluded by ${pattern}`);
   const timeoutMs = count(own(section, "timeoutMs"), "classifier.timeoutMs", CLASSIFIER_TIMEOUT_MS, "milliseconds");
-  const closeCall = fraction(own(section, "closeCall"), "classifier.closeCall", CLASSIFIER_CLOSE_CALL);
+  // Accepted within its old range and ignored (classifierIgnored): the demand's closeCall decides a close call.
+  fraction(own(section, "closeCall"), "classifier.closeCall", CLASSIFIER_CLOSE_CALL);
   const caps: Record<string, unknown> = own(section, "context") === undefined ? {} : object(own(section, "context"), "classifier.context", CONTEXT_KEYS);
   // The question Jev is asked: the built-in one unless the roster gives its own, inline or in a file.
   // Each is checked for itself first, so that a null or a number is named, not taken for "both".
@@ -619,7 +660,6 @@ function classifierSettings(value: unknown, exclude: readonly string[]): JevSett
   return {
     model,
     timeoutMs,
-    closeCall,
     context: {
       messages: count(own(caps, "messages"), "classifier.context.messages", CLASSIFIER_MESSAGES, "messages"),
       messageChars: count(own(caps, "messageChars"), "classifier.context.messageChars", CLASSIFIER_MESSAGE_CHARS, "characters"),
@@ -630,11 +670,122 @@ function classifierSettings(value: unknown, exclude: readonly string[]): JevSett
   };
 }
 
+/** The classifier settings the roster gives that are accepted and ignored, by path. */
+function classifierIgnored(value: unknown): string[] {
+  return isRecord(value) && own(value, "closeCall") !== undefined ? ["classifier.closeCall"] : [];
+}
+
+const DEMAND_KEYS = ["jevWeight", "heuristicsWeight", "minConfidence", "closeCall", "cuts", "deepSessionFloor", "weights"];
+const SWITCHING_KEYS = ["margin", "horizonCap", "cacheSurvival"];
+const WEIGHT = { default: 0, min: 0, max: 100 } as const;
+const JEV_WEIGHT = { ...WEIGHT, default: DEFAULT_DEMAND.jevWeight } as const;
+const HEURISTICS_WEIGHT = { ...WEIGHT, default: DEFAULT_DEMAND.heuristicsWeight } as const;
+const MIN_CONFIDENCE = { default: DEFAULT_DEMAND.minConfidence, min: 0, max: 1 } as const;
+const DEMAND_CLOSE_CALL = { default: DEFAULT_DEMAND.closeCall, min: 0, max: 0.5 } as const;
+const SWITCH_MARGIN = { default: DEFAULT_SWITCHING.margin, min: 0, max: 0.9 } as const;
+const HORIZON_CAP = { default: DEFAULT_SWITCHING.horizonCap, min: 1, max: 20 } as const;
+const SURVIVAL_PAIRS_MAX = 32;
+const CUTS_PROBLEM = "must be three numbers that ascend, each above 0 and below 3";
+const SURVIVAL_PROBLEM = `must be 1 to ${SURVIVAL_PAIRS_MAX} pairs of [seconds, chance], the seconds rising and the chances from 1 to 0 never rising`;
+
+const isNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
+
+/** Three cuts that ascend strictly, each above 0 and below 3; the default when absent. */
+function cutsOf(value: unknown): DemandSettings["cuts"] {
+  if (value === undefined) return DEFAULT_DEMAND.cuts;
+  if (!Array.isArray(value) || value.length !== 3) fail("demand.cuts", CUTS_PROBLEM);
+  const [first, second, third] = value as unknown[];
+  if (!isNumber(first) || !isNumber(second) || !isNumber(third) || !(first > 0 && first < second && second < third && third < 3)) fail("demand.cuts", CUTS_PROBLEM);
+  return [first, second, third];
+}
+
+/** The demand section, with every setting it leaves out given its default. */
+function demandSettings(value: unknown): DemandSettings {
+  if (value === undefined) return DEFAULT_DEMAND;
+  const section = object(value, "demand", DEMAND_KEYS);
+  const jevWeight = fraction(own(section, "jevWeight"), "demand.jevWeight", JEV_WEIGHT);
+  const heuristicsWeight = fraction(own(section, "heuristicsWeight"), "demand.heuristicsWeight", HEURISTICS_WEIGHT);
+  if (jevWeight === 0 && heuristicsWeight === 0) fail("demand", "jevWeight and heuristicsWeight cannot both be 0");
+  const floor = own(section, "deepSessionFloor");
+  if (floor !== undefined && !isTier(floor)) fail("demand.deepSessionFloor", `must be one of ${TIERS.join(", ")}`);
+  const given = own(section, "weights") === undefined ? {} : object(own(section, "weights"), "demand.weights", SIGNALS);
+  const weights: { -readonly [K in keyof DemandSettings["weights"]]: number } = { ...DEFAULT_DEMAND.weights };
+  for (const signal of SIGNALS) weights[signal] = fraction(own(given, signal), `demand.weights.${signal}`, { ...WEIGHT, default: weights[signal] });
+  if (SIGNALS.every((signal) => weights[signal] === 0)) fail("demand.weights", "cannot all be 0");
+  return {
+    jevWeight,
+    heuristicsWeight,
+    minConfidence: fraction(own(section, "minConfidence"), "demand.minConfidence", MIN_CONFIDENCE),
+    closeCall: fraction(own(section, "closeCall"), "demand.closeCall", DEMAND_CLOSE_CALL),
+    cuts: cutsOf(own(section, "cuts")),
+    deepSessionFloor: floor ?? DEFAULT_DEMAND.deepSessionFloor,
+    weights,
+  };
+}
+
+/** Pairs of [seconds, chance]: the seconds rise from above 0, the chances run from 1 down to 0 and never rise. */
+function survivalOf(value: unknown): SurvivalTable {
+  if (value === undefined) return DEFAULT_SWITCHING.cacheSurvival;
+  if (!Array.isArray(value) || value.length < 1 || value.length > SURVIVAL_PAIRS_MAX) fail("switching.cacheSurvival", SURVIVAL_PROBLEM);
+  let seconds = 0;
+  let chance = 1;
+  return (value as unknown[]).map((pair) => {
+    if (!Array.isArray(pair) || pair.length !== 2) fail("switching.cacheSurvival", SURVIVAL_PROBLEM);
+    const [after, odds] = pair as unknown[];
+    if (!isNumber(after) || !isNumber(odds) || !(after > seconds) || !(odds >= 0 && odds <= chance)) fail("switching.cacheSurvival", SURVIVAL_PROBLEM);
+    seconds = after;
+    chance = odds;
+    return [after, odds] as const;
+  });
+}
+
+/** The switching section, with every setting it leaves out given its default. */
+function switchingSettings(value: unknown): SwitchingSettings {
+  if (value === undefined) return DEFAULT_SWITCHING;
+  const section = object(value, "switching", SWITCHING_KEYS);
+  return {
+    margin: fraction(own(section, "margin"), "switching.margin", SWITCH_MARGIN),
+    horizonCap: count(own(section, "horizonCap"), "switching.horizonCap", HORIZON_CAP, "runs"),
+    cacheSurvival: survivalOf(own(section, "cacheSurvival")),
+  };
+}
+
+const EFFORT_KEYS = ["enabled", "minLevel", "maxLevel"];
+
+/** A floor or a ceiling: one of upstream's levels, or absent. */
+function reasoningLevel(value: unknown, path: string): EffortSettings["minLevel"] {
+  if (value === undefined) return undefined;
+  if (!isReasoningLevel(value)) fail(path, `must be one of ${REASONING_LEVELS.join(", ")}`);
+  return value;
+}
+
+/**
+ * The adaptiveReasoning section, upstream's `adaptive_reasoning` (src/domain/types/schemas.ts:818-847):
+ * `enabled` true unless given false, and an optional floor `minLevel` and ceiling `maxLevel`, the
+ * floor never above the ceiling.
+ */
+function effortSettings(value: unknown): EffortSettings {
+  if (value === undefined) return DEFAULT_EFFORT;
+  const section = object(value, "adaptiveReasoning", EFFORT_KEYS);
+  const enabled = own(section, "enabled");
+  if (enabled !== undefined && typeof enabled !== "boolean") fail("adaptiveReasoning.enabled", "must be true or false");
+  const minLevel = reasoningLevel(own(section, "minLevel"), "adaptiveReasoning.minLevel");
+  const maxLevel = reasoningLevel(own(section, "maxLevel"), "adaptiveReasoning.maxLevel");
+  if (minLevel !== undefined && maxLevel !== undefined && REASONING_LEVELS.indexOf(minLevel) > REASONING_LEVELS.indexOf(maxLevel)) {
+    fail("adaptiveReasoning.minLevel", "must not exceed maxLevel");
+  }
+  return {
+    enabled: enabled ?? DEFAULT_EFFORT.enabled,
+    ...(minLevel === undefined ? {} : { minLevel }),
+    ...(maxLevel === undefined ? {} : { maxLevel }),
+  };
+}
+
 /**
  * Version 2, checked in this order: the keys, the exclusions, the roles, the accounts and their
  * scopes, the scopes and their levels, each scope's fallback chain, each level's and each chain's
  * accounts, the work alias's exclusion, the local
- * section, the classifier and the minutes. The checks it shares with version 1 are version 1's
+ * section, the classifier, the demand, switching and adaptiveReasoning sections and the minutes. The checks it shares with version 1 are version 1's
  * helpers, so they keep version 1's messages.
  */
 function validateV2(value: Record<string, unknown>): RosterV2 {
@@ -743,6 +894,9 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
   });
 
   const classifier = own(root, "classifier") === undefined ? undefined : classifierSettings(own(root, "classifier"), exclude);
+  const demand = demandSettings(own(root, "demand"));
+  const switching = switchingSettings(own(root, "switching"));
+  const adaptiveReasoning = effortSettings(own(root, "adaptiveReasoning"));
 
   return {
     version: 2,
@@ -750,11 +904,14 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
     roles,
     accounts,
     ...(local === undefined ? {} : { local }),
-    stickyIdleMinutes: minutes(own(root, "stickyIdleMinutes"), "stickyIdleMinutes", STICKY_IDLE_MINUTES),
+    ignored: [...ignoredSettings(root), ...classifierIgnored(own(root, "classifier"))],
     cooldownMinutes: minutes(own(root, "cooldownMinutes"), "cooldownMinutes", COOLDOWN_MINUTES),
     ...unreachableField(root),
     scopes,
     ...(classifier === undefined ? {} : { classifier }),
+    demand,
+    switching,
+    adaptiveReasoning,
   };
 }
 

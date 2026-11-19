@@ -5,6 +5,7 @@ import { isCodexProvider, isWorkCodex } from "../src/accounts.ts";
 import { BUILTIN_EXCLUDES } from "../src/constants.ts";
 import { autoRoles, excludedBy, excludesFor, isWorkBound, liftWorkAlias, parseRoster, SCOPES, scopeSection } from "../src/roster.ts";
 import type { Roster, RosterV2, ScopedBinding } from "../src/roster.ts";
+import { DEFAULT_DEMAND, DEFAULT_EFFORT, DEFAULT_SWITCHING, DESIGN_WEIGHTS, SIGNALS } from "../src/settings.ts";
 import { rosterFixture, rosterFixtureV2 } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
 
@@ -63,7 +64,6 @@ describe("John's version 2 rosters", () => {
     assert.deepEqual(roster.classifier, {
       model: "openrouter/typesafe/jev-1.14",
       timeoutMs: 1000,
-      closeCall: 0.15,
       context: { messages: 6, messageChars: 1500, totalChars: 12000 },
     });
     assert.deepEqual(roster, {
@@ -85,7 +85,7 @@ describe("John's version 2 rosters", () => {
         ["openai-codex-3", { kind: "multi-pass", label: "Positron work", scope: "work" }],
       ]),
       local: { role: "local", providers: ["omlx-hera", "nyx"], hosts: ["hera.lan", "nyx.lan"] },
-      stickyIdleMinutes: 5,
+      ignored: [],
       cooldownMinutes: 30,
       scopes: {
         personal: { levels: levels(""), directories: [] },
@@ -94,9 +94,11 @@ describe("John's version 2 rosters", () => {
       classifier: {
         model: "openrouter/typesafe/jev-1.14",
         timeoutMs: 1000,
-        closeCall: 0.15,
         context: { messages: 6, messageChars: 1500, totalChars: 12000 },
       },
+      demand: DEFAULT_DEMAND,
+      switching: DEFAULT_SWITCHING,
+      adaptiveReasoning: DEFAULT_EFFORT,
     });
   });
 
@@ -656,7 +658,7 @@ describe("exclusions in version 2", () => {
 });
 
 describe("the classifier", () => {
-  const DEFAULTS = { model: "openrouter/typesafe/jev-1.14", timeoutMs: 1000, closeCall: 0.15, context: { messages: 6, messageChars: 1500, totalChars: 12000 } };
+  const DEFAULTS = { model: "openrouter/typesafe/jev-1.14", timeoutMs: 1000, context: { messages: 6, messageChars: 1500, totalChars: 12000 } };
 
   test("is optional, and every field it leaves out takes its default", () => {
     const none = valid(edited((r) => delete r.classifier));
@@ -674,18 +676,21 @@ describe("the classifier", () => {
         r.classifier = { model: "openrouter/typesafe/jev-1.15", closeCall: 0, context: { messages: 0 } };
       }),
     );
-    assert.deepEqual(some.classifier, { ...DEFAULTS, model: "openrouter/typesafe/jev-1.15", closeCall: 0, context: { ...DEFAULTS.context, messages: 0 } });
+    assert.deepEqual(some.classifier, { ...DEFAULTS, model: "openrouter/typesafe/jev-1.15", context: { ...DEFAULTS.context, messages: 0 } }, "closeCall is accepted and ignored: demand.closeCall decides a close call");
+    assert.deepEqual(some.ignored, ["classifier.closeCall"], "and the roster says it was given");
     for (const bounds of [
       { model: "openrouter/typesafe/jev-1.14", timeoutMs: 100, closeCall: 0.5, context: { messages: 20, messageChars: 8000, totalChars: 32000 } },
       { model: "openrouter/typesafe/jev-1.14", timeoutMs: 1000, closeCall: 0, context: { messages: 0, messageChars: 200, totalChars: 1000 } },
     ]) {
+      const { closeCall: _ignored, ...kept } = bounds;
       assert.deepEqual(
         valid(
           edited((r) => {
             r.classifier = bounds;
           }),
         ).classifier,
-        bounds,
+        kept,
+        "closeCall is accepted and ignored: demand.closeCall decides a close call",
       );
     }
   });
@@ -747,7 +752,7 @@ describe("the classifier", () => {
     }
   });
 
-  test("closeCall is a number from 0 to 0.5", () => {
+  test("closeCall is still checked as a number from 0 to 0.5, and a valid one is ignored", () => {
     for (const closeCall of [0.6, 0.5000001, -0.01, "0.15", null, true]) {
       invalid(
         edited((r) => {
@@ -757,6 +762,12 @@ describe("the classifier", () => {
       );
     }
     invalid(HERA.replace('"classifier": {', '"classifier": { "closeCall": 1e999,'), "classifier.closeCall: must be a number from 0 to 0.5");
+    const given = valid(
+      edited((r) => {
+        r.classifier.closeCall = 0.2;
+      }),
+    );
+    assert.deepEqual([given.ignored, given.classifier !== undefined && "closeCall" in given.classifier], [["classifier.closeCall"], false], "demand.closeCall decides a close call");
   });
 
   test("the context caps are whole numbers within their ranges", () => {
@@ -789,6 +800,29 @@ describe("the classifier", () => {
         r.classifier = "openrouter/typesafe/jev-1.14";
       }),
       "classifier: must be an object",
+    );
+  });
+});
+
+describe("stickyIdleMinutes in version 2", () => {
+  test("is accepted, is not on the roster, and is recorded as ignored", () => {
+    const roster = valid(edited((r) => {
+      r.stickyIdleMinutes = 5;
+    }));
+    assert.equal("stickyIdleMinutes" in roster, false, "nothing holds a session by time");
+    assert.deepEqual(roster.ignored, ["stickyIdleMinutes"]);
+  });
+
+  test("a roster without it ignores nothing", () => {
+    assert.deepEqual(valid(HERA).ignored, []);
+  });
+
+  test("is still refused out of its range, with the same text", () => {
+    invalid(
+      edited((r) => {
+        r.stickyIdleMinutes = -1;
+      }),
+      "stickyIdleMinutes: must be a whole number of minutes from 0 to 1440",
     );
   });
 });
@@ -848,7 +882,7 @@ describe("version 2 keys", () => {
   });
 });
 
-test("version 2 reports its first defect in order: keys, exclude, roles, accounts, scopes, level accounts, the work alias, local, classifier, minutes", () => {
+test("version 2 reports its first defect in order: keys, exclude, roles, accounts, scopes, level accounts, the work alias, local, classifier, demand, switching, adaptiveReasoning, minutes", () => {
   const defects: Array<readonly [string, (r: Json) => void]> = [
     ["unexpected: unknown key", (r) => (r.unexpected = 1)],
     ['exclude[0]: "x" is neither a provider/id ref nor a provider/* pattern', (r) => (r.exclude = ["x"])],
@@ -859,6 +893,9 @@ test("version 2 reports its first defect in order: keys, exclude, roles, account
     ['roles[9].models[0]: "openai-codex-3/gpt-6-nova" is excluded by openai-codex-3/*', (r) => r.roles.push({ name: "spare", models: ["openai-codex-3/gpt-6-nova"] })],
     ['local.role: "nobody" is not a role', (r) => (r.local.role = "nobody")],
     ["classifier.timeoutMs: must be a whole number of milliseconds from 100 to 1000", (r) => (r.classifier.timeoutMs = 1001)],
+    ["demand.jevWeight: must be a number from 0 to 100", (r) => (r.demand = { jevWeight: -1 })],
+    ["switching.margin: must be a number from 0 to 0.9", (r) => (r.switching = { margin: 1 })],
+    ["adaptiveReasoning.enabled: must be true or false", (r) => (r.adaptiveReasoning = { enabled: "no" })],
     ["cooldownMinutes: must be a whole number of minutes from 1 to 1440", (r) => (r.cooldownMinutes = 0)],
   ];
   // Each defect is the one reported while every later defect is present too.
@@ -871,4 +908,99 @@ test("version 2 reports its first defect in order: keys, exclude, roles, account
     );
   }
   valid(HERA);
+});
+
+describe("the demand and switching sections", () => {
+  const FALLBACK = fixture("roster-hera-v2-fallback.json");
+  const SURVIVAL_PROBLEM = "switching.cacheSurvival: must be 1 to 32 pairs of [seconds, chance], the seconds rising and the chances from 1 to 0 never rising";
+  const CUTS_PROBLEM = "demand.cuts: must be three numbers that ascend, each above 0 and below 3";
+  const ALL_ZERO = Object.fromEntries(SIGNALS.map((signal) => [signal, 0]));
+
+  test("a roster without them gets the defaults", () => {
+    const roster = rosterFixtureV2("roster-hera-v2-fallback.json");
+    assert.deepEqual(roster.demand, DEFAULT_DEMAND, "demand defaults");
+    assert.deepEqual(roster.switching, DEFAULT_SWITCHING, "switching defaults");
+    assert.deepEqual(DEFAULT_DEMAND.weights, DESIGN_WEIGHTS, "the default weights are the design's");
+    assert.equal(DESIGN_WEIGHTS.requirement_low + DESIGN_WEIGHTS.cluster_signal, 0, "the two signals nothing computes carry no weight");
+  });
+
+  test("a section that gives one setting keeps the defaults for the rest", () => {
+    const switching = valid(edited((r) => (r.switching = { margin: 0.3 }), FALLBACK)).switching;
+    assert.equal(switching.margin, 0.3, "the margin given");
+    assert.equal(switching.horizonCap, 5, "the default horizon cap");
+    assert.deepEqual(switching.cacheSurvival, DEFAULT_SWITCHING.cacheSurvival, "the default table");
+    const demand = valid(edited((r) => (r.demand = { weights: { turn_type: 0.3 } }), FALLBACK)).demand;
+    assert.equal(demand.weights.turn_type, 0.3, "the weight given");
+    assert.equal(demand.weights.triage_verdict, 0.18, "another weight keeps its default");
+    assert.equal(demand.weights.requirement_low, 0, "a signal nothing computes keeps weight 0");
+    assert.equal(demand.jevWeight, 4, "the default Jev weight");
+    assert.deepEqual(demand.cuts, [0.75, 1.5, 2.25], "the default cuts");
+  });
+
+  test("refuses what the checker promises to refuse", () => {
+    for (const [section, expected] of [
+      [{ demand: { jevWeight: -1 } }, "demand.jevWeight: must be a number from 0 to 100"],
+      [{ demand: { jevWeight: 0, heuristicsWeight: 0 } }, "demand: jevWeight and heuristicsWeight cannot both be 0"],
+      [{ demand: { cuts: [0.75, 1.5, 2.25 + 0.75] } }, CUTS_PROBLEM],
+      [{ demand: { cuts: [0.75, 0.5, 2.25] } }, CUTS_PROBLEM],
+      [{ demand: { cuts: [0.75, 1.5] } }, CUTS_PROBLEM],
+      [{ demand: { deepSessionFloor: "top" } }, "demand.deepSessionFloor: must be one of low, medium, high, super"],
+      [{ demand: { weights: { turn_type: -0.1 } } }, "demand.weights.turn_type: must be a number from 0 to 100"],
+      [{ demand: { weights: { speed: 1 } } }, "demand.weights.speed: unknown key"],
+      [{ demand: { weights: ALL_ZERO } }, "demand.weights: cannot all be 0"],
+      [{ switching: { margin: 1 } }, "switching.margin: must be a number from 0 to 0.9"],
+      [{ switching: { horizonCap: 0 } }, "switching.horizonCap: must be a whole number of runs from 1 to 20"],
+      [{ switching: { cacheSurvival: [[300, 0.9], [60, 0.8]] } }, SURVIVAL_PROBLEM],
+      [{ switching: { cacheSurvival: [[60, 0.8], [300, 0.9]] } }, SURVIVAL_PROBLEM],
+      [{ switching: { cacheSurvival: [] } }, SURVIVAL_PROBLEM],
+    ] as const) {
+      const parsed = parseRoster(JSON.stringify({ ...JSON.parse(FALLBACK), ...section }));
+      assert.equal(parsed.ok, false, `${expected} is refused`);
+      assert.ok(!parsed.ok && parsed.error.startsWith(expected), `${expected}, got ${parsed.ok ? "ok" : parsed.error}`);
+    }
+  });
+
+  test("version 1 refuses both sections as unknown keys", () => {
+    for (const key of ["demand", "switching"]) {
+      const parsed = parseRoster(JSON.stringify({ ...JSON.parse(fixture("roster-hera.json")), [key]: {} }));
+      assert.ok(!parsed.ok && parsed.error.startsWith(`${key}: unknown key`), `${key} in version 1`);
+    }
+  });
+});
+
+describe("the adaptiveReasoning section: upstream's adaptive_reasoning (src/domain/types/schemas.ts:818-847)", () => {
+  const FALLBACK = fixture("roster-hera-v2-fallback.json");
+  const LEVELS = "must be one of minimal, low, medium, high, xhigh, max";
+
+  test("a roster without it gets upstream's defaults: on, with no floor and no ceiling", () => {
+    assert.deepEqual(rosterFixtureV2("roster-hera-v2-fallback.json").adaptiveReasoning, { enabled: true }, "schemas.ts:845-847");
+    assert.deepEqual(DEFAULT_EFFORT, { enabled: true });
+  });
+
+  test("gives the off switch, the floor and the ceiling as written, the rest as upstream's defaults", () => {
+    assert.deepEqual(valid(edited((r) => (r.adaptiveReasoning = { enabled: false }), FALLBACK)).adaptiveReasoning, { enabled: false }, "off");
+    assert.deepEqual(valid(edited((r) => (r.adaptiveReasoning = { minLevel: "low" }), FALLBACK)).adaptiveReasoning, { enabled: true, minLevel: "low" }, "a floor alone");
+    assert.deepEqual(valid(edited((r) => (r.adaptiveReasoning = { maxLevel: "high" }), FALLBACK)).adaptiveReasoning, { enabled: true, maxLevel: "high" }, "a ceiling alone");
+    assert.deepEqual(valid(edited((r) => (r.adaptiveReasoning = { minLevel: "medium", maxLevel: "medium" }), FALLBACK)).adaptiveReasoning, { enabled: true, minLevel: "medium", maxLevel: "medium" }, "a floor equal to the ceiling");
+    assert.deepEqual(valid(edited((r) => (r.adaptiveReasoning = {}), FALLBACK)).adaptiveReasoning, { enabled: true }, "an empty section");
+  });
+
+  test("refuses what upstream's schema refuses", () => {
+    for (const [section, expected] of [
+      [{ enabled: "no" }, "adaptiveReasoning.enabled: must be true or false"],
+      [{ minLevel: "off" }, `adaptiveReasoning.minLevel: ${LEVELS}`],
+      [{ maxLevel: "huge" }, `adaptiveReasoning.maxLevel: ${LEVELS}`],
+      [{ minLevel: "high", maxLevel: "low" }, "adaptiveReasoning.minLevel: must not exceed maxLevel"],
+      [{ floor: "low" }, "adaptiveReasoning.floor: unknown key"],
+    ] as const) {
+      const parsed = parseRoster(JSON.stringify({ ...JSON.parse(FALLBACK), adaptiveReasoning: section }));
+      assert.equal(parsed.ok, false, `${expected} is refused`);
+      assert.ok(!parsed.ok && parsed.error.startsWith(expected), `${expected}, got ${parsed.ok ? "ok" : parsed.error}`);
+    }
+  });
+
+  test("version 1 refuses it as an unknown key, and has upstream's defaults", () => {
+    const parsed = parseRoster(JSON.stringify({ ...JSON.parse(fixture("roster-hera.json")), adaptiveReasoning: {} }));
+    assert.ok(!parsed.ok && parsed.error.startsWith("adaptiveReasoning: unknown key"), "adaptiveReasoning in version 1");
+  });
 });

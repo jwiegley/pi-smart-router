@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test, { describe } from "node:test";
 
-import { baseUrlHost, canonicalHost, checkLocal, EMPTY_POLICY, isLocalHost, parsePolicy, policyFromRoster } from "../src/local.ts";
+import { baseUrlHost, canonicalHost, checkLocal, EMPTY_POLICY, isLocalHost, policyFromRoster } from "../src/local.ts";
 import type { LocalCheck, LocalPolicy } from "../src/local.ts";
 import { parseRoster } from "../src/roster.ts";
 import type { Roster } from "../src/roster.ts";
@@ -164,37 +164,5 @@ describe("the local check", () => {
 
   test("lets nothing through an empty policy", () => {
     for (const routing of [true, false]) refused(checkLocal(GLM, EMPTY_POLICY, routing), /is not a local provider/);
-  });
-});
-
-describe("a recorded policy", () => {
-  const recorded = { refs: ["omlx-hera/GLM-5.3-Flash-oQ4e-mtp"], providers: ["omlx-hera"], hosts: ["hera.lan"] };
-
-  test("reads back exactly", () => {
-    assert.deepEqual(parsePolicy(recorded), recorded);
-    assert.deepEqual(parsePolicy(JSON.parse(JSON.stringify(recorded))), recorded);
-    assert.deepEqual(parsePolicy({ refs: [], providers: [], hosts: [] }), EMPTY_POLICY);
-  });
-
-  test("is refused when it is anything but a policy within the built-in rule", () => {
-    const bad: unknown[] = [
-      null,
-      [],
-      "policy",
-      { refs: recorded.refs, providers: recorded.providers },
-      { ...recorded, extra: true },
-      JSON.parse('{"refs": [], "providers": [], "hosts": [], "__proto__": {}}'),
-      { ...recorded, refs: "omlx-hera/GLM" },
-      { ...recorded, hosts: [1] },
-      { ...recorded, refs: ["openrouter/z-ai/glm-5.3"] },
-      { ...recorded, refs: ["omlx-hera"] },
-      { ...recorded, refs: ["omlx-hera/"] },
-      { ...recorded, refs: ["omlx-hera/GLM*"] },
-      { ...recorded, providers: ["omlx hera"] },
-      { ...recorded, hosts: ["api.openai.com"] },
-      { ...recorded, hosts: ["Hera.lan"] },
-      { ...recorded, hosts: ["100.64.0.1"] },
-    ];
-    for (const value of bad) assert.equal(parsePolicy(value), undefined, JSON.stringify(value));
   });
 });

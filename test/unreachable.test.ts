@@ -13,7 +13,6 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 
 import { checkRoster } from "../src/check.ts";
 import { SCOPE_ENTRY } from "../src/constants.ts";
-import { policyFromRoster } from "../src/local.ts";
 import { holdFrom, Holds, isUnreachable } from "../src/resolve.ts";
 import { parseRoster, unreachableMinutesOf } from "../src/roster.ts";
 import { scopeEntry } from "../src/scope.ts";
@@ -360,18 +359,7 @@ describe("smart-router/local when a server cannot be reached", () => {
   });
 });
 
-describe("the pin and smart-router/auto when a server cannot be reached", () => {
-  test("a pinned session stays inside its policy: the local models in order, then the model it has, never a cloud model", async (t) => {
-    const { loaded } = await session(t, { setup: (s) => s.pin(policyFromRoster(ROSTER)) });
-    const { runtime } = loaded;
-    const signal = await prompt(loaded, "plan the migration #super");
-    assert.equal(routed(runtime.route("auto", request("user", { signal }))), GLM);
-    assert.equal(routed(runtime.route("auto", request("retry", { signal, failed: dead(loaded, GLM) }))), NYX_QWEN);
-    assert.equal(routed(runtime.route("auto", request("retry", { signal, failed: dead(loaded, NYX_QWEN, REFUSED, NOW + 1) }))), HERA_QWEN);
-    const last = runtime.route("auto", request("retry", { signal, failed: dead(loaded, HERA_QWEN, REFUSED, NOW + 2) }));
-    assert.deepEqual([routed(last), lastCode(loaded)], [HERA_QWEN, "retry:same"]);
-  });
-
+describe("smart-router/auto when a server cannot be reached", () => {
   test("on smart-router/auto the chain's local models give way to each other, and never lead back up the chain", async (t) => {
     const { loaded, cat } = await session(t);
     const { runtime } = loaded;

@@ -177,7 +177,7 @@ describe("jevAsk", () => {
   const history: BoundedHistory = { getLatestCustomEntry: () => undefined, getRecentActiveEntries: () => [] };
   const personal: ScopeState = { kind: "ok", scope: "personal", source: "default" };
   /** A message Jev is asked about: every condition holds. */
-  const asked: JevGate = { idle: true, selection: "auto", pinned: false, roster, history, scope: personal, resend: false };
+  const asked: JevGate = { idle: true, selection: "auto", roster, history, scope: personal, resend: false };
   /** A version 2 roster from a fixture, edited as JSON. */
   const edited = (name: string, edit: (json: Record<string, unknown>) => void): Roster => {
     const json = JSON.parse(fixture(name)) as Record<string, unknown>;
@@ -200,10 +200,6 @@ describe("jevAsk", () => {
   test("never asks off smart-router/auto: on smart-router/local, or on a physical model", () => {
     assert.equal(jevAsk({ ...asked, selection: "local" }), undefined);
     assert.equal(jevAsk({ ...asked, selection: undefined }), undefined);
-  });
-
-  test("never asks in a pinned session, pinned by its entry or by PI_SMART_ROUTER_LOCAL_ONLY", () => {
-    assert.equal(jevAsk({ ...asked, pinned: true }), undefined);
   });
 
   test("never asks without the bounded session readers", () => {
@@ -252,13 +248,12 @@ const goodAnswer = {
 };
 
 describe("interpret", () => {
-  test("takes the higher tier of a close call", () => {
-    const outcome = interpret(stopResult(goodAnswer), 0.15, "m", 12);
+  test("keeps Jev's choice and all four probabilities, and makes no level of them: the demand does", () => {
+    const outcome = interpret(stopResult(goodAnswer), "m", 12);
     assert.deepEqual(outcome, {
       kind: "answer",
       model: "m",
       choice: "medium",
-      tier: "high",
       probabilities: goodAnswer.probabilities,
       confidence: 0.8,
       ms: 12,
@@ -277,13 +272,13 @@ describe("interpret", () => {
       undefined,
     ];
     for (const answer of cases) {
-      assert.deepEqual(interpret(stopResult(answer), 0.15, "m", 1), { kind: "failure", model: "m", failure: "malformed", ms: 1 });
+      assert.deepEqual(interpret(stopResult(answer), "m", 1), { kind: "failure", model: "m", failure: "malformed", ms: 1 });
     }
   });
 
   test("names timeouts, other errors and aborts", () => {
     const failure = (r: ClassifierResult) => {
-      const outcome = interpret(r, 0.15, "m", 1);
+      const outcome = interpret(r, "m", 1);
       return outcome.kind === "failure" ? outcome.failure : outcome.kind;
     };
     assert.equal(failure(failedResult("error", "Request timed out after 1000ms")), "timeout");
@@ -294,7 +289,7 @@ describe("interpret", () => {
 });
 
 describe("askJev", () => {
-  const settings: JevSettings = { model: "openrouter/typesafe/jev-1.14", timeoutMs: 1000, closeCall: 0.15, context: caps };
+  const settings: JevSettings = { model: "openrouter/typesafe/jev-1.14", timeoutMs: 1000, context: caps };
   const model = { id: "typesafe/jev-1.14" } as unknown as ClassifierModel<ClassifierApi>;
   const context = buildContext("hi", [], descriptions, caps);
 

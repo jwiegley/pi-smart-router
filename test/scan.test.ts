@@ -54,6 +54,7 @@ function specifiers(text: string): string[] {
 test("the shipped files are index.ts and the TypeScript under src/", () => {
   assert.ok(shipped.length > 1);
   assert.ok(shipped.includes("src/triage/triage-engine.ts"));
+  assert.ok(shipped.includes("src/triage/tier-features.ts"));
 });
 
 test("no shipped file reads a session's whole history", () => {

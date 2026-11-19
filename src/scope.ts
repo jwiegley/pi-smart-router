@@ -1,5 +1,5 @@
 // A session's scope, personal or work: a property of the session, kept in `smart-router.scope`
-// custom entries. Like the pin (src/pin.ts), it is read on every route with the fork's bounded
+// custom entries. It is read on every route with the fork's bounded
 // getLatestCustomEntry over the whole session (scope "all"), so nothing mirrors it in memory. The
 // first rule that applies decides:
 //

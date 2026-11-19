@@ -1,10 +1,6 @@
 // What counts as local: the built-in local-host rule, the local policy taken from the roster's
-// `local` section, and the check a model must pass while a request is local-only.
-//
-// The policy is a snapshot. The pin records the policy in force when John pinned, so a later
-// roster edit cannot widen it, and a recorded policy is checked against the built-in rule again
-// when it is read back.
-import { isRecord, own } from "./files.ts";
+// `local` section, and the check a model must pass while a request is local-only, which only
+// smart-router/local's requests are.
 import type { Roster } from "./roster.ts";
 
 export interface LocalPolicy {
@@ -96,34 +92,6 @@ export function policyFromRoster(roster: Roster): LocalPolicy {
     refs: Object.freeze([...role.models]),
     providers: Object.freeze([...local.providers]),
     hosts: Object.freeze([...local.hosts]),
-  });
-}
-
-function strings(value: unknown): readonly string[] | undefined {
-  return Array.isArray(value) && value.every((item) => typeof item === "string") ? (value as string[]) : undefined;
-}
-
-/**
- * A policy recorded in a pin entry, or undefined when it is not exactly a policy whose refs use
- * its providers and whose hosts pass the built-in rule. The caller fails closed on undefined.
- */
-export function parsePolicy(value: unknown): LocalPolicy | undefined {
-  if (!isRecord(value) || Object.keys(value).sort().join(",") !== "hosts,providers,refs") return undefined;
-  const refs = strings(own(value, "refs"));
-  const providers = strings(own(value, "providers"));
-  const hosts = strings(own(value, "hosts"));
-  if (refs === undefined || providers === undefined || hosts === undefined) return undefined;
-  if (providers.some((provider) => !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(provider))) return undefined;
-  // A ref splits at its first "/", and provider ids have none, so this is "the ref's provider is
-  // one of the policy's providers".
-  const usesPolicyProvider = (ref: string): boolean =>
-    /^[^\s*\x00-\x1f\x7f]+$/.test(ref) && providers.some((provider) => ref.startsWith(`${provider}/`) && ref.length > provider.length + 1);
-  if (!refs.every(usesPolicyProvider)) return undefined;
-  if (!hosts.every(isLocalHost)) return undefined;
-  return Object.freeze({
-    refs: Object.freeze([...refs]),
-    providers: Object.freeze([...providers]),
-    hosts: Object.freeze([...hosts]),
   });
 }
 

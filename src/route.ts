@@ -10,9 +10,18 @@
 //   owner user          the run's plan (on auto, only under the roster version it was made for,
 //                       and under version 2 in its scope), else as a continuation (steering,
 //                       follow-ups)
-//   owner continuation  previous, else the run's pick, else the last responder: that model if it
-//                       resolves, else its role, else the role's fallback; with no base, the
-//                       default role (the local role when local-only) and its fallback
+//   owner run start     on smart-router/auto under a version 2 roster, a run's first request
+//                       without a plan (an extension's run, which has no prompt) takes the
+//                       highest level of the branch's last three prompts, else the level its
+//                       session last needed, raised to the deep-session floor in a deep session,
+//                       through the choice a prompt's run makes (run:need); a session that never
+//                       planned a run continues as below
+//   owner continuation  a stuck run (src/stuck.ts) on smart-router/auto under a version 2 roster
+//                       moves up, once per run, to the level directly above's own model when it
+//                       is available, never a chain's, unless its level is SUPER or its tag's
+//                       (escalate); else previous, else the run's pick, else the last responder:
+//                       that model if it resolves, else its role, else the role's fallback; with
+//                       no base, the default role (the local role when local-only) and its fallback
 //   owner retry         a usage-limit or auth failure moves to the role's next candidate, then its
 //                       fallback; a local model whose server could not be reached, before any
 //                       output, gives way to the candidate written after it that is not held,
@@ -25,29 +34,35 @@
 //
 // Every route ends with the same assertions, never returns router state, and keeps a short history
 // of model ids and codes, never prompt text.
-import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+//
+// Every route sends the thinking effort upstream's adaptive reasoning gives the request's turn type
+// (src/effort.ts; John, 2026-11-18: "Exactly as upstream"), or its role's fixed level: the same
+// effort the cost choice priced (effortFor).
 import type { ModelRoute, ModelRouteReason, ModelRouteRequest } from "@earendil-works/pi-coding-agent";
 
 import { isWorkCodex, subscriptionKind } from "./accounts.ts";
 import type { Classification } from "./classify.ts";
+import { isDeepSession } from "./demand.ts";
+import type { SessionDepth } from "./demand.ts";
 import { VIRTUAL_API } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
-import { eligibleRole, NO_LOCAL_SECTION, noScopeSection, pickInRole } from "./decide.ts";
-import type { Choice, Decision, LastResponder, LevelInput, Plan, PlanLevel } from "./decide.ts";
+import { chooseModel, effortFor, eligibleRole, escalationTarget, NO_LOCAL_SECTION, noScopeSection, pickInRole } from "./decide.ts";
+import type { Choice, CompactionFigures, CostFigures, CostTerms, Decision, LastResponder, LevelInput, Plan, PlanLevel } from "./decide.ts";
+import { turnTypeOf } from "./effort.ts";
+import type { SentEffort } from "./effort.ts";
 import { invariant, noBoundedHistory, unroutable } from "./errors.ts";
 import type { JevOutcome } from "./jev.ts";
+import { newLedger, notePlanned, notePrompt, recentNeed } from "./ledger.ts";
+import type { Ledger } from "./ledger.ts";
 import { checkLocal } from "./local.ts";
-import type { LocalPolicy } from "./local.ts";
+import type { NeedRun } from "./records.ts";
 import { clock, coolFrom, failureKind, holdFrom, refOf, resolveCandidate } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
-import { autoRoles, excludedBy, excludesFor, isWorkBound, levelRoles, roleOf, scopeSection } from "./roster.ts";
-
-/** A session's pin as routing sees it. */
-export interface Pin {
-  readonly on: boolean;
-  /** The policy local-only routing obeys while pinned. */
-  readonly policy: LocalPolicy;
-}
+import { autoRoles, excludedBy, excludesFor, isWorkBound, roleOf, scopeSection } from "./roster.ts";
+import type { ScopeSection } from "./roster.ts";
+import { stuck } from "./stuck.ts";
+import { higherTier, tierAbove } from "./tiers.ts";
+import type { Tier } from "./tiers.ts";
 
 /** The model the owner loop's last route picked in the current run. */
 export interface RunPick {
@@ -70,6 +85,11 @@ export interface HistoryEntry {
   readonly foreign: boolean;
   /** A version 2 run's level, on the request that consumed its plan. Version 1 entries have none. */
   readonly level?: PlanLevel;
+  /**
+   * The owner loop's request continued a run under way: the run's first request is an earlier
+   * entry. /smart-router status walks back over such entries to the run's first request.
+   */
+  readonly continuesRun?: true;
 }
 
 export const HISTORY_LIMIT = 50;
@@ -111,6 +131,12 @@ export interface LastInput {
   readonly level: LevelInput;
 }
 
+/**
+ * What decided a run, as status shows it: a planned run's level, or a run without a prompt's choice
+ * and the level whose model took it.
+ */
+export type RunTerms = { readonly kind: "plan"; readonly level: PlanLevel } | { readonly kind: "need"; readonly run: NeedRun; readonly tier: Tier };
+
 /** What a router instance keeps per session. */
 export interface SessionRecord {
   plan: Plan | undefined;
@@ -121,28 +147,64 @@ export interface SessionRecord {
    * this a retry went back and forth between two of them.
    */
   readonly limited: Set<string>;
+  /** What the session has measured: each model's cache, its runs' shape and its prompts' levels (src/ledger.ts). */
+  readonly ledger: Ledger;
   /**
-   * The level role the session's last planned version 2 run took. While the session is on a model
-   * of the scope's fallback chain, that model stands for this level: a run that starts without a
-   * prompt picks in it again, and the hold rules compare with it (PlanInput.held).
+   * The level the session's last planned version 2 run needed: a run that starts without a prompt
+   * takes it, through the same choice (run:need).
    */
-  levelRole: string | undefined;
+  need: Tier | undefined;
+  /**
+   * The level whose model the run under way took, from its plan, its run:need choice or its
+   * escalation; cleared when the agent settles.
+   */
+  runTier: Tier | undefined;
+  /** Whether the run under way's level came from its message's tag: such a run is never escalated. Cleared when the agent settles. */
+  runTagged: boolean;
+  /** Whether the run under way has moved up once for being stuck; cleared when the agent settles. */
+  escalated: boolean;
+  /** The run under way's run:need choice, for its footer, when its first request had no plan; cleared when the agent settles. */
+  needRun: NeedRun | undefined;
+  /**
+   * The terms of the latest run's choice, for /smart-router status: a planned run's level, or a run
+   * without a prompt's run:need choice and the level that took it; none for a run whose first
+   * request made neither. Kept when the agent settles, until the next run's first request.
+   */
+  runTerms: RunTerms | undefined;
   last: LastResponder | undefined;
   readonly history: HistoryEntry[];
   /** The planned version 2 run's level, until its record is written. */
   pendingLevel: PendingLevel | undefined;
   /** What an extension's resend of the same text (pi-idle-check) plans with again. */
   lastInput: LastInput | undefined;
+  /** The thinking effort the owner loop's latest request carried, and why: levels and names, never text. */
+  effort: SentEffort | undefined;
 }
 
 export function newRecord(): SessionRecord {
-  return { plan: undefined, runPick: undefined, limited: new Set(), levelRole: undefined, last: undefined, history: [], pendingLevel: undefined, lastInput: undefined };
+  return {
+    plan: undefined,
+    runPick: undefined,
+    limited: new Set(),
+    ledger: newLedger(),
+    need: undefined,
+    runTier: undefined,
+    runTagged: false,
+    escalated: false,
+    needRun: undefined,
+    runTerms: undefined,
+    last: undefined,
+    history: [],
+    pendingLevel: undefined,
+    lastInput: undefined,
+    effort: undefined,
+  };
 }
 
 /** The fork's bounded session readers. Pi 1.5.0's npm types lack them, so they are detected. */
 export interface BoundedHistory {
   getLatestCustomEntry(customType: string, options?: { scope?: "all" | "active" }): unknown;
-  getRecentActiveEntries(options?: { type?: string; customType?: string; messageRole?: string; limit?: number }): readonly unknown[];
+  getRecentActiveEntries(options?: { type?: string; customType?: string; messageRole?: string; limit?: number; stopBeforeId?: string }): readonly unknown[];
 }
 
 export function boundedHistory(sessionManager: unknown): BoundedHistory | undefined {
@@ -151,6 +213,26 @@ export function boundedHistory(sessionManager: unknown): BoundedHistory | undefi
   return typeof view.getLatestCustomEntry === "function" && typeof view.getRecentActiveEntries === "function"
     ? (view as BoundedHistory)
     : undefined;
+}
+
+/**
+ * The active context's entry count from Pi's history metrics, where this Pi has them: John's Pi
+ * gives `getHistoryMetrics().session_active_entries` without reading the history, counted from the
+ * last compaction, an extension's own entries included. Pi 1.5.0's npm types
+ * lack it, so it is detected; undefined when it is absent, throws, or gives anything but a finite
+ * count of zero or more.
+ */
+export function activeEntries(sessionManager: unknown): number | undefined {
+  if (typeof sessionManager !== "object" || sessionManager === null) return undefined;
+  try {
+    const { getHistoryMetrics } = sessionManager as { readonly getHistoryMetrics?: unknown };
+    if (typeof getHistoryMetrics !== "function") return undefined;
+    const metrics: unknown = getHistoryMetrics.call(sessionManager);
+    const count = typeof metrics === "object" && metrics !== null ? (metrics as { readonly session_active_entries?: unknown }).session_active_entries : undefined;
+    return typeof count === "number" && Number.isFinite(count) && count >= 0 ? count : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function requireBoundedHistory(id: VirtualId, sessionManager: unknown): BoundedHistory {
@@ -164,8 +246,13 @@ export interface RouteInput {
   readonly id: VirtualId;
   readonly request: ModelRouteRequest;
   readonly rc: ResolveContext;
-  readonly pin: Pin;
   readonly record: SessionRecord;
+  /** What the cost rule reads of the session: its ledger and the request's own thinking level. */
+  readonly figures: CostFigures | undefined;
+  /** Pi's compaction settings under the selection. */
+  readonly compaction: CompactionFigures;
+  /** How deep the session is: a run without a prompt takes at least the deep-session floor in a deep one. */
+  readonly depth: SessionDepth;
 }
 
 const previousRef = (request: ModelRouteRequest): string | undefined =>
@@ -209,12 +296,17 @@ function stick(rc: ResolveContext, previous: string | undefined, record: Session
 }
 
 /**
- * What an owner continuation without a previous model would pick now: the run's pick, else the
- * last responder, its role or that role's fallback, else the default role. No side effects; the
+ * What the owner loop's next request without a previous model would pick now, as routeOwned would
+ * pick it: with no run pick, on smart-router/auto under a version 2 roster, a session that has a
+ * need takes the run:need choice (chooseForNeed), priced with `figures` and `compaction` and floored
+ * by `depth`; else the run's pick, else the last responder, its role or that role's fallback, else
+ * the default role. No side effects: nothing of the record or its ledger changes. The
  * pi-cache-optimizer adapter reports it.
  */
-export function predict(rc: ResolveContext, record: SessionRecord): Decision {
-  return stick(rc, undefined, record);
+export function predict(rc: ResolveContext, record: SessionRecord, figures: CostFigures | undefined, compaction: CompactionFigures, depth: SessionDepth): Decision {
+  const section = levelSection(rc);
+  const chosen = section === undefined || record.runPick !== undefined ? undefined : chooseForNeed(rc, record, section, figures, compaction, depth);
+  return chosen?.decision ?? stick(rc, undefined, record);
 }
 
 function retry(rc: ResolveContext, request: ModelRouteRequest, record: SessionRecord): Decision {
@@ -261,7 +353,7 @@ export interface Failover {
  * What would take the request if it were sent again after such a failure, as a new run's plan
  * would pick it: from `start`, the role the new run starts in (its level's, or the local role),
  * the first candidate in the written order that is neither cooling nor held, then the scope's
- * chain; held to the selection, the scope and the pin as any pick is. The failed model is cooling
+ * chain; held to the selection and the scope as any pick is. The failed model is cooling
  * or held by now. Nothing when only the failed model itself, or nothing, is left. Pure.
  */
 export function afterFailure(rc: ResolveContext, failover: Failover, start: string | undefined): Choice | undefined {
@@ -284,7 +376,7 @@ export function planApplies(plan: Plan, id: VirtualId, rc: ResolveContext): bool
 
 /**
  * The run's plan, consumed: it is never used twice, and never where it does not apply. A plan that
- * no longer applies, because the selection, the pin, the scope or the roster's version changed after
+ * no longer applies, because the selection, the scope or the roster's version changed after
  * its message planned, takes its level with it: the run did not go to that level, so it records none.
  */
 function takePlan(record: SessionRecord, id: VirtualId, rc: ResolveContext): Plan | undefined {
@@ -296,21 +388,66 @@ function takePlan(record: SessionRecord, id: VirtualId, rc: ResolveContext): Pla
 }
 
 /**
- * The level a run that starts without a plan goes back to, if it does: on smart-router/auto under a
- * version 2 roster, outside the pin, when this is the run's first request, the model it would stay
- * on is one of the scope's fallback chain, and the session's last planned run took a level of this
- * scope. Such a run (a goal continuation, a loop's) has no prompt to plan it, and without this it
- * would stay on the chain model for as long as it kept starting runs, however long ago the level's
- * own model came back.
+ * The scope's section where levels route: smart-router/auto under a version 2 roster, in a scope it
+ * serves. Undefined on smart-router/local, under a version 1 roster, and in a scope without one.
  */
-function levelToReturnTo(rc: ResolveContext, request: ModelRouteRequest, record: SessionRecord): string | undefined {
-  const { levelRole } = record;
-  if (rc.roster.version !== 2 || rc.virtualId !== "auto" || rc.localOnly || record.runPick !== undefined || levelRole === undefined) return undefined;
-  const section = scopeSection(rc.roster, rc.scope);
-  const base = previousRef(request) ?? record.last?.ref;
-  const role = base === undefined ? undefined : roleOf(rc.roster, base)?.name;
-  if (section?.fallback === undefined || role === undefined || !section.fallback.includes(role)) return undefined;
-  return levelRoles(section).includes(levelRole) ? levelRole : undefined;
+function levelSection(rc: ResolveContext): ScopeSection | undefined {
+  if (rc.virtualId !== "auto" || rc.localOnly || rc.roster.version !== 2) return undefined;
+  return scopeSection(rc.roster, rc.scope);
+}
+
+/** A decision that puts the run at a level: the level whose model takes it, and what the cost rule decided. */
+interface Leveled {
+  readonly decision: Decision;
+  readonly tier: Tier;
+  readonly cost?: CostTerms;
+}
+
+/**
+ * A run:need choice: its level, the need it was chosen for, how many of the branch's last prompts
+ * that need came from (none: the session's last need), and whether the deep-session floor raised it.
+ */
+interface NeedChoice extends Leveled {
+  readonly need: Tier;
+  readonly prompts: number | undefined;
+  readonly floor: boolean;
+}
+
+/**
+ * A run that starts without a prompt (an extension's own, such as a goal continuation or a loop's)
+ * has no plan: it takes the highest level among the branch's last three planned prompts
+ * (recentNeed; John, 2026-11-18), or with none known on the branch the level its session last
+ * needed, raised to the roster's deep-session floor when the session is deep (isDeepSession: the
+ * risky floor needs prompt text, so it does not apply), and goes through the choice a prompt's run
+ * makes, priced with the session's figures and nothing for a prompt. The session's need itself is
+ * not changed. Undefined when the session never planned a run: it continues as before.
+ */
+function chooseForNeed(rc: ResolveContext, record: SessionRecord, section: ScopeSection, figures: CostFigures | undefined, compaction: CompactionFigures, depth: SessionDepth): NeedChoice | undefined {
+  if (record.need === undefined) return undefined;
+  const recent = recentNeed(record.ledger);
+  const base = recent?.need ?? record.need;
+  const lowest = rc.roster.version === 2 && isDeepSession(depth) ? rc.roster.demand.deepSessionFloor : base;
+  const need = higherTier(base, lowest);
+  const { tier, decision, cost } = chooseModel({ rc, section, need, code: "run:need", last: record.last, promptTokens: 0, compaction, figures, priced: true });
+  return { tier, decision, need, prompts: recent?.prompts, floor: need !== base, ...(cost === undefined ? {} : { cost }) };
+}
+
+/**
+ * A stuck run's move up: on a continuation of a run whose level is below SUPER and not its tag's,
+ * that has not moved up yet, when its last three tool calls failed (src/stuck.ts), the level
+ * directly above the run's, to that level's own model, unpriced (escalationTarget). Never a
+ * fallback chain, and never a level further up. When that model is not available the run stays,
+ * and a later request of the run can still move. Only a model other than the run's is a move; it
+ * carries the code `escalate`.
+ */
+function escalation(input: RouteInput, section: ScopeSection): Leveled | undefined {
+  const { request, rc, record } = input;
+  const { runPick, runTier } = record;
+  if (request.reason !== "continuation" || runPick?.id !== rc.virtualId || runTier === undefined || record.escalated || record.runTagged) return undefined;
+  if (tierAbove(runTier) === undefined || !stuck(request.messages)) return undefined;
+  const target = escalationTarget({ rc, section, from: runTier, code: "escalate", last: record.last, compaction: input.compaction });
+  if (target === undefined || target.decision.choice.ref === runPick.ref) return undefined;
+  return { tier: target.tier, decision: { ok: true, choice: { ...target.decision.choice, code: "escalate" } } };
 }
 
 /** The planned model if it still resolves, else the planned role, then its fallback. */
@@ -327,8 +464,8 @@ function fromPlan(rc: ResolveContext, plan: Plan): Decision {
  * How a pick's provider breaks the session's scope, if it does. A personal session never sends to a
  * work-bound account. A work session sends only to the work-bound Codex account, which only a
  * version 2 roster binds: under a version 1 roster, which serves no work scope, it sends nothing.
- * In both, a local-only request keeps the pin's rules, checked after this one: a local model, which
- * has no account. prepare() already refuses smart-router/auto for a scope the roster does not
+ * In both, a local-only request, smart-router/local's, keeps the local policy, checked after this
+ * one: a local model, which has no account. prepare() already refuses smart-router/auto for a scope the roster does not
  * serve; this check holds even if that refusal is bypassed.
  */
 function outsideScope(rc: ResolveContext, provider: string): string | undefined {
@@ -341,11 +478,11 @@ function outsideScope(rc: ResolveContext, provider: string): string | undefined 
 }
 
 /**
- * Whether the request's session is a work session that is not pinned: work scope, or a scope that
- * cannot be read, outside the pin. A refusal then names only the models that keep the conversation
- * on the work account (src/errors.ts).
+ * Whether the request's session is a work session: work scope, or a scope that cannot be read,
+ * which resolves in work scope. A refusal then names only the models that keep the conversation on
+ * the work account (src/errors.ts).
  */
-const workUnpinned = (rc: ResolveContext): boolean => rc.pinned !== true && rc.scope === "work";
+const workSession = (rc: ResolveContext): boolean => rc.scope === "work";
 
 /** The router's own invariants, checked on every pick before it is returned. */
 export function assertSafe(id: VirtualId, rc: ResolveContext, choice: Choice): void {
@@ -369,13 +506,7 @@ export function assertSafe(id: VirtualId, rc: ResolveContext, choice: Choice): v
                   : rc.localOnly && !checkLocal(choice.model, rc.policy, true).ok
                     ? "is outside the local policy"
                     : undefined;
-  if (problem !== undefined) throw invariant(id, choice.ref, problem, workUnpinned(rc));
-}
-
-/** The level a role sends: the selected one, or the role's fixed level. Pi clamps it to the model. */
-export function levelFor(rc: ResolveContext, roleName: string, selected: ModelThinkingLevel): ModelThinkingLevel {
-  const role = rc.roster.roles.find((entry) => entry.name === roleName);
-  return role === undefined || role.thinking === "selected" ? selected : role.thinking;
+  if (problem !== undefined) throw invariant(id, choice.ref, problem, workSession(rc));
 }
 
 /** The first cooling account that a refusal's candidates wait for, and the time it stops, as HH:MM. */
@@ -391,9 +522,8 @@ function settle(input: RouteInput, decision: Decision): Choice {
   if (!decision.ok) {
     throw unroutable(input.id, decision, {
       localOnly: input.rc.localOnly,
-      pinned: input.pin.on,
       stepUps: input.rc.roster.version === 2,
-      work: workUnpinned(input.rc),
+      work: workSession(input.rc),
       cooling: coolingAccount(input.rc, decision),
     });
   }
@@ -409,17 +539,53 @@ function remember(record: SessionRecord, entry: HistoryEntry): void {
 /** A request of the owner session's own agent loop. */
 export function routeOwned(input: RouteInput): ModelRoute {
   const { id, request, rc, record } = input;
+  const starts = record.runPick === undefined;
   let decision: Decision;
   let plan: Plan | undefined;
   if (request.reason === "user") plan = takePlan(record, id, rc);
-  const back = plan === undefined && request.reason !== "retry" ? levelToReturnTo(rc, request, record) : undefined;
+  const section = levelSection(rc);
+  const unplanned = section === undefined || plan !== undefined || request.reason === "retry" ? undefined : starts ? chooseForNeed(rc, record, section, input.figures, input.compaction, input.depth) : undefined;
+  const escalated = section === undefined || plan !== undefined || unplanned !== undefined ? undefined : escalation(input, section);
   if (plan !== undefined) decision = fromPlan(rc, plan);
   else if (request.reason === "retry") decision = retry(rc, request, record);
-  else if (back !== undefined) decision = pickInRole(rc, back, { fallback: true, code: "return:level" });
+  else if (unplanned !== undefined) decision = unplanned.decision;
+  else if (escalated !== undefined) decision = escalated.decision;
   else decision = stick(rc, previousRef(request), record);
   const choice = settle(input, decision);
-  // The level a planned run took is the session's until the next planned run.
-  if (plan?.level !== undefined && plan.role !== undefined) record.levelRole = plan.role;
+  // A planned run's prompt: its need and the level whose model took it go in the ledger, and the
+  // need is the session's until the next planned run. A run without a prompt counts as a prompt
+  // that needed its run:need level (the highest of the last prompts, else the session's), raised
+  // to the deep-session floor where it was, adds nothing to the last prompts, and leaves the
+  // session's need as it was.
+  if (plan?.level !== undefined) {
+    const { need, tier, source } = plan.level;
+    notePrompt(record.ledger, need, tier);
+    notePlanned(record.ledger, need);
+    record.need = need;
+    record.runTier = tier;
+    record.runTagged = source === "tag";
+    record.needRun = undefined;
+    record.runTerms = { kind: "plan", level: plan.level };
+  } else if (unplanned !== undefined) {
+    notePrompt(record.ledger, unplanned.need, unplanned.tier);
+    record.runTier = unplanned.tier;
+    record.runTagged = false;
+    record.needRun = {
+      scope: rc.scope,
+      need: unplanned.need,
+      ...(unplanned.prompts === undefined ? {} : { prompts: unplanned.prompts }),
+      ...(unplanned.floor ? { floor: true as const } : {}),
+      ...(unplanned.cost === undefined ? {} : { cost: unplanned.cost }),
+    };
+    record.runTerms = { kind: "need", run: record.needRun, tier: unplanned.tier };
+  } else if (starts) {
+    // A run whose first request made no choice of level shows no older run's terms.
+    record.runTerms = undefined;
+  }
+  if (escalated !== undefined) {
+    record.runTier = escalated.tier;
+    record.escalated = true;
+  }
   record.runPick = { id, ref: choice.ref, role: choice.role };
   remember(record, {
     at: rc.now,
@@ -432,8 +598,12 @@ export function routeOwned(input: RouteInput): ModelRoute {
     code: choice.code,
     foreign: false,
     ...(plan?.level === undefined ? {} : { level: plan.level }),
+    ...(starts ? {} : { continuesRun: true as const }),
   });
-  return { model: choice.model, thinkingLevel: levelFor(rc, choice.role, request.thinkingLevel) };
+  // A run that moved up for being stuck is upstream's loop escalation from that request on.
+  const effort = effortFor(rc, choice.role, choice.model, request.thinkingLevel, turnTypeOf(request.messages), record.escalated);
+  record.effort = effort;
+  return { model: choice.model, thinkingLevel: effort.level };
 }
 
 /** A `direct` request, or a loop request of a session without its own router instance. */
@@ -469,5 +639,6 @@ export function routeOther(input: RouteInput): ModelRoute {
     code: choice.code,
     foreign: !direct,
   });
-  return { model: choice.model, thinkingLevel: levelFor(rc, choice.role, request.thinkingLevel) };
+  // Such a request belongs to no run of the owner's loop, so it is never an escalated run's.
+  return { model: choice.model, thinkingLevel: effortFor(rc, choice.role, choice.model, request.thinkingLevel, turnTypeOf(request.messages), false).level };
 }

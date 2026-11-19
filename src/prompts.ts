@@ -12,7 +12,7 @@
 // John edits guidance, not the protocol. Whatever these texts say, the request has one question
 // with exactly the four levels as its choices (src/jev.ts), an answer is taken only when it names
 // one of the four and gives a probability for each, and the level it names is routed inside the
-// session's scope, under its account rules and under the pin (src/decide.ts, src/route.ts). No
+// session's scope and under its account rules (src/decide.ts, src/route.ts). No
 // text here is read by anything but Jev.
 //
 // Whatever the source, the text goes through redaction before it is sent (src/jev.ts), as the
@@ -21,8 +21,8 @@
 // A prompt file is read with the roster's own safe reader and refreshed with the roster. In it,
 // HTML comments (<!-- ... -->) are John's notes and are not sent. A file that is missing, unsafe,
 // empty, too long, or still holds a placeholder is an error: Jev is then not asked in the scopes
-// that need it, the keywords decide their levels, and status and the checker say why. Nothing
-// falls back to an older text.
+// that need it, the heuristics alone weigh their prompts' demand, and status and the checker say
+// why. Nothing falls back to an older text.
 import { DESCRIBE_MAX_CHARS, INSTRUCTIONS_MAX_CHARS, PROMPT_DIR, PROMPT_FILE_MAX_BYTES } from "./constants.ts";
 import { agentFile, readUserFile } from "./files.ts";
 import type { AgentFile, FileSystem, Parsed } from "./files.ts";
@@ -224,5 +224,5 @@ export function promptProblem(uses: readonly PromptUse[]): string | undefined {
   if (first === undefined) return undefined;
   const everywhere = broken.some((use) => use.scope === undefined);
   const scopes = everywhere ? "any scope" : `${[...new Set(broken.map((use) => use.scope))].join(" and ")} scope`;
-  return `${first.error ?? ""}. Jev is not asked in ${scopes} until it is fixed, and the keywords decide every level there.`;
+  return `${first.error ?? ""}. Jev is not asked in ${scopes} until it is fixed, and the heuristics alone weigh every prompt's demand there.`;
 }

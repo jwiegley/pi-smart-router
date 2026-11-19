@@ -5,14 +5,16 @@ import test, { afterEach, beforeEach, describe } from "node:test";
 import { isDeepStrictEqual } from "node:util";
 
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, Message, Model } from "@earendil-works/pi-ai";
 import type { ModelRouteReason } from "@earendil-works/pi-coding-agent";
 
 import { planUserTurn } from "../src/decide.ts";
-import type { Choice } from "../src/decide.ts";
-import { EMPTY_POLICY, policyFromRoster } from "../src/local.ts";
+import type { Choice, CompactionFigures } from "../src/decide.ts";
+import { demandOf } from "../src/demand.ts";
+import type { PromptFacts } from "../src/demand.ts";
+import { noBoundedHistory } from "../src/errors.ts";
 import type { ResolveContext } from "../src/resolve.ts";
-import { assertSafe, newRecord, predict, routeOther, routeOwned } from "../src/route.ts";
+import { activeEntries, assertSafe, newRecord, predict, routeOther, routeOwned } from "../src/route.ts";
 import type { RouteInput, SessionRecord } from "../src/route.ts";
 import {
   ASTRA,
@@ -42,6 +44,10 @@ const SID = "session-1";
 const PLANNING = "plan the migration to the new store";
 const TRIVIAL = "Format this file";
 const HERA = rosterFixture("roster-hera.json");
+/** The compaction settings a plan made here is given; no plan here has a conversation to fit. */
+const COMPACTION: CompactionFigures = { enabled: true, reserve: 0, keepRecent: 20_000 };
+/** A new session's facts, as the router reads them: no usage, no messages, no entry count. */
+const FRESH: PromptFacts = { contextTokens: undefined, roles: [], entries: undefined };
 
 /** A Codex model, as Hera's catalog lists them. */
 const codex = (ref: string): Model<Api> => model(ref, { api: "openai-codex-responses", baseUrl: CHATGPT, contextWindow: 272_000, maxTokens: 128_000 });
@@ -265,14 +271,13 @@ describe("direct and foreign requests", () => {
     assert.deepEqual(record(loaded)?.runPick, pick, "the run's pick, which the adapter reports, is unchanged");
   });
 
-  test("under the pin, direct goes local, and auto never leaves the policy", async (t) => {
-    const loaded = await start({ dir: agentDir(t), select: "local", setup: (session) => session.pin(policyFromRoster(HERA)) });
+  test("on smart-router/local, direct and continuation requests go to the local role, whatever answered before", async (t) => {
+    const loaded = await start({ dir: agentDir(t), select: "local" });
     await loaded.host.emit("message_end", { message: assistant(KIMI) });
-    assert.equal(routed(loaded.runtime.route("local", request("direct", { previous: previous(loaded.runtime, KIMI) }))), GLM);
+    assert.equal(routed(loaded.runtime.route("local", request("direct", { previous: previous(loaded.runtime, KIMI) }))), GLM, "direct goes local");
     assert.equal(lastHistory(loaded)?.code, "direct:default");
     const signal = loaded.session.startRun();
-    assert.equal(routed(loaded.runtime.route("local", request("continuation", { signal, previous: previous(loaded.runtime, SOL) }))), GLM);
-    refuses(() => loaded.runtime.route("auto", request("direct", { previous: previous(loaded.runtime, KIMI) })), /^smart-router\/auto: no local model can take this request while this session is pinned/);
+    assert.equal(routed(loaded.runtime.route("local", request("continuation", { signal, previous: previous(loaded.runtime, SOL) }))), GLM, "a continuation goes local");
   });
 });
 
@@ -334,6 +339,24 @@ describe("refusals", () => {
     assert.equal(loaded.session.wholeHistoryReads, 0);
   });
 
+  test("a Pi without bounded history says at session start that both models refuse, and a model picked by hand is still sent", async (t) => {
+    const loaded = load({ dir: agentDir(t), bounded: false });
+    loaded.session.select(KIMI);
+    await loaded.host.emit("session_start", { reason: "startup" });
+    assert.equal(
+      loaded.session.notices[0]?.message,
+      "pi-smart-router: this Pi has no bounded session history (getLatestCustomEntry and getRecentActiveEntries), so smart-router/auto and smart-router/local refuse every request. Run jwiegley/pi 1.5.0 or later.",
+      "the notice says both models refuse, and nothing of a pin",
+    );
+    // The router's own models refuse there; a model picked by hand is left selected and sent as it is.
+    assert.deepEqual([`${loaded.session.model?.provider}/${loaded.session.model?.id}`, loaded.host.selections.length], [KIMI, 0], "the selection is left as it is");
+    assert.deepEqual(await loaded.host.emit("input", { text: "fix the build", source: "interactive" }), [undefined], "its prompt is sent");
+    for (const id of ["auto", "local"] as const) {
+      assert.throws(() => loaded.runtime.route(id, request("direct")), { message: noBoundedHistory(id).message }, id);
+    }
+    assert.equal(loaded.session.wholeHistoryReads, 0, "no whole-history read");
+  });
+
   test("Hera's work alias is refused even when a roster names it", async (t) => {
     const roster = JSON.parse(fixture("roster-hera.json"));
     roster.roles.find((role: { name: string }) => role.name === "engineer").models = ["openai-codex-3/gpt-6.1-sol"];
@@ -375,17 +398,23 @@ describe("session state", () => {
     assert.equal(record(loaded)?.last?.ref, KIMI);
     assert.equal(record(loaded)?.last?.at, NOW - 60_000);
     const SEED = { type: "message", messageRole: "assistant", limit: 16 };
+    // An earlier version's pin entry is never looked for (John, 2026-11-18: no trace of the pin).
     const PIN = { customType: "smart-router.pin", scope: "all" };
     const SCOPE = { customType: "smart-router.scope", scope: "all" };
     // The level a resumed session held: its latest level record, one bounded read of the branch.
     const LEVEL = { customType: "smart-router.level", scope: "active" };
+    // The branch's latest compaction, one bounded read: an answer older than it seeds nothing. It
+    // stops before the oldest entry the seed read returned (e0, KIMI's), so it never walks a branch
+    // that was never compacted to its root.
+    const COMPACTION = { type: "compaction", limit: 1, stopBeforeId: "e0" };
     const reads = loaded.session.boundedReads;
     assert.equal(reads.filter((read) => isDeepStrictEqual(read, SEED)).length, 1, "one read of the branch: the seed's");
     assert.equal(reads.filter((read) => isDeepStrictEqual(read, LEVEL)).length, 1, "and one of its latest level record");
-    assert.ok(reads.some((read) => isDeepStrictEqual(read, PIN)), "session_start reads the pin");
+    assert.equal(reads.filter((read) => isDeepStrictEqual(read, COMPACTION)).length, 1, "and one of its latest compaction entry: an answer older than the branch's latest compaction seeds nothing");
+    assert.equal(reads.filter((read) => isDeepStrictEqual(read, PIN)).length, 0, "session_start on smart-router/auto does not look for an old pin entry: John's ruling of 2026-11-18, no trace of the pin");
     assert.ok(reads.some((read) => isDeepStrictEqual(read, SCOPE)), "and the scope");
     for (const read of reads) {
-      assert.ok([SEED, LEVEL, PIN, SCOPE].some((allowed) => isDeepStrictEqual(read, allowed)), `${JSON.stringify(read)}: every other read is the pin's or the scope's, over the whole session`);
+      assert.ok([SEED, LEVEL, COMPACTION, SCOPE].some((allowed) => isDeepStrictEqual(read, allowed)), `${JSON.stringify(read)}: every other read is the scope's, over the whole session`);
     }
     assert.equal(loaded.session.wholeHistoryReads, 0);
   });
@@ -426,24 +455,6 @@ describe("session state", () => {
     assert.equal(record(loaded)?.plan, undefined);
   });
 
-  test("the idle window runs from when the last response arrived, and the fit guard reads Pi's reserve", async (t) => {
-    let clock = NOW;
-    const loaded = await start({ dir: agentDir(t), now: () => clock });
-    // DeepSeek's window is 128,000 tokens; the conversation holds 120,000.
-    await loaded.host.emit("message_end", { message: assistant(ASTRA, { timestamp: NOW - 3_600_000, usage: { ...assistant(ASTRA).usage, totalTokens: 120_000 } }) });
-    await loaded.host.emit("input", { text: TRIVIAL, source: "interactive" });
-    assert.equal(record(loaded)?.plan?.code, "hold:sticky", "inside the idle window, although the request started an hour ago");
-    clock = NOW + 6 * 60_000;
-    await loaded.host.emit("input", { text: TRIVIAL, source: "interactive" });
-    assert.equal(record(loaded)?.plan?.code, "hold:fit", "Pi's default reserve of 16,384 leaves 111,616");
-    loaded.host.settings = { compaction: { reserveTokens: 64_000, modelOverrides: { "smart-router/auto": { reserveTokens: 4_096 } } } };
-    await loaded.host.emit("input", { text: TRIVIAL, source: "interactive" });
-    assert.equal(record(loaded)?.plan?.code, "reopen:idle", "the override for smart-router/auto leaves 123,904");
-    loaded.host.settings = { compaction: { reserveTokens: 64_000 } };
-    await loaded.host.emit("input", { text: TRIVIAL, source: "interactive" });
-    assert.equal(record(loaded)?.plan?.code, "hold:fit");
-  });
-
   test("thinking levels: a role's fixed level, else the selected level", async (t) => {
     const loaded = await start({ dir: agentDir(t), select: "local" });
     const signal = loaded.session.startRun();
@@ -475,14 +486,12 @@ describe("the final assertions", () => {
     refuses(() => assertSafe("local", heraContext({ virtualId: "local" }), safe), /which is not in the local role; this is a bug in pi-smart-router/);
   });
 
-  test("the way out offers a work Codex model to a work session that is not pinned, and any model under the pin", () => {
+  test("the way out offers a work Codex model to a work session", () => {
     const work = heraContext({ scope: "work" });
     const deepseek = work.catalog.find("openrouter", "deepseek/deepseek-v4.1-flash-1017");
     assert.ok(deepseek !== undefined);
     const worker = { role: "worker", ref: DEEPSEEK, model: deepseek, code: "t" };
     refuses(() => assertSafe("auto", work, worker), /this is a bug in pi-smart-router\. Nothing was sent\. Choose a work Codex model with \/model\.$/);
-    const pinned = heraContext({ scope: "work", localOnly: true, pinned: true });
-    refuses(() => assertSafe("auto", pinned, worker), /which is not in the local role; this is a bug in pi-smart-router\. Nothing was sent\. Choose a model with \/model\.$/);
   });
 
   test("a version 1 roster is unchanged in personal scope, and in work scope passes only a local-only pick", () => {
@@ -502,7 +511,7 @@ describe("the final assertions", () => {
     );
     refuses(() => assertSafe("auto", work, engineer), /openai-codex-2\/gpt-6\.1-sol, which is outside this session's work scope, which a version 1 roster does not serve;/);
     refuses(() => assertSafe("auto", work, alias), /openai-codex-3\/gpt-6\.1-sol, which is excluded/);
-    // A local-only request keeps the pin's rules: a local model, which carries no account.
+    // A local-only request, smart-router/local's, keeps the local policy: a local model, which carries no account.
     const local = heraContext({ scope: "work", virtualId: "local" });
     assertSafe("local", local, { role: "local", ref: GLM, model: model(GLM, { baseUrl: HERA_LAN }), code: "t" });
     refuses(() => assertSafe("local", local, engineer), /openai-codex-2\/gpt-6\.1-sol, which is outside this session's work scope/);
@@ -516,14 +525,16 @@ describe("a version 1 roster in work scope, past prepare()'s own refusal", () =>
     id: rc.virtualId,
     request: { ...request(reason), model: VIRTUAL },
     rc,
-    pin: { on: false, policy: EMPTY_POLICY },
     record,
+    figures: undefined,
+    compaction: COMPACTION,
+    depth: FRESH,
   });
 
   test("smart-router/auto refuses on every path that can reach a model, and nothing is sent or recorded", () => {
     const rc = heraContext({ scope: "work" });
     const planned = newRecord();
-    planned.plan = planUserTurn({ rc, text: PLANNING, last: undefined, now: NOW, reserve: 0 });
+    planned.plan = planUserTurn({ rc, text: PLANNING, last: undefined, now: NOW, compaction: COMPACTION, facts: FRESH });
     assert.ok(planned.plan.decision.ok && planned.plan.decision.choice.ref === ASTRA, "the prompt planned astra");
     const paths: Array<[string, SessionRecord, (record: SessionRecord) => unknown]> = [
       ["the owned run", planned, (record) => routeOwned(input(rc, "user", record))],
@@ -583,7 +594,7 @@ describe("a version 2 session's scope in the final assertions", () => {
     refuses(() => assertSafe("auto", workOnly, pick("work-high", NATIVE_SOL)), /openai-codex\/gpt-6\.1-sol, which is on a work-bound account, and this session is in personal scope;/);
   });
 
-  test("a local-only request in work scope keeps the pin's rules: the local role, and never an account", () => {
+  test("a local-only request in work scope keeps smart-router/local's rules: the local role, and never an account", () => {
     const local = heraContext({ roster: HERA_V2, scope: "work", virtualId: "local" });
     assertSafe("local", local, { role: "local", ref: GLM, model: model(GLM, { baseUrl: HERA_LAN }), code: "t" });
     refuses(() => assertSafe("local", local, pick("high", SOL)), /openai-codex-2\/gpt-6\.1-sol, which is not on a work-bound Codex account, and this session is in work scope;/);
@@ -593,10 +604,10 @@ describe("a version 2 session's scope in the final assertions", () => {
 
 describe("a version 2 roster's default role", () => {
   test("is the personal scope's medium level, and without a personal scope there is none", () => {
-    const hera = predict(heraContext({ roster: rosterFixtureV2("roster-hera-v2.json") }), newRecord());
+    const hera = predict(heraContext({ roster: rosterFixtureV2("roster-hera-v2.json") }), newRecord(), undefined, COMPACTION, FRESH);
     assert.ok(hera.ok, JSON.stringify(hera));
     assert.deepEqual([hera.choice.role, hera.choice.ref, hera.choice.code], ["medium", DEEPSEEK, "stick:default"], "terra is not in Hera's test catalog");
-    assert.deepEqual(predict(heraContext({ roster: rosterFixtureV2("roster-work.json") }), newRecord()), {
+    assert.deepEqual(predict(heraContext({ roster: rosterFixtureV2("roster-work.json") }), newRecord(), undefined, COMPACTION, FRESH), {
       ok: false,
       attempts: [],
       problem: "the roster has no personal scope",
@@ -605,15 +616,15 @@ describe("a version 2 roster's default role", () => {
 
   test("is the session scope's medium level, and without that scope there is none", () => {
     const catalog = new FakeCatalog([...heraModels(), codex("openai-codex-3/gpt-6.1-terra"), codex("openai-codex/gpt-6.1-terra")]);
-    const hera = predict(heraContext({ roster: rosterFixtureV2("roster-hera-v2.json"), scope: "work", catalog }), newRecord());
+    const hera = predict(heraContext({ roster: rosterFixtureV2("roster-hera-v2.json"), scope: "work", catalog }), newRecord(), undefined, COMPACTION, FRESH);
     assert.ok(hera.ok, JSON.stringify(hera));
     assert.deepEqual([hera.choice.role, hera.choice.ref, hera.choice.code], ["work-medium", "openai-codex-3/gpt-6.1-terra", "stick:default"]);
-    const work = predict(heraContext({ roster: rosterFixtureV2("roster-work.json"), scope: "work", catalog }), newRecord());
+    const work = predict(heraContext({ roster: rosterFixtureV2("roster-work.json"), scope: "work", catalog }), newRecord(), undefined, COMPACTION, FRESH);
     assert.ok(work.ok, JSON.stringify(work));
     assert.deepEqual([work.choice.role, work.choice.ref], ["work-medium", "openai-codex/gpt-6.1-terra"]);
     const v2 = rosterFixtureV2("roster-hera-v2.json");
     const { work: _work, ...personalScope } = v2.scopes;
-    assert.deepEqual(predict(heraContext({ roster: { ...v2, scopes: personalScope }, scope: "work", catalog }), newRecord()), {
+    assert.deepEqual(predict(heraContext({ roster: { ...v2, scopes: personalScope }, scope: "work", catalog }), newRecord(), undefined, COMPACTION, FRESH), {
       ok: false,
       attempts: [],
       problem: "the roster has no work scope",
@@ -623,10 +634,10 @@ describe("a version 2 roster's default role", () => {
   test("a continuation holds the last responder only when the session's scope reaches it", () => {
     const hera = rosterFixtureV2("roster-hera-v2.json");
     const record = { ...newRecord(), last: { ref: WORK_SOL, at: NOW } };
-    const work = predict(heraContext({ roster: hera, scope: "work" }), record);
+    const work = predict(heraContext({ roster: hera, scope: "work" }), record, undefined, COMPACTION, FRESH);
     assert.ok(work.ok, JSON.stringify(work));
     assert.deepEqual([work.choice.role, work.choice.ref, work.choice.code], ["work-high", WORK_SOL, "stick:last"]);
-    const personal = predict(heraContext({ roster: hera, scope: "personal" }), record);
+    const personal = predict(heraContext({ roster: hera, scope: "personal" }), record, undefined, COMPACTION, FRESH);
     assert.ok(personal.ok, JSON.stringify(personal));
     assert.deepEqual([personal.choice.role, personal.choice.ref, personal.choice.code], ["medium", DEEPSEEK, "stick:default"]);
   });
@@ -645,14 +656,24 @@ describe("a version 2 run's plan", () => {
   const WORK_TERRA = "openai-codex-3/gpt-6.1-terra";
   const HERA_V2 = rosterFixtureV2("roster-hera-v2.json");
   const VIRTUAL = model("smart-router/auto", { api: "pi-virtual", baseUrl: "" });
-  const KEYWORD_MEDIUM = { tier: "medium", asked: "medium", start: "medium", source: "keyword", steppedUp: false, returnedToFirst: false } as const;
+  /** A plain question's level without Jev: the heuristics alone rate it MEDIUM, 0.89, in a new session. */
+  const HEURISTICS_MEDIUM = {
+    need: "medium",
+    tier: "medium",
+    source: "heuristics",
+    steppedUp: false,
+    returnedToFirst: false,
+    demand: demandOf({ text: FRANCE, planning: false, risky: false, jev: undefined, facts: FRESH }, HERA_V2.demand),
+  } as const;
   const v2Catalog = (): FakeCatalog => new FakeCatalog([...heraModels(), codex(TERRA), codex(WORK_TERRA)]);
   const owned = (rc: ResolveContext, record: SessionRecord): RouteInput => ({
     id: rc.virtualId,
     request: { ...request("user"), model: VIRTUAL },
     rc,
-    pin: { on: false, policy: EMPTY_POLICY },
     record,
+    figures: undefined,
+    compaction: COMPACTION,
+    depth: FRESH,
   });
 
   test("puts its level in the run's history entry", async (t) => {
@@ -667,18 +688,25 @@ describe("a version 2 run's plan", () => {
       trigger: "triage:no_fast_path",
       role: "medium",
       ref: TERRA,
-      code: "keyword",
+      code: "heuristics",
       foreign: false,
-      // This runtime's registry has no Jev, so the keywords decided, and the level says why.
-      level: { scope: "personal", ...KEYWORD_MEDIUM, jev: { kind: "failure", model: "openrouter/typesafe/jev-1.14", failure: "unavailable", ms: 0 } },
-    });
+      // This runtime's registry has no Jev, so the heuristics decided alone, and the level says why.
+      // The router priced the untagged run with the session's figures, and with no usage yet a
+      // missing figure is said: cost unknown.
+      level: {
+        scope: "personal",
+        ...HEURISTICS_MEDIUM,
+        jev: { kind: "failure", model: "openrouter/typesafe/jev-1.14", failure: "unavailable", ms: 0 },
+        cost: { outcome: "unknown", why: "no usage yet" },
+      },
+    }, "the run's level, with its cost unknown: a missing figure is said (no usage yet)");
   });
 
   test("is used only in the scope it was made in", () => {
     const personal = heraContext({ roster: HERA_V2, catalog: v2Catalog() });
     const work = heraContext({ roster: HERA_V2, catalog: v2Catalog(), scope: "work" });
     const record = newRecord();
-    record.plan = planUserTurn({ rc: personal, text: FRANCE, last: undefined, now: NOW, reserve: 0 });
+    record.plan = planUserTurn({ rc: personal, text: FRANCE, last: undefined, now: NOW, compaction: COMPACTION, facts: FRESH });
     assert.ok(record.plan.decision.ok && record.plan.decision.choice.ref === TERRA, "the prompt planned terra in personal scope");
     // By the run's first request the session is in work scope: the plan is dropped, and the run sticks there.
     assert.equal(routed(routeOwned(owned(work, record))), WORK_TERRA);
@@ -693,23 +721,23 @@ describe("a version 2 run's plan", () => {
       code: "stick:default",
       foreign: false,
     });
-    record.plan = planUserTurn({ rc: work, text: FRANCE, last: undefined, now: NOW, reserve: 0 });
+    record.plan = planUserTurn({ rc: work, text: FRANCE, last: undefined, now: NOW, compaction: COMPACTION, facts: FRESH });
     assert.equal(routed(routeOwned(owned(work, record))), WORK_TERRA);
-    assert.deepEqual([record.history.at(-1)?.code, record.history.at(-1)?.level], ["keyword", { scope: "work", ...KEYWORD_MEDIUM }]);
+    assert.deepEqual([record.history.at(-1)?.code, record.history.at(-1)?.level], ["heuristics", { scope: "work", ...HEURISTICS_MEDIUM }], "without Jev the heuristics decide alone");
   });
 
   test("is never used under a version 1 roster, nor a version 1 plan under a version 2 roster", () => {
     const v2 = heraContext({ roster: HERA_V2, catalog: v2Catalog() });
     const v1 = heraContext({ catalog: v2Catalog() });
     const record = newRecord();
-    record.plan = planUserTurn({ rc: v2, text: FRANCE, last: undefined, now: NOW, reserve: 0 });
+    record.plan = planUserTurn({ rc: v2, text: FRANCE, last: undefined, now: NOW, compaction: COMPACTION, facts: FRESH });
     assert.ok(record.plan.level !== undefined, "a version 2 plan carries its level");
     // The roster became version 1 before the run's first request: the plan is dropped, and the run sticks.
     assert.equal(routed(routeOwned(owned(v1, record))), DEEPSEEK);
     assert.deepEqual([record.history.at(-1)?.role, record.history.at(-1)?.code], ["worker", "stick:default"]);
     // And the other way: a version 1 plan, which has no level, is dropped under a version 2 roster.
     const other = newRecord();
-    other.plan = planUserTurn({ rc: v1, text: FRANCE, last: undefined, now: NOW, reserve: 0 });
+    other.plan = planUserTurn({ rc: v1, text: FRANCE, last: undefined, now: NOW, compaction: COMPACTION, facts: FRESH });
     assert.equal(other.plan.level, undefined);
     assert.equal(routed(routeOwned(owned(v2, other))), TERRA);
     assert.deepEqual([other.history.at(-1)?.role, other.history.at(-1)?.code], ["medium", "stick:default"]);
@@ -718,9 +746,142 @@ describe("a version 2 run's plan", () => {
   test("a local-only plan, which has no level, is used as before", () => {
     const local = heraContext({ roster: HERA_V2, virtualId: "local" });
     const record = newRecord();
-    record.plan = planUserTurn({ rc: local, text: FRANCE, last: undefined, now: NOW, reserve: 0 });
+    record.plan = planUserTurn({ rc: local, text: FRANCE, last: undefined, now: NOW, compaction: COMPACTION, facts: FRESH });
     assert.equal(record.plan.level, undefined);
     assert.equal(routed(routeOwned(owned(local, record))), GLM);
     assert.deepEqual([record.history.at(-1)?.code, "level" in (record.history.at(-1) ?? {})], ["local", false]);
+  });
+});
+
+describe("a stuck run's move up, by the rules alone", () => {
+  const V2 = rosterFixtureV2("roster-hera-v2.json");
+  const TERRA = "openai-codex-2/gpt-6.1-terra";
+  const VIRTUAL = model("smart-router/auto", { api: "pi-virtual", baseUrl: "" });
+  const catalog = (): FakeCatalog => new FakeCatalog([...heraModels(), codex(TERRA)]);
+  /** A run whose bash calls failed three times in a row with one text. */
+  const stuckMessages: Message[] = [
+    { role: "user", content: [{ type: "text", text: "fix the build" }], timestamp: NOW },
+    ...[0, 1, 2].flatMap((i): Message[] => [
+      assistant(TERRA, { content: [{ type: "toolCall", id: `call-${i}`, name: "bash", arguments: {} }], stopReason: "toolUse" }),
+      { role: "toolResult", toolCallId: `call-${i}`, toolName: "bash", content: [{ type: "text", text: "No such file" }], isError: true, timestamp: NOW },
+    ]),
+  ];
+  /** A record whose run is under way on `ref`, at MEDIUM by its record, whatever made it so. */
+  const underWay = (rc: ResolveContext, ref: string, role: string): SessionRecord => {
+    const record = newRecord();
+    record.runPick = { id: rc.virtualId, ref, role };
+    record.runTier = "medium";
+    return record;
+  };
+  const continuation = (rc: ResolveContext, record: SessionRecord, on: string): RouteInput => ({
+    id: rc.virtualId,
+    request: { ...request("continuation", { messages: stuckMessages, previous: { model: model(on), thinkingLevel: "high" } }), model: VIRTUAL },
+    rc,
+    record,
+    figures: undefined,
+    compaction: COMPACTION,
+    depth: FRESH,
+  });
+
+  test("smart-router/auto under a version 2 roster moves a stuck MEDIUM run to HIGH: the control", () => {
+    const rc = heraContext({ roster: V2, catalog: catalog() });
+    const record = underWay(rc, TERRA, "medium");
+    assert.equal(routed(routeOwned(continuation(rc, record, TERRA))), SOL, "HIGH's own model");
+    assert.deepEqual([record.history.at(-1)?.code, record.runTier, record.escalated], ["escalate", "high", true], "the move up, once");
+  });
+
+  test("smart-router/local and a version 1 roster never move a run up, whatever the record says", () => {
+    const cases: ReadonlyArray<readonly [string, ResolveContext, string, string]> = [
+      ["smart-router/local", heraContext({ roster: V2, catalog: catalog(), virtualId: "local" }), GLM, "local"],
+      ["a version 1 roster", heraContext({ catalog: catalog() }), DEEPSEEK, "worker"],
+    ];
+    for (const [name, rc, on, role] of cases) {
+      const record = underWay(rc, on, role);
+      const route = routeOwned(continuation(rc, record, on));
+      assert.equal(routed(route), on, `${name}: the run stays on its model`);
+      assert.deepEqual([record.history.at(-1)?.code, record.runTier, record.escalated], ["stick:previous", "medium", false], `${name}: no move up`);
+    }
+  });
+
+  test("a tagged run, a run at SUPER and a run that moved up already stay where they are", () => {
+    const rc = heraContext({ roster: V2, catalog: catalog() });
+    const cases: ReadonlyArray<readonly [string, (record: SessionRecord) => void]> = [
+      ["a tagged run", (record) => (record.runTagged = true)],
+      ["a run at SUPER", (record) => (record.runTier = "super")],
+      ["a run that moved up already", (record) => (record.escalated = true)],
+    ];
+    for (const [name, edit] of cases) {
+      const record = underWay(rc, TERRA, "medium");
+      edit(record);
+      assert.equal(routed(routeOwned(continuation(rc, record, TERRA))), TERRA, name);
+      assert.equal(record.history.at(-1)?.code, "stick:previous", name);
+    }
+  });
+
+  test("a run already on the level above's own model is not moved: only a model other than the run's is a move", () => {
+    // A MEDIUM run the cost rule put on SOL, HIGH's own model: the level above picks SOL again.
+    const rc = heraContext({ roster: V2, catalog: catalog() });
+    const record = underWay(rc, SOL, "high");
+    assert.equal(routed(routeOwned(continuation(rc, record, SOL))), SOL, "the run stays on its model");
+    assert.deepEqual(
+      [record.history.at(-1)?.code, record.runTier, record.escalated],
+      ["stick:previous", "medium", false],
+      "no move up: the run keeps its level, and its one move up is still to come",
+    );
+  });
+});
+
+describe("a run without a prompt, by the rules alone", () => {
+  const V2 = rosterFixtureV2("roster-hera-v2.json");
+  const TERRA = "openai-codex-2/gpt-6.1-terra";
+  const VIRTUAL = model("smart-router/auto", { api: "pi-virtual", baseUrl: "" });
+
+  test("a retry that starts a run is a retry: it takes no level and notes no prompt", () => {
+    // The router refused the run's first request, so no pick was kept; Pi retries it.
+    const rc = heraContext({ roster: V2, catalog: new FakeCatalog([...heraModels(), codex(TERRA)]) });
+    const record = newRecord();
+    record.need = "medium";
+    const input: RouteInput = {
+      id: rc.virtualId,
+      request: { ...request("retry", { messages: [{ role: "user", content: [{ type: "text", text: "go on" }], timestamp: NOW }], previous: { model: model(TERRA), thinkingLevel: "high" } }), model: VIRTUAL },
+      rc,
+      record,
+      figures: undefined,
+      compaction: COMPACTION,
+      depth: FRESH,
+    };
+    routeOwned(input);
+    assert.deepEqual(
+      [record.ledger.needs.length, record.runTier, record.needRun],
+      [0, undefined, undefined],
+      "a retry is not a run without a prompt: it notes no prompt, takes no level and records no run at the session's need",
+    );
+  });
+});
+
+describe("activeEntries", () => {
+  test("is the branch's entry count from Pi's history metrics, where this Pi has them", () => {
+    assert.equal(activeEntries({ getHistoryMetrics: () => ({ session_active_entries: 1_200 }) }), 1_200);
+    assert.equal(activeEntries({ getHistoryMetrics: () => ({ session_active_entries: 0 }) }), 0, "an empty branch counts none");
+  });
+
+  test("is undefined where Pi has no metrics, its reader throws, or the count is not a finite count", () => {
+    const throwing = () => {
+      throw new Error("the index is locked");
+    };
+    for (const [name, manager] of [
+      ["no session manager", undefined],
+      ["Pi 1.5.0's session manager, without metrics", { getRecentActiveEntries: () => [] }],
+      ["a reader that throws", { getHistoryMetrics: throwing }],
+      ["a getter that throws", Object.defineProperty({}, "getHistoryMetrics", { get: throwing })],
+      ["metrics that are not an object", { getHistoryMetrics: () => 1_200 }],
+      ["metrics without the count", { getHistoryMetrics: () => ({}) }],
+      ["a negative count", { getHistoryMetrics: () => ({ session_active_entries: -1 }) }],
+      ["an infinite count", { getHistoryMetrics: () => ({ session_active_entries: Number.POSITIVE_INFINITY }) }],
+      ["a count that is not a number", { getHistoryMetrics: () => ({ session_active_entries: "1200" }) }],
+      ["a count that is NaN", { getHistoryMetrics: () => ({ session_active_entries: Number.NaN }) }],
+    ] as const) {
+      assert.equal(activeEntries(manager), undefined, name);
+    }
   });
 });

@@ -22,9 +22,26 @@ const TAIL = [
   "This reads the roster alone. Whether each model is in Pi's catalog on this host, available and has credentials is /smart-router status's to say.",
 ];
 
+/** What the checker says of a roster that leaves out the demand and switching sections: the defaults, in plain words. */
+const DEMAND_AND_SWITCHING = [
+  "Demand: Jev's answer counts 4 and the heuristics 1 at full confidence; under 60% confidence the heuristics can only raise the level.",
+  "  LOW under 0.75, MEDIUM under 1.5, HIGH under 2.25, SUPER from there; within 0.1 under a cut takes the level above.",
+  "  A conversation over 100,000 tokens or 1,000 entries is never under MEDIUM.",
+  "  Heuristic weights: triage_verdict 0.18, turn_type 0.18, complex_inverse 0.14, trivial_signal 0.1, cyclomatic_low 0.08, prompt_shortness 0.06, token_shortness 0.05, no_tool_context 0.05, message_shallow 0.03, prose_ratio 0.03, requirement_low 0, cluster_signal 0.",
+  // "more than": chooseByCost (src/cost.ts) moves only when another model is cheaper by more than the margin; at exactly 15% it stays.
+  "Switching: a move must cost more than 15% less than staying; lighter prompts in a row are priced up to 5 runs ahead.",
+  "  A model's cache is taken to survive 97% up to 1 min, 92% up to 5 min, 87% up to 20 min, 79% up to 30 min, 66% up to 1 h, 50% up to 2 h, 38% up to 6 h, 11% up to 24 h, and not after.",
+];
+
+/** What the checker says of a roster that leaves out the adaptiveReasoning section: upstream's defaults, in plain words. */
+const EFFORT = [
+  "Thinking effort, as upstream's adaptive reasoning: while /thinking is medium (Pi's default) or off, minimal after a tool result, low for an ordinary turn, medium for planning, and high on SUPER or in a run that moved up; any other /thinking level is never lowered, and is raised when the turn asks for more.",
+  "  No floor and no ceiling. A role that fixes its thinking keeps it. A change of effort costs that model's cache.",
+];
+
 /** What the checker says of John's roster of 2026-11-17, after its first line. */
 const JOHN_ROUTING = [
-  "smart-router/auto in personal scope: a tag, else Jev (openrouter/typesafe/jev-1.14), else the keywords, pick the level; each level tries its own models in order:",
+  "smart-router/auto in personal scope: a tag, else the demand from Jev (openrouter/typesafe/jev-1.14) and the heuristics, pick the level; each level tries its own models in order:",
   "  LOW    openai-codex-2/gpt-6-luna  (role low)",
   "  MEDIUM openai-codex-2/gpt-6.1-terra  (role medium)",
   "  HIGH   openai-codex-2/gpt-6.1-sol  (role high)",
@@ -35,18 +52,19 @@ const JOHN_ROUTING = [
   "    3. omlx-hera/GLM-5.3-Flash-oQ4e-mtp  (role local, thinking max)",
   `    4. ${NYX_QWEN}  (role local, thinking max)`,
   "    5. omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp  (role local, thinking max)",
-  "  under the pin: only the local role local, in its own order (below)",
   "",
-  "smart-router/auto in work scope: a tag, else Jev (openrouter/typesafe/jev-1.14), else the keywords, pick the level; each level tries its own models in order:",
+  "smart-router/auto in work scope: a tag, else the demand from Jev (openrouter/typesafe/jev-1.14) and the heuristics, pick the level; each level tries its own models in order:",
   "  LOW    openai-codex-3/gpt-6-luna  (role work-low)",
   "  MEDIUM openai-codex-3/gpt-6.1-terra  (role work-medium)",
   "  HIGH   openai-codex-3/gpt-6.1-sol  (role work-high)",
   "  SUPER  openai-codex-3/gpt-6-astra  (role work-super)",
   "  no fallback: a level with no available model passes its run up to the next level; with none above, the run is refused",
   "  sessions under these directories are in work scope: /Users/johnw/src/positron",
-  "  under the pin: refused, since smart-router/auto does not reach the local role in this scope; choose smart-router/local",
   "",
-  "smart-router/local, in any scope, pinned or not: only these, in this order, never a cloud model:",
+  ...DEMAND_AND_SWITCHING,
+  ...EFFORT,
+  "",
+  "smart-router/local, in any scope: only these, in this order, never a cloud model:",
   "  1. omlx-hera/GLM-5.3-Flash-oQ4e-mtp  (role local, thinking max)",
   `  2. ${NYX_QWEN}  (role local, thinking max)`,
   "  3. omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp  (role local, thinking max)",
@@ -66,7 +84,10 @@ const JOHN_ROUTING = [
   "Accounts:",
   '  openai-codex-2: the Multi-Pass label "personal", personal scope',
   '  openai-codex-3: the Multi-Pass label "Positron work", work scope',
-  ...TAIL,
+  ...TAIL.slice(0, -1),
+  // John's roster gives classifier.closeCall, which the demand's closeCall replaces.
+  "classifier.closeCall is accepted and ignored: demand.closeCall decides a close call.",
+  ...TAIL.slice(-1),
 ];
 
 describe("checking a roster's text", () => {
@@ -74,36 +95,72 @@ describe("checking a roster's text", () => {
     assert.deepEqual(checkRoster(JOHN), { ok: true, lines: ["OK: a valid version 2 roster.", "", ...JOHN_ROUTING] });
   });
 
-  test("a version 2 roster without a chain or a classifier, for one scope, says what the other scope and the pin do", () => {
+  test("a version 2 roster without a chain or a classifier, for one scope, says what the other scope does", () => {
     const report = checkRoster(fixture("roster-work.json"));
     assert.equal(report.ok, true);
-    assert.deepEqual(report.lines.slice(0, 13), [
+    assert.deepEqual(report.lines.slice(0, 11), [
       "OK: a valid version 2 roster.",
       "",
       "smart-router/auto in personal scope: refused, since the roster has no personal scope",
       "",
-      "smart-router/auto in work scope: a tag, else the keywords, pick the level; each level tries its own models in order:",
+      "smart-router/auto in work scope: a tag, else the demand the heuristics give, pick the level; each level tries its own models in order:",
       "  LOW    openai-codex/gpt-6-luna  (role work-low)",
       "  MEDIUM openai-codex/gpt-6.1-terra  (role work-medium)",
       "  HIGH   openai-codex/gpt-6.1-sol  (role work-high)",
       "  SUPER  openai-codex/gpt-6-astra  (role work-super)",
       "  no fallback: a level with no available model passes its run up to the next level; with none above, the run is refused",
-      "  under the pin: refused, since smart-router/auto does not reach the local role in this scope; choose smart-router/local",
       "",
-      "smart-router/local, in any scope, pinned or not:",
     ]);
-    assert.equal(report.lines[13], "  refused: the roster has no local section");
+    assert.deepEqual(report.lines.slice(11, 17), DEMAND_AND_SWITCHING, "the defaults are read back for a roster that gives neither section");
+    assert.deepEqual(report.lines.slice(17, 19), EFFORT, "upstream's defaults are read back for a roster that gives no adaptiveReasoning section");
+    assert.deepEqual(report.lines.slice(19, 22), ["", "smart-router/local, in any scope:", "  refused: the roster has no local section"]);
   });
 
   test("a level with several models of its own lists them in order", () => {
     const report = checkRoster(fixture("roster-hera-v2.json"));
     assert.ok(report.lines.includes(`  LOW    openai-codex-2/gpt-6-luna, then ${NYX_QWEN}, then omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp  (role low)`), report.lines.join("\n"));
-    assert.ok(report.lines.includes("  under the pin: refused, since smart-router/auto does not reach the local role in this scope; choose smart-router/local"));
+    assert.ok(!report.lines.some((line) => /\bpin(ned)?\b/.test(line)), "the local-only pin has been removed, and no line speaks of it");
+  });
+
+  test("a roster that gives stickyIdleMinutes is told it is ignored, in either version; one without it is told nothing", () => {
+    const IGNORED = "stickyIdleMinutes is accepted and ignored: nothing holds a session on a model by time.";
+    for (const name of ["roster-hera-v2-fallback.json", "roster-hera.json"]) {
+      const given = JSON.parse(fixture(name));
+      given.stickyIdleMinutes = 5;
+      const report = checkRoster(JSON.stringify(given));
+      assert.equal(report.ok, true, `${name}: ${report.lines[0]}`);
+      assert.ok(report.lines.includes(IGNORED), `${name}: ${report.lines.join("\n")}`);
+      assert.ok(!checkRoster(fixture(name)).lines.some((line) => /stickyIdleMinutes/.test(line)), `${name} without it`);
+    }
+  });
+
+  test("a roster whose classifier gives closeCall is told it is ignored; one without it is told nothing", () => {
+    const IGNORED = "classifier.closeCall is accepted and ignored: demand.closeCall decides a close call.";
+    const given = JSON.parse(fixture("roster-hera-v2.json"));
+    given.classifier.closeCall = 0.15;
+    const report = checkRoster(JSON.stringify(given));
+    assert.equal(report.ok, true, report.lines[0]);
+    assert.ok(report.lines.includes(IGNORED), report.lines.join("\n"));
+    assert.ok(!checkRoster(fixture("roster-hera-v2.json")).lines.some((line) => /classifier\.closeCall/.test(line)), "without it");
+  });
+
+  test("the adaptiveReasoning section reads back: the off switch, a floor and a ceiling", () => {
+    const read = (section: unknown): string[] => {
+      const given = JSON.parse(fixture("roster-work.json"));
+      given.adaptiveReasoning = section;
+      const report = checkRoster(JSON.stringify(given));
+      assert.equal(report.ok, true, report.lines[0]);
+      return report.lines.filter((line) => /^Thinking effort|^ {2}(No floor|Floor)/.test(line));
+    };
+    assert.deepEqual(read({ enabled: false }), ["Thinking effort: adaptiveReasoning is off, so every request carries the selected /thinking level, or its role's fixed one."], "off");
+    assert.deepEqual(read({ minLevel: "low", maxLevel: "high" }).slice(1), ["  Floor low, ceiling high: the levels the turn gives are raised to the floor and capped at the ceiling. A role that fixes its thinking keeps it. A change of effort costs that model's cache."], "both bounds");
+    assert.deepEqual(read({ minLevel: "low" }).slice(1), ["  Floor low; no ceiling: the levels the turn gives are raised to the floor. A role that fixes its thinking keeps it. A change of effort costs that model's cache."], "a floor");
+    assert.deepEqual(read({ maxLevel: "medium" }).slice(1), ["  No floor; ceiling medium: the levels the turn gives are capped at the ceiling. A role that fixes its thinking keeps it. A change of effort costs that model's cache."], "a ceiling");
   });
 
   test("a version 1 roster reads back as its routing table and one-hop fallbacks", () => {
     const report = checkRoster(fixture("roster-hera.json"));
-    assert.deepEqual(report.lines.slice(0, 9), [
+    assert.deepEqual(report.lines.slice(0, 8), [
       "OK: a valid version 1 roster.",
       "",
       "smart-router/auto in personal scope (version 1: the keywords pick the kind of run):",
@@ -111,9 +168,16 @@ describe("checking a roster's text", () => {
       "  complex  openai-codex-2/gpt-6.1-sol  (role engineer); then the fallback openrouter/z-ai/glm-5.3  (role coder)",
       "  default  openrouter/deepseek/deepseek-v4.1-flash-1017  (role worker); no fallback",
       "  trivial  openrouter/deepseek/deepseek-v4.1-flash-1017  (role worker); no fallback",
-      "  under the pin: refused, since smart-router/auto does not reach the local role in this scope; choose smart-router/local",
       "smart-router/auto in work scope: refused, since a version 1 roster serves no work scope",
     ]);
+    assert.deepEqual(
+      report.lines.filter((line) => /^Thinking effort|^ {2}No floor/.test(line)),
+      [
+        "Thinking effort, as upstream's adaptive reasoning: while /thinking is medium (Pi's default) or off, minimal after a tool result, low for an ordinary turn and medium for planning; any other /thinking level is never lowered, and is raised when the turn asks for more.",
+        "  No floor and no ceiling. A role that fixes its thinking keeps it. A change of effort costs that model's cache.",
+      ],
+      "a version 1 roster has upstream's defaults, and neither SUPER nor a run that moves up",
+    );
   });
 
   test("an invalid roster gives the parser's first error, with its place, and says what it costs", () => {
@@ -136,7 +200,7 @@ describe("checking a roster's text", () => {
     const [, example] = /```json\n([\s\S]*?)\n```/.exec(section) ?? [];
     assert.equal(`${example}\n`, JOHN);
     const [, shown] = /```text\n([\s\S]*?)\n```/.exec(section) ?? [];
-    assert.deepEqual((shown ?? "").split("\n"), JOHN_ROUTING.slice(0, 12));
+    assert.deepEqual((shown ?? "").split("\n"), JOHN_ROUTING.slice(0, 11));
   });
 
   test("every roster the README shows is valid", () => {

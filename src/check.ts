@@ -14,8 +14,9 @@ import { readUserFile } from "./files.ts";
 import type { ReadOptions } from "./files.ts";
 import { promptLines, promptProblem, promptReader, promptUses } from "./prompts.ts";
 import type { PromptReader, PromptUse } from "./prompts.ts";
-import { autoRoles, candidatesOf, parseRoster, SCOPES, unreachableMinutesOf } from "./roster.ts";
-import type { Roster, RosterV1, RosterV2, Scope } from "./roster.ts";
+import { candidatesOf, parseRoster, SCOPES, unreachableMinutesOf } from "./roster.ts";
+import type { Roster, RosterV1, RosterV2 } from "./roster.ts";
+import { DEEP_SESSION_ENTRIES, DEEP_SESSION_TOKENS, DEFAULT_EFFORT, SIGNALS } from "./settings.ts";
 import { tierLabel, TIERS } from "./tiers.ts";
 
 export interface CheckReport {
@@ -35,23 +36,15 @@ function numbered(roster: Roster, candidates: ReadonlyArray<{ readonly role: str
   return candidates.map(({ role, ref }, index) => `${indent}${index + 1}. ${ref}  (role ${role}${thinkingOf(roster, role)})`);
 }
 
-/** What smart-router/local, and smart-router/auto under the pin, route to. */
+/** What smart-router/local routes to. */
 function localLines(roster: Roster): string[] {
   const role = roster.local?.role;
-  if (role === undefined) return ["smart-router/local, in any scope, pinned or not:", "  refused: the roster has no local section"];
+  if (role === undefined) return ["smart-router/local, in any scope:", "  refused: the roster has no local section"];
   return [
-    "smart-router/local, in any scope, pinned or not: only these, in this order, never a cloud model:",
+    "smart-router/local, in any scope: only these, in this order, never a cloud model:",
     ...numbered(roster, modelsOf(roster, role).map((ref) => ({ role, ref })), "  "),
     `  local means: a provider of ${roster.local?.providers.join(", ")} whose base URL is on ${roster.local?.hosts.join(", ")}`,
   ];
-}
-
-/** What a pinned session on smart-router/auto does in a scope: the local role when auto reaches it there, else a refusal. */
-function pinnedLine(roster: Roster, scope: Scope): string {
-  const role = roster.local?.role;
-  return role !== undefined && autoRoles(roster, scope).has(role)
-    ? `  under the pin: only the local role ${role}, in its own order (below)`
-    : "  under the pin: refused, since smart-router/auto does not reach the local role in this scope; choose smart-router/local";
 }
 
 function accountLines(roster: Roster): string[] {
@@ -73,7 +66,7 @@ function describeV2(roster: RosterV2): string[] {
       lines.push(`smart-router/auto in ${scope} scope: refused, since the roster has no ${scope} scope`, "");
       continue;
     }
-    const decides = roster.classifier === undefined ? "the keywords" : `Jev (${roster.classifier.model}), else the keywords`;
+    const decides = roster.classifier === undefined ? "the demand the heuristics give" : `the demand from Jev (${roster.classifier.model}) and the heuristics`;
     lines.push(`smart-router/auto in ${scope} scope: a tag, else ${decides}, pick the level; each level tries its own models in order:`);
     for (const tier of TIERS) {
       const role = section.levels[tier].role;
@@ -86,7 +79,7 @@ function describeV2(roster: RosterV2): string[] {
       lines.push("  then, for every level, when its own models cannot take a request, the fallback chain in this order:", ...numbered(roster, chain, "    "));
     }
     if (scope === "work" && section.directories.length > 0) lines.push(`  sessions under these directories are in work scope: ${section.directories.join(", ")}`);
-    lines.push(pinnedLine(roster, scope), "");
+    lines.push("");
   }
   return lines;
 }
@@ -99,7 +92,7 @@ function describeV1(roster: RosterV1): string[] {
     const after = target === undefined ? "no fallback" : `then the fallback ${modelsOf(roster, target).join(", then ")}  (role ${target})`;
     lines.push(`  ${kind.padEnd(8)} ${modelsOf(roster, role).join(", then ")}  (role ${role}${thinkingOf(roster, role)}); ${after}`);
   }
-  lines.push(pinnedLine(roster, "personal"), "smart-router/auto in work scope: refused, since a version 1 roster serves no work scope", "");
+  lines.push("smart-router/auto in work scope: refused, since a version 1 roster serves no work scope", "");
   return lines;
 }
 
@@ -111,6 +104,79 @@ function promptSection(roster: Roster, uses: readonly PromptUse[]): string[] {
   return [`Jev's prompts${asked}: the question it is asked, and what each level means:`, ...promptLines(uses), ""];
 }
 
+/** A share as a percentage, without the noise of floating point. */
+const percent = (share: number): string => `${Math.round(share * 10_000) / 100}%`;
+
+/** A time as whole hours, else whole minutes, else seconds. */
+function duration(seconds: number): string {
+  if (seconds % 3600 === 0) return `${seconds / 3600} h`;
+  if (seconds % 60 === 0) return `${seconds / 60} min`;
+  return `${seconds} s`;
+}
+
+/** How a prompt's demand is weighed, in words. */
+function demandLines(roster: RosterV2): string[] {
+  const { jevWeight, heuristicsWeight, minConfidence, closeCall, cuts, deepSessionFloor, weights } = roster.demand;
+  const [low, medium, high] = cuts;
+  const listed = SIGNALS.map((signal) => [signal, weights[signal]] as const).sort((a, b) => b[1] - a[1]);
+  return [
+    `Demand: Jev's answer counts ${jevWeight} and the heuristics ${heuristicsWeight} at full confidence; under ${percent(minConfidence)} confidence the heuristics can only raise the level.`,
+    `  LOW under ${low}, MEDIUM under ${medium}, HIGH under ${high}, SUPER from there; within ${closeCall} under a cut takes the level above.`,
+    `  A conversation over ${DEEP_SESSION_TOKENS.toLocaleString("en-US")} tokens or ${DEEP_SESSION_ENTRIES.toLocaleString("en-US")} entries is never under ${tierLabel(deepSessionFloor)}.`,
+    `  Heuristic weights: ${listed.map(([signal, weight]) => `${signal} ${weight}`).join(", ")}.`,
+  ];
+}
+
+/** When a session moves to another model, in words. */
+function switchingLines(roster: RosterV2): string[] {
+  const { margin, horizonCap, cacheSurvival } = roster.switching;
+  const table = cacheSurvival.map(([seconds, chance]) => `${percent(chance)} up to ${duration(seconds)}`);
+  return [
+    `Switching: a move must cost more than ${percent(margin)} less than staying; lighter prompts in a row are priced up to ${horizonCap} runs ahead.`,
+    `  A model's cache is taken to survive ${table.join(", ")}, and not after.`,
+  ];
+}
+
+/**
+ * What thinking effort each request carries, in words: upstream's adaptive reasoning (src/effort.ts),
+ * with the roster's floor, ceiling and off switch; a version 1 roster has upstream's defaults, and
+ * neither SUPER nor a run that moves up.
+ */
+function effortLines(roster: Roster): string[] {
+  const settings = roster.version === 2 ? roster.adaptiveReasoning : DEFAULT_EFFORT;
+  if (!settings.enabled) return ["Thinking effort: adaptiveReasoning is off, so every request carries the selected /thinking level, or its role's fixed one."];
+  const table =
+    roster.version === 2
+      ? "minimal after a tool result, low for an ordinary turn, medium for planning, and high on SUPER or in a run that moved up"
+      : "minimal after a tool result, low for an ordinary turn and medium for planning";
+  const { minLevel, maxLevel } = settings;
+  const bounds =
+    minLevel === undefined && maxLevel === undefined
+      ? "No floor and no ceiling."
+      : minLevel !== undefined && maxLevel !== undefined
+        ? `Floor ${minLevel}, ceiling ${maxLevel}: the levels the turn gives are raised to the floor and capped at the ceiling.`
+        : minLevel !== undefined
+          ? `Floor ${minLevel}; no ceiling: the levels the turn gives are raised to the floor.`
+          : `No floor; ceiling ${maxLevel}: the levels the turn gives are capped at the ceiling.`;
+  return [
+    `Thinking effort, as upstream's adaptive reasoning: while /thinking is medium (Pi's default) or off, ${table}; any other /thinking level is never lowered, and is raised when the turn asks for more.`,
+    `  ${bounds} A role that fixes its thinking keeps it. A change of effort costs that model's cache.`,
+  ];
+}
+
+/** Why the settings a roster may give and this version ignores are ignored, by path. */
+const IGNORED_BECAUSE: Readonly<Record<string, string>> = {
+  stickyIdleMinutes: "nothing holds a session on a model by time.",
+  "classifier.closeCall": "demand.closeCall decides a close call.",
+};
+
+/** One line for each setting the roster gives that is accepted and ignored. */
+const ignoredLines = (roster: Roster): string[] =>
+  roster.ignored.map((path) => {
+    const because = IGNORED_BECAUSE[path];
+    return because === undefined ? `${path} is accepted and ignored.` : `${path} is accepted and ignored: ${because}`;
+  });
+
 /**
  * What a valid roster routes to, for each selection and scope, in the order it tries, and where
  * Jev's prompts come from. `uses`: a version 2 roster's prompts as they are in effect.
@@ -118,12 +184,16 @@ function promptSection(roster: Roster, uses: readonly PromptUse[]): string[] {
 export function describeRouting(roster: Roster, uses: readonly PromptUse[] = []): string[] {
   return [
     ...(roster.version === 2 ? describeV2(roster) : describeV1(roster)),
+    ...(roster.version === 2 ? [...demandLines(roster), ...switchingLines(roster)] : []),
+    ...effortLines(roster),
+    "",
     ...localLines(roster),
     "",
     ...promptSection(roster, uses),
     ...accountLines(roster),
     `A usage-limit or authentication error takes a cloud model out of routing for ${roster.cooldownMinutes} minutes, and with it every model of the same subscription account; a local-role model is never taken out.`,
     `A local model whose server cannot be reached is passed over for ${unreachableMinutesOf(roster)} minutes while another model in the order above can take the request.`,
+    ...ignoredLines(roster),
     "This reads the roster alone. Whether each model is in Pi's catalog on this host, available and has credentials is /smart-router status's to say.",
   ];
 }

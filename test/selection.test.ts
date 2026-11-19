@@ -1,5 +1,5 @@
 // A model picked by hand always stays selected and is sent as it is: John's decision of 2026-11-16,
-// "Manual choice always wins", in work scope and under the pin alike. These tests pin the rule at
+// "Manual choice always wins", in every scope. These tests pin the rule at
 // every event the router hears, and that its policies still hold where they belong: in the routes
 // of its own two models.
 import assert from "node:assert/strict";
@@ -9,25 +9,20 @@ import test, { afterEach, beforeEach, describe } from "node:test";
 
 import type { Api, Model } from "@earendil-works/pi-ai";
 
-import { ENV_PIN, ENV_SCOPE, PIN_ENTRY, SCOPE_ENTRY } from "../src/constants.ts";
+import { ENV_SCOPE, SCOPE_ENTRY } from "../src/constants.ts";
 import { directoryFailedNotice, directoryNotice } from "../src/errors.ts";
-import { policyFromRoster } from "../src/local.ts";
-import { processSlot } from "../src/owners.ts";
-import { readPin } from "../src/pin.ts";
 import { readScope, scopeEntry } from "../src/scope.ts";
-import { coveredByPin, describeModel, localSelection, ownModel, STATUS_PINNED } from "../src/selection.ts";
-import { CHATGPT, FakeCatalog, GLM, heraModels, KIMI, model, NATIVE_SOL, NOW, rosterFixture, rosterFixtureV2, SOL, WORK_SOL } from "./support/catalog.ts";
+import { describeModel, ownModel } from "../src/selection.ts";
+import { CHATGPT, FakeCatalog, GLM, heraModels, KIMI, model, NATIVE_SOL, NOW, SOL, WORK_SOL } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
 import { agentDir, FakeRuntime, load, request, resetSlot, routed, start } from "./support/pi.ts";
 import type { FakeHost, FakeSession, Loaded, LoadOptions } from "./support/pi.ts";
 
-const POLICY = policyFromRoster(rosterFixture("roster-hera.json"));
 const LOCAL = "smart-router/local";
 const AUTO = "smart-router/auto";
 const OTHER_ROUTER = "other-router/auto";
 const WORK_TERRA = "openai-codex-3/gpt-6.1-terra";
 const HERA_V2 = fixture("roster-hera-v2.json");
-const POLICY_V2 = policyFromRoster(rosterFixtureV2("roster-hera-v2.json"));
 /** Hera's version 2 work directory, and a directory under it. */
 const WORK_DIRECTORY = "/Users/johnw/src/positron";
 const APP = `${WORK_DIRECTORY}/app`;
@@ -54,11 +49,7 @@ afterEach(resetSlot);
 const selection = (loaded: Loaded): string | undefined =>
   loaded.session.model === undefined ? undefined : `${loaded.session.model.provider}/${loaded.session.model.id}`;
 const messages = (loaded: Loaded): string[] => loaded.session.notices.map((notice) => notice.message);
-const pinStatus = (loaded: Loaded): string | undefined => loaded.session.statuses.get("smart-router");
 
-/** A session pinned to Hera's local policy, on smart-router/local unless `select` says otherwise. */
-const pinned = (t: Parameters<typeof agentDir>[0], options: Partial<LoadOptions> & { readonly select?: string } = {}): Promise<Loaded> =>
-  start({ dir: agentDir(t), select: "local", setup: (session) => session.pin(POLICY), now: () => NOW, ...options });
 
 /** Record work scope in a session, as /smart-router scope work does. */
 const workEntry = (session: FakeSession): void => session.appendCustom(SCOPE_ENTRY, scopeEntry("work", "command", NOW - 60_000));
@@ -144,7 +135,7 @@ async function sendsAsItIs(loaded: Loaded, ref: string, label: string): Promise<
 
 describe("the router's handlers", () => {
   test("it registers none for provider requests or cache warming, and its compaction and tree handlers answer nothing", async (t) => {
-    const loaded = await pinned(t, { select: KIMI });
+    const loaded = await start({ dir: agentDir(t), select: KIMI, now: () => NOW });
     assert.deepEqual([loaded.host.count("before_provider_request"), loaded.host.count("cache_warming_decision")], [0, 0]);
     assert.equal(loaded.host.count("tool_call"), 0, "and it blocks no tools (Q7)");
     assert.deepEqual(await loaded.host.emit("session_before_compact", { reason: "manual" }), [undefined]);
@@ -153,7 +144,7 @@ describe("the router's handlers", () => {
   });
 
   test("a session's record holds no guard state: there is no lock to set", async (t) => {
-    const loaded = await pinned(t);
+    const loaded = await start({ dir: agentDir(t), select: "local", now: () => NOW });
     await loaded.host.choose(KIMI);
     await loaded.host.emit("input", { text: "fix the build", source: "interactive" });
     const record = loaded.router?.record(loaded.session.id);
@@ -177,7 +168,7 @@ describe("a model picked by hand in work scope", () => {
       BY_HAND.join(" "),
       "every selection made is one the test made: the router made none",
     );
-    assert.equal(pinStatus(loaded), undefined, "work scope has no status item");
+    assert.equal(loaded.session.statuses.get("smart-router"), undefined, "work scope has no status item");
   });
 
   test("the pick John reported: xai/grok-4.7 in work scope stays, and smart-router/auto is not selected again", async (t) => {
@@ -313,74 +304,6 @@ describe("a model picked by hand in work scope", () => {
   });
 });
 
-describe("a model picked by hand under the pin", () => {
-  test("stays selected, set or cycled, with no notice, and is sent as it is: the prompt, the turn, the payload, warming, compaction and a tree summary", async (t) => {
-    const loaded = await pinned(t);
-    for (const [index, ref] of [KIMI, SOL, GLM, OTHER_ROUTER].entries()) {
-      if (ref === OTHER_ROUTER) loaded.runtime.catalog.add(model(OTHER_ROUTER, { api: "pi-virtual", baseUrl: "" }));
-      const source = index % 2 === 0 ? "set" : "cycle";
-      assert.equal(await loaded.host.choose(ref, source), true);
-      assert.equal(selection(loaded), ref, `${ref} (${source})`);
-      await sendsAsItIs(loaded, ref, `${ref} (${source})`);
-    }
-    assert.deepEqual(messages(loaded), [], "the router said nothing at all");
-    assert.equal(loaded.host.selections.length, 4, "the router made no selection of its own");
-  });
-
-  test("a second pick at once is kept too, and smart-router/auto can be selected", async (t) => {
-    const loaded = await pinned(t);
-    const signal = loaded.session.startRun();
-    await loaded.host.choose(KIMI);
-    await loaded.host.choose(SOL);
-    await loaded.host.choose(AUTO);
-    assert.deepEqual([selection(loaded), signal.aborted, loaded.session.aborts, messages(loaded)], [AUTO, false, 0, []]);
-  });
-
-  test("at turn_start nothing is switched and nothing is aborted", async (t) => {
-    const loaded = await pinned(t);
-    loaded.session.force(KIMI);
-    const signal = loaded.session.startRun();
-    await loaded.host.emit("turn_start", { turnIndex: 0, timestamp: NOW });
-    assert.deepEqual([selection(loaded), signal.aborted, loaded.session.aborts, loaded.host.selections.length, messages(loaded)], [KIMI, false, 0, 0, []]);
-  });
-
-  test("under PI_SMART_ROUTER_LOCAL_ONLY too, and in a pinned work session", async (t) => {
-    await withEnv(ENV_PIN, "1", async () => {
-      const latched = await start({ dir: agentDir(t), id: "env", select: KIMI, now: () => NOW });
-      assert.equal(readPin(latched.session.ctx.sessionManager, processSlot().env).env, true);
-      assert.deepEqual([selection(latched), messages(latched)], [KIMI, []], "the restored pick is kept at start");
-      await sendsAsItIs(latched, KIMI, "the environment switch");
-    });
-    resetSlot();
-    const loaded = await working(t, {
-      select: KIMI,
-      setup: (session) => {
-        workEntry(session);
-        session.pin(POLICY_V2);
-      },
-    });
-    assert.deepEqual(readScope(loaded.session.ctx.sessionManager, false, undefined), { kind: "ok", scope: "work", source: "entry" });
-    assert.deepEqual([selection(loaded), messages(loaded)], [KIMI, []], "at start, the pick is kept");
-    for (const ref of [WORK_SOL, GLM, KIMI]) {
-      await loaded.host.choose(ref);
-      await sendsAsItIs(loaded, ref, `pinned work session: ${ref}`);
-    }
-  });
-
-  test("a pin that cannot be read counts as a pin for the router's own models, and stops no model picked by hand", async (t) => {
-    const loaded = await start({ dir: agentDir(t), select: KIMI, now: () => NOW });
-    const manager = loaded.session.ctx.sessionManager as unknown as Record<string, unknown>;
-    const latest = manager.getLatestCustomEntry as (customType: string, options?: unknown) => unknown;
-    manager.getLatestCustomEntry = (customType: string, options?: unknown) => {
-      if (customType === PIN_ENTRY) throw new Error("index unavailable");
-      return latest(customType, options);
-    };
-    assert.equal(readPin(manager, processSlot().env).entry, "unreadable");
-    await sendsAsItIs(loaded, KIMI, "an unreadable pin");
-    assert.throws(() => loaded.runtime.route("auto", request("direct")), { message: /^smart-router\/auto: no local model can take this request while this session is pinned to local models/ });
-  });
-});
-
 describe("a restored selection", () => {
   test("in a work session, by its entry or its directory, is kept at session start; the directory is still recorded", async (t) => {
     const dir = agentDir(t, { roster: HERA_V2 });
@@ -409,20 +332,7 @@ describe("a restored selection", () => {
     });
   });
 
-  test("in a pinned session is kept at session start, and nothing is tried: a router that cannot select a model says nothing", async (t) => {
-    const loaded = load({ dir: agentDir(t), setup: (session) => session.pin(POLICY), now: () => NOW });
-    let attempts = 0;
-    loaded.host.setModel = async () => {
-      attempts += 1;
-      return false;
-    };
-    loaded.session.select(SOL);
-    await loaded.host.emit("session_start", { reason: "resume" });
-    assert.deepEqual([selection(loaded), attempts, messages(loaded)], [SOL, 0, []]);
-    assert.equal(pinStatus(loaded), undefined, "the pin's item is not shown over a model the pin does not route");
-  });
-
-  test("smart-router/local restored into a work session is kept, and routes to the LAN model without the pin", async (t) => {
+  test("smart-router/local restored into a work session is kept, and routes to the LAN model", async (t) => {
     const loaded = await working(t, { select: "local" });
     assert.deepEqual([selection(loaded), messages(loaded), loaded.host.selections.length], [LOCAL, [], 0]);
     assert.deepEqual(await loaded.host.emit("input", { text: "fix the build", source: "interactive" }), [undefined], "the prompt is passed on");
@@ -430,8 +340,7 @@ describe("a restored selection", () => {
     const signal = loaded.session.startRun();
     await loaded.host.emit("turn_start", { turnIndex: 0, timestamp: NOW });
     assert.equal(routed(loaded.runtime.route("local", request("user", { signal }))), GLM);
-    assert.deepEqual([selection(loaded), signal.aborted, messages(loaded)], [LOCAL, false, []], "the selection stays, nothing is said, and the session is not pinned");
-    assert.equal(pinStatus(loaded), undefined, "the pin's item is not shown: the session is not pinned");
+    assert.deepEqual([selection(loaded), signal.aborted, messages(loaded)], [LOCAL, false, []], "the selection stays, and nothing is said");
   });
 });
 
@@ -443,22 +352,6 @@ describe("the router's own models still route only inside their policies", () =>
     assert.equal(routed(loaded.runtime.route("auto", request("direct"))), WORK_TERRA);
     const signal = loaded.session.startRun();
     assert.equal(routed(loaded.runtime.route("auto", request("continuation", { signal, previous: { model: loaded.runtime.physical(KIMI), thinkingLevel: "high" } }))), WORK_TERRA, "never back to the model picked by hand");
-  });
-
-  test("under the pin, smart-router/local goes to the LAN model and smart-router/auto refuses, naming what to select or run", async (t) => {
-    const loaded = await pinned(t);
-    await loaded.host.choose(KIMI);
-    await loaded.host.choose(LOCAL);
-    assert.equal(routed(loaded.runtime.route("local", request("direct"))), GLM);
-    await loaded.host.choose(AUTO);
-    assert.deepEqual(await loaded.host.emit("input", { text: "plan the migration", source: "interactive" }), [undefined], "the prompt is passed on");
-    const signal = loaded.session.startRun();
-    await loaded.host.emit("turn_start", { turnIndex: 0, timestamp: NOW });
-    assert.throws(() => loaded.runtime.route("auto", request("user", { signal })), {
-      message:
-        "smart-router/auto: no local model can take this request while this session is pinned to local models (local: omlx-hera/GLM-5.3-Flash-oQ4e-mtp: its role local is neither a routing target nor a fallback, so smart-router/auto never routes to it). Nothing was sent. Choose smart-router/local with /model, or run /smart-router local off.",
-    });
-    assert.deepEqual([selection(loaded), signal.aborted, messages(loaded)], [AUTO, false, []], "the refusal is the route's: the selection stays, and the router aborts nothing");
   });
 
   test("while the roster fails to load, a work session stays in work scope, its pick by hand is kept, and smart-router/auto refuses", async (t) => {
@@ -485,35 +378,7 @@ describe("the router's own models still route only inside their policies", () =>
   });
 });
 
-describe("the pin's status item", () => {
-  test("shows while the pin covers the selection: either of the router's models or a physical model inside the policy; a model picked by hand outside it shows none", async (t) => {
-    const loaded = await pinned(t);
-    assert.equal(STATUS_PINNED, "local models");
-    assert.equal(pinStatus(loaded), "local models");
-    for (const [ref, shown] of [
-      [KIMI, undefined],
-      [GLM, "local models"],
-      [SOL, undefined],
-      [AUTO, "local models"],
-      [LOCAL, "local models"],
-    ] as const) {
-      await loaded.host.choose(ref);
-      assert.equal(pinStatus(loaded), shown, ref);
-    }
-  });
-
-  test("shows nothing for an unpinned session, whatever is selected, and never says locked", async (t) => {
-    const loaded = await start({ dir: agentDir(t) });
-    assert.deepEqual([...loaded.session.statuses], [["smart-router", undefined]]);
-    for (const ref of [KIMI, LOCAL, GLM]) {
-      await loaded.host.choose(ref);
-      assert.equal(pinStatus(loaded), undefined, ref);
-    }
-  });
-});
-
 describe("how the router reads a selection", () => {
-  const pin = { on: true, policy: POLICY };
   const find = (ref: string): Model<Api> | undefined => {
     const runtime = new FakeRuntime(workCatalog());
     load({ dir: "/nonexistent", runtime });
@@ -539,36 +404,5 @@ describe("how the router reads a selection", () => {
     assert.equal(ownModel(undefined), undefined);
     assert.equal(ownModel({ provider: "smart-router", id: "auto", api: "openai-completions" }), undefined, "a physical model that only bears the name");
     assert.equal(ownModel({ provider: "smart-router", id: "other", api: "pi-virtual" }), undefined, "a virtual model of that provider the router does not register");
-  });
-
-  test("localSelection: what /smart-router local on leaves selected is smart-router/local or a physical model inside the pin's policy", () => {
-    assert.deepEqual(
-      [LOCAL, GLM, AUTO, KIMI, SOL, OTHER_ROUTER].map((ref) => [ref, localSelection(find(ref), pin)]),
-      [
-        [LOCAL, true],
-        [GLM, true],
-        [AUTO, false],
-        [KIMI, false],
-        [SOL, false],
-        [OTHER_ROUTER, false],
-      ],
-    );
-    assert.equal(localSelection(undefined, pin), false);
-  });
-
-  test("coveredByPin: the pin's item shows for either of the router's models, a physical model inside the policy and no model at all; never without a pin", () => {
-    assert.deepEqual(
-      [LOCAL, GLM, AUTO, KIMI, SOL, OTHER_ROUTER].map((ref) => [ref, coveredByPin(find(ref), pin)]),
-      [
-        [LOCAL, true],
-        [GLM, true],
-        [AUTO, true],
-        [KIMI, false],
-        [SOL, false],
-        [OTHER_ROUTER, false],
-      ],
-    );
-    assert.equal(coveredByPin(undefined, pin), true);
-    assert.equal(coveredByPin(find(LOCAL), { on: false, policy: POLICY }), false);
   });
 });

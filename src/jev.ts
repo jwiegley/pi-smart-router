@@ -11,7 +11,7 @@ import type { BoundedHistory } from "./route.ts";
 import { parseRef, scopeSection } from "./roster.ts";
 import type { Roster, ScopeSection } from "./roster.ts";
 import type { ScopeState } from "./scope.ts";
-import { closeCallTier, isTier, TIERS, type Tier } from "./tiers.ts";
+import { isTier, TIERS, type Tier } from "./tiers.ts";
 
 export const JEV_QUESTION = "level";
 /** The built-in question, asked unless the roster gives its own instructions (src/prompts.ts). */
@@ -25,7 +25,6 @@ export interface JevContextCaps {
 export interface JevSettings {
   readonly model: string;
   readonly timeoutMs: number;
-  readonly closeCall: number;
   readonly context: JevContextCaps;
   /** The roster's own question for Jev, inline. Without it and without a file, the built-in one is asked. */
   readonly instructions?: string;
@@ -109,8 +108,8 @@ export type JevOutcome =
   | {
       readonly kind: "answer";
       readonly model: string;
+      /** Jev's top choice. The level comes from the demand, which reads all four probabilities. */
       readonly choice: Tier;
-      readonly tier: Tier;
       readonly probabilities: Readonly<Record<Tier, number>>;
       readonly confidence: number;
       readonly ms: number;
@@ -122,7 +121,7 @@ function failure(model: string, kind: JevFailure, ms: number): JevOutcome {
 }
 
 /** pi-ai checks the answer's types only; the labels must be exactly the four tiers here. */
-export function interpret(result: ClassifierResult, closeCall: number, model: string, ms: number): JevOutcome {
+export function interpret(result: ClassifierResult, model: string, ms: number): JevOutcome {
   if (result.stopReason === "aborted") return failure(model, "aborted", ms);
   if (result.stopReason === "error") {
     return failure(model, /^Request timed out after \d+ms$/.test(result.errorMessage ?? "") ? "timeout" : "error", ms);
@@ -137,15 +136,7 @@ export function interpret(result: ClassifierResult, closeCall: number, model: st
     return failure(model, "malformed", ms);
   }
   const probabilities: Record<Tier, number> = { low: raw.low!, medium: raw.medium!, high: raw.high!, super: raw.super! };
-  return {
-    kind: "answer",
-    model,
-    choice: answer.choice,
-    tier: closeCallTier(probabilities, closeCall),
-    probabilities,
-    confidence: answer.confidence,
-    ms,
-  };
+  return { kind: "answer", model, choice: answer.choice, probabilities, confidence: answer.confidence, ms };
 }
 
 /** What the router reads at a message's input to decide whether Jev is asked about it. */
@@ -154,8 +145,6 @@ export interface JevGate {
   readonly idle: boolean;
   /** The router model selected, if one is: only smart-router/auto routes by level. */
   readonly selection: VirtualId | undefined;
-  /** Whether the session is pinned, by its entry or by PI_SMART_ROUTER_LOCAL_ONLY. */
-  readonly pinned: boolean;
   /** The roster, when it loaded. */
   readonly roster: Roster | undefined;
   /** The fork's bounded session readers, through which Jev's context is read; undefined on a Pi without them. */
@@ -175,14 +164,13 @@ export interface JevAsk {
 
 /**
  * Whether Jev is asked about a message, and with what. Never for a steer or a follow-up, off
- * smart-router/auto, under the pin, without the bounded readers, for an extension's resend of the
- * latest message, without a version 2 roster's classifier, or in a scope that cannot be read or
- * that the roster does not serve. Pure: the router reads every condition first. Nothing refuses a
- * pinned session's prompt on smart-router/auto before this, so the pin is checked here.
+ * smart-router/auto, without the bounded readers, for an extension's resend of the latest message,
+ * without a version 2 roster's classifier, or in a scope that cannot be read or that the roster
+ * does not serve. Pure: the router reads every condition first.
  */
 export function jevAsk(gate: JevGate): JevAsk | undefined {
   const { roster, scope, history } = gate;
-  if (!gate.idle || gate.selection !== "auto" || gate.pinned || history === undefined || gate.resend) return undefined;
+  if (!gate.idle || gate.selection !== "auto" || history === undefined || gate.resend) return undefined;
   if (roster?.version !== 2 || roster.classifier === undefined || scope.kind !== "ok") return undefined;
   const section = scopeSection(roster, scope.scope);
   return section === undefined ? undefined : { settings: roster.classifier, section, history };
@@ -212,7 +200,7 @@ export async function askJev(
     const model = ref === undefined ? undefined : registry.findOfType("classifier", ref.provider, ref.id);
     if (model === undefined) return failure(settings.model, "unavailable", elapsed());
     const result = await registry.classify(model, context, { timeoutMs: settings.timeoutMs, maxRetries: 0 });
-    return interpret(result, settings.closeCall, settings.model, elapsed());
+    return interpret(result, settings.model, elapsed());
   } catch {
     return failure(settings.model, "error", elapsed());
   }
