@@ -209,9 +209,16 @@ function sizeUnknown(ctx: ExtensionContext): boolean {
   }
 }
 
-/** When the branch was last compacted, from a bounded read of its latest compaction entry; undefined when it never was or the time cannot be read. */
-function compactedAt(view: BoundedHistory): number | undefined {
-  const entry = view.getRecentActiveEntries({ type: "compaction", limit: 1 }).at(-1);
+/**
+ * When the branch was last compacted, from a bounded read of its latest compaction entry, made only
+ * back to `oldest`, the oldest entry the seed read returned, so that a branch never compacted is not
+ * walked to its root: a compaction older than every seeded answer would filter nothing. Undefined
+ * when there is no such entry, its time cannot be read, or `oldest` has no id (no read is made).
+ */
+function compactedAt(view: BoundedHistory, oldest: unknown): number | undefined {
+  const stopBeforeId = isRecord(oldest) && typeof oldest.id === "string" ? oldest.id : undefined;
+  if (stopBeforeId === undefined) return undefined;
+  const entry = view.getRecentActiveEntries({ type: "compaction", limit: 1, stopBeforeId }).at(-1);
   const stamp = isRecord(entry) && typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
   return Number.isFinite(stamp) ? stamp : undefined;
 }
@@ -504,7 +511,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
    */
   const seed = (view: BoundedHistory, ledger: Ledger | undefined, ctx: ExtensionContext): LastResponder | undefined => {
     const entries = view.getRecentActiveEntries({ type: "message", messageRole: "assistant", limit: SEED_ENTRIES });
-    const compacted = ledger === undefined ? undefined : compactedAt(view);
+    const compacted = ledger === undefined || entries.length === 0 ? undefined : compactedAt(view, entries[0]);
     let last: LastResponder | undefined;
     for (const entry of entries) {
       const found = responder(entry);

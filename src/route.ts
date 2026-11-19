@@ -192,7 +192,7 @@ export function newRecord(): SessionRecord {
 /** The fork's bounded session readers. Pi 1.5.0's npm types lack them, so they are detected. */
 export interface BoundedHistory {
   getLatestCustomEntry(customType: string, options?: { scope?: "all" | "active" }): unknown;
-  getRecentActiveEntries(options?: { type?: string; customType?: string; messageRole?: string; limit?: number }): readonly unknown[];
+  getRecentActiveEntries(options?: { type?: string; customType?: string; messageRole?: string; limit?: number; stopBeforeId?: string }): readonly unknown[];
 }
 
 export function boundedHistory(sessionManager: unknown): BoundedHistory | undefined {

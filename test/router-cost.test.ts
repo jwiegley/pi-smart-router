@@ -382,6 +382,28 @@ describe("the ledger's feed", () => {
     assert.deepEqual([recordOf(state).last?.ref, recordOf(state).last?.usage?.totalTokens], [ASTRA, 31_000], "the last responder is astra, with its size");
   });
 
+  test("the compaction read covers only the entries the seed read returned, and is not made without one", async (t) => {
+    const compactionReads = (state: Session): unknown[] =>
+      state.loaded.session.boundedReads.filter((read) => typeof read === "object" && read !== null && (read as { type?: unknown }).type === "compaction");
+    const state = await session(t, {
+      setup: (s) => {
+        s.entries.push({ type: "compaction", id: `e${s.entries.length}`, parentId: null, timestamp: new Date(NOW - 400_000).toISOString(), summary: "the summary", firstKeptEntryId: "e0", tokensBefore: 151_000 });
+        s.appendAssistant(assistant(TERRA, { usage: usageOf(91_000), timestamp: NOW - 300_000 }));
+        s.appendAssistant(assistant(ASTRA, { usage: usageOf(151_000), timestamp: NOW - 100_000 }));
+      },
+    });
+    assert.deepEqual(
+      compactionReads(state),
+      [{ type: "compaction", limit: 1, stopBeforeId: "e1" }],
+      "one compaction read, which stops before e1, the oldest entry the seed read returned: a compaction older than it (e0) is not looked for",
+    );
+    assert.deepEqual([...recordOf(state).ledger.seen.keys()], [TERRA, ASTRA], "the compaction is older than every seeded answer, so it filters nothing");
+
+    resetSlot();
+    const empty = await session(t, { id: "empty" });
+    assert.deepEqual(compactionReads(empty), [], "with no seeded entry, no compaction read is made");
+  });
+
   test("seeding stops at a rewrite: a response before a smaller prompt of the same model is not counted", async (t) => {
     const state = await session(t, {
       setup: (s) => {

@@ -403,8 +403,10 @@ describe("session state", () => {
     const SCOPE = { customType: "smart-router.scope", scope: "all" };
     // The level a resumed session held: its latest level record, one bounded read of the branch.
     const LEVEL = { customType: "smart-router.level", scope: "active" };
-    // The branch's latest compaction, one bounded read: an answer older than it seeds nothing.
-    const COMPACTION = { type: "compaction", limit: 1 };
+    // The branch's latest compaction, one bounded read: an answer older than it seeds nothing. It
+    // stops before the oldest entry the seed read returned (e0, KIMI's), so it never walks a branch
+    // that was never compacted to its root.
+    const COMPACTION = { type: "compaction", limit: 1, stopBeforeId: "e0" };
     const reads = loaded.session.boundedReads;
     assert.equal(reads.filter((read) => isDeepStrictEqual(read, SEED)).length, 1, "one read of the branch: the seed's");
     assert.equal(reads.filter((read) => isDeepStrictEqual(read, LEVEL)).length, 1, "and one of its latest level record");
