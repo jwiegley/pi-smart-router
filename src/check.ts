@@ -132,7 +132,7 @@ function switchingLines(roster: RosterV2): string[] {
   const { margin, horizonCap, cacheSurvival } = roster.switching;
   const table = cacheSurvival.map(([seconds, chance]) => `${percent(chance)} up to ${duration(seconds)}`);
   return [
-    `Switching: a move must cost at least ${percent(margin)} less than staying; lighter prompts in a row are priced up to ${horizonCap} runs ahead.`,
+    `Switching: a move must cost more than ${percent(margin)} less than staying; lighter prompts in a row are priced up to ${horizonCap} runs ahead.`,
     `  A model's cache is taken to survive ${table.join(", ")}, and not after.`,
   ];
 }

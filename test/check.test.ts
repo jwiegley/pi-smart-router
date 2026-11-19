@@ -28,7 +28,8 @@ const DEMAND_AND_SWITCHING = [
   "  LOW under 0.75, MEDIUM under 1.5, HIGH under 2.25, SUPER from there; within 0.1 under a cut takes the level above.",
   "  A conversation over 100,000 tokens or 1,000 entries is never under MEDIUM.",
   "  Heuristic weights: triage_verdict 0.18, turn_type 0.18, complex_inverse 0.14, trivial_signal 0.1, cyclomatic_low 0.08, prompt_shortness 0.06, token_shortness 0.05, no_tool_context 0.05, message_shallow 0.03, prose_ratio 0.03, requirement_low 0, cluster_signal 0.",
-  "Switching: a move must cost at least 15% less than staying; lighter prompts in a row are priced up to 5 runs ahead.",
+  // "more than": chooseByCost (src/cost.ts) moves only when another model is cheaper by more than the margin; at exactly 15% it stays.
+  "Switching: a move must cost more than 15% less than staying; lighter prompts in a row are priced up to 5 runs ahead.",
   "  A model's cache is taken to survive 97% up to 1 min, 92% up to 5 min, 87% up to 20 min, 79% up to 30 min, 66% up to 1 h, 50% up to 2 h, 38% up to 6 h, 11% up to 24 h, and not after.",
 ];
 

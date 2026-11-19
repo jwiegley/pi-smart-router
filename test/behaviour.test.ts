@@ -2054,7 +2054,8 @@ test("C9 a version 2 roster without demand or switching routes with the defaults
   for (const line of [
     "Demand: Jev's answer counts 4 and the heuristics 1 at full confidence; under 60% confidence the heuristics can only raise the level.",
     "  LOW under 0.75, MEDIUM under 1.5, HIGH under 2.25, SUPER from there; within 0.1 under a cut takes the level above.",
-    "Switching: a move must cost at least 15% less than staying; lighter prompts in a row are priced up to 5 runs ahead.",
+    // "more than": chooseByCost (src/cost.ts) moves only when another model is cheaper by more than the margin.
+    "Switching: a move must cost more than 15% less than staying; lighter prompts in a row are priced up to 5 runs ahead.",
     "  A model's cache is taken to survive 97% up to 1 min, 92% up to 5 min, 87% up to 20 min, 79% up to 30 min, 66% up to 1 h, 50% up to 2 h, 38% up to 6 h, 11% up to 24 h, and not after.",
   ]) {
     assert.ok(check.includes(line), `the defaults are in effect: ${line}`);

@@ -42,7 +42,7 @@ export interface DemandSettings {
 }
 
 export interface SwitchingSettings {
-  /** A move must cost at least this share less than staying. */
+  /** A move must cost more than this share less than staying: chooseByCost (src/cost.ts) stays at exactly this share. */
   readonly margin: number;
   /** How many lighter prompts in a row are priced ahead, at most. */
   readonly horizonCap: number;
