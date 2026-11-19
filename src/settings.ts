@@ -1,7 +1,7 @@
-// The settings that decide how the router weighs a prompt and when it moves a session to another
-// model: their types, their defaults and the fixed figures the pure modules share. The roster's
-// optional `demand` and `switching` sections (src/roster.ts) override the defaults; the checker
-// (src/check.ts) reads them back. This module imports nothing of Pi's and reads no clock, so the
+// The settings that decide how the router weighs a prompt, when it moves a session to another
+// model and what thinking effort it sends: their types, their defaults and the fixed figures the
+// pure modules share. The roster's optional `demand`, `switching` and `adaptiveReasoning` sections
+// (src/roster.ts) override the defaults; the checker (src/check.ts) reads them back. This module imports nothing of Pi's and reads no clock, so the
 // standalone checker can reach it.
 import { DEFAULT_LOW_INTENSITY_WEIGHTS } from "./triage/tier-features.ts";
 import type { LowIntensityWeights } from "./triage/tier-features.ts";
@@ -48,6 +48,32 @@ export interface SwitchingSettings {
   readonly horizonCap: number;
   readonly cacheSurvival: SurvivalTable;
 }
+
+/**
+ * The thinking levels upstream's adaptive reasoning derives and bounds, lowest first: Pi's levels
+ * without `off` (upstream's `AdaptiveReasoningLevelSchema`, src/domain/types/schemas.ts:789).
+ */
+export const REASONING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type ReasoningLevel = (typeof REASONING_LEVELS)[number];
+
+export const isReasoningLevel = (value: unknown): value is ReasoningLevel => typeof value === "string" && (REASONING_LEVELS as readonly string[]).includes(value);
+
+/**
+ * Upstream's adaptive reasoning knobs (`adaptive_reasoning`, src/domain/types/schemas.ts:818-847):
+ * the off switch, and a floor and a ceiling that bound only the level the policy derives from the
+ * turn (src/effort.ts). The roster refuses a floor above the ceiling, as upstream does.
+ */
+export interface EffortSettings {
+  /** When false, the policy is skipped and the selected level is sent, as before. */
+  readonly enabled: boolean;
+  /** The floor: a level the policy derives is raised to at least this one. */
+  readonly minLevel?: ReasoningLevel;
+  /** The ceiling: a level the policy derives is capped at this one. */
+  readonly maxLevel?: ReasoningLevel;
+}
+
+/** Upstream's defaults: on, with no floor and no ceiling. */
+export const DEFAULT_EFFORT: EffortSettings = { enabled: true };
 
 /** Upstream's weights, except that the two signals nothing computes here carry none. */
 export const DESIGN_WEIGHTS: LowIntensityWeights = { ...DEFAULT_LOW_INTENSITY_WEIGHTS, requirement_low: 0, cluster_signal: 0 };
