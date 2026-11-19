@@ -1123,6 +1123,19 @@ describe("a run that starts without a prompt, after several prompts", () => {
     assert.equal(recordOf(state).needRun?.need, "high", "the last prompts are still HIGH and LOW: a run without a prompt is not a prompt");
   });
 
+  test("a run without a prompt is not counted among the prompts", async (t) => {
+    const state = await session(t);
+    await shallow(state, "go on", ANSWER_HIGH, "high");
+    await shallow(state, "rename foo to bar", ANSWER_LOW, "low");
+    let last = await shallow(state, "rename bar to baz", ANSWER_LOW, "low");
+    last = routed(await unprompted(state, last));
+    assert.equal(recordOf(state).needRun?.need, "high", "HIGH, LOW, LOW: HIGH");
+    await answer(state, last, SHALLOW_TOKENS);
+    last = await shallow(state, "rename baz to qux", ANSWER_LOW, "low");
+    await unprompted(state, last);
+    assert.equal(recordOf(state).needRun?.need, "low", "the last three prompts are LOW, LOW, LOW: the run without a prompt between them is not one");
+  });
+
   test("in a deep session takes at least the deep-session floor, and status says the floor raised it", async (t) => {
     const state = await session(t);
     await shallow(state, "rename foo to bar", ANSWER_LOW, "low");
