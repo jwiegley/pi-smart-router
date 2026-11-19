@@ -418,7 +418,7 @@ function chooseForNeed(rc: ResolveContext, record: SessionRecord, section: Scope
 
 /**
  * A stuck run's move up: on a continuation of a run whose level is below SUPER and not its tag's,
- * that has not moved up yet, when its last three tool calls failed the same way, the first
+ * that has not moved up yet, when its last three tool calls failed (src/stuck.ts), the first
  * available model that is a higher level's own, starting one level above the run's, unpriced
  * (escalationTarget). Never a fallback chain. With no such model the run stays, and a later request
  * of the run can still move. Only a model other than the run's is a move; it carries the code

@@ -280,7 +280,7 @@ export function stepUpNotice(start: Tier, tier: Tier, modelId: string): string {
  * that level's model. It names levels and a model id only, never a tool result's text.
  */
 export function escalationNotice(from: Tier, to: Tier, modelId: string): string {
-  return `pi-smart-router: this run's last three tool calls failed the same way, so it moves up from ${tierLabel(from)} to ${tierLabel(to)} (${modelId}).`;
+  return `pi-smart-router: this run's last three tool calls failed, so it moves up from ${tierLabel(from)} to ${tierLabel(to)} (${modelId}).`;
 }
 
 /** What one role's candidates said, as a refusal lists it: the first role, then each `later` one, a fallback role named as one. */

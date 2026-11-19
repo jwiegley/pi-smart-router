@@ -2046,7 +2046,7 @@ test("C7 three identical failed tool calls move the run up one level, with a not
     "three identical failed tool calls move the run up one level: the fourth request goes to HIGH's model",
   );
   assert.equal(answered(pi), PERSONAL.high);
-  assert.equal(count(pi, "pi-smart-router: this run's last three tool calls failed the same way, so it moves up from MEDIUM to HIGH (gpt-6.1-sol)."), 1, "with a notice, once");
+  assert.equal(count(pi, "pi-smart-router: this run's last three tool calls failed, so it moves up from MEDIUM to HIGH (gpt-6.1-sol)."), 1, "with a notice, once");
   assert.equal(pi.ui.status(LEVEL_KEY), "personal MEDIUM → gpt-6.1-sol (demand 1.0; escalated)", "the footer follows the run up: the blend of 80% MEDIUM and the heuristics is 1.01 (L7)");
   assert.equal(await lastDecision(pi), "smart-router/auto continuation: high → openai-codex-2/gpt-6.1-sol (escalate)");
   const record = { need: "medium", tier: "medium", escalated: true, ref: PERSONAL.high };
@@ -2054,30 +2054,36 @@ test("C7 three identical failed tool calls move the run up one level, with a not
   assert.equal(runRecords(pi).length, 1);
 });
 
-test("C8 three different failures do not", TIMEOUT, async (t) => {
+test("C8 two failed tool calls and then one that succeeds do not", TIMEOUT, async (t) => {
   const world = levelsWorld(t);
   const codex = world.faux("openai-codex-2");
+  writeFileSync(join(world.cwd, "notes.txt"), "zebra notes\n");
   const pi = await world.start({ select: "smart-router/auto", tools: ["read"] });
   world.jev.answer(JEV.medium);
-  codex.respond(...readsThenAnswer(["missing-1.txt", "missing-2.txt", "missing-3.txt"]));
+  codex.respond(...readsThenAnswer(["missing-1.txt", "missing-2.txt", "notes.txt", "missing-3.txt"]));
   await pi.prompt("Tidy the zebra notes");
   assert.deepEqual(toolResults(pi), [
     ["read", true],
     ["read", true],
+    ["read", false],
     ["read", true],
   ]);
-  assert.deepEqual(codex.calls.map((call) => call.ref), [PERSONAL.medium, PERSONAL.medium, PERSONAL.medium, PERSONAL.medium], "three different failures do not move the run");
-  assert.deepEqual(pi.ui.saw(/failed the same way/), [], "three different failures do not: no notice");
+  assert.deepEqual(
+    codex.calls.map((call) => call.ref),
+    [PERSONAL.medium, PERSONAL.medium, PERSONAL.medium, PERSONAL.medium, PERSONAL.medium],
+    "a success among the last three tool results makes no stuck run: the run stays on MEDIUM's model",
+  );
+  assert.deepEqual(pi.ui.saw(/moves up from/), [], "no stuck run: no notice");
   assert.equal(
     pi.ui.status(LEVEL_KEY),
     "personal MEDIUM → gpt-6.1-terra (demand 1.0; cost unknown)",
-    "three different failures do not: the footer is the plan's; on a session's first prompt there is no usage yet, so the cost is unknown",
+    "no stuck run: the footer is the plan's; on a session's first prompt there is no usage yet, so the cost is unknown",
   );
   assert.deepEqual(runRecords(pi).at(-1)?.cost, { outcome: "unknown", why: "no usage yet" }, "the run's record is written, and its cost is unknown for want of usage");
-  assert.equal(runRecords(pi).at(-1)?.escalated, undefined, "three different failures do not: the record does not say escalated");
+  assert.equal(runRecords(pi).at(-1)?.escalated, undefined, "no stuck run: the record does not say escalated");
 });
 
-test("C8b three different shell commands that each fail without output do not, though Pi gives them one text", TIMEOUT, async (t) => {
+test("C8b three different shell commands that each fail without output move the run up", TIMEOUT, async (t) => {
   const world = levelsWorld(t);
   const codex = world.faux("openai-codex-2");
   // Pi's own bash tool, on a shell that runs nothing and exits 1 without output: the tests may start
@@ -2109,13 +2115,14 @@ test("C8b three different shell commands that each fail without output do not, t
   );
   assert.deepEqual(
     codex.calls.map((call) => call.ref),
-    [PERSONAL.medium, PERSONAL.medium, PERSONAL.medium, PERSONAL.medium],
-    "three different calls that failed alike are not stuck: the calls must be the same, not only their results",
+    [PERSONAL.medium, PERSONAL.medium, PERSONAL.medium, PERSONAL.high],
+    "John's ruling of 2026-11-18, exactly upstream: three failed tool calls in a row are a stuck run whatever the calls were, so the fourth request goes to HIGH's model",
   );
-  assert.deepEqual(pi.ui.saw(/failed the same way/), [], "three different calls do not move the run: no notice");
-  assert.doesNotMatch(pi.ui.status(LEVEL_KEY) ?? "", /escalated/, "three different calls do not move the run: the footer does not say escalated");
-  assert.equal(pi.ui.status(LEVEL_KEY), "personal MEDIUM → gpt-6.1-terra (demand 1.0; cost unknown)", "the footer is the plan's");
-  assert.equal(runRecords(pi).at(-1)?.escalated, undefined, "three different calls do not move the run: the record does not say escalated");
+  assert.equal(answered(pi), PERSONAL.high);
+  assert.equal(count(pi, "pi-smart-router: this run's last three tool calls failed, so it moves up from MEDIUM to HIGH (gpt-6.1-sol)."), 1, "with a notice, once");
+  assert.equal(pi.ui.status(LEVEL_KEY), "personal MEDIUM → gpt-6.1-sol (demand 1.0; escalated)", "the footer follows the run up");
+  const record = { need: "medium", tier: "medium", escalated: true, ref: PERSONAL.high };
+  assert.deepEqual(fields(runRecords(pi).at(-1), record), record, "one record, which says the run escalated");
 });
 
 test("C9 a version 2 roster without demand or switching routes with the defaults", TIMEOUT, async (t) => {
@@ -2199,7 +2206,7 @@ test("C11 a work session never leaves the work account", TIMEOUT, async (t) => {
   work.respond(...readsThenAnswer(["missing.txt", "missing.txt", "missing.txt"]));
   await pi.prompt("Tidy the zebra notes");
   assert.equal(answered(pi), WORK.high, "the escalation stays on the work account");
-  assert.equal(count(pi, "pi-smart-router: this run's last three tool calls failed the same way, so it moves up from MEDIUM to HIGH (gpt-6.1-sol)."), 1);
+  assert.equal(count(pi, "pi-smart-router: this run's last three tool calls failed, so it moves up from MEDIUM to HIGH (gpt-6.1-sol)."), 1);
   assert.match(pi.ui.status(LEVEL_KEY) ?? "", /^work MEDIUM → gpt-6\.1-sol \(demand \d\.\d; escalated\)$/);
   assert.deepEqual(called(world.counts()), { "openai-codex-3": 6 }, "a work session never leaves the work account: a LOW, a SUPER and an escalated run of four requests");
   assert.deepEqual(

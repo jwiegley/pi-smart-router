@@ -763,6 +763,15 @@ function failures(count: number, texts: readonly string[] = [TOOL_TEXT]): Messag
   return messages;
 }
 
+/** `messages`, then one more tool call, on `tool`, whose result succeeded. */
+function thenSucceeded(messages: readonly Message[], tool = "read"): Message[] {
+  return [
+    ...messages,
+    assistant(TERRA, { content: [{ type: "toolCall", id: "call-ok", name: tool, arguments: { path: "notes.md" } }], stopReason: "toolUse" }),
+    { role: "toolResult", toolCallId: "call-ok", toolName: tool, content: [{ type: "text", text: "ok" }], isError: false, timestamp: NOW },
+  ];
+}
+
 /** Nothing the router kept, recorded or showed holds a tool result's text. */
 function holdsNoToolText(state: Session): void {
   const kept = JSON.stringify([recordOf(state).history, state.loaded.session.entries, state.loaded.session.notices, [...state.loaded.session.statuses.values()]]);
@@ -1010,18 +1019,18 @@ describe("escalation", () => {
   test("a stuck run moves up one level, once, with a notice", async (t) => {
     assert.equal(
       escalationNotice("medium", "high", "gpt-6.1-sol"),
-      "pi-smart-router: this run's last three tool calls failed the same way, so it moves up from MEDIUM to HIGH (gpt-6.1-sol).",
-      "the notice names the levels and the model",
+      "pi-smart-router: this run's last three tool calls failed, so it moves up from MEDIUM to HIGH (gpt-6.1-sol).",
+      "the notice names the levels and the model, and no sameness of the failures: John's ruling of 2026-11-18 counts any three failures in a row",
     );
     const state = await session(t);
     const level = await say(state, "go on", ANSWER_MEDIUM);
     assert.equal(routed(await route(state, "go on")), TERRA, "a MEDIUM run on terra");
     assert.equal(footer(state), `personal MEDIUM → gpt-6.1-terra (${demandNote(level)}; cost unknown)`, "the planned run's footer, as before");
     const before = state.loaded.session.notices.length;
-    const differ = continuation(state, TERRA, failures(3, [TOOL_TEXT, `${TOOL_TEXT} again`]));
-    assert.deepEqual([routed(differ), lastCode(state)], [TERRA, "stick:previous"], "three failures that differ are ordinary work");
-    const up = continuation(state, TERRA, failures(3));
-    assert.deepEqual([routed(up), lastCode(state)], [SOL, "escalate"], "three identical failures move the run to HIGH's model");
+    const recovered = continuation(state, TERRA, thenSucceeded(failures(2)));
+    assert.deepEqual([routed(recovered), lastCode(state)], [TERRA, "stick:previous"], "two failures and then a success are ordinary work");
+    const up = continuation(state, TERRA, failures(3, [TOOL_TEXT, `${TOOL_TEXT} again`, "Permission denied"]));
+    assert.deepEqual([routed(up), lastCode(state)], [SOL, "escalate"], "three failures in a row with three different texts move the run to HIGH's model: John's ruling of 2026-11-18, exactly upstream");
     assert.deepEqual(state.loaded.session.notices.slice(before), [{ type: "info", message: escalationNotice("medium", "high", "gpt-6.1-sol") }], "said once, where it happens");
     assert.deepEqual([recordOf(state).runTier, recordOf(state).escalated], ["high", true], "the run is at HIGH now, and escalated");
     const escalatedFooter = `personal MEDIUM → gpt-6.1-sol (${demandNote(level)}; escalated)`;

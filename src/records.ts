@@ -97,7 +97,7 @@ export interface LevelRecord {
   readonly returnedToFirst?: true;
   /** The model that answered is one of the scope's fallback chain, not one of the tier's own; `tier` is still the run's. */
   readonly fallback?: true;
-  /** The run moved up a level because its last three tool calls failed the same way. */
+  /** The run moved up a level because its last three tool calls failed. */
   readonly escalated?: true;
   readonly aborted?: true;
   /** A correction's: the `at` of the run it corrects. */
