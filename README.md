@@ -911,8 +911,9 @@ is not asked at all and its outcome is the failure `error`.
   entries included. This is upstream's planned floor for the terse "continue" in a long session,
   which no classifier rates well. The floor holds for a run without a prompt too
   ([Runs without a prompt](#runs-without-a-prompt)), so with this default, once the session has
-  planned a run, no run in a conversation over 100,000 tokens routes to LOW unless its tag says so.
-  Before that, a run without a prompt stays on the model the session used last.
+  planned a run, no run in a conversation known to be over 100,000 tokens routes to LOW unless its
+  tag says so. That section says when the size is not known. Before a session has planned a run, a
+  run without a prompt stays on the model the session used last.
   `"deepSessionFloor": "low"` turns the floor off.
 
 The record of a run says what decided its level: `tag`, `jev` (the blend with Jev's answer),
