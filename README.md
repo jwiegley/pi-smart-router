@@ -518,7 +518,7 @@ Three things to know:
 | `accounts.<provider>.scope` | no | `"personal"`, the default, or `"work"`. |
 | `classifier` | no | Jev's settings; without them, Jev is never asked. `model`, an exact ref, default `openrouter/typesafe/jev-1.14`; `timeoutMs`, 100 to 1000, default 1000; and `context`: `messages`, 0 to 20, default 6; `messageChars`, 200 to 8000, default 1500; `totalChars`, 1000 to 32000, default 12000. `closeCall`, which earlier versions used, is still accepted from 0 to 0.5 and ignored, and the checker says so: `demand.closeCall` decides a close call. The model names a Jev version, so that tuned demand settings keep their meaning; moving to a newer Jev is a roster edit. `instructions`, the question Jev is asked, as a text of at most 4000 characters, or `instructionsFile`, the name of a prompt file that holds it; not both, and with neither the built-in question is asked ([Jev's prompts](#jevs-prompts)). |
 | `demand` | no | How a prompt's demand is weighed ([The level a prompt needs](#the-level-a-prompt-needs)). `jevWeight` and `heuristicsWeight`, each 0 to 100, defaults 4 and 1, not both 0; `minConfidence`, 0 to 1, default 0.6; `closeCall`, 0 to 0.5, default 0.1; `cuts`, three numbers that ascend, each above 0 and below 3, default `[0.75, 1.5, 2.25]`; `deepSessionFloor`, `low`, `medium`, `high` or `super`, default `medium`; and `weights`, any of the twelve heuristic signals, each 0 to 100 and not all 0, by default upstream's weights with `requirement_low` and `cluster_signal` at 0. Every field is optional, and a field left out keeps its default. |
-| `adaptiveReasoning` | no | The thinking effort each request is sent ([Thinking effort](#thinking-effort)), upstream's `adaptive_reasoning`: `enabled`, `true` or `false`, default `true`; `minLevel`, the floor, and `maxLevel`, the ceiling, each one of `minimal`, `low`, `medium`, `high`, `xhigh` and `max`, with no default, the floor never above the ceiling. Both bound only the level the turn gives, never a level `/thinking` set that is kept. A version 1 roster has none, and the defaults. |
+| `adaptiveReasoning` | no | The thinking effort each request is sent ([Thinking effort](#thinking-effort)), upstream's `adaptive_reasoning`: `enabled`, `true` or `false`, default `true`; `minLevel`, the floor, and `maxLevel`, the ceiling, each one of `minimal`, `low`, `medium`, `high`, `xhigh` and `max`, with no default, the floor never above the ceiling. A floor above the selected `/thinking` level raises it; a ceiling never lowers it. A version 1 roster has none, and the defaults. |
 | `switching` | no | When a session moves to another model ([Choosing the model](#choosing-the-model)). `margin`, 0 to 0.9, default 0.15; `horizonCap`, a whole number of runs from 1 to 20, default 5; and `cacheSurvival`, 1 to 32 pairs of `[seconds, chance]`, the seconds rising and the chances from 1 to 0 never rising, by default the table in [Choosing the model](#choosing-the-model). Every field is optional. |
 
 ### Account bindings in version 2
@@ -1141,20 +1141,29 @@ in any case and inside a longer word, is a *planning* turn; anything else is an 
   is sent the selected level, as before), or sets a floor (`minLevel`) and a ceiling (`maxLevel`)
   on the level the turn gives. The ceiling wins over the floor.
 - **A model that does not reason**, or one whose catalog maps every level up to the turn's to
-  `null`, is sent the selected level.
+  `null`, is sent the selected level. A model whose catalog has no `minimal` and no level below it
+  therefore gets its requests after a tool result at the selected level, which Pi clamps to what
+  the model supports, while its ordinary prompts go at `low`: at `/thinking medium` such a run
+  alternates between the two. This is upstream's rule as written, and a roster floor does not
+  change it.
 - **A change of effort costs that model's cache.** On John's ChatGPT-account models the prompt cache
-  holds only between two requests at one effort, so an ordinary turn after a planning one on the
-  same model, or a tool result's request after an ordinary turn, reads the conversation again at the
-  full input price. The cost choice prices each candidate at the effort it would be sent, so the
-  request carries the effort its price assumed.
+  holds only between two requests at one effort, and `minimal` is sent as `low` there, so those
+  two are one effort. An ordinary turn after a planning one on the same model, or a tool result's
+  request after a planning one, reads the conversation again at the full input price. The cost
+  choice prices each candidate at the effort its run's first request would be sent, so that
+  request carries the effort its price assumed; a later change of effort within the run is not
+  priced.
 - **The footer** shows the effort the latest request carried, and why, under a key of its own,
   `smart-router-effort`: `thinking minimal (after a tool result)`,
   `thinking low (an ordinary turn)`, `thinking medium (planning)`, `thinking high (SUPER)`, `thinking high (a stuck run)`,
   `thinking max (as selected, never lowered)`, `thinking medium (raised from the selected level for
   planning)`, `thinking max (the role's own level)`, or `(the roster's floor)` and `(the roster's
-  ceiling)`, and `(as selected)` where the rule leaves the level, as for a model that does not
-  reason. `/smart-router status` says the same on its line `Thinking sent on the latest request`.
-  A model picked by hand is never routed, so neither shows anything for it.
+  ceiling)`, `(as selected)` where the rule leaves the level, as for a model that does not
+  reason, and `(as selected; adaptive effort is off)`. Both name the level the router returned;
+  Pi then clamps it to what the model supports, so a model that does not reason is sent none and
+  a ChatGPT-account model shown `minimal` is sent `low`. `/smart-router status` says the same on
+  its line `Thinking sent on the latest request`. A model picked by hand is never routed: status
+  shows nothing for it at once, and the footer from the next run's start.
 
 What upstream does that the router does not: it adds a line asking for brevity to the system
 prompt of a verbose model at `minimal` or `low`, which a route cannot do; it keeps the session's

@@ -729,7 +729,9 @@ John to confirm or overrule. Where a line differs from the text above, the line 
   request that carries that prompt last; a run without a prompt is priced at its first request,
   from that request's messages; what pi-cache-optimizer is told before a run without a prompt
   assumes an ordinary turn. When another extension or a template changes a prompt after the router
-  planned it, the turn type of the request sent can differ from the one priced.
+  planned it, the turn type of the request sent can differ from the one priced. Only the run's
+  first request is priced: a later change of effort within the run, as after a planning prompt's
+  first tool result, is not, for any candidate alike.
 - **What John sees.** A footer item of its own, `smart-router-effort`, after each request of the
   owner's loop: `thinking minimal (after a tool result)`, `thinking low (an ordinary turn)`,
   `thinking medium (planning)`, `thinking high (SUPER)`, `thinking high (a stuck run)`,
@@ -748,6 +750,7 @@ John to confirm or overrule. Where a line differs from the text above, the line 
 - **A version 1 roster with compaction disabled** sends a request that is too large for its model
   as it is: version 1 has no fit logic left. All six of John's rosters are version 2.
 - **No trace of the pin (John, 2026-11-18).** `PI_SMART_ROUTER_LOCAL_ONLY` is ignored and an old
-  session's pin entry is not looked for. Neither produces a notice.
+  session's pin entry is not looked for. Neither produces a notice. `/smart-router local` is an
+  unknown subcommand, answered with the usage, and no longer says that the pin is gone.
 - **The review script** replays, for each rated run, the first user message at or after the
   record's time, and falls back to the latest one before it.

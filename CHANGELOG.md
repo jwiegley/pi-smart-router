@@ -105,7 +105,8 @@ Jev's request is unchanged, byte for byte, at `classifier.context.messages` of 5
   between two requests to one model costs a full-price read of the conversation.
 - **The `adaptiveReasoning` roster section**, version 2: `enabled` (default `true`), `minLevel`
   and `maxLevel`, each one of `minimal` to `max`, the floor never above the ceiling; upstream's
-  defaults without it, and always under version 1. The checker reads the rule back in words.
+  defaults without it, and always under version 1, which has no off switch. The checker reads the
+  rule back in words.
 - **The review script**, `scripts/review-demand.ts`: it replays the rated runs of the session files
   it is given and reports how often the heuristics, Jev and the blend named the level John meant.
   It reads only those files, sends nothing, prints no prompt text, and is not shipped. It runs on
