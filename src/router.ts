@@ -211,9 +211,10 @@ function sizeUnknown(ctx: ExtensionContext): boolean {
 
 /**
  * When the branch was last compacted, from a bounded read of its latest compaction entry, made only
- * back to `oldest`, the oldest entry the seed read returned, so that a branch never compacted is not
- * walked to its root: a compaction older than every seeded answer would filter nothing. Undefined
- * when there is no such entry, its time cannot be read, or `oldest` has no id (no read is made).
+ * back to `oldest`, the oldest entry the seed read returned, so that a branch never compacted is
+ * not walked to its root: a compaction older than every seeded answer would filter nothing.
+ * Undefined when there is no such entry, its time cannot be read, or `oldest` has no id (no read is
+ * made).
  */
 function compactedAt(view: BoundedHistory, oldest: unknown): number | undefined {
   const stopBeforeId = isRecord(oldest) && typeof oldest.id === "string" ? oldest.id : undefined;
@@ -772,8 +773,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   /**
    * Plan an idle input's run with the session as it is now: after a wait, its selection, scope and
    * roster may have moved. `roles`: what the heuristics read of the input's window (rolesOf), none
-   * for a run that read none; the conversation's size and the active context's entry count are read here,
-   * without a read of the history.
+   * for a run that read none; the conversation's size and the active context's entry count are read
+   * here, without a read of the history.
    */
   const plan = (ctx: ExtensionContext, record: Session, text: string, digest: string, level: LevelInput, token: number, roles: readonly string[]): Plan | undefined => {
     if (!ctx.isIdle()) return undefined;
@@ -1026,7 +1027,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     if (message.stopReason === "aborted") return;
     const at = now();
     const session = recordOf(sessionId);
-    // A usage that is not numbers is none: the next choice's cost is unknown, and the ledger records nothing.
+    // A usage that is not numbers is none: the next choice's cost is unknown, and the ledger
+    // records nothing.
     session.last = { ref, at, usage: usable(message.usage) ? message.usage : undefined };
     // Whichever selection sent it, a model picked by hand's included: its cache and the run's shape.
     noteAnswer(session.ledger, answerOf(message, ctx.modelRegistry.find(message.provider, message.model), at));

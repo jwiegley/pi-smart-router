@@ -44,11 +44,14 @@ Jev's request is unchanged, byte for byte, at `classifier.context.messages` of 5
   a risky operation gets at least HIGH, as before; and a conversation over 100,000 tokens, or whose
   active context holds over 1,000 entries (Pi counts them from the last compaction, an extension's
   own entries included), gets at least MEDIUM. That floor holds for a prompt and for a run without a
-  prompt, so once the session has planned a run such a conversation never routes to LOW without a
-  tag; before that, a run without a prompt stays on the model used last. Without an answer from
-  Jev, or when the conversation cannot be read, the heuristics decide alone. The heuristics count
-  the latest 20 messages as Pi would send them to the model, and an extension's own entry, which is
-  not a message entry, is not read (`src/demand.ts`).
+  prompt, so once the session has planned a run a conversation known to be that large never routes
+  to LOW without a tag; before that, a run without a prompt stays on the model used last. The size
+  is unknown right after a compaction, after a move to another leaf and after an answer whose usage
+  could not be read; until the next answer only the count of entries can raise the level, and after
+  a compaction that count has started again. Without an answer from Jev, or when the conversation
+  cannot be read, the heuristics decide alone. The heuristics count the latest 20 messages as Pi
+  would send them to the model, and an extension's own entry, which is not a message entry, is not
+  read (`src/demand.ts`).
 - **The cost choice.** Among the first available model of the needed level and of each level above
   it, the run goes to the one its expected run costs least on (`src/cost.ts`): the first request
   at the cached-input price for what survives in the model's cache, by a survival table measured on
@@ -74,7 +77,9 @@ Jev's request is unchanged, byte for byte, at `classifier.context.messages` of 5
   never from SUPER and never for a tagged run, with the notice "pi-smart-router: this run's last
   three tool calls failed the same way, so it moves up from MEDIUM to HIGH (gpt-6.1-sol)." and
   `escalated` in the footer and the record. Three different shell commands that fail without
-  output, which Pi's shell tool gives one text, are not stuck. A stuck run never moves to a
+  output, which Pi's shell tool gives one text, are not stuck. A failed result whose call cannot be
+  found means the run is not stuck; so does one whose call id is empty, or shared by two calls of
+  one batch, since the call cannot then be told apart. A stuck run never moves to a
   fallback chain: with no higher level's own model available it stays, and nothing is shown.
 - **Two optional roster sections**, `demand` (`jevWeight`, `heuristicsWeight`, `minConfidence`,
   `closeCall`, `cuts`, `deepSessionFloor`, `weights`) and `switching` (`margin`, `horizonCap`,
@@ -112,14 +117,15 @@ Jev's request is unchanged, byte for byte, at `classifier.context.messages` of 5
   the compaction leaves; if it wins, Pi compacts first. Pi writes the summary with a request of its
   own that no cache serves, so its input is priced at the writing model's uncached input price, on
   the conversation less what the compaction keeps (`keepRecentTokens`): an upper bound, which errs
-  toward staying. Its output is priced at 4,000 tokens. The reasoning a summary may add, the wait
-  before the answer and the detail a summary loses are not priced. With compaction disabled, such a model is
-  passed over and a too-small level steps up, as before. A version 1 roster, which has no fit rule
-  left, sends a request too large for its model as it is when compaction is disabled.
+  toward staying. Its output is priced at 4,000 tokens. When Pi's cut falls inside a turn it writes
+  two summaries; the second one's output is not priced. The reasoning a summary may add, the wait
+  before the answer and the detail a summary loses are not priced. With compaction disabled, such a
+  model is passed over and a too-small level steps up, as before. A version 1 roster, which has no
+  fit rule left, sends a request too large for its model as it is when compaction is disabled.
 - **A run without a prompt**, and a prompt's run whose plan cannot be matched to it, takes the level
   its session last needed, raised to the deep-session floor in a very deep session, through the
-  same choice, instead of the model used last or the level's first model. pi-cache-optimizer is told the model that choice will take. Such a run writes no
-  level record.
+  same choice, instead of the model used last or the level's first model. pi-cache-optimizer is
+  told the model that choice will take. Such a run writes no level record.
 - A level record writes `need` where earlier versions wrote `asked`; records with `asked` or
   `source: "keyword"` still read.
 - **A version 1 role no longer prefers the model that answered last.** The preference went with the

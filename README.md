@@ -1003,11 +1003,13 @@ then the run on what the compaction leaves, `keepRecentTokens` plus the summary,
 cached, at the price tier of that size. Pi writes the summary with a request of its own, its own
 system prompt and the serialized conversation, which no cache serves. So the summary's input is
 priced at the writing model's price for uncached input, on the conversation's size less what the
-compaction keeps (`keepRecentTokens`), and its output at 4,000 tokens. That input is an upper
-bound, because Pi shortens long tool results before it sends them, and it errs toward staying. The
-reasoning a summary may add, the wait before the answer and the detail a summary loses are not
-priced. A candidate that compacts shows nothing cached in status, since its cost uses no cache. Leaving the current model then costs its uncached premium on that smaller
-conversation, times the chance its level is needed again. If the candidate wins, Pi compacts
+compaction keeps (`keepRecentTokens`), and its output at 4,000 tokens. When Pi's cut falls inside
+a turn it writes two summaries; the second one's output is not priced. The summary's input is an
+upper bound, because Pi shortens long tool results before it sends them, and it errs toward
+staying. The reasoning a summary may add, the wait before the answer and the detail a summary
+loses are not priced. A candidate that compacts shows nothing cached in status, since its cost uses
+no cache. Leaving the current model then costs its uncached premium on that smaller conversation,
+times the chance its level is needed again. If the candidate wins, Pi compacts
 first, the summary written by the model that answered last. With compaction disabled Pi would send
 the request as it is, so there a candidate too small for the conversation is passed over, and a
 needed level whose first available model is too small passes the run up.
@@ -1053,12 +1055,13 @@ it while two messages were pending), take the level the session last needed: tha
 planned run, or, in a resumed session, of its latest level record. In a very deep session that
 level is raised to the deep-session floor, as a prompt's demand is: over 100,000 tokens by the
 latest usage, or over 1,000 entries in the active context, which Pi counts from the last
-compaction, an extension's own entries included. Right after a compaction, and after a move to
-another leaf of the session tree, no answer has measured the conversation yet, so its size is
-unknown and counts as not over; after a compaction the count of entries has started again too, so
-the floor waits for the next answer. A move to another leaf forgets every model's cache even when
-the new leaf is an ancestor of the old one, whose conversation the caches still hold. The risky floor needs a prompt's text and does not apply. The session's own
-need is not raised: the next run without a prompt starts from it again.
+compaction, an extension's own entries included. The size is unknown right after a compaction,
+after a move to another leaf of the session tree, and after an answer whose usage could not be
+read, and an unknown size counts as not over. Until the next answer only the count of entries can
+raise the level, and after a compaction that count has started again. A move to another leaf
+forgets every model's cache even when the new leaf is an ancestor of the old one, whose
+conversation the caches still hold. The risky floor needs a prompt's text and does not apply. The
+session's own need is not raised: the next run without a prompt starts from it again.
 
 The run goes through the same choice a prompt's run makes, priced with nothing added for a prompt,
 and counts, for the horizon and for the chance a level is needed again, as a prompt that needed
@@ -1078,9 +1081,10 @@ same arguments (compared with the keys of every object sorted), each call found 
 assistant message before its result, and the same first 256 characters of result text. Any failure
 does not count: in Pi every shell command that exits non-zero is a failed call, and its shell tool
 gives every command that fails without output the same text, so three different searches that find
-nothing are ordinary work. A failed result whose call cannot be found counts for nothing. The three
-are looked for after the latest user message of the request; Pi sends an extension's own message as
-a user message, so a run an extension starts is bounded the same way.
+nothing are ordinary work. A failed result whose call cannot be found means the run is not stuck.
+So does one whose call id is empty, or shared by two calls of one batch, since the call cannot then
+be told apart. The three are looked for after the latest user message of the request; Pi sends an
+extension's own message as a user message, so a run an extension starts is bounded the same way.
 
 - **Where it goes:** to the first available model that is a higher level's own, starting one level
   above the run's, unpriced. It never goes to a fallback chain, whose models may be weaker than the

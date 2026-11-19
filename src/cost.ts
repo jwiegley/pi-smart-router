@@ -73,7 +73,10 @@ export interface Priced {
   readonly cost: number;
   /** What leaving the current model costs, already in `cost`; zero for the current model itself. */
   readonly leaving: number;
-  /** The candidate's cached size and its chance of surviving; both 0 for one that compacts, whose cost uses neither. */
+  /**
+   * The candidate's cached size and its chance of surviving; both 0 for one that compacts, whose
+   * cost uses neither.
+   */
   readonly cached: number;
   readonly survival: number;
   readonly compacts: boolean;

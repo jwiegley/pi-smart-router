@@ -122,7 +122,10 @@ function remember(ledger: Ledger, answer: Answer): number {
   return tokens;
 }
 
-/** An answer that ended without an error: the model's cache, the provider's writes, the run under way. Nothing from a usage that is not numbers. */
+/**
+ * An answer that ended without an error: the model's cache, the provider's writes, the run under
+ * way. Nothing from a usage that is not numbers.
+ */
 export function noteAnswer(ledger: Ledger, answer: Answer): void {
   if (!usable(answer.usage)) return;
   const tokens = remember(ledger, answer);

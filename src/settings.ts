@@ -77,7 +77,10 @@ export const DEFAULT_SWITCHING: SwitchingSettings = {
   ],
 };
 
-/** A conversation over this many tokens, or with this many entries in its active context (Pi counts them from the last compaction), is never under the deep-session floor. */
+/**
+ * A conversation over this many tokens, or with this many entries in its active context (Pi counts
+ * them from the last compaction), is never under the deep-session floor.
+ */
 export const DEEP_SESSION_TOKENS = 100_000;
 export const DEEP_SESSION_ENTRIES = 1_000;
 
@@ -91,5 +94,8 @@ export const RUNS_NEEDED = 3;
 export const AGAIN_DEFAULT = 0.5;
 export const AGAIN_MIN = 0.2;
 
-/** The size assumed for a compaction's summary: its output tokens, and its share of the conversation after it. */
+/**
+ * The size assumed for a compaction's summary: its output tokens, and its share of the conversation
+ * after it.
+ */
 export const SUMMARY_TOKENS = 4_000;

@@ -125,7 +125,10 @@ export interface LastInput {
   readonly level: LevelInput;
 }
 
-/** What decided a run, as status shows it: a planned run's level, or a run without a prompt's choice and the level whose model took it. */
+/**
+ * What decided a run, as status shows it: a planned run's level, or a run without a prompt's choice
+ * and the level whose model took it.
+ */
 export type RunTerms = { readonly kind: "plan"; readonly level: PlanLevel } | { readonly kind: "need"; readonly run: NeedRun; readonly tier: Tier };
 
 /** What a router instance keeps per session. */

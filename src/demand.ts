@@ -21,7 +21,10 @@ export interface PromptFacts {
   readonly contextTokens: number | undefined;
   /** The roles of the latest messages, oldest first, at most HEURISTIC_MESSAGES; "tool" for a tool result. */
   readonly roles: readonly string[];
-  /** The active context's entry count, where Pi's history metrics give one: counted from the last compaction, an extension's own entries included. */
+  /**
+   * The active context's entry count, where Pi's history metrics give one: counted from the last
+   * compaction, an extension's own entries included.
+   */
   readonly entries: number | undefined;
 }
 
@@ -32,8 +35,8 @@ export interface PromptFacts {
  * "assistant", and any other role as "user", as Pi sends a ! shell run (bashExecution) or a custom
  * message. A message Pi keeps out of the context (`excludeFromContext`, a !! shell run) is not
  * counted, nor is anything without a string role. An extension's own entry in the session is not a
- * message entry, so the window read, which asks for message entries, never reads it. The live router and the review script both use
- * this, so that a replay sees the roles the router saw.
+ * message entry, so the window read, which asks for message entries, never reads it. The live
+ * router and the review script both use this, so that a replay sees the roles the router saw.
  */
 export function rolesOf(messages: readonly unknown[]): string[] {
   const roles: string[] = [];
@@ -48,7 +51,10 @@ export function rolesOf(messages: readonly unknown[]): string[] {
 
 export type DemandGuard = "low-confidence" | "close-call" | "risky" | "deep-session";
 
-/** What says how deep a session is: the conversation's size and the active context's entry count, each undefined when unknown. */
+/**
+ * What says how deep a session is: the conversation's size and the active context's entry count,
+ * each undefined when unknown.
+ */
 export type SessionDepth = Pick<PromptFacts, "contextTokens" | "entries">;
 
 /**

@@ -49,7 +49,6 @@ export interface Files {
   readonly labels: Loaded<Labels> | undefined;
 }
 
-/** What the command needs of its router instance. */
 /** What the commands read of a session's record. */
 export interface SessionView {
   readonly history: readonly HistoryEntry[];
@@ -57,6 +56,7 @@ export interface SessionView {
   readonly runTerms: RunTerms | undefined;
 }
 
+/** What the command needs of its router instance. */
 export interface CommandHost {
   readonly pi: Pick<ExtensionAPI, "appendEntry" | "getAllTools" | "getCommands" | "getThinkingLevel">;
   readonly now: () => number;

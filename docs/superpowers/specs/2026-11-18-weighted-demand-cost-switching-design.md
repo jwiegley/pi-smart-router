@@ -618,9 +618,10 @@ John to confirm or overrule. Where a line differs from the text above, the line 
   no cache serves. Its input is priced at the writing model's price for uncached input, on the
   conversation's size less what the compaction keeps. That is an upper bound, because Pi shortens
   long tool results before it sends them, and it errs toward staying. Its output is priced at
-  4,000 tokens. The reasoning a summary may add, the wait before the answer and the detail a
-  summary loses are not priced. The design's "one summary request on the current model", read
-  through that model's cache, priced a compaction several times too low.
+  4,000 tokens. When Pi's cut falls inside a turn it writes two summaries; the second one's
+  output is not priced. The reasoning a summary may add, the wait before the answer and the
+  detail a summary loses are not priced. The design's "one summary request on the current
+  model", read through that model's cache, priced a compaction several times too low.
 - **A choice by cost when the current model cannot take the run.** When the current model is not
   adequate for the needed level, or is not one of the scope's level models, the cheapest adequate
   model takes the run. When that is a warm stronger model and not the needed level's own, the
@@ -636,9 +637,11 @@ John to confirm or overrule. Where a line differs from the text above, the line 
   the session last needed, raised to the deep-session floor when the conversation is over 100,000
   tokens or its active context holds more than 1,000 entries. Pi counts those entries from the
   last compaction, an extension's own entries included. Once a session has planned a run, a
-  conversation of that size therefore never routes to LOW without a tag, as the guards above
-  promise. Its footer then says `run, floor`. Right after a compaction the size is unknown and
-  the count has started again, so the floor waits for the next answer.
+  conversation known to be that large therefore never routes to LOW without a tag, as the guards
+  above promise. Its footer then says `run, floor`. The size is unknown right after a compaction,
+  after a move to another leaf, and after an answer whose usage could not be read. Until the next
+  answer only the count of entries can raise the level, and after a compaction that count has
+  started again.
 - **pi-cache-optimizer is told the same choice.** Before a run starts, the router tells
   pi-cache-optimizer which model the run will reach, and that extension decides from the answer
   whether to rewrite the system prompt. For a run without a prompt the answer is now the choice the
@@ -648,7 +651,8 @@ John to confirm or overrule. Where a line differs from the text above, the line 
   before its result, and the same first 256 characters of result text. The design's "the same
   tool and the same error text" is not enough in Pi, whose shell tool gives every command that
   fails without output the same text, so three different searches that find nothing would count.
-  A failed result whose call cannot be found counts for nothing.
+  A failed result whose call cannot be found means the run is not stuck. So does one whose call id
+  is empty, or shared by two calls of one batch, since the call cannot then be told apart.
 - **Where a stuck run goes.** It moves to the first available model that is a higher level's
   own, starting one level up. It never moves to a fallback chain, whose models may be weaker than
   the one the run is on. When no higher level has a model of its own available, the run stays

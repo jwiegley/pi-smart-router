@@ -566,7 +566,10 @@ export function fits(p: Pick<PlanInput, "last" | "text" | "now"> & { readonly re
   return fitsSize(historyOf(p.last) + promptTokensOf(p.text, p.now), p.reserve, model);
 }
 
-/** The conversation's size as the latest response measured it; 0 without one, or with a usage that is not numbers. */
+/**
+ * The conversation's size as the latest response measured it; 0 without one, or with a usage that
+ * is not numbers.
+ */
 function historyOf(last: LastResponder | undefined): number {
   return last?.usage === undefined || !usable(last.usage) ? 0 : calculateContextTokens(last.usage);
 }

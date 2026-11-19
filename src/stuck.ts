@@ -10,10 +10,10 @@
 // result's `toolCallId`, in an assistant message before it (Pi's `ToolCall` and
 // `ToolResultMessage`, `@earendil-works/pi-ai`'s `types.d.ts`). A failed result whose call cannot
 // be found means the run is not stuck, and so does one whose call id is empty, or shared by two
-// calls of one batch, since the call cannot then be told apart. Arguments are compared in a canonical form, the keys of every object
-// sorted at every depth. Upstream compares a hash of each text's first 256 characters; comparing
-// the characters themselves is the same test without the hash. The texts and arguments are held
-// only while they are compared.
+// calls of one batch, since the call cannot then be told apart. Arguments are compared in a
+// canonical form, the keys of every object sorted at every depth. Upstream compares a hash of each
+// text's first 256 characters; comparing the characters themselves is the same test without the
+// hash. The texts and arguments are held only while they are compared.
 //
 // The run under way is what follows the latest user message. A route request's messages are Pi's
 // model-facing messages, in which an extension's custom message (a goal continuation's, a loop's)
