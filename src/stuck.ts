@@ -8,8 +8,9 @@
 // in circles when their calls are the same, the same tool with the same arguments, and their texts
 // are the same first 256 characters. A result's call is the `toolCall` block whose `id` is the
 // result's `toolCallId`, in an assistant message before it (Pi's `ToolCall` and
-// `ToolResultMessage`, `@earendil-works/pi-ai`'s `types.d.ts`); a failed result whose call cannot
-// be found counts for nothing. Arguments are compared in a canonical form, the keys of every object
+// `ToolResultMessage`, `@earendil-works/pi-ai`'s `types.d.ts`). A failed result whose call cannot
+// be found means the run is not stuck, and so does one whose call id is empty, or shared by two
+// calls of one batch, since the call cannot then be told apart. Arguments are compared in a canonical form, the keys of every object
 // sorted at every depth. Upstream compares a hash of each text's first 256 characters; comparing
 // the characters themselves is the same test without the hash. The texts and arguments are held
 // only while they are compared.
@@ -67,18 +68,23 @@ function canonical(value: unknown, seen: Set<object> = new Set()): string | unde
 
 /**
  * The call a tool result answers, as the tool's name and its arguments' canonical form: the
- * `toolCall` block whose id is `id`, in an assistant message from `from` back to `after`
- * (exclusive). Undefined when none is found or its arguments have no canonical form.
+ * `toolCall` block whose id is `id`, in the nearest assistant message from `from` back to `after`
+ * (exclusive) that holds one. Undefined when none is found, when its arguments have no canonical
+ * form, or when the call cannot be told apart: an empty id (Pi's openai-completions gives `""` when
+ * a server sends none) or one that two blocks of that message share (some servers repeat an id
+ * within a batch).
  */
 function callOf(messages: readonly unknown[], id: string, from: number, after: number): string | undefined {
+  if (id === "") return undefined;
   for (let index = from; index > after; index -= 1) {
     const message = messages[index];
     if (!isRecord(message) || message.role !== "assistant" || !Array.isArray(message.content)) continue;
-    for (const block of message.content) {
-      if (!isRecord(block) || block.type !== "toolCall" || block.id !== id) continue;
-      const args = canonical(block.arguments);
-      return typeof block.name === "string" && args !== undefined ? `${JSON.stringify(block.name)}(${args})` : undefined;
-    }
+    const calls = message.content.filter((block) => isRecord(block) && block.type === "toolCall" && block.id === id);
+    if (calls.length === 0) continue;
+    const [block] = calls;
+    if (calls.length > 1 || !isRecord(block)) return undefined;
+    const args = canonical(block.arguments);
+    return typeof block.name === "string" && args !== undefined ? `${JSON.stringify(block.name)}(${args})` : undefined;
   }
   return undefined;
 }

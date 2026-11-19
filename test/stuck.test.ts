@@ -156,6 +156,23 @@ describe("stuck", () => {
     assert.equal(stuck(after), false, "a call is found only in an assistant message before its result");
   });
 
+  test("a call that cannot be told apart by its id is a call that cannot be found", () => {
+    const commands = [rg("parseRoster"), rg("readRoster"), rg("loadRoster")];
+    /** One assistant message calling the three commands with these ids, then a failed result for each. */
+    const batchWithIds = (ids: readonly string[]): unknown[] => [
+      user(),
+      assistant(commands.map((args, index) => ({ type: "toolCall", id: ids[index], name: "bash", arguments: args }))),
+      ...ids.map((id) => resultOf({ id }, fail("bash", SILENT))),
+    ];
+    assert.equal(stuck(batchWithIds(["", "", ""])), false, "ids that are all empty, as Pi's openai-completions gives when the server sends none: the calls cannot be told apart, so they cannot be found and the run is not stuck");
+    assert.equal(stuck(batchWithIds(["call_0", "call_0", "call_0"])), false, "one id shared by the calls of a batch: the calls cannot be told apart, so they cannot be found and the run is not stuck");
+    const repeated = [
+      user(),
+      ...[1, 2, 3].flatMap(() => [assistant([{ type: "toolCall", id: "call_0", name: "bash", arguments: rg("parseRoster") }]), resultOf({ id: "call_0" }, fail("bash", SILENT))]),
+    ];
+    assert.equal(stuck(repeated), true, "an id repeated across messages is found in the nearest message, which holds the right call: the same command failed three times");
+  });
+
   test("results with no text block compare as the empty text, so the calls decide", () => {
     const same = run(fail("bash", undefined, rg("x")), fail("bash", undefined, rg("x")), fail("bash", undefined, rg("x")));
     assert.equal(stuck(same), true, "three identical calls whose results have no text block failed identically");
