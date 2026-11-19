@@ -90,6 +90,14 @@ describe("a model's cache", () => {
     assert.equal(ledger.seen.get("p/a")?.tokens, 150_000, "a untouched");
   });
 
+  test("is kept for every model when the same model's next prompt is the same size: only a smaller one is a rewrite", () => {
+    const ledger = newLedger();
+    noteAnswer(ledger, answer("p/a", { tokens: 150_000 }));
+    noteAnswer(ledger, answer("p/b", { tokens: 151_000 }));
+    noteAnswer(ledger, answer("p/b", { tokens: 151_000 }));
+    assert.deepEqual([...ledger.seen.keys()].sort(), ["p/a", "p/b"], "an equal size rewrote nothing, so the other model's cache stays");
+  });
+
   test("is forgotten for every model by forgetCaches, which keeps the runs and the prompts", () => {
     const ledger = newLedger();
     noteAnswer(ledger, { ...answer("p/a", { tokens: 150_000 }), usage: usageOf({ input: 150_000, cacheWrite: 5 }) });

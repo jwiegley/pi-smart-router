@@ -812,6 +812,46 @@ describe("a stuck run's move up, by the rules alone", () => {
       assert.equal(record.history.at(-1)?.code, "stick:previous", name);
     }
   });
+
+  test("a run already on the level above's own model is not moved: only a model other than the run's is a move", () => {
+    // A MEDIUM run the cost rule put on SOL, HIGH's own model: the level above picks SOL again.
+    const rc = heraContext({ roster: V2, catalog: catalog() });
+    const record = underWay(rc, SOL, "high");
+    assert.equal(routed(routeOwned(continuation(rc, record, SOL))), SOL, "the run stays on its model");
+    assert.deepEqual(
+      [record.history.at(-1)?.code, record.runTier, record.escalated],
+      ["stick:previous", "medium", false],
+      "no move up: the run keeps its level, and its one move up is still to come",
+    );
+  });
+});
+
+describe("a run without a prompt, by the rules alone", () => {
+  const V2 = rosterFixtureV2("roster-hera-v2.json");
+  const TERRA = "openai-codex-2/gpt-6.1-terra";
+  const VIRTUAL = model("smart-router/auto", { api: "pi-virtual", baseUrl: "" });
+
+  test("a retry that starts a run is a retry: it takes no level and notes no prompt", () => {
+    // The router refused the run's first request, so no pick was kept; Pi retries it.
+    const rc = heraContext({ roster: V2, catalog: new FakeCatalog([...heraModels(), codex(TERRA)]) });
+    const record = newRecord();
+    record.need = "medium";
+    const input: RouteInput = {
+      id: rc.virtualId,
+      request: { ...request("retry", { messages: [{ role: "user", content: [{ type: "text", text: "go on" }], timestamp: NOW }], previous: { model: model(TERRA), thinkingLevel: "high" } }), model: VIRTUAL },
+      rc,
+      record,
+      figures: undefined,
+      compaction: COMPACTION,
+      depth: FRESH,
+    };
+    routeOwned(input);
+    assert.deepEqual(
+      [record.ledger.needs.length, record.runTier, record.needRun],
+      [0, undefined, undefined],
+      "a retry is not a run without a prompt: it notes no prompt, takes no level and records no run at the session's need",
+    );
+  });
 });
 
 describe("activeEntries", () => {

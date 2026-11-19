@@ -149,6 +149,23 @@ describe("ratesOf", () => {
     same(ratesOf({ input: 8, output: 40, cacheRead: 0.4, cacheWrite: 10, tiers: undefined }, 150_000, false), base, "tiers undefined");
   });
 
+  test("takes the tier with the highest threshold below the size, whatever order the catalog lists them in", () => {
+    const unordered: CatalogCost = {
+      input: 8,
+      output: 40,
+      cacheRead: 0.4,
+      cacheWrite: 10,
+      tiers: [
+        { inputTokensAbove: 272_000, input: 16, output: 60, cacheRead: 0.8, cacheWrite: 20 },
+        { inputTokensAbove: 128_000, input: 12, output: 50, cacheRead: 0.6, cacheWrite: 15 },
+      ],
+    };
+    const rates = ratesOf(unordered, 300_000, false);
+    assert.ok(rates, "priced");
+    near(rates.input * 1e6, 16, "300,000 tokens fall in the tier above 272,000, not the one above 128,000 listed after it");
+    near(rates.output * 1e6, 60, "and its output price");
+  });
+
   test("a model without a price makes the cost unknown", () => {
     assert.equal(ratesOf(undefined, 1000, false), undefined, "no cost at all");
     assert.equal(ratesOf({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, 1000, false), undefined, "all zeros");
@@ -283,6 +300,14 @@ describe("chooseByCost", () => {
       compaction: NO_COMPACTION,
     });
     assert.equal(priceOf(choice, "B").leaving, 0, "a negative cached size is no cache: leaving costs nothing, never less");
+  });
+
+  test("a cached size larger than the conversation counts only up to the conversation", () => {
+    // A stated lifetime makes the cache certain, so the first request is the whole conversation at
+    // the cache-read price and nothing at the input price; one request, no output.
+    const workload: Workload = { tokens: 150_000, requests: 1, output: 0, growth: 0, seconds: 60, horizon: 1 };
+    const oversized = candidate("astra", "super", ASTRA, { cached: 200_000, idle: 30, lifetime: 300 });
+    near(runCost(oversized, workload, TABLE), 150_000 * ASTRA.cacheRead, "W is at most T: 150,000 tokens read from the cache, none counted below zero at the input price");
   });
 
   test("with no current model a compacting candidate writes its own summary", () => {

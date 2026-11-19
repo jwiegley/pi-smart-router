@@ -157,6 +157,23 @@ describe("a confident Jev", () => {
   });
 });
 
+describe("Jev's probabilities", () => {
+  test("are shares of their sum: the confidence is the top one's share, whatever the total", () => {
+    // HIGH's table, scaled by 2 and by 1/2: the same answer, so the same confidence (0.8) and the
+    // same value as HIGH on this prompt (1.5312, above).
+    for (const [name, table] of [
+      ["summing to 2", { low: 0.1, medium: 0.2, high: 1.6, super: 0.1 }],
+      ["summing to 0.5", { low: 0.025, medium: 0.05, high: 0.4, super: 0.025 }],
+    ] as const) {
+      const demand = run("fix the typo in the README", FRESH, { jev: answer(table) });
+      close(demand.jev?.confidence ?? NaN, 0.8, `${name}: the confidence is the top probability over the sum`);
+      close(demand.value, 1.5312, `${name}: the value is HIGH's`);
+      assert.equal(demand.tier, "high", `${name}: the tier`);
+      assert.deepEqual(demand.guards, [], `${name}: a sure answer is not unsure`);
+    }
+  });
+});
+
 describe("the guards", () => {
   test("an unsure Jev can only raise the heuristics' level", () => {
     const lower = run(PLANNING, FRESH, { planning: true, jev: answer({ low: 0.4, medium: 0.3, high: 0.2, super: 0.1 }) });
@@ -168,6 +185,16 @@ describe("the guards", () => {
     close(higher.value, 1.5738, "an unsure Jev above the heuristics: the blend");
     assert.equal(higher.tier, "high", "an unsure Jev above the heuristics: the tier");
     assert.deepEqual(higher.guards, [], "an unsure Jev above the heuristics: the guards");
+  });
+
+  test("a Jev exactly at minConfidence is not unsure: the blend stands", () => {
+    // c = 0.6 is not below minConfidence (0.6), so the planning prompt's heuristics (2.0214) do not
+    // replace the blend: (4 * 0.6 * dJ + 2.0214) / (4 * 0.6 + 1), with dJ = 0.4.
+    const atFloor = run(PLANNING, FRESH, { planning: true, jev: answer({ low: 0.6, medium: 0.4, high: 0, super: 0 }) });
+    close(atFloor.jev?.confidence ?? NaN, 0.6, "the confidence is exactly the floor");
+    close(atFloor.value, (4 * 0.6 * 0.4 + 2.0214) / (4 * 0.6 + 1), "the blend, not the heuristics' value");
+    assert.equal(atFloor.tier, "medium", "the blend's level");
+    assert.deepEqual(atFloor.guards, [], "no low-confidence guard at the floor itself");
   });
 
   test("a risky operation is never under HIGH, and a very deep session never under the floor", () => {

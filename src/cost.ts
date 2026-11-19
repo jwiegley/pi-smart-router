@@ -151,7 +151,7 @@ export function runCost(candidate: Candidate, workload: Workload, table: Surviva
 
 /**
  * Prices the run on each candidate and picks one. The cheapest total takes the run, the lowest
- * level on a tie; the current model keeps it unless the cheapest is under its total by the margin.
+ * level on a tie; the current model keeps it unless the cheapest saves more than the margin.
  * `candidates` come lowest level first and are not empty.
  */
 export function chooseByCost(input: {
