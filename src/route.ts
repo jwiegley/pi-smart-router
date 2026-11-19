@@ -16,8 +16,8 @@
 //                       session, through the choice a prompt's run makes (run:need); a session
 //                       that never planned a run continues as below
 //   owner continuation  a stuck run (src/stuck.ts) on smart-router/auto under a version 2 roster
-//                       moves up, once per run, to the first available model that is a higher
-//                       level's own, never a chain's, unless its level is SUPER or its tag's
+//                       moves up, once per run, to the level directly above's own model when it
+//                       is available, never a chain's, unless its level is SUPER or its tag's
 //                       (escalate); else previous, else the run's pick, else the last responder:
 //                       that model if it resolves, else its role, else the role's fallback; with
 //                       no base, the default role (the local role when local-only) and its fallback
@@ -418,11 +418,11 @@ function chooseForNeed(rc: ResolveContext, record: SessionRecord, section: Scope
 
 /**
  * A stuck run's move up: on a continuation of a run whose level is below SUPER and not its tag's,
- * that has not moved up yet, when its last three tool calls failed (src/stuck.ts), the first
- * available model that is a higher level's own, starting one level above the run's, unpriced
- * (escalationTarget). Never a fallback chain. With no such model the run stays, and a later request
- * of the run can still move. Only a model other than the run's is a move; it carries the code
- * `escalate`.
+ * that has not moved up yet, when its last three tool calls failed (src/stuck.ts), the level
+ * directly above the run's, to that level's own model, unpriced (escalationTarget). Never a
+ * fallback chain, and never a level further up. When that model is not available the run stays,
+ * and a later request of the run can still move. Only a model other than the run's is a move; it
+ * carries the code `escalate`.
  */
 function escalation(input: RouteInput, section: ScopeSection): Leveled | undefined {
   const { request, rc, record } = input;

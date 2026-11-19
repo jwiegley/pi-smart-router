@@ -450,10 +450,10 @@ export function chooseModel(input: {
 }
 
 /**
- * Where a stuck run moves: the first available model that is a higher level's own, starting one
- * level above `from` and going up; with compaction disabled, only one the conversation fits. Never
- * a fallback chain, whose models may be weaker than the run's. Undefined when no higher level has
- * such a model: the run stays.
+ * Where a stuck run moves: the level directly above `from`, to that level's own model only; with
+ * compaction disabled, only when the conversation fits it (John, 2026-11-18). Never a fallback
+ * chain, whose models may be weaker than the run's, and never a level further up. Undefined when
+ * `from` has no level above or its model is not available: the run stays.
  */
 export function escalationTarget(input: {
   readonly rc: ResolveContext;
@@ -464,14 +464,12 @@ export function escalationTarget(input: {
   readonly compaction: CompactionFigures;
 }): { readonly tier: Tier; readonly decision: Decision & { readonly ok: true } } | undefined {
   const { rc, section, compaction } = input;
-  const conversation = historyOf(input.last);
-  for (let tier = tierAbove(input.from); tier !== undefined; tier = tierAbove(tier)) {
-    const decision = pickInRole(rc, section.levels[tier].role, { fallback: false, code: input.code });
-    if (!decision.ok) continue;
-    if (!compaction.enabled && !fitsSize(conversation, compaction.reserve, decision.choice.model)) continue;
-    return { tier, decision };
-  }
-  return undefined;
+  const tier = tierAbove(input.from);
+  if (tier === undefined) return undefined;
+  const decision = pickInRole(rc, section.levels[tier].role, { fallback: false, code: input.code });
+  if (!decision.ok) return undefined;
+  if (!compaction.enabled && !fitsSize(historyOf(input.last), compaction.reserve, decision.choice.model)) return undefined;
+  return { tier, decision };
 }
 
 /**

@@ -1174,7 +1174,29 @@ describe("escalation", () => {
     assert.equal(routed(await route(small, "go on")), SOL, "the stepped-up run is routed to sol");
   });
 
-  test("a stuck run moves to the first available model that is a higher level's own, never to a chain", async (t) => {
+  test("with the level above's own model unavailable a stuck run stays, though the level after it has one: it never looks further up nor to a chain", async (t) => {
+    const cat = catalog();
+    const state = await session(t, { catalog: cat });
+    const level = await say(state, "go on", ANSWER_MEDIUM);
+    assert.equal(routed(await route(state, "go on")), TERRA);
+    const planned = `personal MEDIUM → gpt-6.1-terra (${demandNote(level)}; cost unknown)`;
+    cat.unavailable.add(SOL);
+    const before = state.loaded.session.notices.length;
+    assert.deepEqual(
+      [routed(continuation(state, TERRA, failures(3))), lastCode(state), recordOf(state).runTier],
+      [TERRA, "stick:previous", "medium"],
+      "John's ruling of 2026-11-18: a stuck run goes one level up to that level's own model, else stays; HIGH's sol is unavailable, so the run stays on terra and does not go on to SUPER's astra (it previously did) nor to HIGH's chain",
+    );
+    assert.equal(state.loaded.session.notices.length, before, "the run stays: no notice");
+    assert.ok(
+      !state.loaded.session.notices.some((notice) => notice.message === fallbackMoveNotice("gpt-6.1-terra", "openrouter", "z-ai/glm-5.3-flash")),
+      "no chain-move notice: the run never moves to a chain",
+    );
+    assert.equal(footer(state), planned, "the run stays: its footer is the plan's, with no escalated");
+    assert.equal(recordOf(state).escalated, false, "the run stays: the flag is not set");
+  });
+
+  test("a stuck run that stayed moves at a later request of the same run once the level above's own model is back", async (t) => {
     const cat = catalog();
     const state = await session(t, { catalog: cat });
     await say(state, "go on", ANSWER_MEDIUM);
@@ -1182,43 +1204,17 @@ describe("escalation", () => {
     cat.unavailable.add(SOL);
     const before = state.loaded.session.notices.length;
     assert.deepEqual(
-      [routed(continuation(state, TERRA, failures(3))), lastCode(state), recordOf(state).runTier],
-      [ASTRA, "escalate", "super"],
-      "HIGH has only its chain available: a stuck run moves to the first available model that is a higher level's own, SUPER's astra, never to the chain (it previously took the chain's z-ai/glm-5.3-flash)",
+      [routed(continuation(state, TERRA, failures(3))), lastCode(state), recordOf(state).escalated],
+      [TERRA, "stick:previous", false],
+      "HIGH's own model is unavailable: the run stays, and its one move up is still to come",
     );
-    assert.deepEqual(state.loaded.session.notices.slice(before), [{ type: "info", message: escalationNotice("medium", "super", "gpt-6-astra") }], "one notice, naming the level and the model the run reached");
-    assert.ok(
-      !state.loaded.session.notices.some((notice) => notice.message === fallbackMoveNotice("gpt-6.1-terra", "openrouter", "z-ai/glm-5.3-flash")),
-      "no chain-move notice: the run never moves to a chain",
-    );
-    assert.match(footer(state) ?? "", /^personal MEDIUM → gpt-6-astra \(demand \d\.\d; escalated\)$/, "the footer says the run escalated, to a level's own model");
-    assert.equal(recordOf(state).escalated, true, "the run escalated");
-  });
-
-  test("with no higher level's own model available a stuck run stays, says nothing, and can still move later in the run", async (t) => {
-    const cat = catalog();
-    const state = await session(t, { catalog: cat });
-    const level = await say(state, "go on", ANSWER_MEDIUM);
-    assert.equal(routed(await route(state, "go on")), TERRA);
-    const planned = `personal MEDIUM → gpt-6.1-terra (${demandNote(level)}; cost unknown)`;
-    cat.unavailable.add(SOL);
-    cat.unavailable.add(ASTRA);
-    const before = state.loaded.session.notices.length;
-    assert.deepEqual(
-      [routed(continuation(state, TERRA, failures(3))), lastCode(state), recordOf(state).runTier],
-      [TERRA, "stick:previous", "medium"],
-      "no higher level has a model of its own available: a stuck run never moves to a chain, so it stays where it is",
-    );
-    assert.equal(state.loaded.session.notices.length, before, "the run stays: no notice");
-    assert.equal(footer(state), planned, "the run stays: its footer is the plan's, with no escalated");
-    assert.equal(recordOf(state).escalated, false, "the run stays: the flag is not set");
-    cat.unavailable.delete(ASTRA);
+    cat.unavailable.delete(SOL);
     assert.deepEqual(
       [routed(continuation(state, TERRA, failures(4))), lastCode(state), recordOf(state).runTier],
-      [ASTRA, "escalate", "super"],
-      "at a later request of the same run, with a higher level's own model available again, it moves",
+      [SOL, "escalate", "high"],
+      "at a later request of the same run, with HIGH's own model available again, it moves one level up",
     );
-    assert.deepEqual(state.loaded.session.notices.slice(before), [{ type: "info", message: escalationNotice("medium", "super", "gpt-6-astra") }], "with one notice");
+    assert.deepEqual(state.loaded.session.notices.slice(before), [{ type: "info", message: escalationNotice("medium", "high", "gpt-6.1-sol") }], "with one notice");
     assert.equal(recordOf(state).escalated, true, "and the flag is set");
   });
 });
