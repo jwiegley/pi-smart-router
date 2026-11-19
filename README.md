@@ -427,10 +427,7 @@ smart-router/auto in personal scope: a tag, else the demand from Jev (openrouter
     5. omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp  (role local, thinking max)
 ```
 
-The read-back goes on with the demand and switching settings, the local set and the rest. This
-roster still carries `classifier.closeCall`, which an earlier version used; it is accepted and
-ignored, and the read-back says so: `demand.closeCall` decides a close call now
-([The level a prompt needs](#the-level-a-prompt-needs)).
+The read-back goes on with the demand and switching settings, the local set and the rest.
 
 How the chain works:
 
@@ -463,12 +460,10 @@ How the chain works:
   of every run.
 - **The session returns to the level's own model** as soon as it can take requests again: each new
   run starts again from the level it needs, and goes to the chain only while none of that level's
-  own models can take it. So does the first request of a run that starts without a prompt, such as
-  a goal continuation or a loop's, which takes the level its session last needed, in a resumed
-  session from its latest level record ([Runs without a prompt](#runs-without-a-prompt)). A chain
-  model is never a candidate of the cost rule. A run under way stays on the model it has. A cooled
-  account is tried again when its time is up; if it is still out of tokens, that one request fails
-  and the account cools again.
+  own models can take it. So does a run that starts without a prompt
+  ([Runs without a prompt](#runs-without-a-prompt)). A chain model is never a candidate of the cost
+  rule. A run under way stays on the model it has. A cooled account is tried again when its time is
+  up; if it is still out of tokens, that one request fails and the account cools again.
 - **A retry never goes back.** When a chain model itself fails with a limit, or a local one cannot
   be reached, the retry takes another model of the same role, then the roles after it in the chain,
   never an earlier role and never the level's own, and no model twice in one run.
@@ -658,9 +653,8 @@ or `/smart-router check` in a session. Both use the router's own parser. A valid
 back in plain language: for `smart-router/auto` in each scope, each level's models, the fallback
 chain in order; under version 2, how the demand is weighed and when a session moves; for
 `smart-router/local`, the local models in order; where each of Jev's prompts comes from; the
-account bindings; and each setting it accepts and ignores (`stickyIdleMinutes`,
-`classifier.closeCall`), with the reason. An invalid one gives the first error
-with its place, such as
+account bindings; and each setting it accepts and ignores, with the reason. An invalid one gives
+the first error with its place, such as
 `INVALID: roles[3].models[1]: "omlx-hera/GLM-5.3-Flash-oQ4e-mtp" is already in role "local"`.
 
 - **The standalone checker needs no Pi, no session and no credentials,** and sends nothing. It
@@ -706,20 +700,17 @@ These are version 1's rules. Version 2 keeps them, comparing levels rather than 
   their turn type ([The level a prompt needs](#the-level-a-prompt-needs)).
 - **One decision per run.** The run is planned when the prompt arrives, and its first request takes
   the plan. Steering, follow-ups and tool continuations stay on the run's model, except that a
-  stuck run moves up once ([A stuck run](#a-stuck-run)). A run that starts without a prompt, such
-  as a goal-x continuation, takes on `smart-router/auto` under version 2 the level its session last
-  needed, through the same choice a prompt's run makes
-  ([Runs without a prompt](#runs-without-a-prompt)); under version 1, on `smart-router/local`, and
-  in a session that has planned no run yet, it stays on the model the session used last.
+  stuck run moves up once ([A stuck run](#a-stuck-run)). A run that starts without a prompt is
+  routed as [Runs without a prompt](#runs-without-a-prompt) says.
 - **A plan belongs to its message's run.** The router binds the two by a digest of the message's
   text, an HMAC-SHA-256 under a key each router instance draws at random, so it holds no prompt
   text. A run whose prompt is that message's text takes the plan; a run whose prompt is the text of
   another message it saw, whose own run has not started, takes none; and a custom message's run
-  takes none. A run that takes no plan is routed as a run without a prompt, as the bullet above
-  says. A prompt can match no message's text, because Pi expands a template or `/skill:`
-  call after the input handlers, and a later extension can change the text: such a run takes the
-  plan of the one idle message since the latest prompt's run started, and none when there were
-  two. A run that drops a tagged message's plan says so. The limits:
+  takes none. A run that takes no plan is routed as a
+  [run without a prompt](#runs-without-a-prompt). A prompt can match no message's text, because Pi
+  expands a template or `/skill:` call after the input handlers, and a later extension can change
+  the text: such a run takes the plan of the one idle message since the latest prompt's run started,
+  and none when there were two. A run that drops a tagged message's plan says so. The limits:
   - identical texts cannot be told apart, so a run can take the plan of another message with the
     same text;
   - a message that a later extension holds, and whose prompt that extension also rewrites, matches
@@ -836,10 +827,9 @@ The router also tells pi-cache-optimizer, through its `pi.routing.registry.v1` r
 physical model each session's next request will use. Without that, the optimizer would rewrite
 Codex system prompts, which Codex's content filter rejects, and would drop oMLX session-affinity
 headers. Only the session's own agent loop changes what the optimizer reads, never a compaction or
-another session. Before a run without a prompt starts, the optimizer is told the model that run's
-first request will take, worked out without changing anything: on `smart-router/auto` under
-version 2, the choice for the level its session last needed
-([Runs without a prompt](#runs-without-a-prompt)), and not merely the model used last.
+another session. Before a run without a prompt starts, the optimizer is told the model its first
+request will take ([Runs without a prompt](#runs-without-a-prompt)), worked out without changing
+anything, and not merely the model used last.
 
 ## Levels
 
@@ -943,7 +933,7 @@ shows the model's provider reporting cache writes.
 - **The first request** reads the whole conversation. If the model's cache survives, what it has
   cached costs the cached-input price and the rest the input price; if not, all of it costs the
   input price. The chance it survives is the survival table's at the time since the model's last
-  answer ([Choosing the model](#choosing-the-model)).
+  answer (Cache survival, below).
 - **Each later request** reads the conversation so far at the cached-input price, and what the run
   added since the request before at the input price.
 - **Every request's output** costs the output price.
@@ -1023,7 +1013,8 @@ needed level whose first available model is too small passes the run up.
 - right after a compaction, after a move to another leaf of the session tree, and in a session that
   starts right after a compaction: no answer has measured the conversation as it now is, until the
   next answer does, and every model's cache is forgotten at the same moment. A move to another leaf
-  also starts the branch's run shapes and its count of lighter prompts afresh; the level the
+  also starts the branch's run shapes and its count of lighter prompts afresh, and the chance a
+  level is needed again is 0.5 until three prompts are counted on the new branch; the level the
   session last needed stays;
 - a level's model has no price: a catalog entry whose input or output price is missing or 0 is no
   price at all, never free;
@@ -1060,8 +1051,11 @@ The run goes through the same choice a prompt's run makes, priced with nothing a
 and counts, for the horizon and for the chance a level is needed again, as a prompt that needed
 its level. Jev is not asked, and the run writes no level record. Its footer says `run` where a
 prompt's says its demand, and `run, floor` when the floor raised the level:
-`personal MEDIUM → gpt-6.1-terra (run, floor; cost unknown)`. A session that has planned no run
-yet keeps the model it used last, as it always did.
+`personal MEDIUM → gpt-6.1-terra (run, floor; cost unknown)`.
+
+All of this is `smart-router/auto` under a version 2 roster. Under version 1, on
+`smart-router/local`, and in a session that has planned no run yet, a run without a prompt stays
+on the model the session used last, as it always did.
 
 ### A stuck run
 
@@ -1120,16 +1114,18 @@ Two marks can follow the demand, and one closes the brackets:
 - **`; fallback`**, last, when the model is one of the scope's fallback chain:
   `personal LOW → z-ai/glm-5.3-flash (tag; fallback)`.
 
-`/smart-router history` shows the same words on a run's first request, with the level whose model
-took it: `[personal HIGH (demand 1.6; cost unknown)]`.
+`/smart-router history` shows the footer's words, without its `; escalated` and `; fallback` marks,
+on a run's first request, with the level whose model took it:
+`[personal HIGH (demand 1.6; cost unknown)]`.
 
 **`/smart-router status`** shows the terms of the run the last decision belongs to: the demand,
 with Jev's term and confidence, the heuristics' term with the three signals that raise it most, and
 every guard that applied, in the order applied; then the run priced, and each candidate, the
 strongest first, with its expected cost, what it has cached and the chance that survives, and what
 leaving the current model adds. For a MEDIUM prompt in the first worked example's session, on the
-6.2 models whose prices the example uses (the prompt and Jev's answer, 80% MEDIUM and 10% each
-for LOW and HIGH, are made up; the figures are the router's):
+6.2 models whose prices the example uses (the prompt, "Add a test for the parser's error path",
+is made up, as is Jev's answer, 80% MEDIUM and 10% each for LOW and HIGH; the conversation's
+latest 20 messages include a tool result; the figures are the router's):
 
 ```text
   Demand 1.08 → MEDIUM: Jev 1.00 at 80%, heuristics 1.33 (trivial_signal 0.11, triage_verdict 0.09, turn_type 0.09).
@@ -1172,9 +1168,7 @@ labelled choices and returns one, with a probability for each. Under a version 2
   whole stays within `totalChars`.
 - **Its answer is one term of the demand.** All four probabilities are kept: their expected level
   and Jev's confidence, its top probability, go into the blend with the heuristics
-  ([The level a prompt needs](#the-level-a-prompt-needs)). The old `classifier.closeCall`, which
-  compared Jev's two most probable levels, is accepted and ignored: `demand.closeCall` decides a
-  close call.
+  ([The level a prompt needs](#the-level-a-prompt-needs)).
 - **Failures leave the heuristics to decide.** A classifier the registry does not have
   (`unavailable`), an error (an OpenRouter refusal arrives as one), a timeout, an aborted request,
   a malformed answer (a choice that is not one of the four levels, or probabilities that miss one
@@ -1599,12 +1593,13 @@ The entry's fields:
 - `source`, what decided the level: `tag`, `jev` (the blend with Jev's answer), `heuristics` (the
   heuristics alone) or `floor` (a risky operation or a deep session raised it);
 - `need`, the level the run needed, its tag's or its demand's after the guards; `tier`, the level
-  whose model took it, `need` or one above; and `tag`, for a tagged run;
+  whose model took it, `need` or a level above it; and `tag`, for a tagged run;
 - `trigger`, the risky operation that raised the run to HIGH;
-- `demand`, for an untagged run: its `value` before the floors, the level it names, Jev's term
-  (`value` and `confidence`) when Jev answered, the heuristics' term (`value`, upstream's `score`,
-  and the three signals that raise it most, each with its share), and the `guards` that applied,
-  in the order applied (`low-confidence`, `close-call`, `risky`, `deep-session`);
+- `demand`, for an untagged run: its `value` before the floors; `tier`, the level after every guard,
+  floors included; Jev's term (`value` and `confidence`) when Jev answered, the heuristics' term
+  (`value`, upstream's `score`, and the three signals that raise it most, each with its share), and
+  the `guards` that applied, in the order applied (`low-confidence`, `close-call`, `risky`,
+  `deep-session`);
 - `keyword`, the keyword classifier's signal and reason; its planning signal gives the heuristics
   their turn type;
 - `jev`: Jev's model, choice, probabilities, confidence and latency (`ms`), or its failure
@@ -1655,11 +1650,11 @@ router itself reads no other session and does not write the roster.
 node --experimental-strip-types scripts/review-demand.ts <session.jsonl>...
 ```
 
-It replays the runs the named session files recorded and reports, for the runs John judged (he
-typed a tag, or corrected the level afterwards), how often the heuristics alone, Jev's top choice
-alone and the blend named the level he meant. For each such run it replays the first user message
-at or after the record's time, else the latest one before it, through the router's own demand
-code at the default settings. It is a development script, not part of the extension: Pi never
+It replays the runs the named session files recorded and reports, for the runs John judged (he typed
+a tag, or corrected the level afterwards), how often the heuristics alone, Jev's top choice alone
+and the blend named the level he meant. For each such run it replays the first user message at or
+after the record's time, less two seconds, else the latest one before it, through the router's own
+demand code at the default settings. It is a development script, not part of the extension: Pi never
 loads it and the package does not ship it. It reads only the files named on its command line,
 contacts nothing, and prints counts, levels, rates and file names, never a prompt's text. Since
 John's session files are under Pi's agent directory, it runs on them only at his word.
@@ -1684,15 +1679,13 @@ John's session files are under Pi's agent directory, it runs on them only at his
   compaction. On a branch with a native Codex compaction checkpoint it switches the selection back
   to Codex, and the router leaves it there: the session is then on Codex. Start local work outside
   such a branch. Hera's `openai-codex-2` never uses codex-compat.
-- **goal-x**: continuations route like any run that starts without a prompt: on
-  `smart-router/auto` under version 2 they take the level the session last needed
-  ([Runs without a prompt](#runs-without-a-prompt)), and they get cooldowns and fallbacks. The
-  default auditor routes through the session, on the selection it inherits; a configured auditor
+- **goal-x**: continuations route like any
+  [run that starts without a prompt](#runs-without-a-prompt), and they get cooldowns and fallbacks.
+  The default auditor routes through the session, on the selection it inherits; a configured auditor
   bypasses the router, so leave it unset in private work. Leave `auditorProjectResources` and
-  `projectResources` off: each loads a second router into every audit. The default auditor routes
-  in the session's scope too, one an entry set included; a configured auditor bypasses work scope
-  as it bypasses the router
-  ([What work scope does not cover](#what-work-scope-does-not-cover)).
+  `projectResources` off: each loads a second router into every audit. The default auditor routes in
+  the session's scope too, one an entry set included; a configured auditor bypasses work scope as it
+  bypasses the router ([What work scope does not cover](#what-work-scope-does-not-cover)).
 - **pi-subagents**: foreground children inherit the selection but load the router only when it is
   registered for children, as nix-config's integration is meant to do; otherwise a child on
   `smart-router/*` fails with "model not found". Give children explicit models where that

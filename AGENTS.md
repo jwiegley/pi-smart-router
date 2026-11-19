@@ -19,7 +19,7 @@ beettlle/pi-smart-router to the virtual models of Pi 1.5. `CLAUDE.md` is a link 
 - Runtime code opens no network connection of its own, starts no process and sets no timer;
   `test/scan.test.ts` holds `index.ts` and `src/` to that, comments included. Its one request off
   the machine is the classifier's, made by Pi: `ctx.modelRegistry.findOfType` and
-  `ctx.modelRegistry.classify` with `{ timeoutMs, maxRetries: 0 }`, once per routed run on
+  `ctx.modelRegistry.classify` with `{ timeoutMs, maxRetries: 0 }`, once per prompt on
   `smart-router/auto` when a version 2 roster has a classifier, and never on
   `smart-router/local`, for a steer or follow-up, or without a classifier. The message and the
   earlier messages it sends go through redaction first (`src/redact.ts`).

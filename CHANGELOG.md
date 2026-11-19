@@ -31,7 +31,8 @@ accepted and ignored. These are visible without a roster change:
 - `/smart-router local on|off|status` and `PI_SMART_ROUTER_LOCAL_ONLY` do nothing but say that the
   pin is gone.
 
-Jev's request is unchanged, byte for byte.
+Jev's request is unchanged, byte for byte, at `classifier.context.messages` of 5 or more; at 1 to
+4 it may now carry earlier messages, since its read is the heuristics' 20-message window.
 
 ### Added
 
