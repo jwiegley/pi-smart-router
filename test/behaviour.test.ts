@@ -1912,22 +1912,52 @@ test("C4 a tag goes to its level whatever the costs", TIMEOUT, async (t) => {
   assert.equal(pi.ui.status(LEVEL_KEY), "personal SUPER → gpt-6-astra (tag)");
 });
 
-test("C5 a conversation too large for the cheaper model is compacted before the move", TIMEOUT, async (t) => {
-  const world = levelsWorld(t, { fleet: pricedLevelsFleet({ [PERSONAL.medium]: { contextWindow: 128_000 } }) });
+test("C5 a conversation too large for the cheaper model is compacted before the move, when the runs repay the summary", TIMEOUT, async (t) => {
+  // Terra's and sol's windows are too small for 200,000 tokens; astra's is not. Pi writes a
+  // compaction's summary with a request of its own that no cache serves, so the summary costs the
+  // conversation less what the compaction keeps (Pi's keepRecentTokens, 1 here) at astra's uncached
+  // input price: about $1.76. A run repays that only when it is long, so the session's three
+  // measured runs are of 30 requests each (29 reads, then an answer), every answer reading 200,000
+  // tokens from astra's cache and writing 300.
+  const small = { contextWindow: 128_000 };
+  const world = levelsWorld(t, { fleet: pricedLevelsFleet({ [PERSONAL.medium]: small, [PERSONAL.high]: small }) });
   const codex = world.faux("openai-codex-2");
+  writeFileSync(join(world.cwd, "notes.txt"), "zebra notes\n");
   const history200k = history(world, "smart-router/auto", [["Load the fixtures", response(codex, { id: "gpt-6-astra", tokens: 200_000 })]]);
-  const pi = await world.start({ sessionManager: history200k });
+  const pi = await world.start({ sessionManager: history200k, tools: ["read"] });
+  const REQUESTS = 30;
+  const SIZE = 200_000;
+  for (const [run, text] of ["Survey the options for the session store", "Survey the options for the queue", "Survey the options for the index"].entries()) {
+    world.jev.answer(JEV.super);
+    codex.respond(
+      ...Array.from({ length: REQUESTS }, (_, index): AssistantMessage => {
+        const message = reply(codex, { cacheRead: SIZE, output: OUT });
+        if (index < REQUESTS - 1) {
+          message.content = [fauxToolCall("read", { path: "notes.txt" }, { id: `read-${run}-${index}` })];
+          message.stopReason = "toolUse";
+        }
+        return message;
+      }),
+    );
+    await pi.prompt(text);
+    assert.equal(answered(pi), PERSONAL.super, `three long SUPER runs first: "${text}"`);
+  }
+  assert.equal(world.refCounts()[PERSONAL.super], 3 * REQUESTS, "three runs of 30 requests on astra");
+
   const text = "Check the error paths";
   world.jev.answer(JEV.medium);
   const mark = world.trace.length;
   await pi.prompt(text);
+  // Pi keeps 1 token, so its cut falls inside the last run's turn: it summarizes the history before
+  // that turn and, in a second request, the turn's prefix (compaction.js, a split turn).
   assert.deepEqual(
     requestsOf(traceFrom(world, mark)),
     [
       [PERSONAL.super, "summary"],
+      [PERSONAL.super, "summary"],
       [PERSONAL.medium, "run"],
     ],
-    "a conversation too large for the cheaper model is compacted before the move: the summary on astra, then the run on terra",
+    "a conversation too large for the cheaper model is compacted before the move: the summary on astra, in two requests for a split turn, then the run on terra",
   );
   assert.deepEqual(
     pi.eventsOf("compaction_start").map((event) => event.reason),
@@ -1935,27 +1965,32 @@ test("C5 a conversation too large for the cheaper model is compacted before the 
     "exactly one compaction",
   );
   assert.equal(answered(pi), PERSONAL.medium);
-  // Nothing measured yet: the default shape, q = 0.5, horizon 1. terra's cost is astra's summary
-  // (its first request and 4,000 tokens of output) and the run on what is left, 1 token kept and
-  // the 4,000-token summary, with nothing cached; leaving astra costs q times that size at its
-  // uncached premium.
-  const tokens = 200_000 + promptSize(text);
-  const workload: Workload = { tokens, ...DEFAULT_SHAPE, horizon: 1 };
-  const stay = expectedRun("super", 200_000, true, workload);
-  const after = 1 + 4_000;
-  const summary = expectedRun("super", 200_000, true, { tokens, requests: 1, output: 0, growth: 0, seconds: 0, horizon: 1 }) + 4_000 * perToken("super").output;
+  // Three runs measured: 30 requests, 300 output tokens each, no growth; horizon 1; every prompt so
+  // far needed SUPER, so q = 1. Astra stays at 30 requests, the first warm. Terra's cost is astra's
+  // summary, uncached (the conversation less the 1 token kept, at the input price, and 4,000 tokens
+  // at the output price), the run on what is left, the 1 token kept and the 4,000-token summary,
+  // with nothing cached, and leaving astra: q times that size at its uncached premium.
+  const tokens = SIZE + OUT + promptSize(text);
+  const workload: Workload = { tokens, requests: REQUESTS, output: OUT, growth: 0, seconds: 0, horizon: 1 };
+  const stay = expectedRun("super", SIZE, true, workload);
+  const keep = 1;
+  const after = keep + 4_000;
   const astra = perToken("super");
-  const terra = summary + expectedRun("medium", 0, false, { ...workload, tokens: after }) + 0.5 * after * (astra.input - astra.cacheRead);
-  assert.equal(afterDemand(pi, "personal MEDIUM → gpt-6.1-terra"), `; moved, ${money(terra)} vs ${money(stay)}`, "the move is priced with its compaction");
+  const summary = (tokens - keep) * astra.input + 4_000 * astra.output;
+  const terra = summary + expectedRun("medium", 0, false, { ...workload, tokens: after }) + 1 * after * (astra.input - astra.cacheRead);
+  assert.ok(terra < stay * (1 - 0.15), `the compaction pays: ${terra} against ${stay}, by more than the margin`);
+  assert.equal(afterDemand(pi, "personal MEDIUM → gpt-6.1-terra"), `; moved, ${money(terra)} vs ${money(stay)}`, "the move is priced with its compaction, the summary uncached");
+  const terms = { outcome: "moved", requests: REQUESTS, horizon: 1, again: 1 };
+  assert.deepEqual(fields(costOf(pi), terms), terms, "the run's shape: 30 requests, one run deep, q = 1");
   const candidates = (costOf(pi).candidates ?? []) as Array<Record<string, unknown>>;
   assert.deepEqual(
-    candidates.map((row) => [row.ref, row.compacts]),
+    candidates.map((row) => [row.ref, row.compacts, row.cached, row.survival]),
     [
-      [PERSONAL.medium, true],
-      [PERSONAL.high, false],
-      [PERSONAL.super, false],
+      [PERSONAL.medium, true, 0, 0],
+      [PERSONAL.high, true, 0, 0],
+      [PERSONAL.super, false, SIZE, 0.97],
     ],
-    "only terra compacts first",
+    "terra and sol compact first, and show no cached size or survival, which their cost does not use",
   );
   assert.deepEqual(pi.ui.saw(/can take this run/), [], "no step-up");
 });

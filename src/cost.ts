@@ -56,10 +56,14 @@ export interface Workload {
   readonly horizon: number;
 }
 
-/** What a compaction leaves: the summary's size, and the conversation's size after it. */
+/**
+ * What a compaction leaves: the summary's size, the conversation's size after it, and what it keeps
+ * of the conversation as it is (Pi's keepRecentTokens), which its summary does not read.
+ */
 export interface Compaction {
   readonly summary: number;
   readonly after: number;
+  readonly keep: number;
 }
 
 export interface Priced {
@@ -69,6 +73,7 @@ export interface Priced {
   readonly cost: number;
   /** What leaving the current model costs, already in `cost`; zero for the current model itself. */
   readonly leaving: number;
+  /** The candidate's cached size and its chance of surviving; both 0 for one that compacts, whose cost uses neither. */
   readonly cached: number;
   readonly survival: number;
   readonly compacts: boolean;
@@ -172,10 +177,15 @@ export function chooseByCost(input: {
     let cost: number;
     let leaving = 0;
     if (candidate.compacts) {
-      // The summary is one request on the current model (on the candidate when there is none),
-      // and the run then starts on the smaller conversation with nothing cached.
+      // The summary is one request on the current model (on the candidate when there is none). Pi
+      // writes it with a request of its own that no cache serves (its own system prompt, the
+      // serialized conversation, no cache retention), so its input is the conversation less what
+      // the compaction keeps, at the uncached input price, and its output the summary's size. That
+      // input is an upper bound, since Pi shortens long tool results before it sends them, and it
+      // errs toward staying; the reasoning a summary may add, the wait and what it loses are not
+      // priced. The run then starts on the smaller conversation with nothing cached.
       const writer = current ?? candidate;
-      const summary = firstRequest(writer, workload.tokens, table) + compaction.summary * writer.rates.output;
+      const summary = Math.max(0, workload.tokens - compaction.keep) * writer.rates.input + compaction.summary * writer.rates.output;
       const fresh: Candidate = { ...candidate, cached: 0, idle: undefined };
       cost = summary + runCost(fresh, { ...workload, tokens: compaction.after }, table);
       if (current !== undefined && !stays) {
@@ -193,8 +203,8 @@ export function chooseByCost(input: {
       tier: candidate.tier,
       cost: cost + leaving,
       leaving,
-      cached: candidate.cached,
-      survival: survivalOf(candidate, table),
+      cached: candidate.compacts ? 0 : candidate.cached,
+      survival: candidate.compacts ? 0 : survivalOf(candidate, table),
       compacts: candidate.compacts,
     };
   });

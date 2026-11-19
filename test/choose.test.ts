@@ -309,7 +309,7 @@ describe("a conversation larger than a candidate's window", () => {
   const small = (): FakeCatalog => catalog(codex(TERRA, { contextWindow: 128_000 }));
   const long: RunStat = { requests: 10, output: 1_000, growth: 0, seconds: 600 };
 
-  test("with compaction enabled the candidate stays, priced with a summary on the current model", () => {
+  test("with compaction enabled the candidate stays, priced with an uncached summary on the current model", () => {
     const chosen = choose({ rc: context({ catalog: small() }), last: lastFrom(ASTRA, 200_000), ledger: ledgerOf({ tokens: 199_000, run: long }) });
     assert.deepEqual(
       pricedOf(chosen).map((entry) => [entry.ref, entry.compacts]),
@@ -320,11 +320,28 @@ describe("a conversation larger than a candidate's window", () => {
       ],
       "200,000 tokens do not fit terra's 128,000 less the reserve: Pi compacts before terra takes it",
     );
-    assert.deepEqual(pickOf(chosen), [TERRA, "medium", "heuristics"], "ten-request runs: terra wins even with the summary");
-    assert.equal(chosen.cost?.outcome, "moved", "ten-request runs: terra wins even with the summary");
-    near(entryOf(chosen, TERRA).cost, 0.468972, "terra: astra's summary, ten requests on 24,000 tokens, leaving astra");
+    const cost = chosen.cost;
+    assert.ok(cost !== undefined && cost.outcome !== "unknown");
+    const workload: Workload = { tokens: 200_000, requests: 10, output: 1_000, growth: 0, seconds: 600, horizon: 1 };
+    assert.deepEqual([cost.workload, cost.again], [workload, 0.5], "the workload: three ten-request runs measured, no lighter prompt noted; q 0.5");
+    // Pi writes the summary with a request of its own that no cache serves: the 180,000 tokens the
+    // compaction does not keep at astra's uncached input price, and 4,000 tokens at its output price.
+    const astra: Rates = { input: 8e-6, cacheRead: 0.4e-6, output: 40e-6 };
+    const terraRates: Rates = { input: 1e-6, cacheRead: 0.05e-6, output: 5e-6 };
+    const after = ENABLED.keepRecent + SUMMARY_TOKENS;
+    const summary = (200_000 - ENABLED.keepRecent) * astra.input + SUMMARY_TOKENS * astra.output;
+    const fresh: Candidate = { ref: TERRA, tier: "medium", rates: terraRates, cached: 0, idle: undefined, compacts: false };
+    const leaving = 0.5 * after * (astra.input - astra.cacheRead);
+    near(entryOf(chosen, TERRA).cost, summary + runCost(fresh, { ...workload, tokens: after }, DEFAULT_SWITCHING.cacheSurvival) + leaving, "terra: astra's uncached summary, ten requests on 24,000 tokens, leaving astra");
+    assert.deepEqual([entryOf(chosen, TERRA).cached, entryOf(chosen, TERRA).survival], [0, 0], "terra compacts: no cached size, no survival");
     near(entryOf(chosen, ASTRA).cost, 1.252972, "astra: ten requests on 200,000 tokens, the first warm");
     near(entryOf(chosen, SOL).cost, 0.778306, "sol: ten requests on 200,000 tokens, the first cold, leaving astra");
+    assert.deepEqual(
+      pickOf(chosen),
+      [SOL, "high", "heuristics"],
+      "a compaction's summary is priced uncached (the design's last section): terra's move no longer pays, and sol, which fits without one, is cheapest",
+    );
+    assert.equal(chosen.cost?.outcome, "moved", "sol undercuts astra by more than the margin");
   });
 
   test("with compaction disabled it is no candidate, and a needed level that does not fit steps up", () => {
@@ -377,11 +394,14 @@ describe("a candidate that compacts first", () => {
   const run = (rc: ResolveContext): Chosen => choose({ rc, last: lastFrom(ASTRA, 200_000), ledger: ledgerOf({ tokens: 199_000, run: long }) });
   const perToken = (cost: { input: number; output: number; cacheRead: number }): Rates => ({ input: cost.input / 1e6, cacheRead: cost.cacheRead / 1e6, output: cost.output / 1e6 });
 
-  /** Terra's expected cost: astra's summary at 200,000 tokens, then the run on 24,000 tokens at `rates`, then leaving astra. */
+  /**
+   * Terra's expected cost: astra's summary of 200,000 tokens, uncached (a compaction's summary is a
+   * request no cache serves: the 180,000 tokens not kept at the input price, 4,000 at the output
+   * price), then the run on 24,000 tokens at `rates`, then leaving astra.
+   */
   function expected(rates: Rates, leaving: number): number {
-    const astra: Candidate = { ref: ASTRA, tier: "super", rates: perToken(PRICES[ASTRA]!), cached: 199_000, idle: 30, compacts: false };
-    const once: Workload = { tokens: 200_000, requests: 1, output: 0, growth: 0, seconds: 0, horizon: 1 };
-    const summary = runCost(astra, once, DEFAULT_SWITCHING.cacheSurvival) + SUMMARY_TOKENS * astra.rates.output;
+    const astra = perToken(PRICES[ASTRA]!);
+    const summary = (200_000 - 20_000) * astra.input + SUMMARY_TOKENS * astra.output;
     const fresh: Candidate = { ref: TERRA, tier: "medium", rates, cached: 0, idle: undefined, compacts: true };
     const after = 20_000 + SUMMARY_TOKENS;
     return summary + runCost(fresh, { tokens: after, requests: 10, output: 1_000, growth: 0, seconds: 600, horizon: 1 }, DEFAULT_SWITCHING.cacheSurvival) + leaving;
@@ -392,13 +412,13 @@ describe("a candidate that compacts first", () => {
     const terra = entryOf(chosen, TERRA);
     assert.equal(terra.compacts, true, "200,000 tokens do not fit terra: Pi compacts first");
     near(terra.cost, expected(perToken(LOWER), terra.leaving), "terra is sent 24,000 tokens, under the tier's 100,000: priced at the lower rates");
-    near(terra.cost, 0.468972, "the lower rates are terra's untiered price: the same cost as without the tier");
+    near(terra.cost, 1.776, "the lower rates are terra's untiered price: the same cost as without the tier, 1.60 of it the uncached summary");
   });
 
   test("is priced when only the tier of the size it is not sent lacks a price", () => {
     const chosen = run(context({ catalog: tiered({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }) }));
     assert.notEqual(chosen.cost?.outcome, "unknown", `terra is sent 24,000 tokens, whose price is known: ${JSON.stringify(chosen.cost)}`);
-    near(entryOf(chosen, TERRA).cost, 0.468972, "terra is sent 24,000 tokens, under the unpriced tier: priced at the lower rates");
+    near(entryOf(chosen, TERRA).cost, 1.776, "terra is sent 24,000 tokens, under the unpriced tier: priced at the lower rates, with the uncached summary");
   });
 });
 

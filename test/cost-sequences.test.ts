@@ -16,7 +16,7 @@ const TOKENS = 150_000;
 const OUTPUT = 1_000;
 /** Seconds that pass between the end of a run and the next prompt. */
 const BETWEEN = 30;
-const COMPACTION = { summary: 4_000, after: 24_000 } as const;
+const COMPACTION = { summary: 4_000, after: 24_000, keep: 20_000 } as const;
 
 interface Model {
   readonly ref: string;

@@ -22,7 +22,7 @@ const MODELS: ReadonlyArray<readonly [ref: string, tier: Tier, rates: Rates]> = 
   ["astra", "super", ASTRA],
 ];
 
-const NO_COMPACTION: Compaction = { summary: 4_000, after: 24_000 };
+const NO_COMPACTION: Compaction = { summary: 4_000, after: 24_000, keep: 20_000 };
 
 function candidate(ref: string, tier: Tier, rates: Rates, over: Partial<Candidate> = {}): Candidate {
   return { ref, tier, rates, cached: 0, idle: undefined, compacts: false, ...over };
@@ -260,32 +260,64 @@ describe("chooseByCost", () => {
     assert.equal(tied.chosen.ref, "a", "equal costs: the lowest level, whatever the order given");
   });
 
-  test("a candidate too small for the conversation is priced with the summary and the smaller conversation", () => {
+  /**
+   * What a compaction's summary costs (the design's last section): Pi writes it with a request of
+   * its own that no cache serves, so its input is the conversation less what the compaction keeps,
+   * at the writing model's price for uncached input, and its output the summary's size.
+   */
+  const uncachedSummary = (writer: Rates, tokens: number, compaction: Compaction): number =>
+    Math.max(0, tokens - compaction.keep) * writer.input + compaction.summary * writer.output;
+
+  test("a candidate too small for the conversation is priced with an uncached summary, and the warm current model keeps a run the old price moved", () => {
     const workload: Workload = { tokens: 200_000, requests: 10, output: 1_000, growth: 1_500, seconds: 120, horizon: 1 };
-    const compaction: Compaction = { summary: 4_000, after: 24_000 };
+    const compaction: Compaction = { summary: 4_000, after: 24_000, keep: 20_000 };
+    const a = candidate("A", "super", ASTRA, { cached: 180_000, idle: 30 });
+    // B answered earlier too: its cache and survival show as zero, since a compacting candidate's cost uses neither.
+    const b = candidate("B", "medium", TERRA, { compacts: true, cached: 50_000, idle: 30 });
+    const choice = chooseByCost({ candidates: [b, a], current: "A", workload, again: 0.5, settings: DEFAULT_SWITCHING, compaction });
+    near(priceOf(choice, "A").cost, 1.52264, "A, staying: its warm cache over the whole conversation");
+    const summary = uncachedSummary(ASTRA, 200_000, compaction);
+    near(summary, 1.6, "the summary: 180,000 tokens at astra's uncached input price and 4,000 at its output price");
+    const run = runCost({ ...b, cached: 0, idle: undefined }, { ...workload, tokens: compaction.after }, TABLE);
+    const leaving = 0.5 * compaction.after * (ASTRA.input - ASTRA.cacheRead);
+    near(priceOf(choice, "B").leaving, leaving, "B's leaving: the smaller conversation at A's uncached premium");
+    near(priceOf(choice, "B").cost, summary + run + leaving, "B, compacting: the uncached summary on A, then the smaller conversation, plus leaving");
+    // The old price read the summary's input through A's cache: its first request, not its uncached input.
+    const old = 0.97 * (180_000 * ASTRA.cacheRead + 20_000 * ASTRA.input) + 0.03 * 200_000 * ASTRA.input + compaction.summary * ASTRA.output;
+    assert.ok(old + run + leaving < priceOf(choice, "A").cost * (1 - DEFAULT_SWITCHING.margin), "the old price would have moved: B under A by more than the margin");
+    assert.equal(choice.outcome, "stayed", "a compaction's summary is no cache's: priced uncached, the move no longer pays and A keeps the run");
+    assert.equal(choice.chosen.ref, "A", "A keeps the run");
+    assert.deepEqual([priceOf(choice, "B").compacts, priceOf(choice, "B").cached, priceOf(choice, "B").survival], [true, 0, 0], "B compacts, and shows a cached size and a survival of 0, which its cost does not use");
+  });
+
+  test("a compaction still wins by cost when the run is long enough to repay the summary", () => {
+    const workload: Workload = { tokens: 200_000, requests: 40, output: 1_000, growth: 1_500, seconds: 120, horizon: 1 };
+    const compaction: Compaction = { summary: 4_000, after: 24_000, keep: 20_000 };
     const a = candidate("A", "super", ASTRA, { cached: 180_000, idle: 30 });
     const b = candidate("B", "medium", TERRA, { compacts: true });
     const choice = chooseByCost({ candidates: [b, a], current: "A", workload, again: 0.5, settings: DEFAULT_SWITCHING, compaction });
-    near(priceOf(choice, "A").cost, 1.52264, "A, staying: its warm cache over the whole conversation");
-    near(priceOf(choice, "B").cost, 0.62524, "B, compacting: the summary on A, then the smaller conversation, plus leaving");
-    near(priceOf(choice, "B").leaving, 0.0912, "B's leaving: the smaller conversation at A's uncached premium");
-    assert.equal(priceOf(choice, "B").compacts, true, "B is marked as compacting");
-    assert.equal(choice.outcome, "moved", "the compacting candidate wins by more than the margin");
-    assert.equal(choice.chosen.ref, "B", "the compacting candidate is chosen");
+    const stay = runCost(a, workload, TABLE);
+    const move = uncachedSummary(ASTRA, 200_000, compaction) + runCost(b, { ...workload, tokens: compaction.after }, TABLE) + 0.5 * compaction.after * (ASTRA.input - ASTRA.cacheRead);
+    near(priceOf(choice, "A").cost, stay, "A, staying: forty requests on 200,000 tokens");
+    near(priceOf(choice, "B").cost, move, "B: the uncached summary, forty requests on 24,000 tokens, and leaving");
+    assert.ok(move < stay * (1 - DEFAULT_SWITCHING.margin), `forty requests repay the summary: ${move} against ${stay}`);
+    assert.deepEqual([choice.outcome, choice.chosen.ref], ["moved", "B"], "the compaction wins by cost");
   });
 
   test("when the current model itself must compact, staying pays for the summary too and leaves nothing behind", () => {
     const workload: Workload = { tokens: 200_000, requests: 10, output: 1_000, growth: 1_500, seconds: 120, horizon: 1 };
-    const compaction: Compaction = { summary: 4_000, after: 24_000 };
+    const compaction: Compaction = { summary: 4_000, after: 24_000, keep: 20_000 };
     const a = candidate("A", "super", ASTRA, { cached: 180_000, idle: 30, compacts: true });
     const b = candidate("B", "medium", TERRA, { compacts: true });
     const choice = chooseByCost({ candidates: [b, a], current: "A", workload, again: 0.5, settings: DEFAULT_SWITCHING, compaction });
+    const summary = uncachedSummary(ASTRA, 200_000, compaction);
     const afterwards = runCost({ ...a, cached: 0, idle: undefined }, { ...workload, tokens: 24_000 }, TABLE);
-    near(priceOf(choice, "A").cost, 0.43304 + afterwards, "A: the summary on itself, then the run at 24,000 tokens with nothing cached");
-    near(priceOf(choice, "A").cost, 1.24104, "A: the same, pinned");
+    near(priceOf(choice, "A").cost, summary + afterwards, "A: the uncached summary on itself (its cache does not serve it), then the run at 24,000 tokens with nothing cached");
+    near(priceOf(choice, "A").cost, 2.408, "A: the same, pinned: 1.60 for the summary and 0.808 for the run");
     assert.equal(priceOf(choice, "A").leaving, 0, "A leaves nothing behind");
+    assert.deepEqual([priceOf(choice, "A").cached, priceOf(choice, "A").survival], [0, 0], "A compacts: its cached size and survival show as 0, since its cost uses neither");
     // B's summary is also written by A, so B costs the same summary plus its own run, plus leaving.
-    near(priceOf(choice, "B").cost, 0.43304 + runCost({ ...b }, { ...workload, tokens: 24_000 }, TABLE) + 0.0912, "B: the same summary on A");
+    near(priceOf(choice, "B").cost, summary + runCost({ ...b }, { ...workload, tokens: 24_000 }, TABLE) + 0.0912, "B: the same summary on A");
   });
 
   test("a current model with a negative cached size leaves nothing behind", () => {
@@ -319,13 +351,22 @@ describe("chooseByCost", () => {
       workload,
       again: 0.5,
       settings: DEFAULT_SWITCHING,
-      compaction: { summary: 4_000, after: 24_000 },
+      compaction: { summary: 4_000, after: 24_000, keep: 20_000 },
     });
-    // Summary on B: 200,000 tokens at 1e-6 plus 4,000 output at 5e-6; then 10 requests at 24,000 tokens.
-    const summary = 200_000 * 1e-6 + 4_000 * 5e-6;
-    near(choice.chosen.cost, summary + runCost(b, { ...workload, tokens: 24_000 }, TABLE), "B's own summary and the smaller run");
+    // Summary on B, uncached: the 180,000 tokens the compaction does not keep at 1e-6, plus 4,000
+    // output at 5e-6; then 10 requests at 24,000 tokens.
+    const summary = 180_000 * 1e-6 + 4_000 * 5e-6;
+    near(choice.chosen.cost, summary + runCost(b, { ...workload, tokens: 24_000 }, TABLE), "B's own uncached summary and the smaller run");
     assert.equal(choice.chosen.leaving, 0, "nothing to leave");
     assert.equal(choice.outcome, "only", "no current model");
+  });
+
+  test("a summary's input is never under zero, when the conversation is smaller than what the compaction keeps", () => {
+    const workload: Workload = { tokens: 15_000, requests: 1, output: 1_000, growth: 0, seconds: 60, horizon: 1 };
+    const b = candidate("B", "medium", TERRA, { compacts: true });
+    const compaction: Compaction = { summary: 4_000, after: 24_000, keep: 20_000 };
+    const choice = chooseByCost({ candidates: [b], current: undefined, workload, again: 0.5, settings: DEFAULT_SWITCHING, compaction });
+    near(choice.chosen.cost, 4_000 * TERRA.output + runCost(b, { ...workload, tokens: 24_000 }, TABLE), "the summary's input is 0 tokens, never fewer: only its output is priced");
   });
 
   test("a run is at least one request, and every candidate comes back priced in the order given", () => {

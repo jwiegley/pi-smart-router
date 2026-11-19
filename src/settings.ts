@@ -91,5 +91,5 @@ export const RUNS_NEEDED = 3;
 export const AGAIN_DEFAULT = 0.5;
 export const AGAIN_MIN = 0.2;
 
-/** The size assumed for a compaction's summary. */
+/** The size assumed for a compaction's summary: its output tokens, and its share of the conversation after it. */
 export const SUMMARY_TOKENS = 4_000;

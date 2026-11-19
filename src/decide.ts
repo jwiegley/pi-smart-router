@@ -358,7 +358,8 @@ function lifetimeOf(model: Model<Api>): number | undefined {
  * disabled, only when the conversation fits it. With no usage yet (no history measured, whatever
  * the prompt's size), a candidate without a price or one seen after now (checked in that order),
  * the needed level's own model takes the run and the cost is unknown. A candidate is priced at the
- * size it is sent: the conversation, or, when Pi compacts first, what the compaction leaves. Else
+ * size it is sent: the conversation, or, when Pi compacts first, what the compaction leaves, after
+ * a summary priced as the uncached request it is (chooseByCost). Else
  * chooseByCost picks, counting a model's cache only at the effort of its last answer: a known
  * effort that differs from the one it would be sent now leaves it nothing cached.
  */
@@ -437,7 +438,7 @@ export function chooseModel(input: {
     workload,
     again,
     settings: switching,
-    compaction: { summary: SUMMARY_TOKENS, after },
+    compaction: { summary: SUMMARY_TOKENS, after, keep: compaction.keepRecent },
   });
   const taken = rated.find((entry) => entry.choice.ref === choice.chosen.ref)!;
   return {
