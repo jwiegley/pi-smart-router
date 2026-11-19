@@ -31,6 +31,11 @@ accepted and ignored. These are visible without a roster change:
   level up to that level's own model, with a notice, or stays when that model is not available.
 - `/smart-router local on|off|status` is gone: `local` is an unknown subcommand, answered with the
   usage. `PI_SMART_ROUTER_LOCAL_ONLY` and an old session's pin entry are ignored, with no notice.
+- Each request's thinking effort follows its turn type, as upstream's adaptive reasoning sets it:
+  at `/thinking medium` (Pi's default) or `off`, `minimal` after a tool result, `low` for an
+  ordinary turn, `medium` for planning, `high` on SUPER or in a run that moved up; any other level
+  is never lowered, and a role's fixed `thinking` is kept. A change of effort costs that model's
+  prompt cache. The footer's new `smart-router-effort` item says which effort and why.
 
 Jev's request is unchanged, byte for byte, at `classifier.context.messages` of 5 or more; at 1 to
 4 it may now carry earlier messages, since its read is the heuristics' 20-message window.
@@ -84,6 +89,23 @@ Jev's request is unchanged, byte for byte, at `classifier.context.messages` of 5
   `cacheSurvival`), with the defaults above (`src/settings.ts`). The checker reads both back in
   words and refuses weights that are negative or all zero, cuts that do not ascend, and a survival
   table whose seconds do not rise or whose chances rise.
+- **Thinking effort by turn type** (`src/effort.ts`; John, 2026-11-18: "Exactly as upstream: effort
+  follows each request's turn type"). Upstream v1.4.0's adaptive reasoning, ported rule for rule:
+  the turn type from the request's last message (a tool result; a user message holding "plan",
+  "architect" or "design"; anything else), its table (`minimal`, `low`, `medium`, and `high` on
+  SUPER's model or in a run that moved up for being stuck), and its merge: at `medium` or `off` the
+  table's level is sent, any other level is never lowered and is raised when the turn asks for
+  more, a floor and then a ceiling bound the table's level, and a model that does not reason, or
+  supports no level up to the turn's, gets the selected level. A role's fixed `thinking` is kept.
+  It applies to every routed request, a compaction's summary included, under both roster versions.
+  The cost choice prices each candidate at the effort the request would be sent on it, so the
+  request carries the effort its price assumed. The footer's `smart-router-effort` item and
+  `/smart-router status` say which effort the latest request carried, and why, as in
+  `thinking minimal (after a tool result)`. On John's ChatGPT-account models each change of effort
+  between two requests to one model costs a full-price read of the conversation.
+- **The `adaptiveReasoning` roster section**, version 2: `enabled` (default `true`), `minLevel`
+  and `maxLevel`, each one of `minimal` to `max`, the floor never above the ceiling; upstream's
+  defaults without it, and always under version 1. The checker reads the rule back in words.
 - **The review script**, `scripts/review-demand.ts`: it replays the rated runs of the session files
   it is given and reports how often the heuristics, Jev and the blend named the level John meant.
   It reads only those files, sends nothing, prints no prompt text, and is not shipped. It runs on
@@ -159,9 +181,10 @@ John answered the design's five open decisions and approved it for building on a
    ruling after the build counts any three failures in a row, as upstream does below its top tier
    (below).
 5. **Thinking effort by turn type**: "Yes, as upstream does." The same day the design found that a
-   change of effort discards the prompt cache on his ChatGPT-account models, so this one is held for
-   his word again with that finding before him. This release does not change the effort a request
-   is sent with.
+   change of effort discards the prompt cache on his ChatGPT-account models, so this one was held
+   for his word again with that finding before him. He chose the design's third choice, twice, the
+   second time with the cache cost stated: "Exactly as upstream: effort follows each request's turn
+   type." This release builds it (above).
 
 ### Decided during the build
 
@@ -172,6 +195,7 @@ overrule, are in the design's last section, "Decided during the build", under th
 - The cost choice
 - Runs without a prompt, and a stuck run
 - What John sees
+- Thinking effort
 - Rosters and the review script
 
 On 2026-11-18 John overruled four of those calls, and the design's last section now carries his

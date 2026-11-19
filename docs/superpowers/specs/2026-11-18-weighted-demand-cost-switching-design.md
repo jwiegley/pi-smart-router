@@ -683,6 +683,65 @@ John to confirm or overrule. Where a line differs from the text above, the line 
   branch, raised to the deep-session floor as before. One short question in a goal session no
   longer drops the continuations to LOW; three light prompts in a row do.
 
+### Thinking effort
+
+- **Exactly as upstream (John, 2026-11-18).** John chose the design's third choice, twice, the
+  second time with the cache cost stated: the effort follows each request's turn type by
+  upstream's table, with upstream's floor, ceiling and off switch, wherever upstream applies it.
+  The cost figures treat each change of effort as the lost cache it is.
+- **Where the turn type comes from.** From the last message of Pi's route request, by upstream's
+  own `deriveTurnType`, word for word: a tool result is a tool-result turn; a user message whose
+  text holds "plan", "architect" or "design", in any case and inside a longer word ("explanation"
+  holds "plan"), is a planning turn; anything else is an ordinary turn; no messages is no turn
+  type. Pi sends an extension's message as a user message, so a run without a prompt is an ordinary
+  or a planning turn by its message's text.
+- **The levels that take the table.** Upstream's code sends the table's level alone at `medium`,
+  and also when its provider receives no level, which is what Pi passes for `/thinking off`; so
+  `off` takes the table too. At any other level upstream never lowers the session's level and
+  raises it when the table's level is higher: at `low` a planning turn goes out at `medium` and a
+  request on SUPER at `high`. The build follows the code. This section's earlier summary, "only
+  while the session's level is `medium`", is exact for `high`, `xhigh` and `max`, where nothing
+  changes unless the roster sets a floor above them.
+- **The strongest tier is SUPER.** Upstream's `frontier-cloud` tier is the SUPER level's role in the
+  session's scope, on `smart-router/auto` under a version 2 roster. Version 1 and
+  `smart-router/local` have no levels, so none of their requests is on it.
+- **The loop escalation is a stuck run, from its move to its end.** Upstream's escalation re-pins
+  the session to its frontier tier, so every request after it is `high` until the pin breaks. Here
+  a stuck run moves one level up for the rest of the run, so every request of the owner's loop in a
+  run that moved up is `high`, a planning turn's excepted, which stays `medium` as upstream
+  classifies planning first.
+- **No pin continuation.** Upstream keeps the session's `medium` on a request its session pin holds
+  unless the turn asks for more. The fork has no session pin (its only pin, the local-only one, is
+  removed), and treating its stay on the run's model as one would leave the table to a run's first
+  request alone; so no request is a pin continuation.
+- **Every routed request, by one rule.** Upstream applies the policy to every request its provider
+  routes, so here a compaction's summary, an extension's call and a foreign session's request take
+  the table too; none of them belongs to a run of the owner's loop, so none is an escalated run's.
+  A role whose roster entry fixes a level keeps it.
+- **The settings.** Upstream's `adaptive_reasoning` (`enabled`, `min_level`, `max_level`) is the
+  version 2 roster's `adaptiveReasoning` (`enabled`, `minLevel`, `maxLevel`), checked as upstream's
+  schema checks it. A version 1 roster refuses the section and has the defaults. Upstream's three
+  environment variables for the same switches are not read: the roster is where the router's
+  settings live.
+- **What is priced is what is sent.** The cost choice prices each candidate at the effort its turn
+  would send it there. A prompt's run is priced when it is planned, from the prompt's text, for the
+  request that carries that prompt last; a run without a prompt is priced at its first request,
+  from that request's messages; what pi-cache-optimizer is told before a run without a prompt
+  assumes an ordinary turn. When another extension or a template changes a prompt after the router
+  planned it, the turn type of the request sent can differ from the one priced.
+- **What John sees.** A footer item of its own, `smart-router-effort`, after each request of the
+  owner's loop: `thinking minimal (after a tool result)`, `thinking low (an ordinary turn)`,
+  `thinking medium (planning)`, `thinking high (SUPER)`, `thinking high (a stuck run)`,
+  `thinking max (as selected, never lowered)`, `thinking medium (raised from the selected level for
+  planning)`, `thinking max (the role's own level)`, `(the roster's floor)`, `(the roster's
+  ceiling)`, `(as selected)` and `(as selected; adaptive effort is off)`. `/smart-router status`
+  says the same on the line `Thinking sent on the latest request`. A run's start clears the item,
+  so a model picked by hand, which is never routed, shows none.
+- **Not built.** Upstream's conciseness hint appends a line to a verbose model's system prompt at
+  `minimal` or `low`; a route returns only a model and a level, and the fork has no verbosity
+  profiles. Upstream's planning delegate, whose decision code also counts as a planning turn, has
+  no counterpart here.
+
 ### Rosters and the review script
 
 - **A version 1 roster with compaction disabled** sends a request that is too large for its model

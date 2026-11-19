@@ -47,6 +47,14 @@ beettlle/pi-smart-router to the virtual models of Pi 1.5. `CLAUDE.md` is a link 
   never import them, and the package does not ship them. `scripts/review-demand.ts` reads only the
   session files named on its command line, and sends and prints no prompt text; running it on
   John's sessions, which are under Pi's agent directory, needs his word.
+- The thinking effort of every routed request is upstream's adaptive reasoning, as John ruled on
+  2026-11-18 ("Exactly as upstream: effort follows each request's turn type"): `src/effort.ts`
+  ports upstream v1.4.0's table and merge rule by rule, and `test/effort.test.ts` cites the upstream
+  line each expectation comes from. Change it only to follow upstream, never to invent a rule of
+  the fork's own. The route and the cost choice both take the effort from `effortFor`
+  (`src/decide.ts`), so the effort a request is sent at is the one its price assumed; a change of
+  effort costs that model's whole prompt cache. A role's fixed `thinking` is never changed, and the
+  roster's `adaptiveReasoning` section holds upstream's off switch, floor and ceiling.
 - Signed commits only (`git commit -S`), one logical change each, with explicit paths staged.
   Never bypass hooks, and never stash, reset or rewrite published history.
 - Pushing, tagging and creating remotes need John's explicit authorization.

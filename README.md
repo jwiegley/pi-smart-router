@@ -518,6 +518,7 @@ Three things to know:
 | `accounts.<provider>.scope` | no | `"personal"`, the default, or `"work"`. |
 | `classifier` | no | Jev's settings; without them, Jev is never asked. `model`, an exact ref, default `openrouter/typesafe/jev-1.14`; `timeoutMs`, 100 to 1000, default 1000; and `context`: `messages`, 0 to 20, default 6; `messageChars`, 200 to 8000, default 1500; `totalChars`, 1000 to 32000, default 12000. `closeCall`, which earlier versions used, is still accepted from 0 to 0.5 and ignored, and the checker says so: `demand.closeCall` decides a close call. The model names a Jev version, so that tuned demand settings keep their meaning; moving to a newer Jev is a roster edit. `instructions`, the question Jev is asked, as a text of at most 4000 characters, or `instructionsFile`, the name of a prompt file that holds it; not both, and with neither the built-in question is asked ([Jev's prompts](#jevs-prompts)). |
 | `demand` | no | How a prompt's demand is weighed ([The level a prompt needs](#the-level-a-prompt-needs)). `jevWeight` and `heuristicsWeight`, each 0 to 100, defaults 4 and 1, not both 0; `minConfidence`, 0 to 1, default 0.6; `closeCall`, 0 to 0.5, default 0.1; `cuts`, three numbers that ascend, each above 0 and below 3, default `[0.75, 1.5, 2.25]`; `deepSessionFloor`, `low`, `medium`, `high` or `super`, default `medium`; and `weights`, any of the twelve heuristic signals, each 0 to 100 and not all 0, by default upstream's weights with `requirement_low` and `cluster_signal` at 0. Every field is optional, and a field left out keeps its default. |
+| `adaptiveReasoning` | no | The thinking effort each request is sent ([Thinking effort](#thinking-effort)), upstream's `adaptive_reasoning`: `enabled`, `true` or `false`, default `true`; `minLevel`, the floor, and `maxLevel`, the ceiling, each one of `minimal`, `low`, `medium`, `high`, `xhigh` and `max`, with no default, the floor never above the ceiling. Both bound only the level the turn gives, never a level `/thinking` set that is kept. A version 1 roster has none, and the defaults. |
 | `switching` | no | When a session moves to another model ([Choosing the model](#choosing-the-model)). `margin`, 0 to 0.9, default 0.15; `horizonCap`, a whole number of runs from 1 to 20, default 5; and `cacheSurvival`, 1 to 32 pairs of `[seconds, chance]`, the seconds rising and the chances from 1 to 0 never rising, by default the table in [Choosing the model](#choosing-the-model). Every field is optional. |
 
 ### Account bindings in version 2
@@ -639,6 +640,18 @@ plain words, and refuses weights that are negative or all zero, cuts that do not
 survival table whose seconds do not rise or whose chances rise. `requirement_low` and
 `cluster_signal` are upstream's signals for its embedding model and its cluster match, which have
 no input here; they weigh 0 so that a missing input does not read as easy work.
+
+**Bound or turn off the thinking effort.** A version 2 roster may also carry `adaptiveReasoning`
+([Thinking effort](#thinking-effort)). Without it the rule is on with no bounds. To keep every
+request at the selected level, as before this rule:
+
+```json
+{ "adaptiveReasoning": { "enabled": false } }
+```
+
+or to keep the turn's level between `low` and `high`:
+`{ "adaptiveReasoning": { "minLevel": "low", "maxLevel": "high" } }`. The checker reads the rule
+back in words and refuses a level it does not know and a floor above the ceiling.
 
 A model belongs to one role. To use a model in two places, that is what a fallback chain is for;
 listing it in two roles is the error `"<model>" is already in role "<role>"`.
@@ -814,8 +827,9 @@ These are version 1's rules. Version 2 keeps them, comparing levels rather than 
   the transcript does not go to a new vendor; otherwise to the default role (under version 2, the
   session's scope's medium level), or to the local role under `smart-router/local`.
 - **Thinking.** Both models offer every thinking level, so a `max` default is not clamped at
-  selection. A role sends the session's level or its fixed `thinking`, and Pi clamps that to what the
-  routed model supports.
+  selection. A role with a fixed `thinking` sends it; any other request is sent the effort its turn
+  type gives ([Thinking effort](#thinking-effort)), and Pi clamps that to what the routed model
+  supports.
 - **Declared limits.** Pi and other extensions read a virtual model's context window and output
   budget before the first response. At every session start the router registers both models again:
   auto with the smallest window and output budget among the first available model of each role it
@@ -992,9 +1006,10 @@ as cached up to that lifetime and not after it.
 now is the effort of its last answer, compared after the model's own mapping of levels. On John's
 ChatGPT-account models a change of effort between two requests discards the model's whole prompt
 cache, so a change of effort leaves that model nothing cached in the figures: after a `/thinking`
-change in a session, the next choice prices the current model as cold, which it is. The router
-does not change the effort a request is sent with: a role sends the session's level or its fixed
-`thinking`.
+change in a session, the next choice prices the current model as cold, which it is. Each
+candidate is priced at the effort the request would be sent on it ([Thinking
+effort](#thinking-effort)): on SUPER an ordinary turn is sent `high`, and a planning turn `medium`,
+so whether astra's cache counts depends on the turn as well as on `/thinking`.
 
 **A conversation too large for a candidate.** With Pi's compaction enabled, as it is by default,
 size removes no candidate and holds no session. A candidate whose window, less Pi's reserve, the
@@ -1102,6 +1117,50 @@ extension's own message as a user message, so a run an extension starts is bound
   never a tool's output. The footer says `escalated` in place of the cost, and the run's record
   carries `escalated: true`.
 
+### Thinking effort
+
+John's ruling of 2026-11-18: "Exactly as upstream: effort follows each request's turn type." Every
+request the router routes is sent the thinking effort upstream's adaptive reasoning gives it
+(`src/effort.ts`, from upstream v1.4.0's `adaptive-reasoning.ts`), on both router models and under
+either roster version. The turn type comes from the request's last message, as upstream reads it:
+a tool result is a *tool result*; a user message whose text holds "plan", "architect" or "design",
+in any case and inside a longer word, is a *planning* turn; anything else is an *ordinary* turn.
+
+| The request | Sent at `/thinking medium` (Pi's default) or `off` |
+|---|---|
+| after a tool result | `minimal` |
+| an ordinary turn | `low` |
+| a planning turn, on any level | `medium` |
+| any other turn on SUPER's model, or in a run that moved up for being stuck | `high` |
+
+- **Any other `/thinking` level** is your own choice and is never lowered: at `high`, `xhigh` and
+  `max` nothing changes. At `minimal` or `low` a turn that asks for more is raised to it, as
+  upstream raises it: at `low`, a planning turn goes out at `medium`.
+- **A role with a fixed `thinking`** keeps it, whatever the turn: the local role's `max` stays.
+- **The roster's `adaptiveReasoning`** section turns the rule off (`"enabled": false`: every request
+  is sent the selected level, as before), or sets a floor (`minLevel`) and a ceiling (`maxLevel`)
+  on the level the turn gives. The ceiling wins over the floor.
+- **A model that does not reason**, or one whose catalog maps every level up to the turn's to
+  `null`, is sent the selected level.
+- **A change of effort costs that model's cache.** On John's ChatGPT-account models the prompt cache
+  holds only between two requests at one effort, so an ordinary turn after a planning one on the
+  same model, or a tool result's request after an ordinary turn, reads the conversation again at the
+  full input price. The cost choice prices each candidate at the effort it would be sent, so the
+  request carries the effort its price assumed.
+- **The footer** shows the effort the latest request carried, and why, under a key of its own,
+  `smart-router-effort`: `thinking minimal (after a tool result)`, `thinking low (an ordinary turn)`,
+  `thinking medium (planning)`, `thinking high (SUPER)`, `thinking high (a stuck run)`,
+  `thinking max (as selected, never lowered)`, `thinking medium (raised from the selected level for
+  planning)`, `thinking max (the role's own level)`, or `(the roster's floor)` and `(the roster's
+  ceiling)`, and `(as selected)` where the rule leaves the level, as for a model that does not
+  reason. `/smart-router status` says the same on its line `Thinking sent on the latest request`.
+  A model picked by hand is never routed, so neither shows anything for it.
+
+What upstream does that the router does not: it adds a line asking for brevity to the system
+prompt of a verbose model at `minimal` or `low`, which a route cannot do; it keeps the session's
+level on a request its session pin holds, and the router has no session pin; and it reads three
+environment variables for the switches, where the router reads the roster.
+
 ### Tags elsewhere
 
 A message that is only a tag sends nothing, with a notice. A tag is removed wherever it is typed,
@@ -1112,6 +1171,9 @@ extension's resend of the latest message's text, as pi-idle-check makes, keeps t
 level, from its tag or its demand, and Jev is not asked again.
 
 ### The footer and status
+
+The thinking effort of each request has an item of its own, `smart-router-effort`
+([Thinking effort](#thinking-effort)).
 
 **The footer** shows each run under a status key of its own, `smart-router-level`: its scope, the
 level it needs, the model that took it, and in brackets what decided. The level is the one needed,
@@ -1701,7 +1763,7 @@ next answer. A replay can therefore raise the deep-session floor where the route
 
 | Command | Does |
 |---|---|
-| `/smart-router` or `/smart-router status` | The roster's path and state; the selection and its thinking level; the session's scope and what set it, under a version 2 roster or whenever `smart-router/auto` refuses the scope; every role's models on this host with `ok` or the reason they cannot route, and catalog prices; the accounts cooling and the local models held as unreachable; account bindings, checked in the session's scope, and auth sources; a version 1 roster's routing table and fallbacks, or a version 2 roster's levels and fallback chain in each scope, its classifier and the source of each of Jev's prompts; the last decision, and whether it went to a fallback chain's model; the terms of the run that decision belongs to, kept from that run's choice however many requests it has made: a planned run's demand with every guard that applied, or a run without a prompt's need and level, and each candidate's expected cost, or why the cost was unknown; none for a tagged run or while a model picked by hand is selected ([The footer and status](#the-footer-and-status)); what can still leave the machine, a model picked by hand first and then the classifier when `smart-router/auto` may ask it; and a warning for any fallback that would move a run onto Codex's API from another one. |
+| `/smart-router` or `/smart-router status` | The roster's path and state; the selection and its thinking level; the session's scope and what set it, under a version 2 roster or whenever `smart-router/auto` refuses the scope; every role's models on this host with `ok` or the reason they cannot route, and catalog prices; the accounts cooling and the local models held as unreachable; account bindings, checked in the session's scope, and auth sources; a version 1 roster's routing table and fallbacks, or a version 2 roster's levels and fallback chain in each scope, its classifier and the source of each of Jev's prompts; the last decision, and whether it went to a fallback chain's model; the terms of the run that decision belongs to, kept from that run's choice however many requests it has made: a planned run's demand with every guard that applied, or a run without a prompt's need and level, and each candidate's expected cost, or why the cost was unknown; none for a tagged run or while a model picked by hand is selected ([The footer and status](#the-footer-and-status)); the thinking effort the latest request carried and why ([Thinking effort](#thinking-effort)); what can still leave the machine, a model picked by hand first and then the classifier when `smart-router/auto` may ask it; and a warning for any fallback that would move a run onto Codex's API from another one. |
 | `/smart-router history [n]` | The last `n` routing decisions (10 by default, at most 50), with reason codes, and on a version 2 run's first request the footer's words: its scope, the level it needs, the model that took it, what decided the level and what the cost rule compared. Model ids and codes only, never prompt text. |
 | `/smart-router scope [work\|personal\|status]` | The session's scope and what set it: `latch`, `entry`, `directory` or `default`. `work` records work scope at once; `personal` asks first in work scope, and is refused under `PI_SMART_ROUTER_SCOPE=work`. Neither changes the selection. |
 | `/smart-router was low\|medium\|high\|super` | Record that the run in flight, when it holds a level, or else the run of the latest record, should have gone to that level. Nothing is sent again. |
