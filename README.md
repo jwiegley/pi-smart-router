@@ -1026,9 +1026,9 @@ needed level whose first available model is too small passes the run up.
 - right after a compaction, after a move to another leaf of the session tree, and in a session that
   starts right after a compaction: no answer has measured the conversation as it now is, until the
   next answer does, and every model's cache is forgotten at the same moment. A move to another leaf
-  also starts the branch's run shapes and its count of lighter prompts afresh, and the chance a
-  level is needed again is 0.5 until three prompts are counted on the new branch; the level the
-  session last needed stays;
+  also starts the branch's run shapes, its count of lighter prompts and its last prompts afresh,
+  and the chance a level is needed again is 0.5 until three prompts are counted on the new branch;
+  the level the session last needed stays;
 - a level's model has no price: a catalog entry whose input or output price is missing or 0 is no
   price at all, never free;
 - a candidate's last answer is dated after now: the clock went backwards.
@@ -1052,17 +1052,22 @@ it goes on down the chain. A retry never goes to another level.
 
 A run that starts without a prompt (a goal continuation, a loop's, any extension's message), and a
 prompt's run whose plan cannot be matched to it (another extension changed its text, or Pi expanded
-it while two messages were pending), take the level the session last needed: that of its latest
-planned run, or, in a resumed session, of its latest level record. In a very deep session that
-level is raised to the deep-session floor, as a prompt's demand is: over 100,000 tokens by the
-latest usage, or over 1,000 entries in the active context, which Pi counts from the last
-compaction, an extension's own entries included. The size is unknown right after a compaction,
-after a move to another leaf of the session tree, and after an answer whose usage could not be
-read, and an unknown size counts as not over. Until the next answer only the count of entries can
-raise the level, and after a compaction that count has started again. A move to another leaf
-forgets every model's cache even when the new leaf is an ancestor of the old one, whose
-conversation the caches still hold. The risky floor needs a prompt's text and does not apply. The
-session's own need is not raised: the next run without a prompt starts from it again.
+it while two messages were pending), take the highest level among the last three prompts planned
+on the branch (John, 2026-11-18). One short question in a goal session therefore does not drop the
+continuations that follow to LOW; three light prompts in a row do. With fewer than three prompts
+known, it is the highest of those known. With none known on the branch, as after a move to another
+leaf of the session tree or in a resumed session, it is the level the session last needed: that of
+its latest planned run, or, in a resumed session, of its latest level record. A run without a
+prompt is not one of the prompts. In a very deep session that level is raised to the deep-session
+floor, as a prompt's demand is: over 100,000 tokens by the latest usage, or over 1,000 entries in
+the active context, which Pi counts from the last compaction, an extension's own entries included.
+The size is unknown right after a compaction, after a move to another leaf of the session tree,
+and after an answer whose usage could not be read, and an unknown size counts as not over. Until
+the next answer only the count of entries can raise the level, and after a compaction that count
+has started again. A move to another leaf forgets every model's cache even when the new leaf is an
+ancestor of the old one, whose conversation the caches still hold. The risky floor needs a
+prompt's text and does not apply. Neither the prompts' needs nor the session's own need is raised:
+the next run without a prompt starts from them again.
 
 The run goes through the same choice a prompt's run makes, priced with nothing added for a prompt,
 and counts, for the horizon and for the chance a level is needed again, as a prompt that needed
@@ -1076,29 +1081,26 @@ on the model the session used last, as it always did.
 
 ### A stuck run
 
-When a run's last three tool calls in a row failed the same way, its next request moves up. The
-three are the same when their calls are the same, not only their results: the same tool with the
-same arguments (compared with the keys of every object sorted), each call found by its id in the
-assistant message before its result, and the same first 256 characters of result text. Any failure
-does not count: in Pi every shell command that exits non-zero is a failed call, and its shell tool
-gives every command that fails without output the same text, so three different searches that find
-nothing are ordinary work. A failed result whose call cannot be found means the run is not stuck.
-So does one whose call id is empty, or shared by two calls of one batch, since the call cannot then
-be told apart. The three are looked for after the latest user message of the request; Pi sends an
+When a run's last three tool calls in a row failed, whatever the tool and whatever the text, its
+next request moves up (John, 2026-11-18: exactly upstream's test below its top tier). A failed call
+is a tool result that Pi marks as an error; a successful result among the last three means the run
+is not stuck. Upstream's test of identical failure text applies only on its top tier, where it
+moves to another top model; here a run on SUPER has no level above and never moves, so that test
+is not built. The three are looked for after the latest user message of the request; Pi sends an
 extension's own message as a user message, so a run an extension starts is bounded the same way.
 
-- **Where it goes:** to the first available model that is a higher level's own, starting one level
-  above the run's, unpriced. It never goes to a fallback chain, whose models may be weaker than the
-  one the run is on. When no higher level has a model of its own available, the run stays where it
-  is and nothing is shown, and a later request of the same run can still move.
+- **Where it goes:** one level up, to that level's own model, unpriced. It never goes to a fallback
+  chain, whose models may be weaker than the one the run is on, and never looks further up. When
+  that model is not available, or with compaction disabled the conversation does not fit it, the
+  run stays where it is and nothing is shown, and a later request of the same run can still move.
 - **Once per run.** Never from SUPER, never for a tagged run, and only on
   `smart-router/auto` under a version 2 roster: not on `smart-router/local`, under a version 1
-  roster or on a model picked by hand. A run without a prompt that took its session's level can
-  move up too. The next run starts again from the level it needs.
-- **It says so,** once, where it happens: "pi-smart-router: this run's last three tool calls failed
-  the same way, so it moves up from MEDIUM to HIGH (gpt-6.1-sol)." The notice names levels and a
-  model, never a tool's output. The footer says `escalated` in place of the cost, and the run's
-  record carries `escalated: true`.
+  roster or on a model picked by hand. A run without a prompt can move up too. The next run starts
+  again from the level it needs.
+- **It says so,** once, where it happens: "pi-smart-router: this run's last three tool calls
+  failed, so it moves up from MEDIUM to HIGH (gpt-6.1-sol)." The notice names levels and a model,
+  never a tool's output. The footer says `escalated` in place of the cost, and the run's record
+  carries `escalated: true`.
 
 ### Tags elsewhere
 
@@ -1123,7 +1125,7 @@ so `personal MEDIUM → gpt-6-astra` is a MEDIUM prompt that stayed on astra.
 | `personal HIGH → gpt-6-astra (demand 1.8; chose, $0.14 vs $0.31)` | No current model was a candidate, and a stronger, warm model cost less than the needed level's own: the chosen model's cost against that one's. |
 | `personal MEDIUM → gpt-6.1-terra (demand 1.0; cost unknown)` | A figure was missing, so the needed level's own model took the run. |
 | `personal LOW → gpt-6.1-terra (demand 0.4)` | Nothing to compare: the run stepped up or went to the chain, or took the needed level's own model with no current model among the candidates, or stayed with no other candidate. |
-| `personal MEDIUM → gpt-6.1-terra (run; moved, $0.23 vs $0.33)` | A run without a prompt, at the level its session last needed; also `(run; cost unknown)`, and `(run)` when nothing was compared. `run, floor`, as in `(run, floor; cost unknown)`, when the deep-session floor raised that level. |
+| `personal MEDIUM → gpt-6.1-terra (run; moved, $0.23 vs $0.33)` | A run without a prompt, at the highest level of the last three prompts, or the level its session last needed when none is known; also `(run; cost unknown)`, and `(run)` when nothing was compared. `run, floor`, as in `(run, floor; cost unknown)`, when the deep-session floor raised that level. |
 | `personal MEDIUM → gpt-6.1-sol (demand 1.0; escalated)` | A stuck run moved up a level; `escalated` replaces the cost, as in `(run; escalated)`. |
 
 Two marks can follow the demand, and one closes the brackets:
@@ -1159,9 +1161,11 @@ latest 20 messages include a tool result; the figures are the router's):
 The footer of that run is `personal MEDIUM → gpt-6.2-astra (demand 1.1; stayed, $0.13 vs $0.20)`.
 A guard that applied ends the demand line, as in `; guards: close-call, risky.`; a cost that was
 unknown gives `  Cost unknown: no usage yet.` in place of the second line. A run without a prompt
-shows the level it needed and the level that took it in place of the demand line, as in
-`  Need MEDIUM → MEDIUM: a run without a prompt, at the level the session last needed.`, then its
-cost line. A tagged run shows no terms, since nothing was weighed, and a model picked by hand shows
+shows the level it needed, where that level came from and the level that took it in place of the
+demand line, as in `  Need HIGH → HIGH: a run without a prompt, at the highest of the last 3
+prompts.`, then its cost line. With fewer prompts known it says `the highest of the last 2 prompts`
+or `the level of the last prompt`; with none known, `the level the session last needed`; and
+`, raised to the deep-session floor` when the floor raised it. A tagged run shows no terms, since nothing was weighed, and a model picked by hand shows
 none.
 
 Two things the footer shows that are not faults:
@@ -1169,9 +1173,10 @@ Two things the footer shows that are not faults:
 - **After a restart, a `/reload` or a move in the session tree**, the session's run shapes start
   again from the defaults. The first lighter prompt is then priced as a run of five requests and
   may move down where a run of one request would have stayed.
-- **Unattended runs follow the last prompt.** A run without a prompt takes the level of the last
-  prompt John typed. After a short question in a goal session under the deep-session floor, the
-  continuations that follow run at that question's level until a heavier prompt.
+- **Unattended runs take the highest of the last three prompts.** A run without a prompt takes the
+  highest level among the last three prompts John typed on the branch, raised to the deep-session
+  floor as before. One short question in a goal session no longer drops the continuations to LOW;
+  three light prompts in a row do.
 
 ## Jev
 
@@ -1589,22 +1594,16 @@ private work, keep using a dedicated session on a local model with pi-warden off
 Earlier versions also had a local-only pin: `/smart-router local on|off|status`, a
 `smart-router.pin` session entry and the `PI_SMART_ROUTER_LOCAL_ONLY` environment variable, which
 kept both of the router's models on local models. John's decision of 2026-11-18 removed it:
-`smart-router/local` already routes locally. What is left of it says that it is gone, so that
-nobody believes an old pin still keeps a session local:
+`smart-router/local` already routes locally. A second decision of the same day left no trace of it:
 
 - **`/smart-router local`**, whatever follows, answers "The local-only pin has been removed. To
   route locally, select the local model: /model smart-router/local", and records and selects
   nothing.
-- **`PI_SMART_ROUTER_LOCAL_ONLY` is ignored, with a notice.** While a process has seen it set, each
-  session start says "PI_SMART_ROUTER_LOCAL_ONLY is set, but the local-only pin has been removed and
-  keeps nothing local. Select smart-router/local to route locally." It selects and routes nothing.
-- **An old pin entry is ignored, with a notice.** The router looks for one once per session, over
-  the whole session as the pin was session-wide: at its start when `smart-router/auto` is selected,
-  else at its first idle prompt there. A session an earlier version pinned is then told "The pin
-  has been removed and is ignored: smart-router/auto routes by level here." The entry stays in the
-  session and is not read again. A fork copies the entries of the branch it is made from, the old
-  pin entry among them when it lies there (`pi --fork` copies the whole session), so the new
-  session is told the same, once; `/new` starts without it.
+- **`PI_SMART_ROUTER_LOCAL_ONLY` is ignored.** Nothing reads it and nothing is shown for it. It
+  selects and routes nothing.
+- **An old pin entry is ignored.** The router does not look for one, and nothing is shown for it.
+  A session file that holds one, and level records of earlier versions, still load without an
+  error, and `smart-router/auto` routes the session by level.
 
 ## Records and training
 

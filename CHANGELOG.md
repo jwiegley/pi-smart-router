@@ -25,12 +25,12 @@ accepted and ignored. These are visible without a roster change:
 - The footer shows the demand and the costs compared, as in
   `personal MEDIUM → gpt-6.1-terra (demand 1.3; moved, $0.63 vs $2.00)`, and `/smart-router status`
   shows the terms behind the last decision.
-- A run without a prompt, such as a goal continuation, takes the level its session last needed,
-  at least MEDIUM in a very deep session.
-- A run whose last three tool calls were the same call and failed the same way moves up to a
-  higher level's own model, with a notice.
-- `/smart-router local on|off|status` and `PI_SMART_ROUTER_LOCAL_ONLY` do nothing but say that the
-  pin is gone.
+- A run without a prompt, such as a goal continuation, takes the highest level of the branch's
+  last three prompts, at least MEDIUM in a very deep session.
+- A run whose last three tool calls in a row failed, whatever the tool and the text, moves one
+  level up to that level's own model, with a notice, or stays when that model is not available.
+- `/smart-router local on|off|status` does nothing but say that the pin is gone;
+  `PI_SMART_ROUTER_LOCAL_ONLY` and an old session's pin entry are ignored, with no notice.
 
 Jev's request is unchanged, byte for byte, at `classifier.context.messages` of 5 or more; at 1 to
 4 it may now carry earlier messages, since its read is the heuristics' 20-message window.
@@ -65,22 +65,20 @@ Jev's request is unchanged, byte for byte, at `classifier.context.messages` of 5
   own model takes the run and the footer says `cost unknown`.
 - **The ledger** (`src/ledger.ts`): what each session has measured, kept in memory: each model's
   cached size, time and effort, keyed by `provider/id`; which providers report cache writes; the
-  shape of the branch's last ten runs; and the level each of its last ten prompts needed. A resumed
+  shape of the branch's last ten runs; the level each of its last ten runs needed; and the needs
+  of its last three planned prompts, from which a run without a prompt takes its level. A resumed
   session seeds it from one bounded read, so a warm model is priced warm; an answer older than the
   branch's latest compaction seeds nothing. A compaction forgets the caches; a move to another leaf
   forgets the branch's figures too, even when the new leaf is an ancestor of the old one. A usage
   whose figures are not finite numbers of zero or more is recorded as nothing.
-- **Escalation** (`src/stuck.ts`): after three failed tool calls in a row that were the same call
-  (the same tool with the same arguments, each found by its id in the assistant message before its
-  result) and gave the same first 256 characters of result text, the run's next request moves to
-  the first available model that is a higher level's own, starting one level up, once per run,
-  never from SUPER and never for a tagged run, with the notice "pi-smart-router: this run's last
-  three tool calls failed the same way, so it moves up from MEDIUM to HIGH (gpt-6.1-sol)." and
-  `escalated` in the footer and the record. Three different shell commands that fail without
-  output, which Pi's shell tool gives one text, are not stuck. A failed result whose call cannot be
-  found means the run is not stuck; so does one whose call id is empty, or shared by two calls of
-  one batch, since the call cannot then be told apart. A stuck run never moves to a
-  fallback chain: with no higher level's own model available it stays, and nothing is shown.
+- **Escalation** (`src/stuck.ts`): after three failed tool calls in a row, whatever the tool and
+  whatever the text, as upstream counts them below its top tier, the run's next request moves one
+  level up, to that level's own model, once per run, never from SUPER and never for a tagged run,
+  with the notice "pi-smart-router: this run's last three tool calls failed, so it moves up from
+  MEDIUM to HIGH (gpt-6.1-sol)." and `escalated` in the footer and the record. A successful result
+  among the last three means the run is not stuck. A stuck run never moves to a fallback chain and
+  never looks further up: when the level above's own model is not available it stays, nothing is
+  shown, and a later request of the same run can still move.
 - **Two optional roster sections**, `demand` (`jevWeight`, `heuristicsWeight`, `minConfidence`,
   `closeCall`, `cuts`, `deepSessionFloor`, `weights`) and `switching` (`margin`, `horizonCap`,
   `cacheSurvival`), with the defaults above (`src/settings.ts`). The checker reads both back in
@@ -100,9 +98,9 @@ Jev's request is unchanged, byte for byte, at `classifier.context.messages` of 5
   prompt `(run; moved, $0.23 vs $0.33)`, `(run; cost unknown)` and `(run)`; with `, jev <failure>`,
   `, floor`, `; escalated` and `; fallback` as marks. `/smart-router status` shows the terms of the
   run the last decision belongs to, a run without a prompt included, however many requests the run
-  has made: the demand's terms, or a run without a prompt's need and level, every guard that
-  applied, and each candidate's cost, cache and survival. A hand-picked model shows none.
-  `/smart-router history` shows each planned run in the footer's form.
+  has made: the demand's terms, or a run without a prompt's need, where it came from and its level,
+  every guard that applied, and each candidate's cost, cache and survival. A hand-picked model
+  shows none. `/smart-router history` shows each planned run in the footer's form.
 
 ### Changed
 
@@ -122,10 +120,11 @@ Jev's request is unchanged, byte for byte, at `classifier.context.messages` of 5
   before the answer and the detail a summary loses are not priced. With compaction disabled, such a
   model is passed over and a too-small level steps up, as before. A version 1 roster, which has no
   fit rule left, sends a request too large for its model as it is when compaction is disabled.
-- **A run without a prompt**, and a prompt's run whose plan cannot be matched to it, takes the level
-  its session last needed, raised to the deep-session floor in a very deep session, through the
-  same choice, instead of the model used last or the level's first model. pi-cache-optimizer is
-  told the model that choice will take. Such a run writes no level record.
+- **A run without a prompt**, and a prompt's run whose plan cannot be matched to it, takes the
+  highest level of the branch's last three planned prompts (with none known, the level its session
+  last needed), raised to the deep-session floor in a very deep session, through the same choice,
+  instead of the model used last or the level's first model. pi-cache-optimizer is told the model
+  that choice will take. Such a run writes no level record.
 - A level record writes `need` where earlier versions wrote `asked`; records with `asked` or
   `source: "keyword"` still read.
 - **A version 1 role no longer prefers the model that answered last.** The preference went with the
@@ -140,9 +139,9 @@ Jev's request is unchanged, byte for byte, at `classifier.context.messages` of 5
 
 - **The local-only pin**: `/smart-router local on|off|status`, `PI_SMART_ROUTER_LOCAL_ONLY` and the
   `smart-router.pin` entry, with every "under the pin" branch. `/smart-router local` answers that
-  the pin is gone and that `/model smart-router/local` routes locally; the variable gets one notice
-  at session start; an old pin entry, looked for once per session, one notice on
-  `smart-router/auto`.
+  the pin is gone and that `/model smart-router/local` routes locally. Nothing reads the variable
+  and nothing looks for an old pin entry, and neither produces a notice; a session that holds one
+  still loads and routes by level.
 - **The level hold**, the five-minute rule, in both roster versions, with its history codes
   `hold:sticky` and `reopen:idle`.
 - **The fit hold** (`hold:fit`), and, with compaction enabled, the step-up for fit.
@@ -156,7 +155,9 @@ John answered the design's five open decisions and approved it for building on a
    heuristics, after which the roster maps the result to a model.
 3. **The local-only pin is removed**: "Let's drop this pin feature since we added it but it has no
    value."
-4. **A stuck run moves up**: one level, after three identical failed tool calls in a row.
+4. **A stuck run moves up**: one level, after three identical failed tool calls in a row. His
+   ruling after the build counts any three failures in a row, as upstream does below its top tier
+   (below).
 5. **Thinking effort by turn type**: "Yes, as upstream does." The same day the design found that a
    change of effort discards the prompt cache on his ChatGPT-account models, so this one is held for
    his word again with that finding before him. This release does not change the effort a request
@@ -172,6 +173,12 @@ overrule, are in the design's last section, "Decided during the build", under th
 - Runs without a prompt, and a stuck run
 - What John sees
 - Rosters and the review script
+
+On 2026-11-18 John overruled four of those calls, and the design's last section now carries his
+rulings: a run is stuck when its last three tool calls in a row failed, whatever the tool and the
+text, exactly as upstream counts them below its top tier; a stuck run goes one level up to that
+level's own model or stays; a run without a prompt takes the highest level of the last three
+prompts; and `PI_SMART_ROUTER_LOCAL_ONLY` and an old pin entry are ignored with no notice.
 
 ### Unchanged
 

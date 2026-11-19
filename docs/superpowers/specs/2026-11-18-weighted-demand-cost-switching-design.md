@@ -631,33 +631,31 @@ John to confirm or overrule. Where a line differs from the text above, the line 
 
 - **A prompt whose plan cannot be matched to its run** (another extension changed its text, or Pi
   expanded it while two messages were pending) is treated as a run without a prompt: it takes the
-  level the session last needed, through the same choice. Before, such a run stayed on the model
-  used last.
-- **The deep-session floor holds for a run without a prompt too.** Such a run takes the level
-  the session last needed, raised to the deep-session floor when the conversation is over 100,000
-  tokens or its active context holds more than 1,000 entries. Pi counts those entries from the
-  last compaction, an extension's own entries included. Once a session has planned a run, a
-  conversation known to be that large therefore never routes to LOW without a tag, as the guards
-  above promise. Its footer then says `run, floor`. The size is unknown right after a compaction,
-  after a move to another leaf, and after an answer whose usage could not be read. Until the next
-  answer only the count of entries can raise the level, and after a compaction that count has
-  started again.
+  level a run without a prompt takes, through the same choice. Before, such a run stayed on the
+  model used last.
+- **The deep-session floor holds for a run without a prompt too.** Such a run takes the highest
+  level of the last three prompts (see "What John sees"), raised to the deep-session floor when the
+  conversation is over 100,000 tokens or its active context holds more than 1,000 entries. Pi
+  counts those entries from the last compaction, an extension's own entries included. Once a
+  session has planned a run, a conversation known to be that large therefore never routes to LOW
+  without a tag, as the guards above promise. Its footer then says `run, floor`. The size is
+  unknown right after a compaction, after a move to another leaf, and after an answer whose usage
+  could not be read. Until the next answer only the count of entries can raise the level, and
+  after a compaction that count has started again.
 - **pi-cache-optimizer is told the same choice.** Before a run starts, the router tells
   pi-cache-optimizer which model the run will reach, and that extension decides from the answer
   whether to rewrite the system prompt. For a run without a prompt the answer is now the choice the
   route will make, computed without side effects, and not the model used last.
-- **What makes three failures the same.** The calls must be the same, not only their results:
-  the same tool with the same arguments, each call found by its id in the assistant message
-  before its result, and the same first 256 characters of result text. The design's "the same
-  tool and the same error text" is not enough in Pi, whose shell tool gives every command that
-  fails without output the same text, so three different searches that find nothing would count.
-  A failed result whose call cannot be found means the run is not stuck. So does one whose call id
-  is empty, or shared by two calls of one batch, since the call cannot then be told apart.
-- **Where a stuck run goes.** It moves to the first available model that is a higher level's
-  own, starting one level up. It never moves to a fallback chain, whose models may be weaker than
-  the one the run is on. When no higher level has a model of its own available, the run stays
-  where it is and nothing is shown. When it moves, one notice says so, and names the level and
-  the model the run reached.
+- **What makes a run stuck (John, 2026-11-18: exactly upstream).** A run below the top level is
+  stuck when its last three tool calls in a row failed, whatever the tool and whatever the text,
+  as upstream counts them below its top tier. Upstream's test of identical text applies only on
+  its top tier, where it moves to another top model; here a run on SUPER has no level above and
+  never moves, so that test is not built. The review round's rule of identical calls is
+  withdrawn.
+- **Where a stuck run goes (John, 2026-11-18).** One level up, to that level's own model, once
+  per run. When that model is not available the run stays where it is and nothing is shown; it
+  can still move at a later request of the same run. It never moves to a fallback chain and does
+  not look further up.
 - **What counts as the run under way.** The three failed tool calls are looked for after the
   latest user message of the request. Pi sends an extension's own message to the model as a user
   message, so a run an extension starts is bounded in the same way.
@@ -680,15 +678,16 @@ John to confirm or overrule. Where a line differs from the text above, the line 
 - **After a restart, a `/reload` or a move in the session tree**, the session's run shapes start
   again from the defaults. The first lighter prompt is then priced as a run of five requests and
   may move down where a run of one request would have stayed.
-- **Unattended runs follow the last prompt.** A run without a prompt takes the level of the last
-  prompt John typed. After a short question in a goal session under the deep-session floor, the
-  continuations that follow run at that question's level until a heavier prompt.
+- **Unattended runs take the highest of the last three prompts (John, 2026-11-18).** A run
+  without a prompt takes the highest level among the last three prompts John typed on the
+  branch, raised to the deep-session floor as before. One short question in a goal session no
+  longer drops the continuations to LOW; three light prompts in a row do.
 
 ### Rosters and the review script
 
 - **A version 1 roster with compaction disabled** sends a request that is too large for its model
   as it is: version 1 has no fit logic left. All six of John's rosters are version 2.
-- **The pin entry of an earlier version** is looked for once per session, across the whole
-  session, and not at every prompt.
+- **No trace of the pin (John, 2026-11-18).** `PI_SMART_ROUTER_LOCAL_ONLY` is ignored and an old
+  session's pin entry is not looked for. Neither produces a notice.
 - **The review script** replays, for each rated run, the first user message at or after the
   record's time, and falls back to the latest one before it.
