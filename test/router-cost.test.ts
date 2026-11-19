@@ -20,6 +20,7 @@ import { escalationNotice, fallbackMoveNotice, stepUpNotice } from "../src/error
 import { effortOf } from "../src/ledger.ts";
 import { decisionLines, readLevelRecord, runFooterText } from "../src/records.ts";
 import { scopeEntry } from "../src/scope.ts";
+import { HISTORY_LIMIT } from "../src/route.ts";
 import { DEFAULT_SWITCHING, RUN_DEFAULTS } from "../src/settings.ts";
 import { tierLabel, TIERS } from "../src/tiers.ts";
 import type { Tier } from "../src/tiers.ts";
@@ -1157,7 +1158,7 @@ describe("/smart-router status after the latest decision", () => {
     const lines = (state.loaded.session.notices.at(-1)?.message ?? "").split("\n");
     const at = lines.findIndex((line) => line.startsWith("Last decision: "));
     assert.ok(at >= 0, lines.join("\n"));
-    return lines.slice(at + 1).filter((line) => line.startsWith("  Demand ") || line.startsWith("  Cost "));
+    return lines.slice(at + 1).filter((line) => line.startsWith("  Demand ") || line.startsWith("  Need ") || line.startsWith("  Cost "));
   }
 
   test("shows the terms of the run the last entry belongs to: a planned run's after its continuations", async (t) => {
@@ -1179,14 +1180,45 @@ describe("/smart-router status after the latest decision", () => {
     assert.deepEqual(await terms(state), [], "no terms of an older run");
   });
 
-  test("shows none after a run without a prompt", async (t) => {
+  test("shows a run without a prompt's own terms: its need, its level and its cost line", async (t) => {
     const state = await session(t);
     await say(state, "go on", ANSWER_MEDIUM);
     await route(state, "go on");
     await answer(state, TERRA);
-    await unprompted(state, TERRA);
+    assert.equal(routed(await unprompted(state, TERRA)), TERRA, "the run without a prompt stays on terra");
     continuation(state, TERRA);
-    assert.deepEqual(await terms(state), [], "the run without a prompt has no terms of its own, and the older run's are not shown");
+    const needRun = recordOf(state).needRun;
+    assert.ok(needRun?.cost !== undefined && needRun.cost.outcome !== "unknown", `the run without a prompt was priced: ${JSON.stringify(needRun)}`);
+    const shown = await terms(state);
+    assert.equal(
+      shown[0],
+      "  Need MEDIUM → MEDIUM: a run without a prompt, at the level the session last needed.",
+      "status shows the terms of the run the last decision belongs to, a run without a prompt included: its need and its level",
+    );
+    assert.equal(shown.length, 2, `the need line and the cost line: ${JSON.stringify(shown)}`);
+    assert.match(shown[1] ?? "", /^ {2}Cost of 5 requests, horizon 1: gpt-6-astra \$\d+\.\d\d \(nothing cached; leaving gpt-6\.1-terra \$\d+\.\d\d\); gpt-6\.1-sol \$\d+\.\d\d \(.*\); gpt-6\.1-terra \$\d+\.\d\d \(149,000 cached, 97%\)\.$/, "and its cost line, as a planned run's: terra, which answered 30 seconds ago, warm");
+    await settled(state);
+    assert.deepEqual(await terms(state), shown, "after the run settles, its terms stay until the next run's");
+    assert.equal(levelRecords(state), 1, "a run without a prompt still writes no level record");
+  });
+
+  test("shows the run's terms however many requests the run has made", async (t) => {
+    const state = await session(t);
+    const level = await say(state, "go on", ANSWER_MEDIUM);
+    await route(state, "go on");
+    for (let i = 0; i <= HISTORY_LIMIT; i++) continuation(state, TERRA);
+    assert.equal(recordOf(state).history.length, HISTORY_LIMIT, "the history keeps only the last 50 entries");
+    assert.ok(recordOf(state).history.every((entry) => entry.continuesRun === true), "the run's first entry has left the history");
+    assert.deepEqual(await terms(state), decisionLines(level), "status shows the run's terms however many requests the run has made: they are kept on the session record, not read from the history");
+  });
+
+  test("a later run without terms of its own shows none of the earlier run's", async (t) => {
+    const state = await session(t, { select: "local" });
+    await state.loaded.host.emit("input", { text: "rename foo to bar", source: "interactive" });
+    const signal = state.loaded.session.startRun();
+    await state.loaded.host.emit("before_agent_start", { messageType: "user", prompt: "rename foo to bar" });
+    assert.equal(routed(state.loaded.runtime.route("local", request("user", { signal }))), GLM, "smart-router/local's run on Hera's GLM");
+    assert.deepEqual(await terms(state), [], "smart-router/local's run has no level and no cost: no terms");
   });
 });
 

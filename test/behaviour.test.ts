@@ -986,7 +986,7 @@ test("L1 an untagged run rated lower moves down at once; a tag routes at once, n
   assert.equal(answered(pi), PERSONAL.high, "nothing holds a session by time");
   assert.equal(
     await lastDecision(pi),
-    "smart-router/auto user: high → openai-codex-2/gpt-6.1-sol (jev, triage:no_fast_path) [personal HIGH (demand 1.6; cost unknown)]",
+    "smart-router/auto user: high → openai-codex-2/gpt-6.1-sol (jev, triage:no_fast_path) [personal HIGH → gpt-6.1-sol (demand 1.6; cost unknown)]",
     "nothing holds a session by time: the blend of 80% HIGH and the heuristics is 1.6; these fakes carry no prices, so a missing figure is said: cost unknown",
   );
 
@@ -1006,7 +1006,7 @@ test("L1 an untagged run rated lower moves down at once; a tag routes at once, n
   );
   assert.doesNotMatch(JSON.stringify(sent[0]?.payload), /#high/, "and so did the payload");
   assert.doesNotMatch(JSON.stringify(pi.session.messages), /#high/, "the session keeps no tag either");
-  assert.equal(await lastDecision(pi), "smart-router/auto user: high → openai-codex-2/gpt-6.1-sol (tag, triage:no_fast_path) [personal HIGH (tag)]");
+  assert.equal(await lastDecision(pi), "smart-router/auto user: high → openai-codex-2/gpt-6.1-sol (tag, triage:no_fast_path) [personal HIGH → gpt-6.1-sol (tag)]");
   const tagged = { source: "tag", tag: "high", tier: "high", jev: { late: true } };
   assert.deepEqual(fields(runRecords(pi).at(-1), tagged), tagged);
 
@@ -1016,7 +1016,7 @@ test("L1 an untagged run rated lower moves down at once; a tag routes at once, n
   await pi.resend("Fix the parser");
   assert.equal(answered(pi), PERSONAL.high);
   assert.equal(world.jev.calls.length, 3, "no second classifier call");
-  assert.equal(await lastDecision(pi), "smart-router/auto user: high → openai-codex-2/gpt-6.1-sol (tag, triage:no_fast_path) [personal HIGH (tag)]");
+  assert.equal(await lastDecision(pi), "smart-router/auto user: high → openai-codex-2/gpt-6.1-sol (tag, triage:no_fast_path) [personal HIGH → gpt-6.1-sol (tag)]");
   const resent = { source: "tag", tag: "high", tier: "high", jev: undefined };
   assert.deepEqual(fields(runRecords(pi).at(-1), resent), resent);
   assert.deepEqual(called(world.counts()), { "openai-codex-2": 4 });
@@ -1065,7 +1065,7 @@ test("L2 a tagged level too small for the conversation is compacted for, not ste
       .slice(1)
       .map((line) => line.replace(/^ {2}\d\d:\d\d:\d\d /, "")),
     [
-      "smart-router/auto user: low → openai-codex-2/gpt-6-luna (tag, triage:keyword_economical) [personal LOW (tag)]",
+      "smart-router/auto user: low → openai-codex-2/gpt-6-luna (tag, triage:keyword_economical) [personal LOW → gpt-6-luna (tag)]",
       "smart-router/auto direct: medium → openai-codex-2/gpt-6.1-terra (direct:previous)",
     ],
     "with compaction enabled a too-small model is compacted for",
@@ -1084,7 +1084,7 @@ test("L2b with compaction disabled, a tagged level steps up, with a notice, when
   assert.equal(answered(pi), PERSONAL.medium);
   assert.equal(notice(pi, /can take this run/), "pi-smart-router: no LOW model can take this run, so it goes to MEDIUM (gpt-6.1-terra).");
   assert.equal(pi.ui.status(LEVEL_KEY), "personal LOW → gpt-6.1-terra (tag)", "the footer names the level the prompt needs, beside the step-up notice");
-  assert.equal(await lastDecision(pi), "smart-router/auto user: medium → openai-codex-2/gpt-6.1-terra (step-up, triage:keyword_economical) [personal MEDIUM (tag)]");
+  assert.equal(await lastDecision(pi), "smart-router/auto user: medium → openai-codex-2/gpt-6.1-terra (step-up, triage:keyword_economical) [personal LOW → gpt-6.1-terra (tag)]", "history in the footer's form: the level the run needs, and the model that took it after the arrow");
   const record = { source: "tag", tag: "low", need: "low", tier: "medium", steppedUp: true, ref: PERSONAL.medium };
   assert.deepEqual(fields(runRecords(pi).at(-1), record), record);
   assert.deepEqual(pi.eventsOf("compaction_start"), [], "compaction is disabled");

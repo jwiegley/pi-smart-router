@@ -267,8 +267,27 @@ export function decisionLines(level: PlanLevel): string[] {
       demand.guards.length === 0 ? "" : `; guards: ${demand.guards.join(", ")}`
     }.`,
   ];
-  if (cost === undefined) return lines;
-  if (cost.outcome === "unknown") return [...lines, `  Cost unknown: ${cost.why}.`];
+  return [...lines, ...costLines(cost)];
+}
+
+/**
+ * The terms behind a run without a prompt (run:need), for /smart-router status: the level it
+ * needed, the session's last need or the deep-session floor's, and the level whose model took it,
+ * then its cost line (costLines).
+ */
+export function needRunLines(run: NeedRun, tier: Tier): string[] {
+  const why = run.floor === true ? "the session's last need, raised to the deep-session floor" : "the level the session last needed";
+  return [`  Need ${tierLabel(run.need)} → ${tierLabel(tier)}: a run without a prompt, at ${why}.`, ...costLines(run.cost)];
+}
+
+/**
+ * What the cost rule compared, as one status line: the run priced, and each candidate, the stronger
+ * first, with its expected cost, its cache and what leaving the current model adds; or why the cost
+ * was unknown; or nothing, when the cost rule was not asked.
+ */
+function costLines(cost: CostTerms | undefined): string[] {
+  if (cost === undefined) return [];
+  if (cost.outcome === "unknown") return [`  Cost unknown: ${cost.why}.`];
   const { requests, horizon } = cost.workload;
   const count = Number.isInteger(requests) ? String(requests) : requests.toFixed(1);
   const leaving = cost.current === undefined ? "" : idOfRef(cost.current);
@@ -280,7 +299,7 @@ export function decisionLines(level: PlanLevel): string[] {
       const left = entry.leaving > 0 ? `; leaving ${leaving} ${money(entry.leaving)}` : "";
       return `${idOfRef(entry.ref)} ${money(entry.cost)} (${cached}${compacts}${left})`;
     });
-  return [...lines, `  Cost of ${count} request${requests === 1 ? "" : "s"}, horizon ${horizon}: ${rows.join("; ")}.`];
+  return [`  Cost of ${count} request${requests === 1 ? "" : "s"}, horizon ${horizon}: ${rows.join("; ")}.`];
 }
 
 /**

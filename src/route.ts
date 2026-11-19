@@ -125,6 +125,9 @@ export interface LastInput {
   readonly level: LevelInput;
 }
 
+/** What decided a run, as status shows it: a planned run's level, or a run without a prompt's choice and the level whose model took it. */
+export type RunTerms = { readonly kind: "plan"; readonly level: PlanLevel } | { readonly kind: "need"; readonly run: NeedRun; readonly tier: Tier };
+
 /** What a router instance keeps per session. */
 export interface SessionRecord {
   plan: Plan | undefined;
@@ -153,6 +156,12 @@ export interface SessionRecord {
   escalated: boolean;
   /** The run under way's run:need choice, for its footer, when its first request had no plan; cleared when the agent settles. */
   needRun: NeedRun | undefined;
+  /**
+   * The terms of the latest run's choice, for /smart-router status: a planned run's level, or a run
+   * without a prompt's run:need choice and the level that took it; none for a run whose first
+   * request made neither. Kept when the agent settles, until the next run's first request.
+   */
+  runTerms: RunTerms | undefined;
   last: LastResponder | undefined;
   readonly history: HistoryEntry[];
   /** The planned version 2 run's level, until its record is written. */
@@ -172,6 +181,7 @@ export function newRecord(): SessionRecord {
     runTagged: false,
     escalated: false,
     needRun: undefined,
+    runTerms: undefined,
     last: undefined,
     history: [],
     pendingLevel: undefined,
@@ -538,12 +548,18 @@ export function routeOwned(input: RouteInput): ModelRoute {
     record.runTier = tier;
     record.runTagged = source === "tag";
     record.needRun = undefined;
+    record.runTerms = { kind: "plan", level: plan.level };
   } else if (unplanned !== undefined) {
     notePrompt(record.ledger, unplanned.need, unplanned.tier);
     record.runTier = unplanned.tier;
     record.runTagged = false;
     record.needRun = { scope: rc.scope, need: unplanned.need, ...(unplanned.floor ? { floor: true as const } : {}), ...(unplanned.cost === undefined ? {} : { cost: unplanned.cost }) };
-  } else if (escalated !== undefined) {
+    record.runTerms = { kind: "need", run: record.needRun, tier: unplanned.tier };
+  } else if (starts) {
+    // A run whose first request made no choice of level shows no older run's terms.
+    record.runTerms = undefined;
+  }
+  if (escalated !== undefined) {
     record.runTier = escalated.tier;
     record.escalated = true;
   }

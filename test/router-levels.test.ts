@@ -2020,7 +2020,7 @@ describe("the footer", () => {
     );
   });
 
-  test("after a step-up, names the level the run needs and its demand, while history names the level that took it; after a higher run, a lower answer moves down", async (t) => {
+  test("after a step-up, names the level the run needs and its demand, as history does; after a higher run, a lower answer moves down", async (t) => {
     const runtime = heraRuntime();
     for (const ref of [LUNA, NYX_QWEN, HERA_QWEN]) runtime.catalog.unavailable.add(ref);
     const stepped = await hera(t, { id: "stepped", runtime });
@@ -2030,7 +2030,7 @@ describe("the footer", () => {
     assert.equal(lastNotice(stepped)?.message, "pi-smart-router: no LOW model can take this run, so it goes to MEDIUM (gpt-6.1-terra).", "beside the step-up notice");
     await finish(stepped, firstRequest(stepped));
     await stepped.host.command("smart-router", "history");
-    assert.match(lastNotice(stepped)?.message ?? "", / \[personal MEDIUM \(demand 0\.4\)\]$/, "history keeps its form, with the new note");
+    assert.match(lastNotice(stepped)?.message ?? "", / \[personal LOW → gpt-6\.1-terra \(demand 0\.4\)\]$/, "history in the footer's form: the level the run needs, and the model that took it after the arrow");
     const down = await hera(t, { id: "down" });
     down.runtime.answer = async () => jevAnswer(HIGH);
     await say(down, "go ahead");

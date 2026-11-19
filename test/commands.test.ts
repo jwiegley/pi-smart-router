@@ -380,7 +380,7 @@ describe("no lock", () => {
 });
 
 describe("history under a version 2 roster", () => {
-  test("a run's planned request ends with its scope, tier and what decided it", async (t) => {
+  test("a run's planned request ends with the footer's words: its scope, the level it needs, the model and what decided the level", async (t) => {
     const loaded = await heraV2(t);
     await loaded.host.emit("input", { text: "x #high", source: "interactive" });
     const signal = loaded.session.startRun();
@@ -389,7 +389,7 @@ describe("history under a version 2 roster", () => {
     loaded.session.endRun();
     const lines = (await answer(loaded, "history")).message.split("\n");
     assert.equal(lines.length, 3);
-    assert.match(lines[1] ?? "", /^ {2}\d\d:\d\d:\d\d smart-router\/auto user: high → openai-codex-2\/gpt-6\.1-sol \(tag, triage:no_fast_path\) \[personal HIGH \(tag\)\]$/);
+    assert.match(lines[1] ?? "", /^ {2}\d\d:\d\d:\d\d smart-router\/auto user: high → openai-codex-2\/gpt-6\.1-sol \(tag, triage:no_fast_path\) \[personal HIGH → gpt-6\.1-sol \(tag\)\]$/, "history in the footer's form");
     assert.match(lines[2] ?? "", /^ {2}\d\d:\d\d:\d\d smart-router\/auto continuation: high → openai-codex-2\/gpt-6\.1-sol \(stick:run\)$/);
   });
 });

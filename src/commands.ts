@@ -25,17 +25,16 @@ import { describeRouting } from "./check.ts";
 import type { Labels } from "./accounts.ts";
 import { LEVEL_ENTRY, PROVIDER, SCOPE_ENTRY } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
-import type { PlanLevel } from "./decide.ts";
 import { firstLine, PIN_REMOVED, rosterNamed } from "./errors.ts";
 import type { Loaded } from "./files.ts";
 import { promptLines, promptProblem, promptUses } from "./prompts.ts";
 import type { PromptReader } from "./prompts.ts";
-import { correctionRecord, decisionLines, levelNote, levelRecord, readLevelRecord } from "./records.ts";
+import { correctionRecord, decisionLines, footerText, levelRecord, needRunLines, readLevelRecord } from "./records.ts";
 import type { LevelRecord } from "./records.ts";
 import { clock, describeHold, resolveCandidate } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
 import { boundedHistory, HISTORY_LIMIT } from "./route.ts";
-import type { HistoryEntry, PendingLevel } from "./route.ts";
+import type { HistoryEntry, PendingLevel, RunTerms } from "./route.ts";
 import { autoRoles, parseRef, scopeSection, SCOPES, servesScope } from "./roster.ts";
 import type { Roster, RosterV1, RosterV2, Scope } from "./roster.ts";
 import { scopeEntry } from "./scope.ts";
@@ -51,6 +50,13 @@ export interface Files {
 }
 
 /** What the command needs of its router instance. */
+/** What the commands read of a session's record. */
+export interface SessionView {
+  readonly history: readonly HistoryEntry[];
+  readonly pendingLevel: PendingLevel | undefined;
+  readonly runTerms: RunTerms | undefined;
+}
+
 export interface CommandHost {
   readonly pi: Pick<ExtensionAPI, "appendEntry" | "getAllTools" | "getCommands" | "getThinkingLevel">;
   readonly now: () => number;
@@ -61,7 +67,7 @@ export interface CommandHost {
   /** The session's scope, as routing reads it: the latch, the session's entry, then the work directories. */
   scopeOf(ctx: ExtensionContext): ScopeState;
   /** The session's records: its decisions, and the level of the run planned or in flight, marked once that run starts. */
-  session(ctx: ExtensionContext): { readonly history: readonly HistoryEntry[]; readonly pendingLevel: PendingLevel | undefined } | undefined;
+  session(ctx: ExtensionContext): SessionView | undefined;
   /** A resolver context for one of the two models, built as routing builds it: in the session's scope, or in `scope`. */
   resolver(ctx: ExtensionContext, roster: Roster, id: VirtualId, scope?: Scope): ResolveContext;
   /** A prompt file the roster names, as the router last loaded it; refresh() and reload() load them with the roster. */
@@ -146,11 +152,14 @@ function rosterLine(roster: Loaded<Roster>): string {
   }
 }
 
-/** A decision, and on a version 2 run's planned request, its scope, tier and what decided the tier. */
+/**
+ * A decision, and on a version 2 run's planned request, the footer's words (footerText): its scope,
+ * the level it needs, the model that took it after the arrow, and what decided the level.
+ */
 function describeEntry(entry: HistoryEntry): string {
   const trigger = entry.trigger === undefined ? "" : `, ${entry.trigger}`;
   const { level } = entry;
-  const tier = level === undefined ? "" : ` [${level.scope} ${tierLabel(level.tier)} (${levelNote(level)})]`;
+  const tier = level === undefined ? "" : ` [${footerText(level, parseRef(entry.ref)?.id ?? entry.ref)}]`;
   return `${stamp(entry.at)} ${PROVIDER}/${entry.virtual} ${entry.reason}: ${entry.role} → ${entry.ref} (${entry.code}${trigger})${entry.foreign ? ", foreign" : ""}${tier}`;
 }
 
@@ -351,22 +360,17 @@ function classifierOf(roster: Loaded<Roster>): string | undefined {
 }
 
 /**
- * The level of the run the latest history entry belongs to: from that entry, back over the entries
- * that continue its run (continuations, retries, steers and follow-ups) to the run's first request,
- * passing over direct and foreign requests on the way, which belong to no run of the owner's loop.
- * None when the latest entry is itself a direct or foreign request, or when the run's first request
- * has no level: a hand-picked model's direct requests, a run without a prompt and a version 1 run
- * show no older run's terms.
+ * The terms of the run the latest history entry belongs to, as the session record keeps them from
+ * that run's choice (runTerms): a planned run's demand and cost, or a run without a prompt's need,
+ * level and cost, however many requests the run has made. None when the latest entry is a direct
+ * or foreign request, which belongs to no run of the owner's loop, and none for a run whose first
+ * request chose no level (a version 1 run, smart-router/local's).
  */
-function runLevel(history: readonly HistoryEntry[]): PlanLevel | undefined {
-  const latest = history.at(-1);
-  if (latest === undefined || latest.reason === "direct" || latest.foreign) return undefined;
-  for (let index = history.length - 1; index >= 0; index -= 1) {
-    const entry = history[index];
-    if (entry === undefined || entry.reason === "direct" || entry.foreign || entry.continuesRun === true) continue;
-    return entry.level;
-  }
-  return undefined;
+function termsLines(session: SessionView | undefined): string[] {
+  const latest = session?.history.at(-1);
+  const terms = session?.runTerms;
+  if (latest === undefined || latest.reason === "direct" || latest.foreign || terms === undefined) return [];
+  return terms.kind === "plan" ? decisionLines(terms.level) : needRunLines(terms.run, terms.tier);
 }
 
 export function statusText(host: CommandHost, ctx: ExtensionContext): string {
@@ -389,11 +393,10 @@ export function statusText(host: CommandHost, ctx: ExtensionContext): string {
   }
   const last = session?.history.at(-1);
   lines.push(`Last decision: ${last === undefined ? "none yet" : describeEntry(last)}`);
-  // The terms behind the decision of the run the latest entry belongs to: the demand, and what each
-  // candidate would cost. A planned run's continuations do not hide them, and a run that had no
-  // level of its own shows none rather than an older run's.
-  const decided = runLevel(session?.history ?? []);
-  if (decided !== undefined) lines.push(...decisionLines(decided));
+  // The terms behind the decision of the run the latest entry belongs to: the demand or a run
+  // without a prompt's need, and what each candidate would cost. The run's later requests do not
+  // hide them, and a run that had no level of its own shows none rather than an older run's.
+  lines.push(...termsLines(session));
   const onFallback = roster.kind === "ok" && roster.value.version === 2 ? onFallbackLine(roster.value, last) : undefined;
   if (onFallback !== undefined) lines.push(onFallback);
   lines.push(egress(host.pi, classifierOf(roster)));
