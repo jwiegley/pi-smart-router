@@ -449,6 +449,31 @@ export function chooseModel(input: {
 }
 
 /**
+ * Where a stuck run moves: the first available model that is a higher level's own, starting one
+ * level above `from` and going up; with compaction disabled, only one the conversation fits. Never
+ * a fallback chain, whose models may be weaker than the run's. Undefined when no higher level has
+ * such a model: the run stays.
+ */
+export function escalationTarget(input: {
+  readonly rc: ResolveContext;
+  readonly section: ScopeSection;
+  readonly from: Tier;
+  readonly code: string;
+  readonly last: LastResponder | undefined;
+  readonly compaction: CompactionFigures;
+}): { readonly tier: Tier; readonly decision: Decision & { readonly ok: true } } | undefined {
+  const { rc, section, compaction } = input;
+  const conversation = historyOf(input.last);
+  for (let tier = tierAbove(input.from); tier !== undefined; tier = tierAbove(tier)) {
+    const decision = pickInRole(rc, section.levels[tier].role, { fallback: false, code: input.code });
+    if (!decision.ok) continue;
+    if (!compaction.enabled && !fitsSize(conversation, compaction.reserve, decision.choice.model)) continue;
+    return { tier, decision };
+  }
+  return undefined;
+}
+
+/**
  * The level a version 2 run on auto needs, and what decided it: a tag's, which no floor raises;
  * else the demand's, after its guards. A guard that raised the level, the risky one or the deep
  * session's, makes the source `floor`; else the blend with Jev's answer is `jev`, and the heuristics

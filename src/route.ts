@@ -16,7 +16,8 @@
 //                       session, through the choice a prompt's run makes (run:need); a session
 //                       that never planned a run continues as below
 //   owner continuation  a stuck run (src/stuck.ts) on smart-router/auto under a version 2 roster
-//                       moves up one level, once per run, unless its level is SUPER or its tag's
+//                       moves up, once per run, to the first available model that is a higher
+//                       level's own, never a chain's, unless its level is SUPER or its tag's
 //                       (escalate); else previous, else the run's pick, else the last responder:
 //                       that model if it resolves, else its role, else the role's fallback; with
 //                       no base, the default role (the local role when local-only) and its fallback
@@ -41,7 +42,7 @@ import { isDeepSession } from "./demand.ts";
 import type { SessionDepth } from "./demand.ts";
 import { VIRTUAL_API } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
-import { chooseModel, eligibleRole, NO_LOCAL_SECTION, noScopeSection, pickInRole } from "./decide.ts";
+import { chooseModel, eligibleRole, escalationTarget, NO_LOCAL_SECTION, noScopeSection, pickInRole } from "./decide.ts";
 import type { Choice, CompactionFigures, CostFigures, CostTerms, Decision, LastResponder, LevelInput, Plan, PlanLevel } from "./decide.ts";
 import { invariant, noBoundedHistory, unroutable } from "./errors.ts";
 import type { JevOutcome } from "./jev.ts";
@@ -403,29 +404,20 @@ function chooseForNeed(rc: ResolveContext, record: SessionRecord, section: Scope
 
 /**
  * A stuck run's move up: on a continuation of a run whose level is below SUPER and not its tag's,
- * that has not moved up yet, when its last three tool calls failed the same way, the level above
- * the run's, by the climb a step-up makes (its chain, then the levels above it), unpriced. Only a
- * model other than the run's is a move; it carries the code `escalate`.
+ * that has not moved up yet, when its last three tool calls failed the same way, the first
+ * available model that is a higher level's own, starting one level above the run's, unpriced
+ * (escalationTarget). Never a fallback chain. With no such model the run stays, and a later request
+ * of the run can still move. Only a model other than the run's is a move; it carries the code
+ * `escalate`.
  */
 function escalation(input: RouteInput, section: ScopeSection): Leveled | undefined {
   const { request, rc, record } = input;
   const { runPick, runTier } = record;
   if (request.reason !== "continuation" || runPick?.id !== rc.virtualId || runTier === undefined || record.escalated || record.runTagged) return undefined;
-  const above = tierAbove(runTier);
-  if (above === undefined || !stuck(request.messages)) return undefined;
-  const { tier, decision } = chooseModel({
-    rc,
-    section,
-    need: above,
-    code: "escalate",
-    last: record.last,
-    promptTokens: 0,
-    compaction: input.compaction,
-    figures: input.figures,
-    priced: false,
-  });
-  if (!decision.ok || decision.choice.ref === runPick.ref) return undefined;
-  return { tier, decision: { ok: true, choice: { ...decision.choice, code: "escalate" } } };
+  if (tierAbove(runTier) === undefined || !stuck(request.messages)) return undefined;
+  const target = escalationTarget({ rc, section, from: runTier, code: "escalate", last: record.last, compaction: input.compaction });
+  if (target === undefined || target.decision.choice.ref === runPick.ref) return undefined;
+  return { tier: target.tier, decision: { ok: true, choice: { ...target.decision.choice, code: "escalate" } } };
 }
 
 /** The planned model if it still resolves, else the planned role, then its fallback. */
