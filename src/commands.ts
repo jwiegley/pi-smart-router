@@ -363,13 +363,14 @@ function classifierOf(roster: Loaded<Roster>): string | undefined {
  * The terms of the run the latest history entry belongs to, as the session record keeps them from
  * that run's choice (runTerms): a planned run's demand and cost, or a run without a prompt's need,
  * level and cost, however many requests the run has made. None when the latest entry is a direct
- * or foreign request, which belongs to no run of the owner's loop, and none for a run whose first
- * request chose no level (a version 1 run, smart-router/local's).
+ * or foreign request, which belongs to no run of the owner's loop; none for a run whose first
+ * request chose no level (a version 1 run, smart-router/local's); and none while a model picked by
+ * hand is selected, which is sent as it is, by no run's choice.
  */
-function termsLines(session: SessionView | undefined): string[] {
+function termsLines(session: SessionView | undefined, selection: ExtensionContext["model"]): string[] {
   const latest = session?.history.at(-1);
   const terms = session?.runTerms;
-  if (latest === undefined || latest.reason === "direct" || latest.foreign || terms === undefined) return [];
+  if (latest === undefined || latest.reason === "direct" || latest.foreign || terms === undefined || ownModel(selection) === undefined) return [];
   return terms.kind === "plan" ? decisionLines(terms.level) : needRunLines(terms.run, terms.tier);
 }
 
@@ -396,7 +397,7 @@ export function statusText(host: CommandHost, ctx: ExtensionContext): string {
   // The terms behind the decision of the run the latest entry belongs to: the demand or a run
   // without a prompt's need, and what each candidate would cost. The run's later requests do not
   // hide them, and a run that had no level of its own shows none rather than an older run's.
-  lines.push(...termsLines(session));
+  lines.push(...termsLines(session, ctx.model));
   const onFallback = roster.kind === "ok" && roster.value.version === 2 ? onFallbackLine(roster.value, last) : undefined;
   if (onFallback !== undefined) lines.push(onFallback);
   lines.push(egress(host.pi, classifierOf(roster)));

@@ -1253,6 +1253,16 @@ describe("/smart-router status after the latest decision", () => {
     assert.deepEqual(await terms(state), decisionLines(level), "status shows the run's terms however many requests the run has made: they are kept on the session record, not read from the history");
   });
 
+  test("a hand-picked model shows none", async (t) => {
+    const state = await session(t);
+    const level = await say(state, "go on", ANSWER_MEDIUM);
+    await route(state, "go on");
+    await answer(state, TERRA);
+    assert.deepEqual(await terms(state), decisionLines(level), "on smart-router/auto, the planned run's terms");
+    state.loaded.session.select(SOL);
+    assert.deepEqual(await terms(state), [], "a model picked by hand is sent as it is, by no run's choice: status shows no terms");
+  });
+
   test("a later run without terms of its own shows none of the earlier run's", async (t) => {
     const state = await session(t, { select: "local" });
     await state.loaded.host.emit("input", { text: "rename foo to bar", source: "interactive" });
