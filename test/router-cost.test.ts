@@ -1102,6 +1102,47 @@ describe("escalation", () => {
     assert.deepEqual(state.loaded.session.notices.slice(before), [{ type: "info", message: escalationNotice("medium", "high", "gpt-6.1-sol") }]);
   });
 
+  test("a notice that throws fails no request: the escalation, the chain move and the step-up are routed and recorded", async (t) => {
+    const throwing = (state: Session): void => {
+      (state.loaded.session.ctx.ui as unknown as Record<string, unknown>).notify = () => {
+        throw new Error("the UI is gone");
+      };
+    };
+    const state = await session(t);
+    await say(state, "go on", ANSWER_MEDIUM);
+    assert.equal(routed(await route(state, "go on")), TERRA, "a MEDIUM run on terra");
+    throwing(state);
+    let up: unknown;
+    assert.doesNotThrow(() => {
+      up = continuation(state, TERRA, failures(3));
+    }, "the escalation notice throws, and the request does not fail");
+    assert.equal(routed(up as Parameters<typeof routed>[0]), SOL, "the stuck run is routed to HIGH's model");
+    assert.deepEqual([lastCode(state), recordOf(state).runTier, recordOf(state).escalated], ["escalate", "high", true], "and the record stands: the run is at HIGH, escalated");
+
+    resetSlot();
+    const cat = catalog();
+    const moved = await session(t, { id: "moved", catalog: cat });
+    await say(moved, "go on", ANSWER_MEDIUM);
+    assert.equal(routed(await route(moved, "go on")), TERRA);
+    throwing(moved);
+    cat.unavailable.add(TERRA);
+    let chained: unknown;
+    assert.doesNotThrow(() => {
+      chained = continuation(moved, TERRA);
+    }, "the chain-move notice throws, and the request does not fail");
+    assert.equal(routed(chained as Parameters<typeof routed>[0]), OR_GLM, "the run goes on with the chain");
+    assert.equal(recordOf(moved).runPick?.ref, OR_GLM, "and the record stands: the run's pick is the chain's model");
+
+    resetSlot();
+    const small = await session(t, { id: "small", catalog: catalog(codex(TERRA, { contextWindow: 128_000 })) });
+    small.loaded.host.settings = { compaction: { enabled: false } };
+    assert.equal(await run(small, "design the whole thing", ANSWER_SUPER), ASTRA);
+    throwing(small);
+    const level = await say(small, "go on", ANSWER_MEDIUM);
+    assert.deepEqual([level.tier, level.steppedUp], ["high", true], "the step-up notice throws, and the plan stands");
+    assert.equal(routed(await route(small, "go on")), SOL, "the stepped-up run is routed to sol");
+  });
+
   test("a stuck run moves to the first available model that is a higher level's own, never to a chain", async (t) => {
     const cat = catalog();
     const state = await session(t, { catalog: cat });

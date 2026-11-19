@@ -562,8 +562,17 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     }
   };
 
+  /**
+   * A notice, when the session has a UI. A notice that throws is dropped: it is said beside a route
+   * (an escalation, a chain move) or a plan (a step-up, a chain pick), and must never fail the
+   * request or undo the record that the route or plan has already made.
+   */
   const notify = (ctx: ExtensionContext, text: string, type: "info" | "warning" | "error"): void => {
-    if (ctx.hasUI) ctx.ui.notify(text, type);
+    try {
+      if (ctx.hasUI) ctx.ui.notify(text, type);
+    } catch {
+      // Nothing to do: the routing result and the record stand without the notice.
+    }
   };
 
   /**
