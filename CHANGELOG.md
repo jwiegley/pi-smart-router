@@ -29,8 +29,8 @@ accepted and ignored. These are visible without a roster change:
   last three prompts, at least MEDIUM in a very deep session.
 - A run whose last three tool calls in a row failed, whatever the tool and the text, moves one
   level up to that level's own model, with a notice, or stays when that model is not available.
-- `/smart-router local on|off|status` does nothing but say that the pin is gone;
-  `PI_SMART_ROUTER_LOCAL_ONLY` and an old session's pin entry are ignored, with no notice.
+- `/smart-router local on|off|status` is gone: `local` is an unknown subcommand, answered with the
+  usage. `PI_SMART_ROUTER_LOCAL_ONLY` and an old session's pin entry are ignored, with no notice.
 
 Jev's request is unchanged, byte for byte, at `classifier.context.messages` of 5 or more; at 1 to
 4 it may now carry earlier messages, since its read is the heuristics' 20-message window.
@@ -138,10 +138,10 @@ Jev's request is unchanged, byte for byte, at `classifier.context.messages` of 5
 ### Removed
 
 - **The local-only pin**: `/smart-router local on|off|status`, `PI_SMART_ROUTER_LOCAL_ONLY` and the
-  `smart-router.pin` entry, with every "under the pin" branch. `/smart-router local` answers that
-  the pin is gone and that `/model smart-router/local` routes locally. Nothing reads the variable
-  and nothing looks for an old pin entry, and neither produces a notice; a session that holds one
-  still loads and routes by level.
+  `smart-router.pin` entry, with every "under the pin" branch. `/smart-router local` is an unknown
+  subcommand, answered with the usage, as any other. Nothing reads the variable and nothing looks
+  for an old pin entry, and neither produces a notice; a session that holds one still loads and
+  routes by level.
 - **The level hold**, the five-minute rule, in both roster versions, with its history codes
   `hold:sticky` and `reopen:idle`.
 - **The fit hold** (`hold:fit`), and, with compaction enabled, the step-up for fit.

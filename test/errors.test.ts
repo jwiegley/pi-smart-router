@@ -14,7 +14,6 @@ import {
   loadFailedNotice,
   looksRetryable,
   noBoundedHistory,
-  PIN_REMOVED,
   refusal,
   RouterError,
   rosterNotice,
@@ -200,8 +199,7 @@ describe("notices and helpers", () => {
     }
   });
 
-  test("the answer to /smart-router local says that the pin is gone, and how to route locally", () => {
-    assert.equal(PIN_REMOVED, "The local-only pin has been removed. To route locally, select the local model: /model smart-router/local", "the answer to /smart-router local");
+  test("a Pi without bounded history is told nothing of a pin", () => {
     assert.doesNotMatch(historyNotice(), /pin/, "a Pi without bounded history is told nothing of a pin");
   });
 

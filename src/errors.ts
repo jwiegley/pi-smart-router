@@ -166,9 +166,6 @@ export function historyNotice(): string {
   return `pi-smart-router: ${NO_HISTORY}, so smart-router/auto and smart-router/local refuse every request. Run jwiegley/pi 1.5.0 or later.`;
 }
 
-/** The answer to `/smart-router local ...`, whatever follows. */
-export const PIN_REMOVED = "The local-only pin has been removed. To route locally, select the local model: /model smart-router/local";
-
 /**
  * smart-router/auto refuses a session whose scope cannot be read until the scope is recorded
  * again: it cannot tell which account the session's requests may use. Such a scope counts as work

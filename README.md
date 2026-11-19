@@ -1596,9 +1596,8 @@ Earlier versions also had a local-only pin: `/smart-router local on|off|status`,
 kept both of the router's models on local models. John's decision of 2026-11-18 removed it:
 `smart-router/local` already routes locally. A second decision of the same day left no trace of it:
 
-- **`/smart-router local`**, whatever follows, answers "The local-only pin has been removed. To
-  route locally, select the local model: /model smart-router/local", and records and selects
-  nothing.
+- **`/smart-router local`** is an unknown subcommand: whatever follows, it answers with the usage,
+  as any unknown subcommand does, and records and selects nothing.
 - **`PI_SMART_ROUTER_LOCAL_ONLY` is ignored.** Nothing reads it and nothing is shown for it. It
   selects and routes nothing.
 - **An old pin entry is ignored.** The router does not look for one, and nothing is shown for it.
@@ -1704,7 +1703,6 @@ next answer. A replay can therefore raise the deep-session floor where the route
 |---|---|
 | `/smart-router` or `/smart-router status` | The roster's path and state; the selection and its thinking level; the session's scope and what set it, under a version 2 roster or whenever `smart-router/auto` refuses the scope; every role's models on this host with `ok` or the reason they cannot route, and catalog prices; the accounts cooling and the local models held as unreachable; account bindings, checked in the session's scope, and auth sources; a version 1 roster's routing table and fallbacks, or a version 2 roster's levels and fallback chain in each scope, its classifier and the source of each of Jev's prompts; the last decision, and whether it went to a fallback chain's model; the terms of the run that decision belongs to, kept from that run's choice however many requests it has made: a planned run's demand with every guard that applied, or a run without a prompt's need and level, and each candidate's expected cost, or why the cost was unknown; none for a tagged run or while a model picked by hand is selected ([The footer and status](#the-footer-and-status)); what can still leave the machine, a model picked by hand first and then the classifier when `smart-router/auto` may ask it; and a warning for any fallback that would move a run onto Codex's API from another one. |
 | `/smart-router history [n]` | The last `n` routing decisions (10 by default, at most 50), with reason codes, and on a version 2 run's first request the footer's words: its scope, the level it needs, the model that took it, what decided the level and what the cost rule compared. Model ids and codes only, never prompt text. |
-| `/smart-router local …` | Whatever follows, says that the local-only pin of earlier versions has been removed and that `/model smart-router/local` routes locally. It records and selects nothing. [Routing locally](#routing-locally). |
 | `/smart-router scope [work\|personal\|status]` | The session's scope and what set it: `latch`, `entry`, `directory` or `default`. `work` records work scope at once; `personal` asks first in work scope, and is refused under `PI_SMART_ROUTER_SCOPE=work`. Neither changes the selection. |
 | `/smart-router was low\|medium\|high\|super` | Record that the run in flight, when it holds a level, or else the run of the latest record, should have gone to that level. Nothing is sent again. |
 | `/smart-router check` | Read the roster and its prompt files again and read them back: what each selection and scope routes to, in order, the demand and switching settings, where each of Jev's prompts comes from, and the settings accepted and ignored; or the first error, with its place. It selects, records and sends nothing. [Checking a roster](#checking-a-roster). |

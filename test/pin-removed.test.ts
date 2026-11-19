@@ -1,15 +1,15 @@
 // The local-only pin of earlier versions is gone: smart-router/local is how a session routes
 // locally. No trace of it is left (John, 2026-11-18): PI_SMART_ROUTER_LOCAL_ONLY is not read and an
 // earlier version's pin entry is not looked for, and neither produces a notice; a session file
-// that holds such an entry still loads and routes by level. /smart-router local answers that the
-// pin is gone. Unit tests on the fake host of test/support/pi.ts; no Pi runtime is started.
+// that holds such an entry still loads and routes by level. /smart-router local is an unknown
+// subcommand, answered with the usage. Unit tests on the fake host of test/support/pi.ts; no Pi
+// runtime is started.
 import assert from "node:assert/strict";
 import test, { afterEach, beforeEach, describe } from "node:test";
 import type { TestContext } from "node:test";
 
 import type { Api, ClassifierResult, Model } from "@earendil-works/pi-ai";
 
-import { PIN_REMOVED } from "../src/errors.ts";
 import { processSlot } from "../src/owners.ts";
 import { TIERS } from "../src/tiers.ts";
 import type { Tier } from "../src/tiers.ts";
@@ -79,7 +79,7 @@ async function withEnv(name: string, value: string, run: () => Promise<void>): P
 
 /** The notices that speak of the pin or its switch: none may be shown. */
 const pinNotices = (loaded: Loaded): string[] =>
-  loaded.session.notices.map((notice) => notice.message).filter((message) => /\bpin\b|pinned|LOCAL_ONLY/i.test(message) && message !== PIN_REMOVED);
+  loaded.session.notices.map((notice) => notice.message).filter((message) => /\bpin\b|pinned|LOCAL_ONLY/i.test(message));
 const failures = (loaded: Loaded): string[] => loaded.session.notices.map((notice) => notice.message).filter((message) => / handler failed: /.test(message));
 const pinEntries = (loaded: Loaded): number => loaded.session.entries.filter((entry) => entry.customType === PIN_ENTRY).length;
 const selection = (loaded: Loaded): string => `${loaded.session.model?.provider}/${loaded.session.model?.id}`;
@@ -187,18 +187,22 @@ describe("the pin of earlier versions", () => {
 });
 
 describe("/smart-router local", () => {
-  test("answers that the pin is gone, whatever follows", async (t) => {
+  test("is an unknown subcommand, whatever follows: the usage, and nothing of a pin (John, 2026-11-18: no trace of the pin)", async (t) => {
     for (const select of ["auto", "local", KIMI]) {
       resetSlot();
       const loaded = await hera(t, { id: select, select, setup: (session) => session.appendCustom(PIN_ENTRY, OLD_PIN) });
       const entries = loaded.session.entries.length;
+      await loaded.host.command("smart-router", "nonsense");
+      const usage = loaded.session.notices.at(-1);
+      assert.match(usage?.message ?? "", /^Usage: \/smart-router /, `${select}: an unknown subcommand's answer is the usage`);
       for (const args of ["local", "local on", "local off", "local status", "local on now", " local   off "]) {
         loaded.session.dialogKeys = ["down", "enter"];
         const before = loaded.session.notices.length;
         await loaded.host.command("smart-router", args);
         assert.equal(loaded.session.notices.length, before + 1, `${select}, ${args}: the command shows exactly one notice`);
-        assert.deepEqual(loaded.session.notices.at(-1), { type: "warning", message: PIN_REMOVED }, `${select}, ${args}: the answer`);
+        assert.deepEqual(loaded.session.notices.at(-1), usage, `${select}, ${args}: no trace of the pin: the answer is the usage, as for any unknown subcommand`);
       }
+      assert.deepEqual(pinNotices(loaded), [], `${select}: no notice speaks of a pin`);
       assert.equal(loaded.session.entries.length, entries, `${select}: no entry is appended`);
       assert.deepEqual([selection(loaded), loaded.host.selections.length], [select.includes("/") ? select : `smart-router/${select}`, 0], `${select}: the selection is unchanged`);
       assert.deepEqual(loaded.session.dialogs, [], `${select}: nothing is asked`);

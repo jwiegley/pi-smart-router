@@ -1,7 +1,6 @@
 // /smart-router: status (the default), history [n], scope [work|personal|status], was
 // low|medium|high|super, check, and reload. It reports through notices, and the only things it
-// writes are the scope's session entries and a run's correction. `local`, whatever follows, answers
-// that the local-only pin of earlier versions has been removed, and writes nothing.
+// writes are the scope's session entries and a run's correction.
 //
 // status shows the roster's state, the selection, the session's scope, each role's
 // candidates on this host with the resolver's verdict and the catalog price, the account bindings
@@ -25,7 +24,7 @@ import { describeRouting } from "./check.ts";
 import type { Labels } from "./accounts.ts";
 import { LEVEL_ENTRY, PROVIDER, SCOPE_ENTRY } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
-import { firstLine, PIN_REMOVED, rosterNamed } from "./errors.ts";
+import { firstLine, rosterNamed } from "./errors.ts";
 import type { Loaded } from "./files.ts";
 import { promptLines, promptProblem, promptUses } from "./prompts.ts";
 import type { PromptReader } from "./prompts.ts";
@@ -539,8 +538,6 @@ export async function run(host: CommandHost, ctx: ExtensionContext, args: string
     const count = option === undefined ? HISTORY_DEFAULT : Number(option);
     if (Number.isSafeInteger(count) && count >= 1) return info(historyText(host, ctx, Math.min(count, HISTORY_LIMIT)));
   }
-  // The local-only pin has been removed: whatever follows, the answer says so and writes nothing.
-  if (sub === "local") return warning(PIN_REMOVED);
   if (sub === "scope" && extra === undefined) {
     const answer = await scopeCommand(host, ctx, option);
     if (answer !== undefined) return answer;
