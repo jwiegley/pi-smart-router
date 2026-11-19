@@ -33,6 +33,12 @@ const DEMAND_AND_SWITCHING = [
   "  A model's cache is taken to survive 97% up to 1 min, 92% up to 5 min, 87% up to 20 min, 79% up to 30 min, 66% up to 1 h, 50% up to 2 h, 38% up to 6 h, 11% up to 24 h, and not after.",
 ];
 
+/** What the checker says of a roster that leaves out the adaptiveReasoning section: upstream's defaults, in plain words. */
+const EFFORT = [
+  "Thinking effort, as upstream's adaptive reasoning: while /thinking is medium (Pi's default) or off, minimal after a tool result, low for an ordinary turn, medium for planning, and high on SUPER or in a run that moved up; any other /thinking level is never lowered, and is raised when the turn asks for more.",
+  "  No floor and no ceiling. A role that fixes its thinking keeps it. A change of effort costs that model's cache.",
+];
+
 /** What the checker says of John's roster of 2026-11-17, after its first line. */
 const JOHN_ROUTING = [
   "smart-router/auto in personal scope: a tag, else the demand from Jev (openrouter/typesafe/jev-1.14) and the heuristics, pick the level; each level tries its own models in order:",
@@ -56,6 +62,7 @@ const JOHN_ROUTING = [
   "  sessions under these directories are in work scope: /Users/johnw/src/positron",
   "",
   ...DEMAND_AND_SWITCHING,
+  ...EFFORT,
   "",
   "smart-router/local, in any scope: only these, in this order, never a cloud model:",
   "  1. omlx-hera/GLM-5.3-Flash-oQ4e-mtp  (role local, thinking max)",
@@ -105,7 +112,8 @@ describe("checking a roster's text", () => {
       "",
     ]);
     assert.deepEqual(report.lines.slice(11, 17), DEMAND_AND_SWITCHING, "the defaults are read back for a roster that gives neither section");
-    assert.deepEqual(report.lines.slice(17, 20), ["", "smart-router/local, in any scope:", "  refused: the roster has no local section"]);
+    assert.deepEqual(report.lines.slice(17, 19), EFFORT, "upstream's defaults are read back for a roster that gives no adaptiveReasoning section");
+    assert.deepEqual(report.lines.slice(19, 22), ["", "smart-router/local, in any scope:", "  refused: the roster has no local section"]);
   });
 
   test("a level with several models of its own lists them in order", () => {
@@ -136,6 +144,20 @@ describe("checking a roster's text", () => {
     assert.ok(!checkRoster(fixture("roster-hera-v2.json")).lines.some((line) => /classifier\.closeCall/.test(line)), "without it");
   });
 
+  test("the adaptiveReasoning section reads back: the off switch, a floor and a ceiling", () => {
+    const read = (section: unknown): string[] => {
+      const given = JSON.parse(fixture("roster-work.json"));
+      given.adaptiveReasoning = section;
+      const report = checkRoster(JSON.stringify(given));
+      assert.equal(report.ok, true, report.lines[0]);
+      return report.lines.filter((line) => /^Thinking effort|^ {2}(No floor|Floor)/.test(line));
+    };
+    assert.deepEqual(read({ enabled: false }), ["Thinking effort: adaptiveReasoning is off, so every request carries the selected /thinking level, or its role's fixed one."], "off");
+    assert.deepEqual(read({ minLevel: "low", maxLevel: "high" }).slice(1), ["  Floor low, ceiling high: the levels the turn gives are raised to the floor and capped at the ceiling. A role that fixes its thinking keeps it. A change of effort costs that model's cache."], "both bounds");
+    assert.deepEqual(read({ minLevel: "low" }).slice(1), ["  Floor low; no ceiling: the levels the turn gives are raised to the floor. A role that fixes its thinking keeps it. A change of effort costs that model's cache."], "a floor");
+    assert.deepEqual(read({ maxLevel: "medium" }).slice(1), ["  No floor; ceiling medium: the levels the turn gives are capped at the ceiling. A role that fixes its thinking keeps it. A change of effort costs that model's cache."], "a ceiling");
+  });
+
   test("a version 1 roster reads back as its routing table and one-hop fallbacks", () => {
     const report = checkRoster(fixture("roster-hera.json"));
     assert.deepEqual(report.lines.slice(0, 8), [
@@ -148,6 +170,14 @@ describe("checking a roster's text", () => {
       "  trivial  openrouter/deepseek/deepseek-v4.1-flash-1017  (role worker); no fallback",
       "smart-router/auto in work scope: refused, since a version 1 roster serves no work scope",
     ]);
+    assert.deepEqual(
+      report.lines.filter((line) => /^Thinking effort|^ {2}No floor/.test(line)),
+      [
+        "Thinking effort, as upstream's adaptive reasoning: while /thinking is medium (Pi's default) or off, minimal after a tool result, low for an ordinary turn and medium for planning; any other /thinking level is never lowered, and is raised when the turn asks for more.",
+        "  No floor and no ceiling. A role that fixes its thinking keeps it. A change of effort costs that model's cache.",
+      ],
+      "a version 1 roster has upstream's defaults, and neither SUPER nor a run that moves up",
+    );
   });
 
   test("an invalid roster gives the parser's first error, with its place, and says what it costs", () => {

@@ -16,7 +16,7 @@ import { promptLines, promptProblem, promptReader, promptUses } from "./prompts.
 import type { PromptReader, PromptUse } from "./prompts.ts";
 import { candidatesOf, parseRoster, SCOPES, unreachableMinutesOf } from "./roster.ts";
 import type { Roster, RosterV1, RosterV2 } from "./roster.ts";
-import { DEEP_SESSION_ENTRIES, DEEP_SESSION_TOKENS, SIGNALS } from "./settings.ts";
+import { DEEP_SESSION_ENTRIES, DEEP_SESSION_TOKENS, DEFAULT_EFFORT, SIGNALS } from "./settings.ts";
 import { tierLabel, TIERS } from "./tiers.ts";
 
 export interface CheckReport {
@@ -137,6 +137,33 @@ function switchingLines(roster: RosterV2): string[] {
   ];
 }
 
+/**
+ * What thinking effort each request carries, in words: upstream's adaptive reasoning (src/effort.ts),
+ * with the roster's floor, ceiling and off switch; a version 1 roster has upstream's defaults, and
+ * neither SUPER nor a run that moves up.
+ */
+function effortLines(roster: Roster): string[] {
+  const settings = roster.version === 2 ? roster.adaptiveReasoning : DEFAULT_EFFORT;
+  if (!settings.enabled) return ["Thinking effort: adaptiveReasoning is off, so every request carries the selected /thinking level, or its role's fixed one."];
+  const table =
+    roster.version === 2
+      ? "minimal after a tool result, low for an ordinary turn, medium for planning, and high on SUPER or in a run that moved up"
+      : "minimal after a tool result, low for an ordinary turn and medium for planning";
+  const { minLevel, maxLevel } = settings;
+  const bounds =
+    minLevel === undefined && maxLevel === undefined
+      ? "No floor and no ceiling."
+      : minLevel !== undefined && maxLevel !== undefined
+        ? `Floor ${minLevel}, ceiling ${maxLevel}: the levels the turn gives are raised to the floor and capped at the ceiling.`
+        : minLevel !== undefined
+          ? `Floor ${minLevel}; no ceiling: the levels the turn gives are raised to the floor.`
+          : `No floor; ceiling ${maxLevel}: the levels the turn gives are capped at the ceiling.`;
+  return [
+    `Thinking effort, as upstream's adaptive reasoning: while /thinking is medium (Pi's default) or off, ${table}; any other /thinking level is never lowered, and is raised when the turn asks for more.`,
+    `  ${bounds} A role that fixes its thinking keeps it. A change of effort costs that model's cache.`,
+  ];
+}
+
 /** Why the settings a roster may give and this version ignores are ignored, by path. */
 const IGNORED_BECAUSE: Readonly<Record<string, string>> = {
   stickyIdleMinutes: "nothing holds a session on a model by time.",
@@ -157,7 +184,9 @@ const ignoredLines = (roster: Roster): string[] =>
 export function describeRouting(roster: Roster, uses: readonly PromptUse[] = []): string[] {
   return [
     ...(roster.version === 2 ? describeV2(roster) : describeV1(roster)),
-    ...(roster.version === 2 ? [...demandLines(roster), ...switchingLines(roster), ""] : []),
+    ...(roster.version === 2 ? [...demandLines(roster), ...switchingLines(roster)] : []),
+    ...effortLines(roster),
+    "",
     ...localLines(roster),
     "",
     ...promptSection(roster, uses),

@@ -5,7 +5,7 @@ import { isCodexProvider, isWorkCodex } from "../src/accounts.ts";
 import { BUILTIN_EXCLUDES } from "../src/constants.ts";
 import { autoRoles, excludedBy, excludesFor, isWorkBound, liftWorkAlias, parseRoster, SCOPES, scopeSection } from "../src/roster.ts";
 import type { Roster, RosterV2, ScopedBinding } from "../src/roster.ts";
-import { DEFAULT_DEMAND, DEFAULT_SWITCHING, DESIGN_WEIGHTS, SIGNALS } from "../src/settings.ts";
+import { DEFAULT_DEMAND, DEFAULT_EFFORT, DEFAULT_SWITCHING, DESIGN_WEIGHTS, SIGNALS } from "../src/settings.ts";
 import { rosterFixture, rosterFixtureV2 } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
 
@@ -98,6 +98,7 @@ describe("John's version 2 rosters", () => {
       },
       demand: DEFAULT_DEMAND,
       switching: DEFAULT_SWITCHING,
+      adaptiveReasoning: DEFAULT_EFFORT,
     });
   });
 
@@ -881,7 +882,7 @@ describe("version 2 keys", () => {
   });
 });
 
-test("version 2 reports its first defect in order: keys, exclude, roles, accounts, scopes, level accounts, the work alias, local, classifier, demand, switching, minutes", () => {
+test("version 2 reports its first defect in order: keys, exclude, roles, accounts, scopes, level accounts, the work alias, local, classifier, demand, switching, adaptiveReasoning, minutes", () => {
   const defects: Array<readonly [string, (r: Json) => void]> = [
     ["unexpected: unknown key", (r) => (r.unexpected = 1)],
     ['exclude[0]: "x" is neither a provider/id ref nor a provider/* pattern', (r) => (r.exclude = ["x"])],
@@ -894,6 +895,7 @@ test("version 2 reports its first defect in order: keys, exclude, roles, account
     ["classifier.timeoutMs: must be a whole number of milliseconds from 100 to 1000", (r) => (r.classifier.timeoutMs = 1001)],
     ["demand.jevWeight: must be a number from 0 to 100", (r) => (r.demand = { jevWeight: -1 })],
     ["switching.margin: must be a number from 0 to 0.9", (r) => (r.switching = { margin: 1 })],
+    ["adaptiveReasoning.enabled: must be true or false", (r) => (r.adaptiveReasoning = { enabled: "no" })],
     ["cooldownMinutes: must be a whole number of minutes from 1 to 1440", (r) => (r.cooldownMinutes = 0)],
   ];
   // Each defect is the one reported while every later defect is present too.
@@ -963,5 +965,42 @@ describe("the demand and switching sections", () => {
       const parsed = parseRoster(JSON.stringify({ ...JSON.parse(fixture("roster-hera.json")), [key]: {} }));
       assert.ok(!parsed.ok && parsed.error.startsWith(`${key}: unknown key`), `${key} in version 1`);
     }
+  });
+});
+
+describe("the adaptiveReasoning section: upstream's adaptive_reasoning (src/domain/types/schemas.ts:818-847)", () => {
+  const FALLBACK = fixture("roster-hera-v2-fallback.json");
+  const LEVELS = "must be one of minimal, low, medium, high, xhigh, max";
+
+  test("a roster without it gets upstream's defaults: on, with no floor and no ceiling", () => {
+    assert.deepEqual(rosterFixtureV2("roster-hera-v2-fallback.json").adaptiveReasoning, { enabled: true }, "schemas.ts:845-847");
+    assert.deepEqual(DEFAULT_EFFORT, { enabled: true });
+  });
+
+  test("gives the off switch, the floor and the ceiling as written, the rest as upstream's defaults", () => {
+    assert.deepEqual(valid(edited((r) => (r.adaptiveReasoning = { enabled: false }), FALLBACK)).adaptiveReasoning, { enabled: false }, "off");
+    assert.deepEqual(valid(edited((r) => (r.adaptiveReasoning = { minLevel: "low" }), FALLBACK)).adaptiveReasoning, { enabled: true, minLevel: "low" }, "a floor alone");
+    assert.deepEqual(valid(edited((r) => (r.adaptiveReasoning = { maxLevel: "high" }), FALLBACK)).adaptiveReasoning, { enabled: true, maxLevel: "high" }, "a ceiling alone");
+    assert.deepEqual(valid(edited((r) => (r.adaptiveReasoning = { minLevel: "medium", maxLevel: "medium" }), FALLBACK)).adaptiveReasoning, { enabled: true, minLevel: "medium", maxLevel: "medium" }, "a floor equal to the ceiling");
+    assert.deepEqual(valid(edited((r) => (r.adaptiveReasoning = {}), FALLBACK)).adaptiveReasoning, { enabled: true }, "an empty section");
+  });
+
+  test("refuses what upstream's schema refuses", () => {
+    for (const [section, expected] of [
+      [{ enabled: "no" }, "adaptiveReasoning.enabled: must be true or false"],
+      [{ minLevel: "off" }, `adaptiveReasoning.minLevel: ${LEVELS}`],
+      [{ maxLevel: "huge" }, `adaptiveReasoning.maxLevel: ${LEVELS}`],
+      [{ minLevel: "high", maxLevel: "low" }, "adaptiveReasoning.minLevel: must not exceed maxLevel"],
+      [{ floor: "low" }, "adaptiveReasoning.floor: unknown key"],
+    ] as const) {
+      const parsed = parseRoster(JSON.stringify({ ...JSON.parse(FALLBACK), adaptiveReasoning: section }));
+      assert.equal(parsed.ok, false, `${expected} is refused`);
+      assert.ok(!parsed.ok && parsed.error.startsWith(expected), `${expected}, got ${parsed.ok ? "ok" : parsed.error}`);
+    }
+  });
+
+  test("version 1 refuses it as an unknown key, and has upstream's defaults", () => {
+    const parsed = parseRoster(JSON.stringify({ ...JSON.parse(fixture("roster-hera.json")), adaptiveReasoning: {} }));
+    assert.ok(!parsed.ok && parsed.error.startsWith("adaptiveReasoning: unknown key"), "adaptiveReasoning in version 1");
   });
 });

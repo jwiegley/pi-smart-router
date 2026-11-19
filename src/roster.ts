@@ -36,8 +36,8 @@ import { agentFile, isRecord, message, own } from "./files.ts";
 import type { AgentFile, FileSystem, Parsed } from "./files.ts";
 import type { JevSettings } from "./jev.ts";
 import { canonicalHost, isLocalHost } from "./local.ts";
-import { DEFAULT_DEMAND, DEFAULT_SWITCHING, SIGNALS } from "./settings.ts";
-import type { DemandSettings, SurvivalTable, SwitchingSettings } from "./settings.ts";
+import { DEFAULT_DEMAND, DEFAULT_EFFORT, DEFAULT_SWITCHING, isReasoningLevel, REASONING_LEVELS, SIGNALS } from "./settings.ts";
+import type { DemandSettings, EffortSettings, SurvivalTable, SwitchingSettings } from "./settings.ts";
 import { isTier, TIERS } from "./tiers.ts";
 import type { Tier } from "./tiers.ts";
 
@@ -145,6 +145,8 @@ export interface RosterV2 {
   readonly demand: DemandSettings;
   /** When a session moves to another model, with every default filled in. */
   readonly switching: SwitchingSettings;
+  /** Upstream's adaptive reasoning knobs: on by default, with no floor and no ceiling (src/effort.ts). */
+  readonly adaptiveReasoning: EffortSettings;
 }
 
 export type Roster = RosterV1 | RosterV2;
@@ -583,7 +585,7 @@ function validate(value: unknown): Roster {
 
 // ─── Version 2 ───────────────────────────────────────────────────────────────
 
-const V2_TOP_KEYS = ["version", "exclude", "roles", "scopes", "accounts", "classifier", "demand", "switching", "local", "stickyIdleMinutes", "cooldownMinutes", "unreachableMinutes"];
+const V2_TOP_KEYS = ["version", "exclude", "roles", "scopes", "accounts", "classifier", "demand", "switching", "adaptiveReasoning", "local", "stickyIdleMinutes", "cooldownMinutes", "unreachableMinutes"];
 const SCOPE_KEYS: Readonly<Record<Scope, readonly string[]>> = { personal: ["levels", "fallback"], work: ["levels", "directories", "fallback"] };
 const LEVEL_KEYS = ["role", "describe", "describeFile"];
 const SCOPED_BINDING_KEYS = ["multiPassLabel", "native", "scope"];
@@ -738,11 +740,42 @@ function switchingSettings(value: unknown): SwitchingSettings {
   };
 }
 
+const EFFORT_KEYS = ["enabled", "minLevel", "maxLevel"];
+
+/** A floor or a ceiling: one of upstream's levels, or absent. */
+function reasoningLevel(value: unknown, path: string): EffortSettings["minLevel"] {
+  if (value === undefined) return undefined;
+  if (!isReasoningLevel(value)) fail(path, `must be one of ${REASONING_LEVELS.join(", ")}`);
+  return value;
+}
+
+/**
+ * The adaptiveReasoning section, upstream's `adaptive_reasoning` (src/domain/types/schemas.ts:818-847):
+ * `enabled` true unless given false, and an optional floor `minLevel` and ceiling `maxLevel`, the
+ * floor never above the ceiling.
+ */
+function effortSettings(value: unknown): EffortSettings {
+  if (value === undefined) return DEFAULT_EFFORT;
+  const section = object(value, "adaptiveReasoning", EFFORT_KEYS);
+  const enabled = own(section, "enabled");
+  if (enabled !== undefined && typeof enabled !== "boolean") fail("adaptiveReasoning.enabled", "must be true or false");
+  const minLevel = reasoningLevel(own(section, "minLevel"), "adaptiveReasoning.minLevel");
+  const maxLevel = reasoningLevel(own(section, "maxLevel"), "adaptiveReasoning.maxLevel");
+  if (minLevel !== undefined && maxLevel !== undefined && REASONING_LEVELS.indexOf(minLevel) > REASONING_LEVELS.indexOf(maxLevel)) {
+    fail("adaptiveReasoning.minLevel", "must not exceed maxLevel");
+  }
+  return {
+    enabled: enabled ?? DEFAULT_EFFORT.enabled,
+    ...(minLevel === undefined ? {} : { minLevel }),
+    ...(maxLevel === undefined ? {} : { maxLevel }),
+  };
+}
+
 /**
  * Version 2, checked in this order: the keys, the exclusions, the roles, the accounts and their
  * scopes, the scopes and their levels, each scope's fallback chain, each level's and each chain's
  * accounts, the work alias's exclusion, the local
- * section, the classifier, the demand and switching sections and the minutes. The checks it shares with version 1 are version 1's
+ * section, the classifier, the demand, switching and adaptiveReasoning sections and the minutes. The checks it shares with version 1 are version 1's
  * helpers, so they keep version 1's messages.
  */
 function validateV2(value: Record<string, unknown>): RosterV2 {
@@ -853,6 +886,7 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
   const classifier = own(root, "classifier") === undefined ? undefined : classifierSettings(own(root, "classifier"), exclude);
   const demand = demandSettings(own(root, "demand"));
   const switching = switchingSettings(own(root, "switching"));
+  const adaptiveReasoning = effortSettings(own(root, "adaptiveReasoning"));
 
   return {
     version: 2,
@@ -867,6 +901,7 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
     ...(classifier === undefined ? {} : { classifier }),
     demand,
     switching,
+    adaptiveReasoning,
   };
 }
 
