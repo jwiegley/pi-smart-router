@@ -11,7 +11,7 @@ import type { TestContext } from "node:test";
 import type { ClassifierResult } from "@earendil-works/pi-ai";
 
 import { checkFile } from "../src/check.ts";
-import { DESCRIBE_MAX_CHARS, INSTRUCTIONS_MAX_CHARS, LEVEL_ENTRY, LEVEL_KEY, PIN_ENTRY, PROMPT_FILE_MAX_BYTES, SCOPE_ENTRY } from "../src/constants.ts";
+import { DESCRIBE_MAX_CHARS, INSTRUCTIONS_MAX_CHARS, LEVEL_ENTRY, LEVEL_KEY, PROMPT_FILE_MAX_BYTES, SCOPE_ENTRY } from "../src/constants.ts";
 import { buildContext, JEV_INSTRUCTIONS } from "../src/jev.ts";
 import { DEFAULT_INSTRUCTIONS, promptReader, promptText, promptUses, scopePrompts } from "../src/prompts.ts";
 import { parseRoster } from "../src/roster.ts";
@@ -20,6 +20,7 @@ import { scopeEntry } from "../src/scope.ts";
 import { TIERS } from "../src/tiers.ts";
 import { FakeCatalog, model, NOW, rosterFixtureV2 } from "./support/catalog.ts";
 import { fixture, write } from "./support/fixtures.ts";
+import { PIN_ENTRY } from "./support/legacy.ts";
 import { agentDir, FakeRuntime, request, resetSlot, routed, start } from "./support/pi.ts";
 import type { FakeSession, Loaded } from "./support/pi.ts";
 

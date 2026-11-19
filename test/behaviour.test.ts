@@ -7,7 +7,8 @@
 // routes (§5.1) and the refusal on an upstream Pi without the fork's bounded session reads. Each
 // asserts which faux provider received each request, with the provider's call count;
 // ./support/host.ts describes the harness. The local-only pin of earlier versions has been
-// removed: L4 checks that PI_SMART_ROUTER_LOCAL_ONLY is ignored, with a notice.
+// removed, with no trace left: L4 checks that PI_SMART_ROUTER_LOCAL_ONLY is ignored and shows
+// nothing, and C13 that a session an earlier version pinned routes by level and shows nothing.
 //
 // Scenarios 6 to 9, 11 and 26, and L5, L6 and L10, once showed the guards that kept a pinned or
 // work-scope session off a model picked by hand. Since John's decision of 2026-11-16 that a manual
@@ -34,7 +35,7 @@ import { createBashToolDefinition, estimateTokens, SessionManager } from "@earen
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 
 import type { RoutingRegistry } from "../src/cache-optimizer.ts";
-import { ENV_SCOPE, LEVEL_ENTRY, LEVEL_KEY, PIN_ENTRY, ROUTING_REGISTRY_KEY, SCOPE_ENTRY, SLOT_KEY, VIRTUAL_IDS } from "../src/constants.ts";
+import { ENV_SCOPE, LEVEL_ENTRY, LEVEL_KEY, ROUTING_REGISTRY_KEY, SCOPE_ENTRY, SLOT_KEY, VIRTUAL_IDS } from "../src/constants.ts";
 import { runCost } from "../src/cost.ts";
 import type { Rates, Workload } from "../src/cost.ts";
 import type { Owner, Slot } from "../src/owners.ts";
@@ -44,6 +45,7 @@ import { TIERS } from "../src/tiers.ts";
 import type { Tier } from "../src/tiers.ts";
 import { keepsSystemPrompt } from "./support/co.ts";
 import { fixture } from "./support/fixtures.ts";
+import { ENV_PIN, PIN_ENTRY } from "./support/legacy.ts";
 import type { Snapshot } from "./support/co.ts";
 import {
   auditorSession,
@@ -1151,7 +1153,7 @@ test("L3 untagged runs follow the blend with Jev; an unsure close call stays low
   );
 });
 
-test("L4 no classifier call on local, for a steer, or without a classifier; PI_SMART_ROUTER_LOCAL_ONLY is ignored, with a notice", TIMEOUT, async (t) => {
+test("L4 no classifier call on local, for a steer, or without a classifier; PI_SMART_ROUTER_LOCAL_ONLY is ignored and shows nothing", TIMEOUT, async (t) => {
   await t.test("on smart-router/local", async (t) => {
     const world = levelsWorld(t);
     const pi = await world.start({ select: "smart-router/local" });
@@ -1166,15 +1168,15 @@ test("L4 no classifier call on local, for a steer, or without a classifier; PI_S
     assert.deepEqual(called(world.counts()), { "local-a": 2 });
   });
 
-  await t.test("the environment switch is ignored, with a notice, and the run goes by level", async (t) => {
-    const ENV_NOTICE =
-      "pi-smart-router: PI_SMART_ROUTER_LOCAL_ONLY is set, but the local-only pin has been removed and keeps nothing local. Select smart-router/local to route locally.";
+  await t.test("the environment switch is ignored and shows nothing, and the run goes by level", async (t) => {
+    /** Notices that speak of the switch or the pin: John's ruling of 2026-11-18 leaves no trace of either. */
+    const pinNotices = (): unknown[] => pi.ui.saw(/LOCAL_ONLY|\bpin\b|pinned/i);
     const world = levelsWorld(t);
-    process.env.PI_SMART_ROUTER_LOCAL_ONLY = "1";
+    process.env[ENV_PIN] = "1";
     const pi = await world.start({ select: "smart-router/auto" });
-    delete process.env.PI_SMART_ROUTER_LOCAL_ONLY;
+    delete process.env[ENV_PIN];
     assert.equal(pi.selection(), "smart-router/auto", "the variable selects nothing");
-    assert.equal(count(pi, ENV_NOTICE), 1, "the session is told once, at its start, that the variable keeps nothing local");
+    assert.deepEqual(pinNotices(), [], "nothing is shown for the variable at session start");
     // smart-router/auto routes by level: Jev is asked, and a LOW run goes to the LOW model, not a local one.
     world.jev.answer(JEV.low);
     await pi.prompt("Rename the helper");
@@ -1182,11 +1184,10 @@ test("L4 no classifier call on local, for a steer, or without a classifier; PI_S
     assert.equal(world.jev.calls.length, 1, "Jev was asked");
     await pi.prompt("Fix the parser #high");
     assert.equal(answered(pi), PERSONAL.high, "a tag sets its run's level");
-    assert.equal(count(pi, ENV_NOTICE), 1, "the prompts say nothing more");
+    assert.deepEqual(pinNotices(), [], "nor at the prompts");
     assert.equal(world.faux("local-a").callCount, 0, "nothing went to the local model");
-    // The latch holds for the life of the process: a new session is told again.
     await pi.runtime.newSession();
-    assert.equal(count(pi, ENV_NOTICE), 2, "a new session of the process is told too");
+    assert.deepEqual(pinNotices(), [], "nor in a new session of the process");
   });
 
   await t.test("for a steer or a follow-up", async (t) => {
@@ -2257,7 +2258,7 @@ test("C12 no request is added to a prompt: one Jev call and one model call per p
   );
 });
 
-test("C13 a session an earlier version pinned routes by level, with one notice", TIMEOUT, async (t) => {
+test("C13 a session an earlier version pinned routes by level and shows nothing of the pin", TIMEOUT, async (t) => {
   const world = levelsWorld(t);
   const codex = world.faux("openai-codex-2");
   const pinned = history(world, "smart-router/auto", [["Load the fixtures", response(codex, { id: "gpt-6.1-terra", tokens: 1_000 })]]);
@@ -2269,9 +2270,7 @@ test("C13 a session an earlier version pinned routes by level, with one notice",
   world.jev.answer(JEV.super);
   await pi.prompt("Survey the options for the session store");
   assert.equal(answered(pi), PERSONAL.super);
-  const PIN_NOTICE =
-    "pi-smart-router: an earlier version pinned this session to local models. The pin has been removed and is ignored: smart-router/auto routes by level here. Select smart-router/local to route locally.";
-  assert.equal(count(pi, PIN_NOTICE), 1, "with one notice");
+  assert.deepEqual(pi.ui.saw(/\bpin\b|pinned/i), [], "John's ruling of 2026-11-18: the old pin entry is not looked for, and nothing is shown for it");
   assert.equal(world.faux("local-a").callCount, 0, "nothing went to the local model");
   assert.equal(world.jev.calls.length, 2, "Jev was asked for each prompt");
 });

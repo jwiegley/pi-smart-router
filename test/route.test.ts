@@ -398,7 +398,7 @@ describe("session state", () => {
     assert.equal(record(loaded)?.last?.ref, KIMI);
     assert.equal(record(loaded)?.last?.at, NOW - 60_000);
     const SEED = { type: "message", messageRole: "assistant", limit: 16 };
-    // The latest pin entry of the session, which an earlier version wrote, is read once, only to say it is ignored.
+    // An earlier version's pin entry is never looked for (John, 2026-11-18: no trace of the pin).
     const PIN = { customType: "smart-router.pin", scope: "all" };
     const SCOPE = { customType: "smart-router.scope", scope: "all" };
     // The level a resumed session held: its latest level record, one bounded read of the branch.
@@ -411,10 +411,10 @@ describe("session state", () => {
     assert.equal(reads.filter((read) => isDeepStrictEqual(read, SEED)).length, 1, "one read of the branch: the seed's");
     assert.equal(reads.filter((read) => isDeepStrictEqual(read, LEVEL)).length, 1, "and one of its latest level record");
     assert.equal(reads.filter((read) => isDeepStrictEqual(read, COMPACTION)).length, 1, "and one of its latest compaction entry: an answer older than the branch's latest compaction seeds nothing");
-    assert.equal(reads.filter((read) => isDeepStrictEqual(read, PIN)).length, 1, "session_start on smart-router/auto reads the latest pin entry once, over the whole session");
+    assert.equal(reads.filter((read) => isDeepStrictEqual(read, PIN)).length, 0, "session_start on smart-router/auto does not look for an old pin entry: John's ruling of 2026-11-18, no trace of the pin");
     assert.ok(reads.some((read) => isDeepStrictEqual(read, SCOPE)), "and the scope");
     for (const read of reads) {
-      assert.ok([SEED, LEVEL, COMPACTION, PIN, SCOPE].some((allowed) => isDeepStrictEqual(read, allowed)), `${JSON.stringify(read)}: every other read is the old pin entry's or the scope's, over the whole session`);
+      assert.ok([SEED, LEVEL, COMPACTION, SCOPE].some((allowed) => isDeepStrictEqual(read, allowed)), `${JSON.stringify(read)}: every other read is the scope's, over the whole session`);
     }
     assert.equal(loaded.session.wholeHistoryReads, 0);
   });

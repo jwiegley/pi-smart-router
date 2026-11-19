@@ -166,16 +166,6 @@ export function historyNotice(): string {
   return `pi-smart-router: ${NO_HISTORY}, so smart-router/auto and smart-router/local refuse every request. Run jwiegley/pi 1.5.0 or later.`;
 }
 
-/** Said once at session start when PI_SMART_ROUTER_LOCAL_ONLY is set. */
-export function pinEnvNotice(): string {
-  return "pi-smart-router: PI_SMART_ROUTER_LOCAL_ONLY is set, but the local-only pin has been removed and keeps nothing local. Select smart-router/local to route locally.";
-}
-
-/** Said once in a session on smart-router/auto whose latest pin entry says it was pinned. */
-export function pinEntryNotice(): string {
-  return "pi-smart-router: an earlier version pinned this session to local models. The pin has been removed and is ignored: smart-router/auto routes by level here. Select smart-router/local to route locally.";
-}
-
 /** The answer to `/smart-router local ...`, whatever follows. */
 export const PIN_REMOVED = "The local-only pin has been removed. To route locally, select the local model: /model smart-router/local";
 

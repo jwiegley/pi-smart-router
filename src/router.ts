@@ -3,10 +3,9 @@
 // (each with the ledger its session's answers feed, which prices a planned run) and cooldowns, the
 // limits both models declare, the session's scope with its handoffs and work directories, the
 // refusals of its own two models for a scope their policy does not serve, a message's tag and Jev's
-// request, each planned run's level record and the footer item that shows its level, the notices
-// that the removed local-only pin's switch and entries are ignored, the /smart-router command, what
-// it tells pi-cache-optimizer, and the handlers wire() registers. No handler changes or blocks what
-// is selected (src/selection.ts).
+// request, each planned run's level record and the footer item that shows its level, the
+// /smart-router command, what it tells pi-cache-optimizer, and the handlers wire() registers. No
+// handler changes or blocks what is selected (src/selection.ts).
 //
 // createRouter only builds closures. It makes no pi.on, registration or command call, so a throw
 // while it is built leaves only the two refusing models index.ts registered, and wire() makes
@@ -34,7 +33,7 @@ import { registerAdapter, unregisterAdapter } from "./cache-optimizer.ts";
 import type { ActiveRoute } from "./cache-optimizer.ts";
 import { smartRouterCommand } from "./commands.ts";
 import type { CommandHost, Files } from "./commands.ts";
-import { ALL_LEVELS, COMMAND, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, LEVEL_ENTRY, LEVEL_KEY, PIN_ENTRY, PROVIDER, SCOPE_ENTRY, VIRTUAL_API, VIRTUAL_IDS } from "./constants.ts";
+import { ALL_LEVELS, COMMAND, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, LEVEL_ENTRY, LEVEL_KEY, PROVIDER, SCOPE_ENTRY, VIRTUAL_API, VIRTUAL_IDS } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { compactionFor, pickInRole, planUserTurn } from "./decide.ts";
 import type { CostFigures, Decision, LastResponder, LevelInput, Plan } from "./decide.ts";
@@ -49,8 +48,6 @@ import {
   firstLine,
   historyNotice,
   looksRetryable,
-  pinEntryNotice,
-  pinEnvNotice,
   promptNotice,
   resendNotice,
   rosterNotice,
@@ -130,8 +127,6 @@ export interface Session extends SessionRecord {
   directoryTried: boolean;
   /** The token of the latest input that planned: an input that waited for Jev plans only if no newer input has planned since. */
   plannedToken: number;
-  /** Whether this instance has looked for the session's old pin entry (pinEntryNotice). It looks once, on smart-router/auto. */
-  pinEntryChecked: boolean;
   /** Whether the footer shows a level item this instance set: only then does a run without a level clear it. */
   levelShown: boolean;
   /** The model of the current run's last assistant message that ended without an error: the one its record names. */
@@ -287,7 +282,6 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         ...newRecord(),
         directoryTried: false,
         plannedToken: 0,
-        pinEntryChecked: false,
         levelShown: false,
         answered: undefined,
         planDigest: undefined,
@@ -609,37 +603,6 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     return needRun === undefined ? undefined : runFooterText(needRun, modelId, inChain(needRun.scope, ref), record.escalated);
   };
 
-  /**
-   * Whether the session's latest pin entry, which an earlier version wrote, says it was pinned. The
-   * pin was session-wide, so the entry is read over the whole session (scope "all"), as the scope's
-   * is: a /tree move to a branch without it left the session pinned. The pin has been removed and
-   * the entry is ignored; it is read only to say so. Never throws: an entry that cannot be read, or
-   * that says anything else, says nothing.
-   */
-  const pinnedBefore = (ctx: ExtensionContext): boolean => {
-    try {
-      const entry = boundedHistory(managerOf(ctx))?.getLatestCustomEntry(PIN_ENTRY, { scope: "all" });
-      const data = isRecord(entry) ? own(entry, "data") : undefined;
-      return isRecord(data) && own(data, "on") === true;
-    } catch {
-      return false;
-    }
-  };
-
-  /**
-   * Look once in a session for an old pin entry, and say that it is ignored when it says the session
-   * was pinned: at session start when smart-router/auto is selected, else at the first idle input on
-   * it. After that one look the entry is never read again, whatever it said. Only smart-router/auto
-   * now routes where the pin would not have: smart-router/local still routes locally, and a model
-   * picked by hand was always sent as it is.
-   */
-  const tellPinEntry = (ctx: ExtensionContext): void => {
-    const record = recordOf(ctx.sessionManager.getSessionId());
-    if (record.pinEntryChecked || virtualIdOf(ctx.model) !== "auto") return;
-    record.pinEntryChecked = true;
-    if (pinnedBefore(ctx)) notify(ctx, pinEntryNotice(), "warning");
-  };
-
   /** Append a scope entry, and say whether it was recorded. */
   const recordScope = (ctx: ExtensionContext, data: ScopeEntryData, recorded: string, failed: (reason: string) => string): void => {
     let failure: string | undefined;
@@ -688,11 +651,6 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     self = { router: api, ctx, sessionId, hash: sessionHash(sessionId) };
     join(slot, self);
     const step = <T>(run: () => T): T | undefined => guarded("session_start", ctx, run);
-    // The removed pin's switch and entries keep nothing local: a session that relied on them is told so.
-    step(() => {
-      if (slot.env.on) notify(ctx, pinEnvNotice(), "warning");
-    });
-    step(() => tellPinEntry(ctx));
     step(() => carryScope(ctx));
     step(() => registerAdapter(slot));
     const state = step(refreshFiles);
@@ -1181,10 +1139,6 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         const result: InputEventResult | undefined = tagged === undefined ? undefined : tagged.text === "" ? HANDLED : { action: "transform", text: tagged.text };
         try {
           const previous = guarded("input", ctx, () => resetInput(ctx));
-          // An old pin entry is looked for at the first idle input on smart-router/auto, unless session_start looked.
-          guarded("input", ctx, () => {
-            if (ctx.isIdle()) tellPinEntry(ctx);
-          });
           if (tagged !== undefined && tagged.text === "") {
             notify(ctx, tagOnlyNotice(tagged.tier), "warning");
           } else {

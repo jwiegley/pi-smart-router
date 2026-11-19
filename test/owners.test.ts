@@ -5,10 +5,8 @@ import test, { afterEach, beforeEach, describe } from "node:test";
 import { ENV_SCOPE, SCOPE_ENTRY, SLOT_KEY } from "../src/constants.ts";
 import { scopeUnserved, stale } from "../src/errors.ts";
 import {
-  envSwitchOn,
   isLive,
   join,
-  latchEnvPin,
   latchEnvScope,
   leaveScopeHandoff,
   ownerBySignal,
@@ -75,21 +73,6 @@ describe("the process slot", () => {
   });
 });
 
-describe("the removed pin's environment switch, latched only for its notice", () => {
-  test("any non-blank value but 0, false or off turns it on; near misses fail closed", () => {
-    for (const value of ["1", "on", "yes", "true", "no", "of", "flase", " ON ", "0x"]) assert.equal(envSwitchOn(value), true, value);
-    for (const value of [undefined, "", "  ", "0", "false", "off", "OFF", " False "]) assert.equal(envSwitchOn(value), false, String(value));
-  });
-
-  test("is latched for the life of the process", () => {
-    const slot = processSlot();
-    assert.equal(latchEnvPin(slot, undefined), false);
-    assert.equal(latchEnvPin(slot, "1"), true);
-    assert.equal(latchEnvPin(slot, undefined), true, "removing the variable leaves it on");
-    assert.equal(latchEnvPin(slot, "off"), true);
-  });
-});
-
 describe("the scope switch", () => {
   test("only PI_SMART_ROUTER_SCOPE=work latches it, and it stays on for the life of the process", () => {
     const slot = processSlot();
@@ -104,7 +87,7 @@ describe("the scope switch", () => {
     assert.equal(scopeLatched(slot), true, "removing the variable leaves it on");
     latchEnvScope(slot, "personal");
     assert.equal(scopeLatched(slot), true);
-    assert.equal(slot.env.on, false, "PI_SMART_ROUTER_LOCAL_ONLY's latch is a separate one");
+    assert.equal(slot.env.on, false, "the slot's other latch, kept for its shape, is never set");
   });
 
   test("the factory latches it, and from then on every session of the process is in work scope", async (t) => {
@@ -120,7 +103,7 @@ describe("the scope switch", () => {
       // Hera's roster is version 1, which serves no work scope: auto refuses, and local routes to the LAN model.
       assert.throws(() => second.runtime.route("auto", request("direct", { previous: previous(second.runtime, KIMI) })), { message: scopeUnserved("auto", "work", 1, true).message });
       assert.equal(routed(second.runtime.route("local", request("direct"))), GLM);
-      assert.equal(processSlot().env.on, false, "the scope switch does not latch PI_SMART_ROUTER_LOCAL_ONLY's");
+      assert.equal(processSlot().env.on, false, "the scope switch sets no other latch");
     } finally {
       if (saved === undefined) delete process.env[ENV_SCOPE];
       else process.env[ENV_SCOPE] = saved;

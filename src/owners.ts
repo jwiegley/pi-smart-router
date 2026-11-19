@@ -56,9 +56,8 @@ export interface Owner {
 
 export interface EnvLatch {
   /**
-   * On for the life of the process once any instance saw PI_SMART_ROUTER_LOCAL_ONLY on. The pin it
-   * once set has been removed: it now only records that the variable was set, so that each session
-   * start says the variable is ignored (pinEnvNotice in src/errors.ts).
+   * The removed local-only pin's latch. Kept for the slot's shape (isSlot), which another version
+   * loaded in the process may check; always false, and no longer written or read.
    */
   on: boolean;
   /** Was the local policy the removed pin's switch pinned to. Kept for the slot's shape; no longer written or read. */
@@ -119,18 +118,6 @@ export function processSlot(host: object = globalThis): Slot {
     throw new Error(`globalThis[Symbol.for("${SLOT_KEY}")] holds an unknown shape; another version of pi-smart-router may be loaded`);
   }
   return existing;
-}
-
-/** Whether a PI_SMART_ROUTER_LOCAL_ONLY value turns the switch on: any non-blank value but 0, false or off. */
-export function envSwitchOn(value: string | undefined): boolean {
-  const text = (value ?? "").trim().toLowerCase();
-  return text !== "" && text !== "0" && text !== "false" && text !== "off";
-}
-
-/** Latch the environment switch, which now only says it is ignored. Once on, it stays on for the life of the process. */
-export function latchEnvPin(slot: Slot, value: string | undefined): boolean {
-  if (envSwitchOn(value)) slot.env.on = true;
-  return slot.env.on;
 }
 
 /**

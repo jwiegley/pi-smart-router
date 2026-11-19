@@ -1,21 +1,21 @@
 // The local-only pin of earlier versions is gone: smart-router/local is how a session routes
-// locally. PI_SMART_ROUTER_LOCAL_ONLY and an earlier version's pin entry are ignored, each with one
-// notice, so that nobody believes an old pin still keeps a session local, and /smart-router local
-// answers that the pin is gone. Unit tests on the fake host of test/support/pi.ts; no Pi runtime is
-// started.
+// locally. No trace of it is left (John, 2026-11-18): PI_SMART_ROUTER_LOCAL_ONLY is not read and an
+// earlier version's pin entry is not looked for, and neither produces a notice; a session file
+// that holds such an entry still loads and routes by level. /smart-router local answers that the
+// pin is gone. Unit tests on the fake host of test/support/pi.ts; no Pi runtime is started.
 import assert from "node:assert/strict";
 import test, { afterEach, beforeEach, describe } from "node:test";
 import type { TestContext } from "node:test";
 
 import type { Api, ClassifierResult, Model } from "@earendil-works/pi-ai";
 
-import { ENV_PIN, PIN_ENTRY } from "../src/constants.ts";
-import { PIN_REMOVED, pinEntryNotice, pinEnvNotice } from "../src/errors.ts";
+import { PIN_REMOVED } from "../src/errors.ts";
 import { processSlot } from "../src/owners.ts";
 import { TIERS } from "../src/tiers.ts";
 import type { Tier } from "../src/tiers.ts";
 import { CHATGPT, FakeCatalog, GLM, heraModels, KIMI, model, NOW, OPENROUTER } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
+import { ENV_PIN, PIN_ENTRY } from "./support/legacy.ts";
 import { agentDir, FakeRuntime, request, resetSlot, routed, start } from "./support/pi.ts";
 import type { Loaded, LoadOptions } from "./support/pi.ts";
 
@@ -77,11 +77,32 @@ async function withEnv(name: string, value: string, run: () => Promise<void>): P
   }
 }
 
-/** How many times the session was told `text`. */
-const told = (loaded: Loaded, text: string): number => loaded.session.notices.filter((notice) => notice.message === text).length;
+/** The notices that speak of the pin or its switch: none may be shown. */
+const pinNotices = (loaded: Loaded): string[] =>
+  loaded.session.notices.map((notice) => notice.message).filter((message) => /\bpin\b|pinned|LOCAL_ONLY/i.test(message) && message !== PIN_REMOVED);
 const failures = (loaded: Loaded): string[] => loaded.session.notices.map((notice) => notice.message).filter((message) => / handler failed: /.test(message));
 const pinEntries = (loaded: Loaded): number => loaded.session.entries.filter((entry) => entry.customType === PIN_ENTRY).length;
 const selection = (loaded: Loaded): string => `${loaded.session.model?.provider}/${loaded.session.model?.id}`;
+/** The session's reads of the old pin entry, as its bounded reader received them. */
+const pinReads = (loaded: Loaded): unknown[] =>
+  loaded.session.boundedReads.filter((read) => typeof read === "object" && read !== null && (read as { customType?: unknown }).customType === PIN_ENTRY);
+
+/** Run `body` with process.env replaced by a view that records the names read through it. */
+async function watchingEnv(body: (names: string[]) => Promise<void>): Promise<void> {
+  const saved = process.env;
+  const names: string[] = [];
+  process.env = new Proxy(saved, {
+    get(target, key, receiver) {
+      if (typeof key === "string") names.push(key);
+      return Reflect.get(target, key, receiver) as unknown;
+    },
+  });
+  try {
+    await body(names);
+  } finally {
+    process.env = saved;
+  }
+}
 
 /** An idle message, answered LOW by Jev, then its run's first request on smart-router/auto. */
 async function lowRun(loaded: Loaded, text = "rename foo to bar"): Promise<string> {
@@ -96,98 +117,56 @@ async function lowRun(loaded: Loaded, text = "rename foo to bar"): Promise<strin
 }
 
 describe("the pin of earlier versions", () => {
-  test("the environment switch is ignored, with one notice at session start", async (t) => {
-    let first: Loaded | undefined;
-    await withEnv(ENV_PIN, "1", async () => {
-      first = await hera(t, { id: "first" });
-    });
-    assert.ok(first !== undefined);
-    assert.equal(processSlot().env.on, true, "the switch is latched for the life of the process, as before");
-    assert.equal(told(first, pinEnvNotice()), 1, "the session is told once, at its start, that the switch keeps nothing local");
-    assert.equal(await lowRun(first), LUNA, "smart-router/auto routes a LOW run to the low level's Codex model, not to a local one");
-    assert.equal(await lowRun(first, "and the tests"), LUNA, "and so does the next run");
-    assert.equal(told(first, pinEnvNotice()), 1, "the prompts say nothing more");
-    assert.equal(first.session.statuses.has("smart-router"), false, "no status item is shown for the switch");
-    // The variable is gone from the environment, but the latch holds for a second session of the process.
-    const second = await hera(t, { id: "second", runtime: heraRuntime() });
-    assert.equal(told(second, pinEnvNotice()), 1, "a second session_start in the process says it again, for that session");
-    assert.equal(told(first, pinEnvNotice()), 1, "and only for that session");
-    assert.equal(await lowRun(second), LUNA, "the second session routes by level too");
-    assert.deepEqual([failures(first), failures(second)], [[], []], "no handler failed");
-  });
-
-  test("an environment switch that is off says nothing", async (t) => {
-    for (const value of ["", "0", "off", "false"]) {
+  test("PI_SMART_ROUTER_LOCAL_ONLY is not read and shows nothing", async (t) => {
+    for (const value of ["1", "on", "", "0", "off"]) {
       resetSlot();
       await withEnv(ENV_PIN, value, async () => {
-        const loaded = await hera(t, { id: `env-${value}` });
-        assert.equal(told(loaded, pinEnvNotice()), 0, JSON.stringify(value));
+        await watchingEnv(async (names) => {
+          const loaded = await hera(t, { id: `env-${value}` });
+          assert.ok(loaded.router !== undefined, `${JSON.stringify(value)}: the router was built`);
+          assert.ok(!names.includes(ENV_PIN), `${JSON.stringify(value)}: nothing reads ${ENV_PIN}: ${JSON.stringify(names)}`);
+          assert.deepEqual(pinNotices(loaded), [], `${JSON.stringify(value)}: nothing is shown for it`);
+          assert.equal(processSlot().env.on, false, `${JSON.stringify(value)}: nothing is latched for it`);
+          assert.equal(await lowRun(loaded), LUNA, `${JSON.stringify(value)}: smart-router/auto routes a LOW run to the low level's Codex model, not to a local one`);
+          assert.equal(loaded.session.statuses.has("smart-router"), false, `${JSON.stringify(value)}: no status item is shown for it`);
+          assert.deepEqual(failures(loaded), [], `${JSON.stringify(value)}: no handler failed`);
+        });
       });
     }
   });
 
-  test("an old pin entry is ignored, with one notice", async (t) => {
+  test("an old pin entry is not looked for, shows nothing, and does not break the session", async (t) => {
     for (const [name, data] of [
       ["the entry /smart-router local on wrote", OLD_PIN],
       ["a pin entry of another shape", OTHER_PIN],
-    ] as const) {
-      resetSlot();
-      const loaded = await hera(t, { id: name, setup: (session) => session.appendCustom(PIN_ENTRY, data) });
-      assert.equal(told(loaded, pinEntryNotice()), 1, `${name}: one notice at session start`);
-      assert.equal(await lowRun(loaded), LUNA, `${name}: smart-router/auto routes by level, not to the local models`);
-      assert.equal(await lowRun(loaded, "and the tests"), LUNA, `${name}: and so does the next run`);
-      assert.equal(told(loaded, pinEntryNotice()), 1, `${name}: a second prompt says nothing more`);
-      assert.equal(pinEntries(loaded), 1, `${name}: nothing is written over the old entry`);
-      assert.deepEqual(failures(loaded), [], `${name}: no handler failed`);
-    }
-  });
-
-  test("an old pin entry on another selection says nothing until smart-router/auto takes an idle message", async (t) => {
-    const loaded = await hera(t, { select: "local", setup: (session) => session.appendCustom(PIN_ENTRY, OLD_PIN) });
-    assert.equal(told(loaded, pinEntryNotice()), 0, "smart-router/local routes locally, so the old pin misleads nobody there");
-    assert.deepEqual(await loaded.host.emit("input", { text: "go ahead", source: "interactive" }), [undefined]);
-    assert.equal(told(loaded, pinEntryNotice()), 0, "not at an input on smart-router/local either");
-    await loaded.host.choose(KIMI);
-    await loaded.host.emit("input", { text: "go ahead", source: "interactive" });
-    assert.equal(told(loaded, pinEntryNotice()), 0, "nor on a model picked by hand");
-    await loaded.host.choose("smart-router/auto");
-    assert.equal(told(loaded, pinEntryNotice()), 0, "a selection alone says nothing");
-    assert.equal(await lowRun(loaded), LUNA, "the first idle message on smart-router/auto routes by level");
-    assert.equal(told(loaded, pinEntryNotice()), 1, "and is told once");
-    await lowRun(loaded, "and the tests");
-    assert.equal(told(loaded, pinEntryNotice()), 1, "and only once");
-  });
-
-  test("an entry that says the session was unpinned says nothing", async (t) => {
-    const loaded = await hera(t, { setup: (session) => session.appendCustom(PIN_ENTRY, OLD_UNPIN) });
-    assert.equal(await lowRun(loaded), LUNA);
-    assert.deepEqual([told(loaded, pinEntryNotice()), told(loaded, pinEnvNotice())], [0, 0]);
-    // The latest entry is the one read: an unpin after a pin says nothing either.
-    const unpinned = await hera(t, {
-      id: "pin-then-unpin",
-      setup: (session) => {
-        session.appendCustom(PIN_ENTRY, OLD_PIN);
-        session.appendCustom(PIN_ENTRY, OLD_UNPIN);
-      },
-    });
-    assert.equal(await lowRun(unpinned), LUNA);
-    assert.equal(told(unpinned, pinEntryNotice()), 0);
-  });
-
-  test("a malformed pin entry is ignored without a notice and without failing", async (t) => {
-    for (const [name, data] of [
+      ["the entry /smart-router local off wrote", OLD_UNPIN],
       ["a number", 7],
       ["an on that is not a boolean", { on: "yes" }],
       ["null", null],
     ] as const) {
       resetSlot();
       const loaded = await hera(t, { id: name, setup: (session) => session.appendCustom(PIN_ENTRY, data) });
-      assert.equal(await lowRun(loaded), LUNA, `${name}: smart-router/auto routes by level`);
-      assert.deepEqual([told(loaded, pinEntryNotice()), failures(loaded)], [0, []], `${name}: no notice, and no handler failed`);
+      assert.equal(await lowRun(loaded), LUNA, `${name}: smart-router/auto routes by level, not to the local models`);
+      assert.equal(await lowRun(loaded, "and the tests"), LUNA, `${name}: and so does the next run`);
+      assert.deepEqual(pinReads(loaded), [], `${name}: the entry is never read`);
+      assert.deepEqual(pinNotices(loaded), [], `${name}: nothing is shown for it`);
+      assert.equal(pinEntries(loaded), 1, `${name}: nothing is written over the old entry`);
+      assert.deepEqual(failures(loaded), [], `${name}: no handler failed`);
     }
   });
 
-  test("a session whose pin entry cannot be read routes by level without a notice", async (t) => {
+  test("an old pin entry on another selection is not looked for when smart-router/auto takes an idle message either", async (t) => {
+    const loaded = await hera(t, { select: "local", setup: (session) => session.appendCustom(PIN_ENTRY, OLD_PIN) });
+    assert.deepEqual(await loaded.host.emit("input", { text: "go ahead", source: "interactive" }), [undefined]);
+    await loaded.host.choose(KIMI);
+    await loaded.host.emit("input", { text: "go ahead", source: "interactive" });
+    await loaded.host.choose("smart-router/auto");
+    assert.equal(await lowRun(loaded), LUNA, "the first idle message on smart-router/auto routes by level");
+    await lowRun(loaded, "and the tests");
+    assert.deepEqual([pinReads(loaded), pinNotices(loaded)], [[], []], "nothing is read and nothing is shown, at any selection");
+  });
+
+  test("a session whose pin entry would throw on reading routes by level: it is never read", async (t) => {
     const loaded = await hera(t, { select: "local", setup: (session) => session.appendCustom(PIN_ENTRY, OLD_PIN) });
     const manager = loaded.session.ctx.sessionManager as unknown as Record<string, unknown>;
     const read = manager.getLatestCustomEntry as (type: string, options?: object) => unknown;
@@ -196,48 +175,14 @@ describe("the pin of earlier versions", () => {
       return read(type, options);
     };
     await loaded.host.choose("smart-router/auto");
-    assert.equal(await lowRun(loaded), LUNA, "a read that throws stops nothing");
-    assert.deepEqual([told(loaded, pinEntryNotice()), failures(loaded)], [0, []]);
-  });
-});
-
-describe("reading an old pin entry", () => {
-  /** The session's reads of the old pin entry, as its bounded reader received them. */
-  const pinReads = (loaded: Loaded): unknown[] =>
-    loaded.session.boundedReads.filter((read) => typeof read === "object" && read !== null && (read as { customType?: unknown }).customType === PIN_ENTRY);
-  const SESSION_WIDE = { customType: PIN_ENTRY, scope: "all" };
-
-  test("reads it session-wide: a pinned session moved to a branch without the entry is still told, once", async (t) => {
-    const loaded = await hera(t, {
-      setup: (session) => {
-        session.appendCustom(PIN_ENTRY, OLD_PIN);
-        // /tree to a point before the pin entry: the branch no longer holds it, the session does.
-        session.leaveBranch();
-      },
-    });
-    assert.equal(told(loaded, pinEntryNotice()), 1, "the pin was session-wide, so a branch without its entry is told too");
-    assert.equal(await lowRun(loaded), LUNA, "and smart-router/auto routes it by level");
-    assert.equal(told(loaded, pinEntryNotice()), 1, "once");
+    assert.equal(await lowRun(loaded), LUNA, "a read that would throw is never made");
+    assert.deepEqual([pinNotices(loaded), failures(loaded)], [[], []]);
   });
 
-  test("checks once per session: a session without an entry reads it exactly once across three prompts on smart-router/auto", async (t) => {
+  test("a session without an entry makes no read of it across three prompts on smart-router/auto", async (t) => {
     const loaded = await hera(t);
     for (const text of ["rename foo to bar", "and the tests", "and the docs"]) assert.equal(await lowRun(loaded, text), LUNA, text);
-    assert.deepEqual(pinReads(loaded), [SESSION_WIDE], "one session-wide read, at session start, and none at the prompts");
-    assert.equal(told(loaded, pinEntryNotice()), 0, "and nothing is said");
-  });
-
-  test("a session started on another selection is checked at its first idle input on smart-router/auto, and then never again", async (t) => {
-    const loaded = await hera(t, { select: "local", setup: (session) => session.appendCustom(PIN_ENTRY, OLD_PIN) });
-    assert.deepEqual(await loaded.host.emit("input", { text: "go ahead", source: "interactive" }), [undefined]);
-    assert.deepEqual(pinReads(loaded), [], "nothing is read at start or at an input on smart-router/local");
-    await loaded.host.choose("smart-router/auto");
-    assert.deepEqual(pinReads(loaded), [], "nor at the selection itself");
-    assert.equal(await lowRun(loaded), LUNA, "the first idle input on smart-router/auto routes by level");
-    assert.deepEqual([pinReads(loaded), told(loaded, pinEntryNotice())], [[SESSION_WIDE], 1], "it reads the entry session-wide once, and says so once");
-    await lowRun(loaded, "and the tests");
-    await lowRun(loaded, "and the docs");
-    assert.deepEqual([pinReads(loaded).length, told(loaded, pinEntryNotice())], [1, 1], "the later prompts read and say nothing more");
+    assert.deepEqual(pinReads(loaded), [], "no read at session start, and none at the prompts");
   });
 });
 

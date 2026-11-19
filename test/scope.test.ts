@@ -6,7 +6,7 @@ import test, { afterEach, beforeEach, describe } from "node:test";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import type { Api, Model } from "@earendil-works/pi-ai";
 
-import { ENV_SCOPE, LEVEL_ENTRY, LEVEL_KEY, PIN_ENTRY, SCOPE_ENTRY } from "../src/constants.ts";
+import { ENV_SCOPE, LEVEL_ENTRY, LEVEL_KEY, SCOPE_ENTRY } from "../src/constants.ts";
 import { directoryFailedNotice, directoryNotice, scopeCarriedNotice, scopeCarryFailedNotice, scopeUnreadable, scopeUnserved } from "../src/errors.ts";
 import { processSlot, scopeLatched } from "../src/owners.ts";
 import { createRouter } from "../src/router.ts";
@@ -14,6 +14,7 @@ import { parseScopeEntry, readScope, scopeEntry, underDirectory, workDirectoryOf
 import type { ScopeEntryData, ScopeState, WorkDirectories } from "../src/scope.ts";
 import { CHATGPT, DEEPSEEK, FakeCatalog, GLM, heraModels, KIMI, model, NOW, SOL } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
+import { PIN_ENTRY } from "./support/legacy.ts";
 import { agentDir, assistant, FakeRuntime, load, request, resetSlot, routed, start } from "./support/pi.ts";
 import type { FakeSession, Loaded, LoadOptions } from "./support/pi.ts";
 

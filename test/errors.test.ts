@@ -15,8 +15,6 @@ import {
   looksRetryable,
   noBoundedHistory,
   PIN_REMOVED,
-  pinEntryNotice,
-  pinEnvNotice,
   refusal,
   RouterError,
   rosterNotice,
@@ -202,17 +200,7 @@ describe("notices and helpers", () => {
     }
   });
 
-  test("the removed pin's notices and the answer to /smart-router local say that it is gone, and how to route locally", () => {
-    assert.equal(
-      pinEnvNotice(),
-      "pi-smart-router: PI_SMART_ROUTER_LOCAL_ONLY is set, but the local-only pin has been removed and keeps nothing local. Select smart-router/local to route locally.",
-      "the environment switch's notice",
-    );
-    assert.equal(
-      pinEntryNotice(),
-      "pi-smart-router: an earlier version pinned this session to local models. The pin has been removed and is ignored: smart-router/auto routes by level here. Select smart-router/local to route locally.",
-      "an old pin entry's notice",
-    );
+  test("the answer to /smart-router local says that the pin is gone, and how to route locally", () => {
     assert.equal(PIN_REMOVED, "The local-only pin has been removed. To route locally, select the local model: /model smart-router/local", "the answer to /smart-router local");
     assert.doesNotMatch(historyNotice(), /pin/, "a Pi without bounded history is told nothing of a pin");
   });

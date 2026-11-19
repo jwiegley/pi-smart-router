@@ -77,7 +77,8 @@ import type {
   SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 
-import { ENV_PIN, ENV_SCOPE, ROUTING_REGISTRY_KEY, SLOT_KEY } from "../../src/constants.ts";
+import { ENV_SCOPE, ROUTING_REGISTRY_KEY, SLOT_KEY } from "../../src/constants.ts";
+import { ENV_PIN } from "./legacy.ts";
 import { ensureRoutingRegistry, resolveActiveRoute } from "./co.ts";
 import type { Snapshot } from "./co.ts";
 
