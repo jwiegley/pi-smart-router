@@ -11,7 +11,7 @@ import type { TestContext } from "node:test";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import type { Api, Model } from "@earendil-works/pi-ai";
 
-import { LEVEL_ENTRY, LEVEL_KEY, SCOPE_ENTRY } from "../src/constants.ts";
+import { LEVEL_ENTRY, SCOPE_ENTRY } from "../src/constants.ts";
 import { eligibleRole, pickInRole, planUserTurn } from "../src/decide.ts";
 import type { CompactionFigures, Decision, LastResponder, LevelInput, Plan } from "../src/decide.ts";
 import { policyFromRoster } from "../src/local.ts";
@@ -24,7 +24,7 @@ import { TIERS } from "../src/tiers.ts";
 import type { Tier } from "../src/tiers.ts";
 import { ASTRA, CHATGPT, FakeCatalog, GLM, HERA_LABELS, HERA_LAN, model, NOW, rosterFixtureV2, SOL, WORK_SOL } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
-import { agentDir, assistant, failure, FakeRuntime, previous, request, resetSlot, routed, start } from "./support/pi.ts";
+import { agentDir, assistant, failure, FakeRuntime, footerOf, plannedWords, previous, request, resetSlot, routed, start } from "./support/pi.ts";
 import type { FakeSession, Loaded } from "./support/pi.ts";
 
 const TEXT = fixture("roster-hera-v2-fallback.json");
@@ -539,8 +539,8 @@ describe("a run through the router with a fallback chain", () => {
     runtime.route("auto", request("user", { signal }));
     assert.equal(routed(runtime.route("auto", request("retry", { signal, failed: failure(runtime, LUNA, LIMIT) }))), OR_GLM);
     await loaded.host.emit("message_end", { message: assistant(OR_GLM) });
-    // The footer names the model that answered, and that it is a fallback, though the plan was luna.
-    assert.equal(loaded.session.statuses.get(LEVEL_KEY), "personal LOW → z-ai/glm-5.3-flash (tag; fallback)");
+    // The footer names the model the retry went to, though the plan was luna.
+    assert.equal(footerOf(loaded), "low high → z-ai/glm-5.3-flash");
     await loaded.host.emit("agent_settled", { aborted: false });
     loaded.session.endRun();
 
@@ -551,7 +551,8 @@ describe("a run through the router with a fallback chain", () => {
     assert.deepEqual(loaded.session.notices.slice(before), [
       { type: "info", message: "pi-smart-router: no LOW model can take this run, so it goes to the fallback openrouter (z-ai/glm-5.3-flash)." },
     ]);
-    assert.equal(loaded.session.statuses.get(LEVEL_KEY), "personal LOW → z-ai/glm-5.3-flash (tag; fallback)");
+    assert.equal(footerOf(loaded), "low → z-ai/glm-5.3-flash", "the plan's footer: the level and the chain model it picked");
+    assert.equal(plannedWords(loaded), "personal LOW → z-ai/glm-5.3-flash (tag; fallback)", "history says the pick is a fallback");
     assert.deepEqual([routed(runtime.route("auto", request("user", { signal }))), lastHistory(loaded)?.code], [OR_GLM, "fallback:low→openrouter"]);
     await finish(loaded, OR_GLM);
 
@@ -564,7 +565,8 @@ describe("a run through the router with a fallback chain", () => {
     state.clock = NOW + 31 * MINUTE;
     signal = await prompt(loaded, "rename baz to qux #low");
     assert.deepEqual([routed(runtime.route("auto", request("user", { signal }))), lastHistory(loaded)?.code], [LUNA, "tag"]);
-    assert.equal(loaded.session.statuses.get(LEVEL_KEY), "personal LOW → gpt-6-luna (tag)");
+    assert.equal(footerOf(loaded), "low high → gpt-6-luna");
+    assert.equal(plannedWords(loaded), "personal LOW → gpt-6-luna (tag)");
     await finish(loaded, LUNA);
     const [first, second, third, fourth] = records(loaded);
     // The first run moved to the chain on its retry, the second was planned onto it.
@@ -679,8 +681,9 @@ describe("a run through the router with a fallback chain", () => {
     state.clock = NOW + MINUTE;
     signal = await prompt(loaded, "Format this file");
     // The limit cooled the whole openai-codex-2 account, luna too, so LOW goes to the chain.
+    assert.equal(footerOf(loaded), "low → z-ai/glm-5.3-flash");
     assert.equal(
-      loaded.session.statuses.get(LEVEL_KEY),
+      plannedWords(loaded),
       "personal LOW → z-ai/glm-5.3-flash (demand 0.6, jev unavailable; fallback)",
       "nothing holds a session by time: without Jev the heuristics alone rate a trivial prompt LOW, 0.59 with the last response's 1,000 tokens",
     );

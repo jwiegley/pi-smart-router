@@ -33,10 +33,11 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 import { install } from "../../index.ts";
-import { PROVIDER, ROUTING_REGISTRY_KEY, SLOT_KEY } from "../../src/constants.ts";
+import { LEVEL_KEY, PROVIDER, ROUTING_REGISTRY_KEY, SLOT_KEY } from "../../src/constants.ts";
 import type { VirtualId } from "../../src/constants.ts";
 import { isRecord } from "../../src/files.ts";
 import type { ClassifierRegistry } from "../../src/jev.ts";
+import { levelText } from "../../src/records.ts";
 import { refOf } from "../../src/resolve.ts";
 import { createRouter } from "../../src/router.ts";
 import type { Router, RouterOptions } from "../../src/router.ts";
@@ -600,3 +601,18 @@ export function failure(runtime: FakeRuntime, ref: string, errorMessage: string,
 }
 
 export const routed = (route: ModelRoute): string => refOf(route.model);
+
+/** The footer's one item of a loaded session: its run's level, the effort of its latest request, and the model. */
+export const footerOf = (loaded: Loaded): string | undefined => loaded.session.statuses.get(LEVEL_KEY);
+
+/**
+ * What /smart-router history says (levelText) of the level the session's latest message planned,
+ * until its run settles, on the model the footer names: the scope, the level the run needs, what
+ * decided it and what the cost rule compared, none of which the footer shows.
+ */
+export function plannedWords(loaded: Loaded): string {
+  const level = loaded.router?.record(loaded.session.id)?.pendingLevel?.level;
+  const [, modelId] = /→ (.+)$/.exec(footerOf(loaded) ?? "") ?? [];
+  assert.ok(level !== undefined && modelId !== undefined, `a message planned a level, and the footer names its model: ${footerOf(loaded)}`);
+  return levelText(level, modelId);
+}

@@ -11,13 +11,13 @@ import type { TestContext } from "node:test";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 
-import { LEVEL_ENTRY, LEVEL_KEY, SCOPE_ENTRY } from "../src/constants.ts";
+import { LEVEL_ENTRY, SCOPE_ENTRY } from "../src/constants.ts";
 import { scopeEntry } from "../src/scope.ts";
 import { TIERS } from "../src/tiers.ts";
 import type { Tier } from "../src/tiers.ts";
 import { ASTRA, CHATGPT, FakeCatalog, GLM, HERA_LAN, KIMI, model, NOW, SOL, WORK_SOL } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
-import { agentDir, assistant, FakeRuntime, request, resetSlot, routed, start } from "./support/pi.ts";
+import { agentDir, assistant, FakeRuntime, footerOf, plannedWords, request, resetSlot, routed, start } from "./support/pi.ts";
 import type { FakeSession, Loaded } from "./support/pi.ts";
 
 const TEXT = fixture("roster-hera-v2-fallback.json");
@@ -127,7 +127,8 @@ describe("a real usage limit: the run ends, the notice says what to do, and the 
     signal = await prompt(loaded, "rename foo to bar #low");
     assert.deepEqual([routed(runtime.route("auto", request("user", { signal }))), lastCode(loaded)], [OR_GLM, "fallback:low→openrouter"]);
     await loaded.host.emit("message_end", { message: assistant(OR_GLM) });
-    assert.equal(loaded.session.statuses.get(LEVEL_KEY), "personal LOW → z-ai/glm-5.3-flash (tag; fallback)");
+    assert.equal(footerOf(loaded), "low high → z-ai/glm-5.3-flash", "the footer names the chain's model under the level the prompt needs");
+    assert.equal(plannedWords(loaded), "personal LOW → z-ai/glm-5.3-flash (tag; fallback)", "and history says it is a fallback");
     await answers(loaded, OR_GLM);
 
     // The account cools for the 42 minutes its error named, so that one failed run is the whole

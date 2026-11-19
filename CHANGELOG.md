@@ -9,6 +9,20 @@ fork's releases on that base. Releases are signed tags; nothing is published to 
 
 ### Changed
 
+- **The footer is one short item**, `super high → gpt-6.2-astra`: the level the run needs, the
+  thinking effort its latest request carried, and the model that request went to. John asked for
+  this on 2026-11-19: "Just the model tier, the thinking level, and which model it's actually
+  using." It replaces the two items of 1.4.0-jw.5, `thinking high (SUPER)` under
+  `smart-router-effort` and `personal SUPER → gpt-6.2-astra (tag)` under `smart-router-level`. The
+  one item keeps the key `smart-router-level`, and `smart-router-effort` is no longer set.
+  - The footer no longer says the scope, what decided the level, what the cost rule compared, why
+    the effort was sent, or the `fallback` and `escalated` marks. `/smart-router history` and
+    `/smart-router status` say them, as before.
+  - It follows every request the router routes, so a retry's model shows when the retry is sent
+    and not when it answers.
+  - A planned prompt shows `super → gpt-6.2-astra` until its first request is sent. A run without
+    a level, as on `smart-router/local` or under a version 1 roster, shows its effort and model,
+    `max → GLM-5.3-Flash-oQ4e-mtp`, where 1.4.0-jw.5 showed the effort item alone.
 - **The README is upstream's again**, as it stands at v1.4.0 (`54bee53d`), with one added section,
   "This fork", that says how the fork differs: what it keeps of upstream, a table of the
   differences, how to install it, one example roster and its commands. John asked for this on

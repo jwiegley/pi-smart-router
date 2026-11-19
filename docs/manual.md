@@ -481,8 +481,9 @@ How the chain works:
 - **It says so.** A run planned onto a chain model shows a notice, "no LOW model can take this
   run, so it goes to the fallback openrouter (z-ai/glm-5.3-flash)"; a run under way that moves
   onto one says "gpt-6-astra can no longer take this run, so it goes on with the fallback
-  openrouter (z-ai/glm-5.3-flash)"; and the footer marks it:
-  `personal LOW → z-ai/glm-5.3-flash (demand 0.6, jev unavailable; fallback)`.
+  openrouter (z-ai/glm-5.3-flash)"; the footer names the chain's model, as in
+  `low high → z-ai/glm-5.3-flash`; and `/smart-router history` marks a run planned onto one:
+  `[personal LOW → z-ai/glm-5.3-flash (demand 0.6, jev unavailable; fallback)]`.
   `/smart-router status` lists each scope's chain with every model's verdict, and says when the
   last request went to one.
 
@@ -906,8 +907,8 @@ demand = (4 · c · Jev's term + 1 · the heuristics' term) / (4 · c + 1)
 
 4 and 1 are `demand.jevWeight` and `demand.heuristicsWeight`. A fully confident Jev carries four
 fifths of the result, an unsure one less, and without an answer from Jev the heuristics decide
-alone: when the roster has no classifier, when Jev fails (its failure then shows in the footer, as
-`jev timeout`, for example), and when the router cannot read the conversation, in which case Jev
+alone: when the roster has no classifier, when Jev fails (its failure then shows in
+`/smart-router history`, as `jev timeout`, for example), and when the router cannot read the conversation, in which case Jev
 is not asked at all and its outcome is the failure `error`.
 
 **The guards**, in the order they apply:
@@ -973,11 +974,11 @@ shows the model's provider reporting cache writes.
 
 **The choice.** The cheapest candidate takes the run, the lower level on a tie. The current model
 keeps it unless another is cheaper by more than `switching.margin`, 15% of the current model's
-cost, so two costs that look equal in the footer are a stay inside the margin. When the model
+cost, so two costs that look equal in `/smart-router history` are a stay inside the margin. When the model
 that answered last is no candidate (it is below the needed level, or is not a level's first
 available model, as a chain model is not), the run moves at once to the cheapest adequate model.
 That is usually the needed level's own, but a stronger model whose cache is warm can cost less than
-a cold one, and the footer then says `chose`.
+a cold one, and history then says `chose`.
 
 **Worked examples.** A 150,000-token conversation, all of it cached on astra, whose last answer was
 30 seconds ago; 1,000 output tokens per request; no growth; 60 seconds per run; a 0.5 chance that
@@ -1033,8 +1034,8 @@ first, the summary written by the model that answered last. With compaction disa
 the request as it is, so there a candidate too small for the conversation is passed over, and a
 needed level whose first available model is too small passes the run up.
 
-**When the cost is unknown,** the run takes the needed level's own model, the footer says
-`cost unknown`, and `/smart-router status` says why: `no usage yet`, `no price` or
+**When the cost is unknown,** the run takes the needed level's own model, `/smart-router history`
+says `cost unknown`, and `/smart-router status` says why: `no usage yet`, `no price` or
 `the clock went backwards`. It is unknown when:
 
 - the session has no usage yet: no answer on the branch, or an answer without usage or of 0 tokens,
@@ -1089,9 +1090,10 @@ the next run without a prompt starts from them again.
 
 The run goes through the same choice a prompt's run makes, priced with nothing added for a prompt,
 and counts, for the horizon and for the chance a level is needed again, as a prompt that needed
-its level. Jev is not asked, and the run writes no level record. Its footer says `run` where a
-prompt's says its demand, and `run, floor` when the floor raised the level:
-`personal MEDIUM → gpt-6.1-terra (run, floor; cost unknown)`.
+its level. Jev is not asked, and the run writes no level record. Its footer names that level, raised
+to the floor where the floor raised it, as a prompt's run does: `medium low → gpt-6.1-terra`.
+`/smart-router status` says where the level came from
+([The footer and status](#the-footer-and-status)).
 
 All of this is `smart-router/auto` under a version 2 roster. Under version 1, on
 `smart-router/local`, and in a session that has planned no run yet, a run without a prompt stays
@@ -1117,8 +1119,9 @@ extension's own message as a user message, so a run an extension starts is bound
   again from the level it needs.
 - **It says so,** once, where it happens: "pi-smart-router: this run's last three tool calls
   failed, so it moves up from MEDIUM to HIGH (gpt-6.1-sol)." The notice names levels and a model,
-  never a tool's output. The footer says `escalated` in place of the cost, and the run's record
-  carries `escalated: true`.
+  never a tool's output. The footer follows the run to the model it moved to, still under the
+  level its prompt needs, as in `medium high → gpt-6.1-sol`, and the run's record carries
+  `escalated: true`.
 
 ### Thinking effort
 
@@ -1156,17 +1159,17 @@ in any case and inside a longer word, is a *planning* turn; anything else is an 
   choice prices each candidate at the effort its run's first request would be sent, so that
   request carries the effort its price assumed; a later change of effort within the run is not
   priced.
-- **The footer** shows the effort the latest request carried, and why, under a key of its own,
-  `smart-router-effort`: `thinking minimal (after a tool result)`,
-  `thinking low (an ordinary turn)`, `thinking medium (planning)`, `thinking high (SUPER)`, `thinking high (a stuck run)`,
-  `thinking max (as selected, never lowered)`, `thinking medium (raised from the selected level for
-  planning)`, `thinking max (the role's own level)`, or `(the roster's floor)` and `(the roster's
+- **The footer** shows the effort the latest request carried, between the run's level and its
+  model: `medium minimal → gpt-6.1-terra` ([The footer and status](#the-footer-and-status)).
+  `/smart-router status` says why, on its line `Thinking sent on the latest request`:
+  `minimal (after a tool result)`, `low (an ordinary turn)`, `medium (planning)`, `high (SUPER)`,
+  `high (a stuck run)`, `max (as selected, never lowered)`, `medium (raised from the selected level
+  for planning)`, `max (the role's own level)`, or `(the roster's floor)` and `(the roster's
   ceiling)`, `(as selected)` where the rule leaves the level, as for a model that does not
   reason, and `(as selected; adaptive effort is off)`. Both name the level the router returned;
   Pi then clamps it to what the model supports, so a model that does not reason is sent none and
-  a ChatGPT-account model shown `minimal` is sent `low`. `/smart-router status` says the same on
-  its line `Thinking sent on the latest request`. A model picked by hand is never routed: status
-  shows nothing for it at once, and the footer from the next run's start.
+  a ChatGPT-account model shown `minimal` is sent `low`. A model picked by hand is never routed:
+  status shows nothing for it at once, and the footer from the next run's start.
 
 What upstream does that the router does not: it adds a line asking for brevity to the system
 prompt of a verbose model at `minimal` or `low`, which a route cannot do; it keeps the session's
@@ -1184,38 +1187,48 @@ level, from its tag or its demand, and Jev is not asked again.
 
 ### The footer and status
 
-The thinking effort of each request has an item of its own, `smart-router-effort`
-([Thinking effort](#thinking-effort)).
-
-**The footer** shows each run under a status key of its own, `smart-router-level`: its scope, the
-level it needs, the model that took it, and in brackets what decided. The level is the one needed,
-so `personal MEDIUM → gpt-6-astra` is a MEDIUM prompt that stayed on astra.
+**The footer** has one item, under the status key `smart-router-level`: the level the run needs,
+the thinking effort its latest request carried, and the model that request went to (John,
+2026-11-19: "Just the model tier, the thinking level, and which model it's actually using").
 
 | Footer | Meaning |
 |---|---|
-| `personal SUPER → gpt-6-astra (tag)` | A tag set the level; nothing was priced. |
-| `personal MEDIUM → gpt-6.1-terra (demand 1.3; moved, $0.63 vs $2.00)` | The demand, to one decimal; the run moved, and the cost on the model it moved to is compared with the cost of staying. |
-| `personal MEDIUM → gpt-6-astra (demand 1.2; stayed, $0.10 vs $0.16)` | The run stayed: the cost of staying against the cheapest other candidate. |
-| `personal HIGH → gpt-6-astra (demand 1.8; chose, $0.14 vs $0.31)` | No current model was a candidate, and a stronger, warm model cost less than the needed level's own: the chosen model's cost against that one's. |
-| `personal MEDIUM → gpt-6.1-terra (demand 1.0; cost unknown)` | A figure was missing, so the needed level's own model took the run. |
-| `personal LOW → gpt-6.1-terra (demand 0.4)` | Nothing to compare: the run stepped up or went to the chain, or took the needed level's own model with no current model among the candidates, or stayed with no other candidate. |
-| `personal MEDIUM → gpt-6.1-terra (run; moved, $0.23 vs $0.33)` | A run without a prompt, at the highest level of the last three prompts, or the level its session last needed when none is known; also `(run; cost unknown)`, and `(run)` when nothing was compared. `run, floor`, as in `(run, floor; cost unknown)`, when the deep-session floor raised that level. |
-| `personal MEDIUM → gpt-6.1-sol (demand 1.0; escalated)` | A stuck run moved up a level; `escalated` replaces the cost, as in `(run; escalated)`. |
+| `super high → gpt-6.2-astra` | A SUPER run, whose latest request was sent at `high`, on astra. |
+| `medium high → gpt-6.2-astra` | The level is the one the prompt needs, so this is a MEDIUM prompt that stayed on astra; at `/thinking medium` a turn on SUPER's model is sent `high`. |
+| `medium minimal → gpt-6.1-terra` | The effort follows each request: here the request after a tool result ([Thinking effort](#thinking-effort)). |
+| `medium high → gpt-6.1-sol` | The model follows each request too: a stuck MEDIUM run that moved up to sol, or a retry that went to another model. |
+| `low → gpt-6-luna` | A prompt that has been planned and whose first request has not been sent: its level and the model picked. |
+| `max → GLM-5.3-Flash-oQ4e-mtp` | A run without a level, as on `smart-router/local`, under a version 1 roster, and before a session has planned a run: the effort and the model. |
+
+It shows nothing for a model picked by hand, which is never routed, and it does not say which scope
+the session is in, what decided the level, what the cost rule compared, why the effort was sent, or
+whether the model is one of a fallback chain. `/smart-router history` and `/smart-router status`
+say those.
+
+**`/smart-router history`** shows each planned run in brackets, on the run's first request: its
+scope, the level the run needs, the model that took it after the arrow, and what decided.
+
+| History | Meaning |
+|---|---|
+| `[personal SUPER → gpt-6-astra (tag)]` | A tag set the level; nothing was priced. |
+| `[personal MEDIUM → gpt-6.1-terra (demand 1.3; moved, $0.63 vs $2.00)]` | The demand, to one decimal; the run moved, and the cost on the model it moved to is compared with the cost of staying. |
+| `[personal MEDIUM → gpt-6-astra (demand 1.2; stayed, $0.10 vs $0.16)]` | The run stayed: the cost of staying against the cheapest other candidate. |
+| `[personal HIGH → gpt-6-astra (demand 1.8; chose, $0.14 vs $0.31)]` | No current model was a candidate, and a stronger, warm model cost less than the needed level's own: the chosen model's cost against that one's. |
+| `[personal MEDIUM → gpt-6.1-terra (demand 1.0; cost unknown)]` | A figure was missing, so the needed level's own model took the run. |
+| `[personal LOW → gpt-6.1-terra (demand 0.4)]` | Nothing to compare: the run stepped up or went to the chain, or took the needed level's own model with no current model among the candidates, or stayed with no other candidate. |
 
 Two marks can follow the demand, and one closes the brackets:
 
 - **`, jev <failure>`** when Jev was asked and gave no answer, so the heuristics decided:
-  `personal MEDIUM → gpt-6.1-terra (demand 0.9, jev timeout; cost unknown)`. The failures are
+  `[personal MEDIUM → gpt-6.1-terra (demand 0.9, jev timeout; cost unknown)]`. The failures are
   `unavailable`, `error`, `timeout`, `aborted`, `malformed` and `prompt` ([Jev](#jev)).
 - **`, floor`** when a risky operation or a deep session raised the level: the demand shown is the
-  one before the floor, as in `personal HIGH → gpt-6.1-sol (demand 0.7, floor; cost unknown)`.
-- **`; fallback`**, last, when the model is one of the scope's fallback chain:
-  `personal LOW → z-ai/glm-5.3-flash (tag; fallback)`.
+  one before the floor, as in `[personal HIGH → gpt-6.1-sol (demand 0.7, floor; cost unknown)]`.
+- **`; fallback`**, last, when the model the plan picked is one of the scope's fallback chain:
+  `[personal LOW → z-ai/glm-5.3-flash (tag; fallback)]`.
 
-`/smart-router history` shows each planned run in the footer's form, on the run's first request: the
-level the run needs, and the model that took it after the arrow, as
-`[personal HIGH → gpt-6.1-sol (demand 1.6; cost unknown)]`. It has no `; escalated` mark: the
-escalation is an entry of its own, with the code `escalate`.
+A run without a prompt plans nothing, so history shows no brackets for it: its request has the
+code `run:need`. A stuck run's move is an entry of its own, with the code `escalate`.
 
 **`/smart-router status`** shows the terms of the run the last decision belongs to, a run without a
 prompt included, however many requests the run has made: the demand,
@@ -1232,7 +1245,9 @@ latest 20 messages include a tool result; the figures are the router's):
   Cost of 1 request, horizon 1: gpt-6.2-astra $0.13 (150,000 cached, 97%); gpt-6.2-sol $0.36 (nothing cached; leaving gpt-6.2-astra $0.05); gpt-6.1-terra $0.20 (nothing cached; leaving gpt-6.2-astra $0.05).
 ```
 
-The footer of that run is `personal MEDIUM → gpt-6.2-astra (demand 1.1; stayed, $0.13 vs $0.20)`.
+History's words for that run are
+`[personal MEDIUM → gpt-6.2-astra (demand 1.1; stayed, $0.13 vs $0.20)]`, and its footer, at
+`/thinking medium`, is `medium high → gpt-6.2-astra`.
 A guard that applied ends the demand line, as in `; guards: close-call, risky.`; a cost that was
 unknown gives `  Cost unknown: no usage yet.` in place of the second line. A run without a prompt
 shows the level it needed, where that level came from and the level that took it in place of the
@@ -1242,7 +1257,7 @@ or `the level of the last prompt`; with none known, `the level the session last 
 `, raised to the deep-session floor` when the floor raised it. A tagged run shows no terms, since
 nothing was weighed, and a model picked by hand shows none.
 
-Two things the footer shows that are not faults:
+Two moves the footer shows that are not faults:
 
 - **After a restart, a `/reload` or a move in the session tree**, the session's run shapes start
   again from the defaults. The first lighter prompt is then priced as a run of five requests and
@@ -1290,7 +1305,7 @@ labelled choices and returns one, with a probability for each. Under a version 2
   or add another label), or a prompt file that cannot be used (`prompt`; then nothing is sent to
   Jev) counts as a failure, and the heuristics decide alone. So does a conversation the router
   cannot read: Jev is then not asked, and its outcome is the failure `error`. The run's record
-  names the failure, and so does its footer: `(demand 0.9, jev timeout; cost unknown)`.
+  names the failure, and so do status and history: `(demand 0.9, jev timeout; cost unknown)`.
 - **Never asked** on `smart-router/local` or a physical model, for a steer or follow-up, for a run
   without a prompt, without a classifier, under a version 1 roster, in a session whose scope
   cannot be read or that the roster does not serve, for a message that is only a tag, or for an
@@ -1345,7 +1360,7 @@ name ending in `.md` or `.txt`, with no directory part:
 - **A file that cannot be used** (missing, unsafe, empty, too long, not text, an unclosed comment,
   or one that still holds a `{{placeholder}}` or a line starting with `TODO`) stops no route. Jev
   is not asked in the scopes that need that file, the heuristics alone give their demand, the
-  footer marks it, as in `(demand 0.5, jev prompt; cost unknown)`, the session says so once when it
+  history marks it, as in `(demand 0.5, jev prompt; cost unknown)`, the session says so once when it
   starts, and `/smart-router status` and the checker name the file and the cause. The router never
   falls back to an older text.
 - **`/smart-router status`** shows the source of every prompt in force: `built-in`,
@@ -1777,7 +1792,7 @@ next answer. A replay can therefore raise the deep-session floor where the route
 | Command | Does |
 |---|---|
 | `/smart-router` or `/smart-router status` | The roster's path and state; the selection and its thinking level; the session's scope and what set it, under a version 2 roster or whenever `smart-router/auto` refuses the scope; every role's models on this host with `ok` or the reason they cannot route, and catalog prices; the accounts cooling and the local models held as unreachable; account bindings, checked in the session's scope, and auth sources; a version 1 roster's routing table and fallbacks, or a version 2 roster's levels and fallback chain in each scope, its classifier and the source of each of Jev's prompts; the last decision, and whether it went to a fallback chain's model; the terms of the run that decision belongs to, kept from that run's choice however many requests it has made: a planned run's demand with every guard that applied, or a run without a prompt's need and level, and each candidate's expected cost, or why the cost was unknown; none for a tagged run or while a model picked by hand is selected ([The footer and status](#the-footer-and-status)); the thinking effort the latest request carried and why ([Thinking effort](#thinking-effort)); what can still leave the machine, a model picked by hand first and then the classifier when `smart-router/auto` may ask it; and a warning for any fallback that would move a run onto Codex's API from another one. |
-| `/smart-router history [n]` | The last `n` routing decisions (10 by default, at most 50), with reason codes, and on a version 2 run's first request the footer's words: its scope, the level it needs, the model that took it, what decided the level and what the cost rule compared. Model ids and codes only, never prompt text. |
+| `/smart-router history [n]` | The last `n` routing decisions (10 by default, at most 50), with reason codes, and on a version 2 run's first request its level's words: its scope, the level it needs, the model that took it, what decided the level and what the cost rule compared. Model ids and codes only, never prompt text. |
 | `/smart-router scope [work\|personal\|status]` | The session's scope and what set it: `latch`, `entry`, `directory` or `default`. `work` records work scope at once; `personal` asks first in work scope, and is refused under `PI_SMART_ROUTER_SCOPE=work`. Neither changes the selection. |
 | `/smart-router was low\|medium\|high\|super` | Record that the run in flight, when it holds a level, or else the run of the latest record, should have gone to that level. Nothing is sent again. |
 | `/smart-router check` | Read the roster and its prompt files again and read them back: what each selection and scope routes to, in order, the demand and switching settings, where each of Jev's prompts comes from, and the settings accepted and ignored; or the first error, with its place. It selects, records and sends nothing. [Checking a roster](#checking-a-roster). |

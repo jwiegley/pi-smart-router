@@ -11,7 +11,7 @@ import type { TestContext } from "node:test";
 import type { ClassifierResult } from "@earendil-works/pi-ai";
 
 import { checkFile } from "../src/check.ts";
-import { DESCRIBE_MAX_CHARS, INSTRUCTIONS_MAX_CHARS, LEVEL_ENTRY, LEVEL_KEY, PROMPT_FILE_MAX_BYTES, SCOPE_ENTRY } from "../src/constants.ts";
+import { DESCRIBE_MAX_CHARS, INSTRUCTIONS_MAX_CHARS, LEVEL_ENTRY, PROMPT_FILE_MAX_BYTES, SCOPE_ENTRY } from "../src/constants.ts";
 import { buildContext, JEV_INSTRUCTIONS } from "../src/jev.ts";
 import { DEFAULT_INSTRUCTIONS, promptReader, promptText, promptUses, scopePrompts } from "../src/prompts.ts";
 import { parseRoster } from "../src/roster.ts";
@@ -21,7 +21,7 @@ import { TIERS } from "../src/tiers.ts";
 import { FakeCatalog, model, NOW, rosterFixtureV2 } from "./support/catalog.ts";
 import { fixture, write } from "./support/fixtures.ts";
 import { PIN_ENTRY } from "./support/legacy.ts";
-import { agentDir, FakeRuntime, request, resetSlot, routed, start } from "./support/pi.ts";
+import { agentDir, FakeRuntime, plannedWords, request, resetSlot, routed, start } from "./support/pi.ts";
 import type { FakeSession, Loaded } from "./support/pi.ts";
 
 const JOHN = fixture("roster-hera-v2-fallback.json");
@@ -426,7 +426,7 @@ describe("prompts from files", () => {
     assert.deepEqual(criteria, ["Renames, formatting and lookups.", "Renames only."]);
   });
 
-  test("a file that cannot be used stops no route: Jev is not asked, the heuristics decide alone, and the session, the footer, status and the checker say why", async (t) => {
+  test("a file that cannot be used stops no route: Jev is not asked, the heuristics decide alone, and the session, history, status and the checker say why", async (t) => {
     const { "personal-high.md": _missing, ...rest } = FILES;
     const loaded = await session(t, WITH_FILES, rest);
     const path = `${loaded.dir}/smart-router/personal-high.md`;
@@ -434,7 +434,7 @@ describe("prompts from files", () => {
     assert.deepEqual(loaded.session.notices, [{ type: "warning", message: `pi-smart-router: a prompt for the classifier cannot be used: ${problem} smart-router/auto still routes.` }]);
     await say(loaded, "Format this file");
     assert.equal(loaded.runtime.classifyCalls.length, 0, "nothing is sent to Jev");
-    assert.equal(loaded.session.statuses.get(LEVEL_KEY), "personal LOW → gpt-6-luna (demand 0.5, jev prompt; cost unknown)", "without Jev the heuristics alone rate a trivial prompt LOW: 0.51; with no usage yet, a missing figure is said: cost unknown");
+    assert.equal(plannedWords(loaded), "personal LOW → gpt-6-luna (demand 0.5, jev prompt; cost unknown)", "without Jev the heuristics alone rate a trivial prompt LOW: 0.51; with no usage yet, a missing figure is said: cost unknown");
     assert.equal(firstRequest(loaded), "openai-codex-2/gpt-6-luna");
     await loaded.host.emit("agent_settled", { aborted: false });
     const record = loaded.session.entries.find((entry) => entry.customType === LEVEL_ENTRY)?.data as { jev?: unknown; source?: string };
@@ -525,7 +525,7 @@ describe("a hostile prompt changes nothing but what Jev reads", () => {
       assert.equal(question.instructions, HOSTILE);
       assert.deepEqual(Object.keys(question.criteria), ["low", "medium", "high", "super"]);
       // The answer is malformed, so the heuristics decide alone: a trivial message goes to the personal LOW model.
-      assert.equal(loaded.session.statuses.get(LEVEL_KEY), "personal LOW → gpt-6-luna (demand 0.5, jev malformed; cost unknown)", "without an answer the heuristics alone rate a trivial prompt LOW: 0.51; with no usage yet, a missing figure is said: cost unknown");
+      assert.equal(plannedWords(loaded), "personal LOW → gpt-6-luna (demand 0.5, jev malformed; cost unknown)", "without an answer the heuristics alone rate a trivial prompt LOW: 0.51; with no usage yet, a missing figure is said: cost unknown");
       assert.equal(firstRequest(loaded), "openai-codex-2/gpt-6-luna");
       await loaded.host.emit("agent_settled", { aborted: false });
       loaded.session.endRun();

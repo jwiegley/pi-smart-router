@@ -217,7 +217,7 @@ function classWords(signal: EffortSignal): string {
   return signal.turnType === "tool_result" ? "a tool result" : "a turn";
 }
 
-/** Why the level was sent, in a few words, for the footer and /smart-router status. */
+/** Why the level was sent, in a few words, for /smart-router status; the footer shows the level alone. */
 export function effortWords(effort: SentEffort): string {
   switch (effort.why) {
     case "role_level":
@@ -245,6 +245,3 @@ export function effortWords(effort: SentEffort): string {
       return "the roster's ceiling";
   }
 }
-
-/** The footer's effort item: the level sent and why, as `thinking low (an ordinary turn)`. */
-export const effortText = (effort: SentEffort): string => `thinking ${effort.level} (${effortWords(effort)})`;

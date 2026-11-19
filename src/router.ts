@@ -3,7 +3,7 @@
 // (each with the ledger its session's answers feed, which prices a planned run) and cooldowns, the
 // limits both models declare, the session's scope with its handoffs and work directories, the
 // refusals of its own two models for a scope their policy does not serve, a message's tag and Jev's
-// request, each planned run's level record and the footer item that shows its level, the
+// request, each planned run's level record, the footer item (a run's level, effort and model), the
 // /smart-router command, what it tells pi-cache-optimizer, and the handlers wire() registers. No
 // handler changes or blocks what is selected (src/selection.ts).
 //
@@ -33,13 +33,13 @@ import { registerAdapter, unregisterAdapter } from "./cache-optimizer.ts";
 import type { ActiveRoute } from "./cache-optimizer.ts";
 import { smartRouterCommand } from "./commands.ts";
 import type { CommandHost, Files } from "./commands.ts";
-import { ALL_LEVELS, COMMAND, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, EFFORT_KEY, LEVEL_ENTRY, LEVEL_KEY, PROVIDER, SCOPE_ENTRY, VIRTUAL_API, VIRTUAL_IDS } from "./constants.ts";
+import { ALL_LEVELS, COMMAND, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, LEVEL_ENTRY, LEVEL_KEY, PROVIDER, SCOPE_ENTRY, VIRTUAL_API, VIRTUAL_IDS } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { compactionFor, pickInRole, planUserTurn } from "./decide.ts";
 import type { CostFigures, Decision, LastResponder, LevelInput, Plan } from "./decide.ts";
 import { HEURISTIC_MESSAGES, rolesOf } from "./demand.ts";
 import type { PromptFacts, SessionDepth } from "./demand.ts";
-import { effortText, turnTypeOf, turnTypeOfText } from "./effort.ts";
+import { turnTypeOf, turnTypeOfText } from "./effort.ts";
 import {
   directoryFailedNotice,
   directoryNotice,
@@ -74,7 +74,7 @@ import { policyFromRoster } from "./local.ts";
 import { healDisplaced, isLive, isLiveOwner, join, leave, leaveScopeHandoff, ownerBySignal, rememberedRoster, rememberRoster, scopeLatched, sessionHash, takeScopeHandoff } from "./owners.ts";
 import type { Owner, OwnerRouter, RosterMemory, Slot } from "./owners.ts";
 import { promptProblem, promptStore, promptUses, scopePrompts } from "./prompts.ts";
-import { footerText, levelRecord, readLevelRecord, runFooterText } from "./records.ts";
+import { footerText, levelRecord, readLevelRecord } from "./records.ts";
 import { clock, coolFrom, Cooldowns, coolsAccount, hasOutput, holdFrom, Holds, resolveContext } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
 import { activeEntries, afterFailure, boundedHistory, newRecord, planApplies, predict, requireBoundedHistory, routeOther, routeOwned } from "./route.ts";
@@ -128,10 +128,8 @@ export interface Session extends SessionRecord {
   directoryTried: boolean;
   /** The token of the latest input that planned: an input that waited for Jev plans only if no newer input has planned since. */
   plannedToken: number;
-  /** Whether the footer shows a level item this instance set: only then does a run without a level clear it. */
-  levelShown: boolean;
-  /** Whether the footer shows an effort item this instance set: only then does a run's start clear it. */
-  effortShown: boolean;
+  /** Whether the footer shows an item this instance set: only then does a run without a level clear it at its start. */
+  footerShown: boolean;
   /** The model of the current run's last assistant message that ended without an error: the one its record names. */
   answered: string | undefined;
   /** The digest of the text, without its tag, of the message whose plan `plan` holds; meaningful only while `plan` is set. */
@@ -285,8 +283,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         ...newRecord(),
         directoryTried: false,
         plannedToken: 0,
-        levelShown: false,
-        effortShown: false,
+        footerShown: false,
         answered: undefined,
         planDigest: undefined,
         inputsSinceRun: 0,
@@ -586,42 +583,17 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   };
 
   /**
-   * The footer's level item, under its own key: a version 2 run's level and model, or none. A
-   * session that shows none is not told so again, so a version 1 roster never sets it.
+   * The footer's one item, under its own key (footerText): a run's level, the thinking effort its
+   * latest request carried and the model, or none. A session that shows none is not told so again.
    */
-  const showLevel = (ctx: ExtensionContext, record: Session, text: string | undefined): void => {
-    if (text === undefined && !record.levelShown) return;
-    record.levelShown = text !== undefined;
+  const showFooter = (ctx: ExtensionContext, record: Session, text: string | undefined): void => {
+    if (text === undefined && !record.footerShown) return;
+    record.footerShown = text !== undefined;
     try {
       ctx.ui.setStatus(LEVEL_KEY, text);
     } catch {
       // The footer is a courtesy.
     }
-  };
-
-  /**
-   * The footer's effort item, under its own key: the thinking effort the owner loop's latest request
-   * carried and why, or none. A session that shows none is not told so again.
-   */
-  const showEffort = (ctx: ExtensionContext, record: Session, text: string | undefined): void => {
-    if (text === undefined && !record.effortShown) return;
-    record.effortShown = text !== undefined;
-    try {
-      ctx.ui.setStatus(EFFORT_KEY, text);
-    } catch {
-      // The footer is a courtesy.
-    }
-  };
-
-  /**
-   * The footer of the run under way on the model `ref` (`modelId` without its provider): a planned
-   * run's level, or a run:need choice's, each saying whether the run escalated and whether the
-   * model is one of the scope's chain. Undefined for a run with neither.
-   */
-  const runFooter = (record: Session, ref: string, modelId: string): string | undefined => {
-    const { pendingLevel: pending, needRun } = record;
-    if (pending !== undefined) return footerText(pending.level, modelId, inChain(pending.level.scope, ref), record.escalated);
-    return needRun === undefined ? undefined : runFooterText(needRun, modelId, inChain(needRun.scope, ref), record.escalated);
   };
 
   /** Append a scope entry, and say whether it was recorded. */
@@ -927,8 +899,9 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     if (planned === undefined || planLevel === undefined || planned.signal === "local") return;
     record.pendingLevel = { token, digest, level: planLevel, keyword: { signal: planned.signal, reason: planned.reason }, at: now(), jev: opinion ? "pending" : level.jev, started: false };
     record.lastInput = { digest, level };
-    // A plan that found no model shows none: its run is refused at its first request.
-    showLevel(ctx, record, planned.decision.ok ? footerText(planLevel, planned.decision.choice.model.id) : undefined);
+    // The plan shows its level and the model it picked; the run's first request adds the effort it
+    // carries. A plan that found no model shows none: its run is refused at its first request.
+    showFooter(ctx, record, planned.decision.ok ? footerText({ tier: planLevel.need, model: planned.decision.choice.model.id }) : undefined);
     if (planLevel.steppedUp && planned.decision.ok) notify(ctx, stepUpNotice(planLevel.need, planLevel.tier, planned.decision.choice.model.id), "info");
     // A chain model is another vendor's or a LAN host's, so the run says where it goes.
     if (planLevel.fallback === true && planned.decision.ok) notify(ctx, fallbackNotice(planLevel.tier, planned.decision.choice.role, planned.decision.choice.model.id), "info");
@@ -997,13 +970,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     }
     // A held model that answers is no longer held: its server is back.
     holds.release(ref);
-    // The footer names the model that answered a run's level, when the run's own route picked it.
     const record = records.get(sessionId);
-    const pick = record?.runPick;
-    if (record !== undefined && pick?.id === "auto" && pick.ref === ref) {
-      const text = runFooter(record, ref, message.model);
-      if (text !== undefined) showLevel(ctx, record, text);
-    }
     if (record !== undefined) record.answered = ref;
     if (message.stopReason === "aborted") return;
     const at = now();
@@ -1119,20 +1086,17 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       const { runTier: from, escalated } = record;
       const route = routeOwned(input);
       const after = record.runPick;
-      // Each request of the owner's loop says the effort it carries, and why.
-      showEffort(ctx, record, record.effort === undefined ? undefined : effortText(record.effort));
+      // Each request of the owner's loop shows the level its run needs, a planned run's or a
+      // run:need choice's, when it has one; the effort the request carries; and the model it goes to.
+      // So the footer follows a run that moves: up for being stuck, or onto another model on a retry.
+      const need = id === "auto" ? (record.pendingLevel?.level.need ?? record.needRun?.need) : undefined;
+      showFooter(ctx, record, record.effort === undefined ? undefined : footerText({ tier: need, effort: record.effort.level, model: route.model.id }));
       const movedUp = !escalated && record.escalated;
       // A stuck run that moves up says so, where it happens, once: the level and the model it reached,
       // nothing of its tools' output. The model it left could still take the run, so no chain-move
       // notice is shown for it.
       const to = record.runTier;
       if (movedUp && from !== undefined && to !== undefined) notify(ctx, escalationNotice(from, to, route.model.id), "info");
-      // The footer follows the run: from an escalated request on, and from the first request of a run
-      // without a plan of its own, whose choice the last planned run's footer does not name.
-      if (after !== undefined && (movedUp || (before === undefined && record.needRun !== undefined))) {
-        const text = runFooter(record, after.ref, route.model.id);
-        if (text !== undefined) showLevel(ctx, record, text);
-      }
       // A run under way that moves from its model onto the scope's chain says so, where it happens.
       if (!movedUp && id === "auto" && !input.rc.localOnly && before !== undefined && after !== undefined && before.ref !== after.ref) {
         const { scope } = input.rc;
@@ -1207,11 +1171,11 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
             record.inputsSinceRun = 0;
             forgetOne(record, prompt);
           }
-          // A run without a level of its own shows none, rather than an earlier run's; and no run
-          // shows an earlier run's effort, so a model picked by hand, which is never routed, shows none.
-          if (record.pendingLevel === undefined) showLevel(ctx, record, undefined);
+          // No run shows an earlier run's item. A run with a level of its own keeps what its plan
+          // showed, its level and the model picked; any other shows none until its first routed
+          // request, so a model picked by hand, which is never routed, shows none.
+          if (record.pendingLevel === undefined) showFooter(ctx, record, undefined);
           record.effort = undefined;
-          showEffort(ctx, record, undefined);
         });
         // Every run starts here, so a run without an input (a custom message's, a goal-x
         // continuation's) records the work directories' scope too.

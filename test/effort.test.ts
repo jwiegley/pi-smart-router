@@ -7,7 +7,7 @@ import test, { describe } from "node:test";
 
 import type { Api, Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 
-import { AMBIENT_LEVEL, clampToSupported, effortText, resolveAdaptiveReasoning, sentEffort, turnTypeOf, turnTypeOfText } from "../src/effort.ts";
+import { AMBIENT_LEVEL, clampToSupported, effortWords, resolveAdaptiveReasoning, sentEffort, turnTypeOf, turnTypeOfText } from "../src/effort.ts";
 import type { EffortSignal, TurnType } from "../src/effort.ts";
 import { DEFAULT_EFFORT, REASONING_LEVELS } from "../src/settings.ts";
 import type { EffortSettings, ReasoningLevel } from "../src/settings.ts";
@@ -196,10 +196,12 @@ describe("what the model supports (AR:141-167, AR:279-307)", () => {
   });
 });
 
-describe("the footer's words", () => {
+describe("status's words for the effort", () => {
   test("name the level sent and why, in a few words, never the text", () => {
-    const words = (turn: EffortSignal, selected: ModelThinkingLevel = "medium", fixed?: ModelThinkingLevel): string =>
-      effortText(sentEffort({ model: SOL, fixed, selected, signal: turn, settings: DEFAULT_EFFORT }));
+    const words = (turn: EffortSignal, selected: ModelThinkingLevel = "medium", fixed?: ModelThinkingLevel): string => {
+      const effort = sentEffort({ model: SOL, fixed, selected, signal: turn, settings: DEFAULT_EFFORT });
+      return `thinking ${effort.level} (${effortWords(effort)})`;
+    };
     assert.equal(words(signal("tool_result")), "thinking minimal (after a tool result)");
     assert.equal(words(signal("main_loop")), "thinking low (an ordinary turn)");
     assert.equal(words(signal("planning")), "thinking medium (planning)");
