@@ -30,7 +30,7 @@ import type { TestContext } from "node:test";
 
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
-import { estimateTokens, SessionManager } from "@earendil-works/pi-coding-agent";
+import { createBashToolDefinition, estimateTokens, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 
 import type { RoutingRegistry } from "../src/cache-optimizer.ts";
@@ -2040,6 +2040,47 @@ test("C8 three different failures do not", TIMEOUT, async (t) => {
   );
   assert.deepEqual(runRecords(pi).at(-1)?.cost, { outcome: "unknown", why: "no usage yet" }, "the run's record is written, and its cost is unknown for want of usage");
   assert.equal(runRecords(pi).at(-1)?.escalated, undefined, "three different failures do not: the record does not say escalated");
+});
+
+test("C8b three different shell commands that each fail without output do not, though Pi gives them one text", TIMEOUT, async (t) => {
+  const world = levelsWorld(t);
+  const codex = world.faux("openai-codex-2");
+  // Pi's own bash tool, on a shell that runs nothing and exits 1 without output: the tests may start
+  // no process, and what is under test is the text Pi's tool makes of such an exit.
+  const silentShell: InlineExtension = {
+    name: "silent-shell",
+    factory: (api) => api.registerTool(createBashToolDefinition(world.cwd, { operations: { exec: async () => ({ exitCode: 1 }) } })),
+  };
+  const pi = await world.start({ select: "smart-router/auto", tools: ["bash"], extensions: [silentShell] });
+  world.jev.answer(JEV.medium);
+  const commands = ["test -e missing-1.txt", "test -e missing-2.txt", "test -e missing-3.txt"];
+  codex.respond(
+    ...commands.map((command, index) => fauxAssistantMessage([fauxToolCall("bash", { command }, { id: `bash-${index + 1}` })], { stopReason: "toolUse" })),
+    fauxAssistantMessage("done"),
+  );
+  await pi.prompt("Tidy the zebra notes");
+  const texts = pi.session.messages.flatMap((message) =>
+    message.role === "toolResult" ? [[message.toolName, message.isError, message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n")]] : [],
+  );
+  const silent = "(no output)\n\nCommand exited with code 1";
+  assert.deepEqual(
+    texts,
+    [
+      ["bash", true, silent],
+      ["bash", true, silent],
+      ["bash", true, silent],
+    ],
+    "Pi ran each command, and each failed with its shell tool's one silent-failure text",
+  );
+  assert.deepEqual(
+    codex.calls.map((call) => call.ref),
+    [PERSONAL.medium, PERSONAL.medium, PERSONAL.medium, PERSONAL.medium],
+    "three different calls that failed alike are not stuck: the calls must be the same, not only their results",
+  );
+  assert.deepEqual(pi.ui.saw(/failed the same way/), [], "three different calls do not move the run: no notice");
+  assert.doesNotMatch(pi.ui.status(LEVEL_KEY) ?? "", /escalated/, "three different calls do not move the run: the footer does not say escalated");
+  assert.equal(pi.ui.status(LEVEL_KEY), "personal MEDIUM → gpt-6.1-terra (demand 1.0; cost unknown)", "the footer is the plan's");
+  assert.equal(runRecords(pi).at(-1)?.escalated, undefined, "three different calls do not move the run: the record does not say escalated");
 });
 
 test("C9 a version 2 roster without demand or switching routes with the defaults", TIMEOUT, async (t) => {
