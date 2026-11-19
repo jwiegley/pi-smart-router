@@ -13,7 +13,9 @@ import {
   newLedger,
   noteAnswer,
   noteRunEnd,
+  notePlanned,
   notePrompt,
+  recentNeed,
   runShape,
   seedAnswer,
 } from "../src/ledger.ts";
@@ -324,5 +326,39 @@ describe("the horizon and the chance a level is needed again", () => {
     const ledger = promptsOf(Array.from({ length: 12 }, (_, i) => [i < 2 ? "super" : "low", "low"] as const));
     assert.equal(ledger.needs.length, 10, "ten kept");
     assert.equal(againChance(ledger, "super"), 0.2, "the two oldest super prompts were dropped");
+  });
+});
+
+describe("the last prompts' needs", () => {
+  test("recentNeed is the highest of the last three planned prompts' needs, with how many are known", () => {
+    const ledger = newLedger();
+    assert.equal(recentNeed(ledger), undefined, "no prompt planned: none known");
+    notePlanned(ledger, "high");
+    assert.deepEqual(recentNeed(ledger), { need: "high", prompts: 1 }, "one known: its need");
+    notePlanned(ledger, "low");
+    assert.deepEqual(recentNeed(ledger), { need: "high", prompts: 2 }, "two known: the higher");
+    notePlanned(ledger, "high");
+    notePlanned(ledger, "low");
+    assert.deepEqual(recentNeed(ledger), { need: "high", prompts: 3 }, "HIGH, LOW, HIGH, LOW: the last three hold a HIGH");
+    notePlanned(ledger, "low");
+    notePlanned(ledger, "low");
+    assert.deepEqual(recentNeed(ledger), { need: "low", prompts: 3 }, "three LOW prompts in a row: LOW");
+    assert.deepEqual(ledger.prompts, ["low", "low", "low"], "only the last three are kept");
+  });
+
+  test("a run without a prompt is no planned prompt: notePrompt does not touch them", () => {
+    const ledger = newLedger();
+    notePlanned(ledger, "high");
+    for (let i = 0; i < 12; i++) notePrompt(ledger, "low", "low");
+    assert.deepEqual(recentNeed(ledger), { need: "high", prompts: 1 }, "however many runs without a prompt followed, the planned prompt is still known");
+  });
+
+  test("are kept by forgetCaches and forgotten by forgetBranch", () => {
+    const ledger = newLedger();
+    notePlanned(ledger, "medium");
+    forgetCaches(ledger);
+    assert.deepEqual(ledger.prompts, ["medium"], "a compaction keeps the branch's prompts");
+    forgetBranch(ledger);
+    assert.deepEqual([ledger.prompts, recentNeed(ledger)], [[], undefined], "a move to another leaf: the prompts, counted on the branch, start afresh");
   });
 });

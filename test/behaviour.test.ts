@@ -2361,7 +2361,7 @@ function routesOf(pi: Pi): Routed[] {
   return seen;
 }
 
-test("C15 a run an extension starts without a prompt takes the level the session last needed", TIMEOUT, async (t) => {
+test("C15 a run an extension starts without a prompt takes the highest level of the last three prompts", TIMEOUT, async (t) => {
   const world = levelsWorld(t, { fleet: pricedLevelsFleet() });
   const pi = await threeSuper(world);
   const codex = world.faux("openai-codex-2");
@@ -2369,7 +2369,6 @@ test("C15 a run an extension starts without a prompt takes the level the session
   codex.respond(reply(codex, { cacheRead: WARM, output: OUT }));
   await pi.prompt("Check the error paths");
   assert.equal(answered(pi), PERSONAL.super, "the MEDIUM prompt stays on the warm astra, as in C2");
-  // The level the session last needed and the level that took its last run differ.
   const last = { need: "medium", tier: "super" };
   assert.deepEqual(fields(runRecords(pi).at(-1), last), last, "the session last needed MEDIUM, and SUPER's model took the run");
   const routes = routesOf(pi);
@@ -2385,17 +2384,10 @@ test("C15 a run an extension starts without a prompt takes the level the session
   );
   assert.equal(world.jev.calls.length, 4, "Jev is not asked for a run without a prompt");
   assert.equal(await lastDecision(pi), "smart-router/auto continuation: super → openai-codex-2/gpt-6-astra (run:need)", "the run goes through the run:need choice");
-  // The run starts from MEDIUM, the need: astra warm against terra and sol cold, each with what
-  // leaving astra costs. Four one-request runs measured; this is the second lighter prompt in a row
-  // (horizon 2), and three of the four prompts needed SUPER (q = 0.75); no prompt is added.
-  const workload = shortRuns(WARM + OUT, 2);
-  const stay = expectedRun("super", WARM, true, workload);
-  const others = Math.min(expectedRun("medium", 0, false, workload), expectedRun("high", 0, false, workload)) + expectedLeaving("super", WARM, 0.75, 0.97);
-  assert.ok(others >= stay * 0.85, "no other model undercuts the warm astra by more than the margin");
   assert.equal(
     pi.ui.status(LEVEL_KEY),
-    `personal MEDIUM → gpt-6-astra (run; stayed, ${money(stay)} vs ${money(others)})`,
-    "the run takes the level the session last needed, MEDIUM, not SUPER, the level that took its last run, and the cost keeps it on astra",
+    "personal SUPER → gpt-6-astra (run)",
+    "John's ruling of 2026-11-18: the run takes the highest level of the last three prompts (SUPER, SUPER, MEDIUM), SUPER, not the MEDIUM the session last needed; SUPER has no other candidate, so no cost is said",
   );
   assert.deepEqual(codex.calls.slice(mark).map((call) => call.ref), [PERSONAL.super], "the request really goes to the model the footer names");
   assert.equal(routes[0]?.ref, PERSONAL.super);

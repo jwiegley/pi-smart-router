@@ -272,11 +272,15 @@ export function decisionLines(level: PlanLevel): string[] {
 
 /**
  * The terms behind a run without a prompt (run:need), for /smart-router status: the level it
- * needed, the session's last need or the deep-session floor's, and the level whose model took it,
- * then its cost line (costLines).
+ * needed and where that level came from, the highest of the branch's last prompts or the level the
+ * session last needed, raised to the deep-session floor where it was; and the level whose model
+ * took it, then its cost line (costLines).
  */
 export function needRunLines(run: NeedRun, tier: Tier): string[] {
-  const why = run.floor === true ? "the session's last need, raised to the deep-session floor" : "the level the session last needed";
+  const { prompts } = run;
+  const from =
+    prompts === undefined ? "the level the session last needed" : prompts === 1 ? "the level of the last prompt" : `the highest of the last ${prompts} prompts`;
+  const why = run.floor === true ? `${from}, raised to the deep-session floor` : from;
   return [`  Need ${tierLabel(run.need)} → ${tierLabel(tier)}: a run without a prompt, at ${why}.`, ...costLines(run.cost)];
 }
 
@@ -315,12 +319,15 @@ export function footerText(level: PlanLevel, modelId: string, fallback: boolean 
 }
 
 /**
- * What a run without a plan of its own (run:need) shows: its scope, the level its session last
- * needed, raised to the deep-session floor where `floor` says so, and what the cost rule decided.
+ * What a run without a plan of its own (run:need) shows: its scope, its level (the highest of the
+ * branch's last prompts, else the level its session last needed), raised to the deep-session floor
+ * where `floor` says so, and what the cost rule decided.
  */
 export interface NeedRun {
   readonly scope: Scope;
   readonly need: Tier;
+  /** How many of the branch's last prompts the level was taken from; absent: the session's last need. */
+  readonly prompts?: number;
   /** The deep-session floor raised the session's last need to `need`. */
   readonly floor?: true;
   readonly cost?: CostTerms;

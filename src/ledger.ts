@@ -3,8 +3,8 @@
 import { clampThinkingLevel } from "@earendil-works/pi-ai";
 import type { Api, Model, ModelThinkingLevel, Usage } from "@earendil-works/pi-ai";
 
-import { AGAIN_DEFAULT, AGAIN_MIN, RUN_DEFAULTS, RUNS_KEPT, RUNS_NEEDED } from "./settings.ts";
-import { tierRank } from "./tiers.ts";
+import { AGAIN_DEFAULT, AGAIN_MIN, PROMPTS_RECALLED, RUN_DEFAULTS, RUNS_KEPT, RUNS_NEEDED } from "./settings.ts";
+import { higherTier, tierRank } from "./tiers.ts";
 import type { Tier } from "./tiers.ts";
 
 /** A model's last answer on the branch since the conversation was last rewritten. */
@@ -42,7 +42,13 @@ export interface Ledger {
   /** Providers whose usage has reported cache writes. */
   readonly writes: Set<string>;
   readonly runs: RunStat[];
+  /** Every run's need, a run without a prompt's included, and the level that took it. */
   readonly needs: PromptNeed[];
+  /**
+   * The needs of the branch's latest planned prompts, up to PROMPTS_RECALLED, oldest first: what a
+   * run without a prompt takes its level from (recentNeed). A run without a prompt adds nothing.
+   */
+  readonly prompts: Tier[];
   /**
    * The run under way: its first request's start, its requests and output so far, its first and
    * latest prompt sizes, its latest answer's time, and how many of its requests came before the
@@ -56,7 +62,7 @@ export interface Ledger {
 }
 
 export function newLedger(): Ledger {
-  return { seen: new Map(), writes: new Set(), runs: [], needs: [], run: undefined, latest: undefined };
+  return { seen: new Map(), writes: new Set(), runs: [], needs: [], prompts: [], run: undefined, latest: undefined };
 }
 
 /** The effort a level becomes on a model: Pi's clamp, then the model's own map. */
@@ -168,6 +174,23 @@ export function notePrompt(ledger: Ledger, need: Tier, took: Tier): void {
   if (ledger.needs.length > RUNS_KEPT) ledger.needs.splice(0, ledger.needs.length - RUNS_KEPT);
 }
 
+/** A planned prompt's need, a tag's included: one of the last PROMPTS_RECALLED a run without a prompt looks at. */
+export function notePlanned(ledger: Ledger, need: Tier): void {
+  ledger.prompts.push(need);
+  if (ledger.prompts.length > PROMPTS_RECALLED) ledger.prompts.splice(0, ledger.prompts.length - PROMPTS_RECALLED);
+}
+
+/**
+ * The level a run without a prompt takes (John, 2026-11-18): the highest need among the branch's
+ * last PROMPTS_RECALLED planned prompts, with how many were known. Undefined with none known.
+ */
+export function recentNeed(ledger: Ledger): { readonly need: Tier; readonly prompts: number } | undefined {
+  const recent = ledger.prompts.slice(-PROMPTS_RECALLED);
+  const [first, ...rest] = recent;
+  if (first === undefined) return undefined;
+  return { need: rest.reduce(higherTier, first), prompts: recent.length };
+}
+
 /**
  * A compaction or a move in the session tree: no model has the conversation cached. A run under way
  * keeps its requests, output and time, and measures its growth again from the next answer.
@@ -180,8 +203,8 @@ export function forgetCaches(ledger: Ledger): void {
 }
 
 /**
- * A move in the session tree to another leaf: no model has that branch cached, and the runs and
- * prompts, which are counted on the branch, start afresh. Whether a provider reports cache writes is
+ * A move in the session tree to another leaf: no model has that branch cached, and the runs, needs
+ * and prompts, which are counted on the branch, start afresh. Whether a provider reports cache writes is
  * a fact about the provider, and stays.
  */
 export function forgetBranch(ledger: Ledger): void {
@@ -189,6 +212,7 @@ export function forgetBranch(ledger: Ledger): void {
   ledger.latest = undefined;
   ledger.runs.length = 0;
   ledger.needs.length = 0;
+  ledger.prompts.length = 0;
   ledger.run = undefined;
 }
 

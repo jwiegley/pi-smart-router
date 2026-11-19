@@ -90,6 +90,9 @@ export const RUN_DEFAULTS = { requests: 5, output: 800, growth: 1_500, seconds: 
 export const RUNS_KEPT = 10;
 export const RUNS_NEEDED = 3;
 
+/** How many of the branch's latest planned prompts a run without a prompt takes its level from: the highest of their needs. */
+export const PROMPTS_RECALLED = 3;
+
 /** The chance the current level is needed again: its share of the kept runs, AGAIN_DEFAULT with too few, never under AGAIN_MIN. */
 export const AGAIN_DEFAULT = 0.5;
 export const AGAIN_MIN = 0.2;

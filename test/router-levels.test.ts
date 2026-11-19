@@ -193,7 +193,7 @@ const UNMATCHED = "pi-smart-router: a tagged message's level could not be matche
  * version 2 roster: a prompt's run whose message's plan could not be matched to it is planned by
  * nothing, as a custom message's run is (design, "Requests inside a run").
  */
-const RUN_NEED = "a run that starts without a plan takes the level its session last needed and goes through the same choice (run:need), never another message's plan";
+const RUN_NEED = "a run that starts without a plan takes the highest level of the branch's last three prompts (the level its session last needed when none is known) and goes through the same choice (run:need), never another message's plan";
 const GOAL_X = { role: "custom", customType: "goal-x", content: "continue", display: false, timestamp: NOW };
 
 /** Two messages that overlap a Jev wait, and the two answers, settled when the test says. */

@@ -11,10 +11,11 @@
 //                       and under version 2 in its scope), else as a continuation (steering,
 //                       follow-ups)
 //   owner run start     on smart-router/auto under a version 2 roster, a run's first request
-//                       without a plan (an extension's run, which has no prompt) takes the level
-//                       its session last needed, raised to the deep-session floor in a deep
-//                       session, through the choice a prompt's run makes (run:need); a session
-//                       that never planned a run continues as below
+//                       without a plan (an extension's run, which has no prompt) takes the
+//                       highest level of the branch's last three prompts, else the level its
+//                       session last needed, raised to the deep-session floor in a deep session,
+//                       through the choice a prompt's run makes (run:need); a session that never
+//                       planned a run continues as below
 //   owner continuation  a stuck run (src/stuck.ts) on smart-router/auto under a version 2 roster
 //                       moves up, once per run, to the level directly above's own model when it
 //                       is available, never a chain's, unless its level is SUPER or its tag's
@@ -46,7 +47,7 @@ import { chooseModel, eligibleRole, escalationTarget, NO_LOCAL_SECTION, noScopeS
 import type { Choice, CompactionFigures, CostFigures, CostTerms, Decision, LastResponder, LevelInput, Plan, PlanLevel } from "./decide.ts";
 import { invariant, noBoundedHistory, unroutable } from "./errors.ts";
 import type { JevOutcome } from "./jev.ts";
-import { newLedger, notePrompt } from "./ledger.ts";
+import { newLedger, notePlanned, notePrompt, recentNeed } from "./ledger.ts";
 import type { Ledger } from "./ledger.ts";
 import { checkLocal } from "./local.ts";
 import type { NeedRun } from "./records.ts";
@@ -394,26 +395,33 @@ interface Leveled {
   readonly cost?: CostTerms;
 }
 
-/** A run:need choice: its level, the need it was chosen for, and whether the deep-session floor raised that need. */
+/**
+ * A run:need choice: its level, the need it was chosen for, how many of the branch's last prompts
+ * that need came from (none: the session's last need), and whether the deep-session floor raised it.
+ */
 interface NeedChoice extends Leveled {
   readonly need: Tier;
+  readonly prompts: number | undefined;
   readonly floor: boolean;
 }
 
 /**
  * A run that starts without a prompt (an extension's own, such as a goal continuation or a loop's)
- * has no plan: it takes the level its session last needed, raised to the roster's deep-session
- * floor when the session is deep (isDeepSession: the risky floor needs prompt text, so it does not
- * apply), and goes through the choice a prompt's run makes, priced with the session's figures and
- * nothing for a prompt. The session's need itself is not changed. Undefined when the session never
- * planned a run: it continues as before.
+ * has no plan: it takes the highest level among the branch's last three planned prompts
+ * (recentNeed; John, 2026-11-18), or with none known on the branch the level its session last
+ * needed, raised to the roster's deep-session floor when the session is deep (isDeepSession: the
+ * risky floor needs prompt text, so it does not apply), and goes through the choice a prompt's run
+ * makes, priced with the session's figures and nothing for a prompt. The session's need itself is
+ * not changed. Undefined when the session never planned a run: it continues as before.
  */
 function chooseForNeed(rc: ResolveContext, record: SessionRecord, section: ScopeSection, figures: CostFigures | undefined, compaction: CompactionFigures, depth: SessionDepth): NeedChoice | undefined {
   if (record.need === undefined) return undefined;
-  const lowest = rc.roster.version === 2 && isDeepSession(depth) ? rc.roster.demand.deepSessionFloor : record.need;
-  const need = higherTier(record.need, lowest);
+  const recent = recentNeed(record.ledger);
+  const base = recent?.need ?? record.need;
+  const lowest = rc.roster.version === 2 && isDeepSession(depth) ? rc.roster.demand.deepSessionFloor : base;
+  const need = higherTier(base, lowest);
   const { tier, decision, cost } = chooseModel({ rc, section, need, code: "run:need", last: record.last, promptTokens: 0, compaction, figures, priced: true });
-  return { tier, decision, need, floor: need !== record.need, ...(cost === undefined ? {} : { cost }) };
+  return { tier, decision, need, prompts: recent?.prompts, floor: need !== base, ...(cost === undefined ? {} : { cost }) };
 }
 
 /**
@@ -548,6 +556,7 @@ export function routeOwned(input: RouteInput): ModelRoute {
   if (plan?.level !== undefined) {
     const { need, tier, source } = plan.level;
     notePrompt(record.ledger, need, tier);
+    notePlanned(record.ledger, need);
     record.need = need;
     record.runTier = tier;
     record.runTagged = source === "tag";
@@ -557,7 +566,13 @@ export function routeOwned(input: RouteInput): ModelRoute {
     notePrompt(record.ledger, unplanned.need, unplanned.tier);
     record.runTier = unplanned.tier;
     record.runTagged = false;
-    record.needRun = { scope: rc.scope, need: unplanned.need, ...(unplanned.floor ? { floor: true as const } : {}), ...(unplanned.cost === undefined ? {} : { cost: unplanned.cost }) };
+    record.needRun = {
+      scope: rc.scope,
+      need: unplanned.need,
+      ...(unplanned.prompts === undefined ? {} : { prompts: unplanned.prompts }),
+      ...(unplanned.floor ? { floor: true as const } : {}),
+      ...(unplanned.cost === undefined ? {} : { cost: unplanned.cost }),
+    };
     record.runTerms = { kind: "need", run: record.needRun, tier: unplanned.tier };
   } else if (starts) {
     // A run whose first request made no choice of level shows no older run's terms.

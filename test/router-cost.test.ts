@@ -203,6 +203,16 @@ async function threeSuperRuns(state: Session): Promise<void> {
   for (let i = 0; i < 3; i++) assert.equal(await run(state, `design the next part ${i}`, ANSWER_SUPER), ASTRA, `SUPER run ${i} goes to astra`);
 }
 
+/**
+ * The branch's last planned prompts, as the ledger holds them, set to `needs`. A run without a
+ * prompt takes the highest of them (John, 2026-11-18), so after threeSuperRuns and a MEDIUM prompt
+ * it would take SUPER; the tests that price a MEDIUM run without a prompt on a warm astra set them
+ * here, since in a natural session the cost rule leaves astra by the third MEDIUM prompt in a row.
+ */
+function lastPromptsNeeded(state: Session, ...needs: Tier[]): void {
+  recordOf(state).ledger.prompts.splice(0, Number.POSITIVE_INFINITY, ...needs);
+}
+
 describe("the ledger's feed", () => {
   test("each answer that ends without an error is noted, with its effort; an aborted or failed one is not", async (t) => {
     const state = await session(t);
@@ -833,6 +843,7 @@ describe("a run that starts without a prompt", () => {
     const state = await session(t);
     await threeSuperRuns(state);
     assert.equal(await run(state, "go on", ANSWER_MEDIUM), ASTRA, "a MEDIUM prompt stays on the warm astra");
+    lastPromptsNeeded(state, "medium");
     assert.equal(recordOf(state).need, "medium", "the session last needed MEDIUM");
     // As the second lighter prompt in a row would be priced: horizon 2, SUPER needed by 3 of 4 prompts.
     const expected = expectedCosts({ tokens: 150_000, cached: 149_000, shape: ONE_REQUEST, horizon: 2, again: 3 / 4 });
@@ -873,6 +884,7 @@ describe("a run that starts without a prompt", () => {
     const state = await session(t);
     await threeSuperRuns(state);
     assert.equal(await run(state, "go on", ANSWER_MEDIUM), ASTRA, "a MEDIUM prompt stays on the warm astra, answered at high");
+    lastPromptsNeeded(state, "medium");
     const astraModel = state.loaded.runtime.physical(ASTRA);
     assert.notEqual(effortOf(astraModel, "low"), effortOf(astraModel, "high"), "astra sends low and high as two efforts");
     assert.equal(state.loaded.host.thinking, "high", "the session's selected level is still high");
@@ -885,6 +897,7 @@ describe("a run that starts without a prompt", () => {
     const state = await session(t);
     await threeSuperRuns(state);
     assert.equal(await run(state, "go on", ANSWER_MEDIUM), ASTRA, "a MEDIUM prompt stays on the warm astra");
+    lastPromptsNeeded(state, "medium");
     // A settings object the fake host cannot clone: its getSettings() throws.
     state.loaded.host.settings = { compaction: { enabled: false }, unreadable: () => undefined };
     assert.throws(() => structuredClone(state.loaded.host.settings), "the host's getSettings() throws");
@@ -942,6 +955,7 @@ describe("a run that starts without a prompt", () => {
     const state = await session(t);
     await threeSuperRuns(state);
     assert.equal(await run(state, "go on", ANSWER_MEDIUM), ASTRA, "a MEDIUM prompt stays on the warm astra");
+    lastPromptsNeeded(state, "medium");
     await state.loaded.host.emit("session_compact", {});
     assert.deepEqual([recordOf(state).last?.ref, recordOf(state).last?.usage], [ASTRA, undefined], "the size is unknown until the next answer");
     const route = await unprompted(state, ASTRA);
@@ -1012,6 +1026,94 @@ describe("a run that starts without a prompt", () => {
     assert.deepEqual([routed(promptless), recordOf(state).runTier, recordOf(state).ledger.needs.at(-1)?.need], [SOL, "high", "high"], "HIGH is above the deep-session floor: the run takes HIGH");
     assert.match(footer(state) ?? "", /^personal HIGH → gpt-6\.1-sol \(run[;)]/, "the footer names HIGH");
     assert.ok(!(footer(state) ?? "").includes("floor"), `the floor raised nothing: ${footer(state)}`);
+  });
+});
+
+describe("a run that starts without a prompt, after several prompts", () => {
+  /** A planned run of `text` at Jev's `jev`, answered by the model it went to with SHALLOW_TOKENS: no deep session. */
+  async function shallow(state: Session, text: string, jev: Record<Tier, number>, need: Tier): Promise<string> {
+    const level = await say(state, text, jev);
+    assert.equal(level.need, need, `"${text}" needs ${need}`);
+    const ref = routed(await route(state, text));
+    await answer(state, ref, SHALLOW_TOKENS);
+    return ref;
+  }
+  /** The status line that says what level a run without a prompt took and where it came from. */
+  async function needLine(state: Session): Promise<string | undefined> {
+    await state.loaded.host.command("smart-router", "status");
+    return (state.loaded.session.notices.at(-1)?.message ?? "").split("\n").find((line) => line.startsWith("  Need "));
+  }
+
+  test("after prompts needing HIGH, HIGH and LOW takes HIGH: the highest of the last three prompts", async (t) => {
+    const state = await session(t);
+    await shallow(state, "go on", ANSWER_HIGH, "high");
+    await shallow(state, "go on with it", ANSWER_HIGH, "high");
+    const last = await shallow(state, "rename foo to bar", ANSWER_LOW, "low");
+    assert.equal(recordOf(state).need, "low", "the session last needed LOW");
+    const sent = await unprompted(state, last);
+    assert.deepEqual(
+      [recordOf(state).needRun?.need, routed(sent), lastCode(state)],
+      ["high", SOL, "run:need"],
+      "John's ruling of 2026-11-18: a run without a prompt takes the highest level among the last three prompts, HIGH, not the last prompt's LOW",
+    );
+    assert.match(footer(state) ?? "", /^personal HIGH → gpt-6\.1-sol \(run[;)]/, "the footer names HIGH");
+    assert.equal(await needLine(state), "  Need HIGH → HIGH: a run without a prompt, at the highest of the last 3 prompts.", "status says where the level came from");
+    assert.equal(recordOf(state).need, "low", "the session's need is not rewritten");
+  });
+
+  test("with fewer than three prompts known, takes the highest of those known", async (t) => {
+    const state = await session(t);
+    await shallow(state, "go on", ANSWER_HIGH, "high");
+    const last = await shallow(state, "rename foo to bar", ANSWER_LOW, "low");
+    await unprompted(state, last);
+    assert.equal(recordOf(state).needRun?.need, "high", "HIGH, then LOW: two known, the higher, HIGH");
+    assert.equal(await needLine(state), "  Need HIGH → HIGH: a run without a prompt, at the highest of the last 2 prompts.", "status says how many prompts it took the level from");
+  });
+
+  test("after prompts needing HIGH, LOW, LOW and LOW takes LOW: three light prompts in a row", async (t) => {
+    const state = await session(t);
+    await shallow(state, "go on", ANSWER_HIGH, "high");
+    let last = "";
+    for (const text of ["rename foo to bar", "rename bar to baz", "rename baz to qux"]) last = await shallow(state, text, ANSWER_LOW, "low");
+    const sent = await unprompted(state, last);
+    assert.deepEqual([recordOf(state).needRun?.need, routed(sent)], ["low", LUNA], "the HIGH prompt is the fourth from last: the last three needed LOW");
+    assert.equal(await needLine(state), "  Need LOW → LOW: a run without a prompt, at the highest of the last 3 prompts.");
+  });
+
+  test("runs without a prompt in between do not push the prompts out", async (t) => {
+    const state = await session(t);
+    await shallow(state, "go on", ANSWER_HIGH, "high");
+    let last = await shallow(state, "rename foo to bar", ANSWER_LOW, "low");
+    for (let i = 0; i < 12; i++) {
+      last = routed(await unprompted(state, last));
+      await answer(state, last, SHALLOW_TOKENS);
+    }
+    assert.equal(recordOf(state).ledger.needs.length, 10, "the ledger's needs hold only the runs without a prompt now");
+    await unprompted(state, last);
+    assert.equal(recordOf(state).needRun?.need, "high", "the last prompts are still HIGH and LOW: a run without a prompt is not a prompt");
+  });
+
+  test("in a deep session takes at least the deep-session floor, and status says the floor raised it", async (t) => {
+    const state = await session(t);
+    await shallow(state, "rename foo to bar", ANSWER_LOW, "low");
+    await shallow(state, "rename bar to baz", ANSWER_LOW, "low");
+    const level = await say(state, "rename baz to qux", ANSWER_LOW);
+    assert.equal(level.need, "low", "a LOW prompt, planned before the session was deep");
+    const ref = routed(await route(state, "rename baz to qux"));
+    await answer(state, ref, 150_000);
+    const sent = await unprompted(state, ref);
+    assert.deepEqual([recordOf(state).needRun?.need, recordOf(state).needRun?.floor, routed(sent)], ["medium", true, TERRA], "three LOW prompts, raised to the deep-session floor, MEDIUM");
+    assert.equal(await needLine(state), "  Need MEDIUM → MEDIUM: a run without a prompt, at the highest of the last 3 prompts, raised to the deep-session floor.");
+  });
+
+  test("after a move to another leaf, which forgets the prompts, takes the level the session last needed", async (t) => {
+    const state = await session(t);
+    await shallow(state, "go on", ANSWER_HIGH, "high");
+    const last = await shallow(state, "rename foo to bar", ANSWER_LOW, "low");
+    await state.loaded.host.emit("session_tree", TO_ANOTHER_LEAF);
+    const sent = await unprompted(state, last);
+    assert.deepEqual([recordOf(state).needRun?.need, routed(sent)], ["low", LUNA], "no prompt known on this branch: the level the session last needed, LOW");
+    assert.equal(await needLine(state), "  Need LOW → LOW: a run without a prompt, at the level the session last needed.");
   });
 });
 
@@ -1260,8 +1362,8 @@ describe("/smart-router status after the latest decision", () => {
     const shown = await terms(state);
     assert.equal(
       shown[0],
-      "  Need MEDIUM → MEDIUM: a run without a prompt, at the level the session last needed.",
-      "status shows the terms of the run the last decision belongs to, a run without a prompt included: its need and its level",
+      "  Need MEDIUM → MEDIUM: a run without a prompt, at the level of the last prompt.",
+      "status shows the terms of the run the last decision belongs to, a run without a prompt included: its need, where it came from (one prompt known: John's ruling of 2026-11-18 takes the highest of the last three) and its level",
     );
     assert.equal(shown.length, 2, `the need line and the cost line: ${JSON.stringify(shown)}`);
     assert.match(shown[1] ?? "", /^ {2}Cost of 5 requests, horizon 1: gpt-6-astra \$\d+\.\d\d \(nothing cached; leaving gpt-6\.1-terra \$\d+\.\d\d\); gpt-6\.1-sol \$\d+\.\d\d \(.*\); gpt-6\.1-terra \$\d+\.\d\d \(149,000 cached, 97%\)\.$/, "and its cost line, as a planned run's: terra, which answered 30 seconds ago, warm");
@@ -1311,6 +1413,7 @@ describe("what pi-cache-optimizer is told before a run without a prompt", () => 
     const record = recordOf(state);
     return structuredClone({
       needs: record.ledger.needs,
+      prompts: record.ledger.prompts,
       runs: record.ledger.runs,
       seen: [...record.ledger.seen],
       need: record.need,
@@ -1351,8 +1454,21 @@ describe("what pi-cache-optimizer is told before a run without a prompt", () => 
     const state = await session(t);
     await threeSuperRuns(state);
     assert.equal(await run(state, "go on", ANSWER_MEDIUM), ASTRA);
-    assert.equal(told(state), ASTRA);
+    assert.equal(told(state), ASTRA, "the last three prompts needed SUPER, SUPER and MEDIUM: SUPER's astra");
+    lastPromptsNeeded(state, "medium");
+    assert.equal(told(state), ASTRA, "with the last prompts needing MEDIUM, the cost keeps the run on the warm astra");
     assert.equal(routed(await unprompted(state, ASTRA)), ASTRA, "and the route agrees");
+  });
+
+  test("after prompts needing HIGH, HIGH and LOW: HIGH's model, the highest of the last three prompts, which the route then picks", async (t) => {
+    const state = await session(t);
+    for (const [text, jev] of [["go on", ANSWER_HIGH], ["go on with it", ANSWER_HIGH], ["rename foo to bar", ANSWER_LOW]] as const) {
+      await say(state, text, jev);
+      await answer(state, routed(await route(state, text)), SHALLOW_TOKENS);
+    }
+    assert.equal(recordOf(state).need, "low", "the session last needed LOW");
+    assert.equal(told(state), SOL, "the prediction takes the highest of the last three prompts, HIGH, as the route does (John's ruling of 2026-11-18)");
+    assert.equal(routed(await unprompted(state, LUNA)), SOL, "and the route agrees");
   });
 
   test("the prediction changes nothing", async (t) => {
@@ -1362,7 +1478,7 @@ describe("what pi-cache-optimizer is told before a run without a prompt", () => 
     const before = held(state);
     told(state);
     told(state);
-    assert.deepEqual(held(state), before, "the ledger's needs, runs and caches, the need, the run's level and marks, the pick, the history and the footer are as they were");
+    assert.deepEqual(held(state), before, "the ledger's needs, prompts, runs and caches, the need, the run's level and marks, the pick, the history and the footer are as they were");
   });
 
   test("a deep session whose last need was LOW: the floor's MEDIUM model, which the route then picks", async (t) => {
