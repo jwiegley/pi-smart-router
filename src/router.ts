@@ -208,6 +208,13 @@ function sizeUnknown(ctx: ExtensionContext): boolean {
   }
 }
 
+/** When the branch was last compacted, from a bounded read of its latest compaction entry; undefined when it never was or the time cannot be read. */
+function compactedAt(view: BoundedHistory): number | undefined {
+  const entry = view.getRecentActiveEntries({ type: "compaction", limit: 1 }).at(-1);
+  const stamp = isRecord(entry) && typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
+  return Number.isFinite(stamp) ? stamp : undefined;
+}
+
 /** The last responder without its usage: the conversation it measured is no longer the one sent. */
 const withoutSize = (last: LastResponder | undefined): LastResponder | undefined => (last === undefined ? undefined : { ref: last.ref, at: last.at });
 
@@ -490,16 +497,19 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
    * The latest successful physical response on the branch, from a bounded read. The same entries,
    * oldest first, seed the ledger: each one's cache, at its entry's time, so that a resumed
    * session's warm model is priced warm. A response before a smaller prompt of the same model is
-   * forgotten there, as the ledger forgets any rewritten conversation (seedAnswer). Without a
-   * ledger, nothing is seeded into one.
+   * forgotten there, as the ledger forgets any rewritten conversation (seedAnswer), and a response
+   * older than the branch's latest compaction, which measured a conversation that is gone, seeds
+   * nothing. Without a ledger, nothing is seeded into one.
    */
   const seed = (view: BoundedHistory, ledger: Ledger | undefined, ctx: ExtensionContext): LastResponder | undefined => {
     const entries = view.getRecentActiveEntries({ type: "message", messageRole: "assistant", limit: SEED_ENTRIES });
+    const compacted = ledger === undefined ? undefined : compactedAt(view);
     let last: LastResponder | undefined;
     for (const entry of entries) {
       const found = responder(entry);
       if (found === undefined) continue;
       last = found;
+      if (compacted !== undefined && found.at < compacted) continue;
       const answered = found.usage === undefined ? undefined : seededAnswer(entry, found.usage);
       if (answered !== undefined && ledger !== undefined) seedAnswer(ledger, answerOf(answered, ctx.modelRegistry.find(answered.provider, answered.model), found.at));
     }

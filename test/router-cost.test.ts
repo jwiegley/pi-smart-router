@@ -367,6 +367,20 @@ describe("the ledger's feed", () => {
     assert.ok(Math.abs((astra?.cost ?? 0) - expected.astra) < 1e-9, `astra's cost is runCost's with the cache: ${astra?.cost} against ${expected.astra}`);
   });
 
+  test("seeding stops at a compaction: an answer older than the branch's latest compaction seeds nothing", async (t) => {
+    const state = await session(t, {
+      setup: (s) => {
+        s.appendAssistant(assistant(TERRA, { usage: usageOf(151_000), timestamp: NOW - 300_000 }));
+        s.entries.push({ type: "compaction", id: `e${s.entries.length}`, parentId: null, timestamp: new Date(NOW - 200_000).toISOString(), summary: "the summary", firstKeptEntryId: "e0", tokensBefore: 151_000 });
+        s.appendAssistant(assistant(ASTRA, { usage: usageOf(31_000), timestamp: NOW - 100_000 }));
+      },
+    });
+    const { ledger } = recordOf(state);
+    assert.deepEqual([...ledger.seen.keys()], [ASTRA], "terra answered before the compaction and astra after it: only astra is seeded, since terra never saw the conversation as it is now");
+    assert.equal(ledger.seen.get(ASTRA)?.tokens, 30_000, "astra at its size after the compaction");
+    assert.deepEqual([recordOf(state).last?.ref, recordOf(state).last?.usage?.totalTokens], [ASTRA, 31_000], "the last responder is astra, with its size");
+  });
+
   test("seeding stops at a rewrite: a response before a smaller prompt of the same model is not counted", async (t) => {
     const state = await session(t, {
       setup: (s) => {

@@ -403,13 +403,16 @@ describe("session state", () => {
     const SCOPE = { customType: "smart-router.scope", scope: "all" };
     // The level a resumed session held: its latest level record, one bounded read of the branch.
     const LEVEL = { customType: "smart-router.level", scope: "active" };
+    // The branch's latest compaction, one bounded read: an answer older than it seeds nothing.
+    const COMPACTION = { type: "compaction", limit: 1 };
     const reads = loaded.session.boundedReads;
     assert.equal(reads.filter((read) => isDeepStrictEqual(read, SEED)).length, 1, "one read of the branch: the seed's");
     assert.equal(reads.filter((read) => isDeepStrictEqual(read, LEVEL)).length, 1, "and one of its latest level record");
+    assert.equal(reads.filter((read) => isDeepStrictEqual(read, COMPACTION)).length, 1, "and one of its latest compaction entry: an answer older than the branch's latest compaction seeds nothing");
     assert.equal(reads.filter((read) => isDeepStrictEqual(read, PIN)).length, 1, "session_start on smart-router/auto reads the latest pin entry once, over the whole session");
     assert.ok(reads.some((read) => isDeepStrictEqual(read, SCOPE)), "and the scope");
     for (const read of reads) {
-      assert.ok([SEED, LEVEL, PIN, SCOPE].some((allowed) => isDeepStrictEqual(read, allowed)), `${JSON.stringify(read)}: every other read is the old pin entry's or the scope's, over the whole session`);
+      assert.ok([SEED, LEVEL, COMPACTION, PIN, SCOPE].some((allowed) => isDeepStrictEqual(read, allowed)), `${JSON.stringify(read)}: every other read is the old pin entry's or the scope's, over the whole session`);
     }
     assert.equal(loaded.session.wholeHistoryReads, 0);
   });
