@@ -194,24 +194,31 @@ describe("checking a roster's text", () => {
     assert.deepEqual(checkRoster("[]").lines[0], "INVALID: roster: must be a JSON object");
   });
 
-  test("the README's fallback example is John's roster, and its read-back is what the checker prints", () => {
-    const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
-    const section = readme.slice(readme.indexOf("### A fallback chain"), readme.indexOf("### Fields in version 2"));
+  test("the manual's fallback example is John's roster, and its read-back is what the checker prints", () => {
+    const manual = readFileSync(new URL("../docs/manual.md", import.meta.url), "utf8");
+    const section = manual.slice(manual.indexOf("### A fallback chain"), manual.indexOf("### Fields in version 2"));
     const [, example] = /```json\n([\s\S]*?)\n```/.exec(section) ?? [];
     assert.equal(`${example}\n`, JOHN);
     const [, shown] = /```text\n([\s\S]*?)\n```/.exec(section) ?? [];
     assert.deepEqual((shown ?? "").split("\n"), JOHN_ROUTING.slice(0, 11));
   });
 
-  test("every roster the README shows is valid", () => {
-    const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
-    const rosters = [...readme.matchAll(/```json\n([\s\S]*?)\n```/g)].map((match) => match[1] ?? "").filter((text) => /"version"\s*:/.test(text));
-    assert.ok(rosters.length >= 5, `the README shows ${rosters.length} rosters`);
-    for (const text of rosters) {
-      const report = checkRoster(text);
-      assert.equal(report.ok, true, `${report.lines[0]}\n${text.slice(0, 200)}`);
-    }
-  });
+  // The manual is the fork's own document. The README is upstream's, with one section on the fork
+  // that shows one roster: the one a missing roster's refusal sends its reader to.
+  for (const [name, path, least] of [
+    ["manual", "../docs/manual.md", 5],
+    ["README", "../README.md", 1],
+  ] as const) {
+    test(`every roster the ${name} shows is valid`, () => {
+      const text = readFileSync(new URL(path, import.meta.url), "utf8");
+      const rosters = [...text.matchAll(/```json\n([\s\S]*?)\n```/g)].map((match) => match[1] ?? "").filter((block) => /"version"\s*:/.test(block));
+      assert.ok(rosters.length >= least, `the ${name} shows ${rosters.length} rosters`);
+      for (const roster of rosters) {
+        const report = checkRoster(roster);
+        assert.equal(report.ok, true, `${report.lines[0]}\n${roster.slice(0, 200)}`);
+      }
+    });
+  }
 });
 
 describe("checking a roster file", () => {

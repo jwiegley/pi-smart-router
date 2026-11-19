@@ -937,9 +937,9 @@ describe("redact", () => {
     });
   }
 
-  // The README's examples of what redaction hides, row for row: its first table under "What
+  // The manual's examples of what redaction hides, row for row: its first table under "What
   // redaction hides". A row with no third text stays as it is.
-  const readmeExamples: ReadonlyArray<readonly [string, string, string?]> = [
+  const manualExamples: ReadonlyArray<readonly [string, string, string?]> = [
     // Passwords in URLs, and escaped breaks.
     ["a URL's password", "git clone https://bob:Hunter2pw@example.com/a/b", `git clone https://bob:${REDACTED}@example.com/a/b`],
     ["a URL's password behind a DOMAIN\\user name, whose \\t then reads as a space", "http://CORP\\tom:Hunter2pw@proxy.corp:8080", `http://CORP om:${REDACTED}@proxy.corp:8080`],
@@ -983,15 +983,15 @@ describe("redact", () => {
     ["the cookie of a Set-Cookie header", "Set-Cookie: sid=Hunter2pw; Path=/; HttpOnly", `Set-Cookie: sid=${REDACTED}; Path=/; HttpOnly`],
   ];
 
-  for (const [what, input, want] of readmeExamples) {
-    test(`reads the README's example: ${what}`, () => {
+  for (const [what, input, want] of manualExamples) {
+    test(`reads the manual's example: ${what}`, () => {
       assert.equal(redact(input), want ?? input);
     });
   }
 
-  // The README's known gaps, row for row: its third table. A row with no third text reaches Jev as
+  // The manual's known gaps, row for row: its third table. A row with no third text reaches Jev as
   // it is.
-  const readmeGaps: ReadonlyArray<readonly [string, string, string?]> = [
+  const manualGaps: ReadonlyArray<readonly [string, string, string?]> = [
     // In a curl command.
     ["a quoted argument that runs over several lines, before the flag", `curl -d '{\n"a": 1\n}' -u admin:pw https://h`],
     ["a -u value in JSON-escaped quotes", 'curl -u \\"admin:pw\\" https://h'],
@@ -1043,35 +1043,35 @@ describe("redact", () => {
     ["a Python auth pair behind a name that only ends in _auth", "http_auth=('bob', 'Hunter2pw')"],
   ];
 
-  for (const [what, input, want] of readmeGaps) {
-    test(`keeps the README's known gap: ${what}`, () => {
+  for (const [what, input, want] of manualGaps) {
+    test(`keeps the manual's known gap: ${what}`, () => {
       assert.equal(redact(input), want ?? input);
     });
   }
 
-  // The README's examples of text that is hidden though it is no secret: its second table.
-  const readmeHidden: ReadonlyArray<readonly [string, string, string]> = [
+  // The manual's examples of text that is hidden though it is no secret: its second table.
+  const manualHidden: ReadonlyArray<readonly [string, string, string]> = [
     ["the text of a plist's key element", "<key>CFBundleName</key>", `<key>${REDACTED}</key>`],
     ["the port of docker run on a line that names mysql", "docker run --name mysql -p8080:80 img", `docker run --name mysql -p${REDACTED} img`],
     ["the word after password on a line that also says login", "enter your login and password carefully", `enter your login and password ${REDACTED}`],
     ["the end of a time format behind a curl word and a single &", "curl -s https://h & date -u +%H:%M:%S", `curl -s https://h & date -u +%H:${REDACTED}`],
   ];
 
-  for (const [what, input, want] of readmeHidden) {
-    test(`hides, as the README says, ${what}`, () => {
+  for (const [what, input, want] of manualHidden) {
+    test(`hides, as the manual says, ${what}`, () => {
       assert.equal(redact(input), want);
     });
   }
 
-  // The README states what redaction hides by example alone, so its tables and the rows above must
+  // The manual states what redaction hides by example alone, so its tables and the rows above must
   // be the same rows: the same label, input and output, byte for byte and in the same order. In a
   // cell a line break is written ⏎ and a tab ⇥; a pipe is written \\|, as a table needs; and a
   // row whose input stays as it is says "unchanged".
-  test("the README's tables under \"What redaction hides\" are the suite's rows, byte for byte", () => {
-    const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
-    const start = readme.indexOf("\n### What redaction hides\n");
-    assert.ok(start >= 0, "the README has the section");
-    const section = readme.slice(start + 1, readme.indexOf("\n## ", start + 1));
+  test("the manual's tables under \"What redaction hides\" are the suite's rows, byte for byte", () => {
+    const manual = readFileSync(new URL("../docs/manual.md", import.meta.url), "utf8");
+    const start = manual.indexOf("\n### What redaction hides\n");
+    assert.ok(start >= 0, "the manual has the section");
+    const section = manual.slice(start + 1, manual.indexOf("\n## ", start + 1));
     const decode = (cell: string, row: string): string => {
       const code = /^`([^`]*)`$/.exec(cell);
       assert.ok(code !== null, `one code span in ${JSON.stringify(cell)} of ${row}`);
@@ -1096,17 +1096,17 @@ describe("redact", () => {
     }
     const rows = (suite: ReadonlyArray<readonly [string, string, string?]>) => suite.map(([what, input, want]) => [what, input, want ?? input]);
     assert.equal(tables.length, 3, "the examples, the text that is no secret, and the known gaps");
-    assert.deepEqual(tables[0], rows(readmeExamples));
-    assert.deepEqual(tables[1], rows(readmeHidden));
-    assert.deepEqual(tables[2], rows(readmeGaps));
+    assert.deepEqual(tables[0], rows(manualExamples));
+    assert.deepEqual(tables[1], rows(manualHidden));
+    assert.deepEqual(tables[2], rows(manualGaps));
     for (const [what, input, want] of tables.flat()) assert.equal(redact(input), want, what);
   });
 
-  // The README's one sentence about the user flags only introduces examples, so the examples must
+  // The manual's one sentence about the user flags only introduces examples, so the examples must
   // be there: each of curl's three flags hidden behind curl, --proxy-user hidden behind wget, and
-  // date -u and docker run -u left as they are. The test above holds the README to these rows.
-  test("the README's examples show curl's user flags behind curl and --proxy-user behind wget, as its sentence says", () => {
-    const hidden = readmeExamples.filter(([, input, want]) => want !== undefined && want !== input);
+  // date -u and docker run -u left as they are. The test above holds the manual to these rows.
+  test("the manual's examples show curl's user flags behind curl and --proxy-user behind wget, as its sentence says", () => {
+    const hidden = manualExamples.filter(([, input, want]) => want !== undefined && want !== input);
     for (const [flag, shape] of [
       ["-u", /^curl -u \S+:Hunter2pw /],
       ["--user", /^curl .* --user \S+:Hunter3pw /],
@@ -1117,7 +1117,7 @@ describe("redact", () => {
       assert.ok(rows.length > 0, `an example with ${flag}`);
       for (const [, , want] of rows) assert.ok(!/Hunter[234]pw/.test(want ?? ""), `${flag}: ${want}`);
     }
-    const left = readmeExamples.filter(([, , want]) => want === undefined).map(([, input]) => input);
+    const left = manualExamples.filter(([, , want]) => want === undefined).map(([, input]) => input);
     for (const text of ["date -u +%H:%M:%S", "docker run -u 1000:1000 img"]) assert.ok(left.some((input) => input.includes(text)), `${text} in a row that stays as it is`);
   });
 

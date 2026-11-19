@@ -1,386 +1,93 @@
-# pi-smart-router (jwiegley fork)
+# pi-smart-router
 
-Two Pi virtual models, `smart-router/auto` and `smart-router/local`, that send each request to a
-physical model chosen from a roster you keep on each host.
+## This fork
 
-This is John Wiegley's fork of [beettlle/pi-smart-router](https://github.com/beettlle/pi-smart-router),
-rewritten for the virtual models of Pi 1.5. Of upstream's code it keeps the deterministic prompt
-classifier and, since 1.4.0-jw.5, the low-intensity scoring that weighs a prompt's heuristics, and
-nothing else; [CHANGELOG.md](CHANGELOG.md) lists what was removed and why. The port started from
-upstream v1.3.0 (`f31b2304`). Since version `1.4.0-jw.4` it has upstream v1.4.0 (`54bee53d`) in its
-history through a merge that keeps the port's tree, as an earlier one recorded upstream main at
-`58e87b59`: everything upstream changed between v1.3.0 and v1.4.0 is in files the port had removed
-or replaced, so the merge brought none of it into this code. Version `1.4.0-jw.5` takes one of
-those files as it is at v1.4.0, the low-intensity scoring ([License](#license)). It is not
-published to npm.
+This repository is [jwiegley/pi-smart-router](https://github.com/jwiegley/pi-smart-router), John
+Wiegley's fork of [beettlle/pi-smart-router](https://github.com/beettlle/pi-smart-router). It is a
+rewrite for the virtual models of Pi 1.5: two models, `smart-router/auto` and `smart-router/local`,
+that send each request to a physical model chosen from a roster you keep on each host.
 
-## What it does
+Everything from [Upstream's README](#upstreams-readme) on is upstream's README at v1.4.0
+(`54bee53d`), unchanged. It describes upstream's package, and most of it does not describe this
+code; this section says what differs. [docs/manual.md](docs/manual.md) is the fork's manual, and
+[CHANGELOG.md](CHANGELOG.md) records its releases and what the port removed and why. A version of
+the fork is `<upstream base>-jw.<n>`, as in `1.4.0-jw.5`.
 
-The router registers two virtual models with Pi's `registerVirtualModel`. Pi asks the router before
-every request of a session on one of them, the router names a physical catalog model, and Pi
-prepares the request for that model's provider: its credentials, base URL, headers, transport budget
-and hooks. The selection stays virtual; each assistant message names the physical model that
-answered, and Pi's footer shows it.
+### What the fork keeps of upstream
 
-- **`smart-router/auto`** routes by what you typed. With a version 1 roster, a planning prompt goes
-  to the planning role, a complex one to the complex role, a trivial one to the trivial role,
-  anything else to the default role, up or down, whichever model answered last: nothing holds a
-  session on a model by time. When a model cannot take a request (not in the catalog, no
-  credentials, cooling down after a usage limit), the next model of its role takes it, and then
-  the role's declared fallback, one hop and no further. Without a declared fallback the request is
-  refused.
-- **Levels and scopes.** With a version 2 roster, `smart-router/auto` sends each run to one of four
-  levels, LOW, MEDIUM, HIGH or SUPER, in the session's scope, personal or work. A trailing tag such
-  as `#high` sets the level; otherwise the prompt's demand does: the judgment of Jev, TypeSafe AI's
-  decision model, which the router asks through Pi, weighed together with upstream's heuristics.
-  Among the models good enough for that level, the run goes to the one the coming work costs least
-  on, counting what each has in its prompt cache, and a session leaves its model only when that
-  saves more than a margin. In a work session `smart-router/auto` routes only to the work Codex
-  account, apart from Jev's request; a model picked by hand and extensions with models of their
-  own are outside it ([What work scope does not cover](#what-work-scope-does-not-cover)). A scope
-  may declare a fallback chain: models that take a run, in a fixed order, when its level's own
-  models cannot. See [Levels](#levels), [A fallback chain](#a-fallback-chain), [Jev](#jev) and
-  [Scope](#scope-personal-or-work).
-- **Easy to change, cheap to get wrong.** Which model serves which level, the fallback chain, the
-  local set and the texts Jev reads are each one edit in one place, a running session picks the
-  edit up at its next prompt, and `/smart-router check` or `node src/check-cli.ts` reads the result
-  back before anything is sent. See [Changing the routing](#changing-the-routing).
-- **`smart-router/local`** routes only to the roster's local role, and never falls back to anything
-  else. If no local model can take the request, it is refused. It does so in personal scope, in
-  work scope and in a session whose scope cannot be read alike: selecting it is the request for
-  local routing. The local-only pin of earlier versions is gone; see
-  [Routing locally](#routing-locally).
-- **A model picked by hand always stays selected.** The router routes only while the selection is
-  `smart-router/auto` or `smart-router/local`. A model you choose with `/model` or by cycling is
-  sent as it is, in work scope too: the router does not switch it back, refuse
-  its prompts, cancel its compactions or touch its requests. See
-  [A model picked by hand](#a-model-picked-by-hand).
-- **Every refusal says "Nothing was sent."** A refusal names the virtual model, gives the cause in
-  the router's own words and says how to get out. Pi never retries a refusal.
+- **The deterministic prompt classifier:** the triage engine and the entropy check, in
+  `src/triage/`, and upstream's planning patterns.
+- **The low-intensity scoring** (`src/triage/tier-features.ts`), as the heuristics that weigh a
+  prompt's demand. Two of its twelve signals, the requirement vector and the cluster match, have no
+  input here and weigh 0.
+- **Adaptive reasoning.** `src/effort.ts` ports the policy of
+  [Adaptive reasoning](#adaptive-reasoning-thinking-level-166) rule by rule, so that section's
+  table of turn classes holds here; its last row, the escalation, is a turn on SUPER's model or in
+  a stuck run. Its switch, floor and ceiling are the roster's `adaptiveReasoning` section, not
+  environment variables; there is no conciseness nudge and no telemetry, and a role's fixed
+  `thinking` is never changed.
+- **The test for a stuck run**, from upstream's loop escalation: a run whose last three tool calls
+  in a row failed moves up one level, once.
 
-The router opens no network connection of its own and sets no timer. When a version 2 roster
-has a classifier, it asks Pi's model registry for one classifier request per prompt on
-smart-router/auto, with a per-attempt timeout and no retries. It never does so on
-smart-router/local, for a steer or follow-up, or without a classifier.
+The files in `src/triage/` are upstream's, taken at v1.4.0 and changed only in their import
+specifiers (`tier-features.ts` also carries a header and reads its types from `types.ts`). The
+rest of upstream's code is replaced or removed. The fork is MIT, as upstream is, and adds the
+[LICENSE](LICENSE) file that upstream does not ship: Copyright (c) 2026 beettlle and contributors,
+and Copyright (c) 2026 John Wiegley for the port.
 
-It also starts no process, writes no file of its own and keeps no prompt text; its session entries
-(the scope's and the level records) are written by Pi, into the session. It reads
-only files under Pi's agent directory: the roster, Multi-Pass's subscription labels when the
-roster binds a Multi-Pass account, and the prompt files the roster names in `smart-router/`
-([Jev's prompts](#jevs-prompts)). It reads no file relative to the working directory or a
-project; it only compares the working directory, as text, with the roster's work directories. The
-one project-influenced value it uses is the compaction settings in Pi's settings, which Pi merges
-with a project's `.pi/settings.json`; they only affect how a version 2 run treats a model too
-small for the conversation: priced with the compaction Pi will make first, or, with compaction
-disabled, passed over. It has no runtime dependency and no native code; Pi supplies
-`@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai`.
+### What differs
+
+| | Upstream | This fork |
+|---|---|---|
+| How it joins Pi | A provider `smart-router` with one model, `auto`, and its own `streamSimple`, which runs the pipeline and delegates to another provider's streaming API | Two virtual models, `smart-router/auto` and `smart-router/local`, registered with Pi's `registerVirtualModel`. The router names a physical model, and Pi prepares and sends the request: credentials, retries, compaction and hooks are Pi's own |
+| What it routes among | A fleet taken from Pi's enabled or authenticated models, in three tiers | A roster: one JSON file per host, `<agentDir>/smart-router.json`, with named roles of exact `provider/id` models. It is validated strictly, and a missing or invalid roster makes both models refuse |
+| How a model is chosen | A pipeline of 12 stages with early exit, for each request | One decision for each run, when its prompt arrives. A version 2 roster has four levels, LOW, MEDIUM, HIGH and SUPER; a trailing tag such as `#high` sets the level, and otherwise the prompt's demand does. Among the models good enough for that level, the run goes to the one the coming work costs least on, counting each model's prompt cache. A version 1 roster routes by the keyword classifier alone |
+| The classifier model | Typed judgment: opt-in, six questions to a Jev-compatible judge, recorded and never deciding | Jev, when the roster names it: asked through Pi's model registry once per prompt, after redaction. Its answer is one term of the demand, weighed with the heuristics |
+| Staying on a model | A session pin, with SAAR and cache break-even rules | No pin and no hold by time. A session leaves its model when a prompt needs a stronger one, or when another adequate model is cheaper by more than a margin |
+| When a model cannot take a request | A safe cloud default: the first healthy economical-cloud model | The next model of the role, then the fallback chain the roster declares, then a level up. Otherwise the request is refused with "Nothing was sent". Nothing falls back to a cloud model the roster does not name |
+| Local models | A hardware probe, and probes of LM Studio and Ollama | The roster's local section. `smart-router/local` routes only to the local role, and never to a cloud model |
+| Accounts | No account binding and no scopes | Every subscription account a role uses is bound in the roster. A session is in personal or work scope, and `smart-router/auto` sends a work session only to the work account |
+| A model picked with `/model` | Recorded as an override, which breaks the session pin | Stays selected and is sent as it is. The router routes only while the selection is one of its own two models |
+| Configuration | Environment variables and configuration files | The roster and the prompt files it names, and one environment variable, `PI_SMART_ROUTER_SCOPE` |
+| State and files | A SQLite database of telemetry, prices and session data, and `.pi-smart-router/` under the working directory | No file of its own. Its records are session entries that Pi writes, and they hold no prompt text |
+| Network | Downloads its embedding model and fetches prices | No connection of its own. The one request off the machine is Jev's, which Pi makes |
+| Commands | `status`, `history`, `stats`, `mode`, `pricing`, `export`, `feedback`, `unpin`, `plan`, `doctor` | `status`, `history`, `scope`, `was`, `check`, `reload` |
+| The package | On npm, with a build, native dependencies and a library API | Not on npm. TypeScript source that Pi loads by path, with no runtime dependency, no native code, no build and no library API |
+
+Removed with these: the HyDRA embedding matcher and its ONNX models, the price broker and virtual
+cost, the planning delegate, the learned tiers (P(success), calibration, expected cost), telemetry
+and dataset export, the fleet modes, the `pi-smart-router` CLI, and upstream's release, benchmark
+and agent tooling. Upstream's sections on them, which is most of its README, do not apply here.
+
+### Installing the fork
 
 It needs jwiegley/pi 1.5.0 or later, whose bounded session reads let it look at a session without
-loading its whole history. Upstream Pi 1.5.0 lacks those reads, so there the router fails closed:
-both of its models refuse every request for as long as it is loaded. Do not load it on upstream Pi.
-
-## Installing
-
-There is no npm package, and none should be installed:
-
-- The fork is not on npm. It ships source only, and Pi loads it by path; nothing needs installing.
-- Never install upstream's npm package `pi-smart-router` beside it. Both register the provider
-  `smart-router`, and Pi refuses the second registration at startup.
-
-John's nix-config is to package this repository for his personal Pi profiles and, once John
-confirms it, for the shared-work profile with `PI_SMART_ROUTER_SCOPE=work` (see
-[Scope](#scope-personal-or-work)); that integration belongs to nix-config, not to this repository.
-To load it by hand, point Pi at the checkout:
+loading its whole history. Upstream Pi 1.5.0 lacks them, so there both of its models refuse every
+request. There is nothing to install: point Pi at a checkout,
 
 ```sh
 pi -e /path/to/pi-smart-router/index.ts
 ```
 
-or add the path to the `extensions` list in Pi's settings. Then:
+or add that path to the `extensions` list in Pi's settings. Never install upstream's npm package
+beside it: both register the provider `smart-router`, and Pi refuses the second. If your settings
+keep an `enabledModels` list, add `smart-router/auto` and `smart-router/local` to it. Then write
+the roster, and run `/smart-router status`.
 
-1. If your settings keep an `enabledModels` list, add `smart-router/auto` and `smart-router/local`:
-   Pi selects and cycles models within that list. Whether `defaultProvider` and `defaultModel`
-   should name a router model is your choice.
-2. Write the roster (next section).
-3. Run `/smart-router status` and check every candidate, binding and route.
+### The roster
 
-## The roster
-
-The roster is one JSON file per host, at `<agentDir>/smart-router.json`, which is
-`~/.config/pi/agent/smart-router.json` on John's hosts. `<agentDir>` is Pi's agent directory
-(`PI_CODING_AGENT_DIR`); a relative one is refused.
-
-- **You own it.** Nix never writes it, and it holds no secrets: the schema has no field for keys,
-  tokens, headers, base URLs or environment.
-- **It must be safe:** a regular file owned by you, not writable by group or others, at most 64 KiB.
-  A symlink is followed to its target, which must pass the same checks.
-- **Validation is strict.** Unknown keys are rejected at every level, and errors name their place,
-  as in `roles[3].models[0]: "openai-codex-3/gpt-6.1-sol" is excluded by openai-codex-3/*`.
-- **Failure is closed.** A missing, invalid or unsafe roster makes both models refuse until it is
-  fixed, with one notice per session start. There is no last-known-good copy, so a typo cannot keep
-  routing to a model you just removed. Only the scope keeps something of the last valid roster: its
-  work directories, so that a broken edit cannot move a work session to personal scope.
-- **Check before you rely on it.** `/smart-router check` in a session, or
-  `node src/check-cli.ts <roster.json>` anywhere, reads the roster back: what each selection and
-  scope routes to, in order, or the first error and its place. See
-  [Checking a roster](#checking-a-roster).
-- **It reloads without a restart:** at session start, at each idle prompt when the file changed,
-  and on `/smart-router status`, `check`, `scope` and `reload`. A running session routes its next
-  prompt by the roster as it is then; the run under way keeps the model it has.
-- **Two schema versions.** Version 1, below, routes by a routing table. Version 2 routes by four
-  levels in each scope; see [Roster version 2](#roster-version-2-levels-and-scopes).
-
-### Hera
-
-```json
-{
-  "version": 1,
-  "$comment": "Hera. openai-codex-2 is John's personal ChatGPT account, labelled 'personal' in Multi-Pass. The router itself excludes openai-codex-3 and refuses work or Positron labels; plain openai-codex is excluded here because Hera reserves it for the work account.",
-  "exclude": ["openai-codex/*"],
-  "roles": [
-    { "name": "local", "$comment": "private or extreme economy; free; only smart-router/local", "models": ["omlx-hera/GLM-5.3-Flash-oQ4e-mtp"], "thinking": "max" },
-    { "name": "worker", "$comment": "economical", "models": ["openrouter/deepseek/deepseek-v4.1-flash-1017"] },
-    { "name": "thinker", "$comment": "strong; the architect's fallback", "models": ["openrouter/moonshotai/kimi-k3.1-pro"] },
-    { "name": "coder", "$comment": "the engineer's fallback, reached only through routing.fallback; ranked just below the engineer so that sessions return to sol as soon as it is available", "models": ["openrouter/z-ai/glm-5.3"] },
-    { "name": "engineer", "$comment": "frontier", "models": ["openai-codex-2/gpt-6.1-sol"] },
-    { "name": "architect", "$comment": "frontier architect/thinker", "models": ["openai-codex-2/gpt-6-astra"] }
-  ],
-  "routing": {
-    "default": "worker",
-    "trivial": "worker",
-    "complex": "engineer",
-    "planning": "architect",
-    "fallback": { "engineer": "coder", "architect": "thinker" }
-  },
-  "accounts": { "openai-codex-2": { "multiPassLabel": "personal" } },
-  "local": { "role": "local", "providers": ["omlx-hera"], "hosts": ["hera.lan"] }
-}
-```
-
-The `"exclude": ["openai-codex/*"]` line is required on Hera: plain `openai-codex` is the work
-account there, and with the line, a role that names it is a validation error.
-
-### Clio, Vulcan, athena and pallas
-
-```json
-{
-  "version": 1,
-  "$comment": "Clio, Vulcan, athena and pallas. Native openai-codex is John's personal ChatGPT login on these hosts; the binding below is his acknowledgement, which the router cannot verify. Run /smart-router status after any /login, /logout, /subs add or /subs remove.",
-  "roles": [
-    { "name": "local", "$comment": "private or extreme economy; free; only smart-router/local", "models": ["omlx-hera/GLM-5.3-Flash-oQ4e-mtp"], "thinking": "max" },
-    { "name": "worker", "$comment": "economical", "models": ["openrouter/deepseek/deepseek-v4.1-flash-1017"] },
-    { "name": "thinker", "$comment": "strong; the architect's fallback", "models": ["openrouter/moonshotai/kimi-k3.1-pro"] },
-    { "name": "coder", "$comment": "the engineer's fallback, reached only through routing.fallback", "models": ["openrouter/z-ai/glm-5.3"] },
-    { "name": "engineer", "$comment": "frontier", "models": ["openai-codex/gpt-6.1-sol"] },
-    { "name": "architect", "$comment": "frontier architect/thinker", "models": ["openai-codex/gpt-6-astra"] }
-  ],
-  "routing": {
-    "default": "worker",
-    "trivial": "worker",
-    "complex": "engineer",
-    "planning": "architect",
-    "fallback": { "engineer": "coder", "architect": "thinker" }
-  },
-  "accounts": { "openai-codex": { "native": "personal" } },
-  "local": { "role": "local", "providers": ["omlx-hera"], "hosts": ["hera.lan"] }
-}
-```
-
-It differs from Hera's in three places: the engineer and architect use native `openai-codex`, there
-is no `exclude` line, and the native login is bound with `"native": "personal"`.
-
-### How the roles are used
-
-- **local (GLM on Hera's oMLX)** takes requests only through `smart-router/local`.
-  `smart-router/auto` never routes to it, because no routing target or fallback names it; that
-  keeps auto from causing cold oMLX prefills.
-- **worker (DeepSeek)** takes default and trivial runs.
-- **engineer (sol)** takes complex runs: code, debugging, a high cyclomatic score and similar.
-- **architect (astra)** takes planning runs, on the prepaid Codex subscription.
-- **coder (GLM 5.3 on OpenRouter)** and **thinker (Kimi)** are reached only as fallbacks: coder when
-  sol cannot take a request, thinker when astra cannot, as when the ChatGPT subscription is
-  unavailable or cooling down after a usage limit. sol and astra share one ChatGPT account, so the
-  fallbacks move to a different quota. A fallback sends the conversation to another vendor; delete
-  the `fallback` object to be refused instead. After a fallback, the next run goes to the role its
-  prompt classifies as: a default or trivial run to worker, and a complex or planning run tries sol
-  or astra again.
-
-The order of `roles` is the ladder, cheapest or weakest first. Every run plans on the role its
-prompt classifies as, whichever role answered last: a session plans on astra and implements on sol
-whenever a run classifies as complex, and a trivial follow-up goes to worker at once.
-
-### Fields
-
-| Field | Required | Meaning |
-|---|---|---|
-| `version` | yes | `1` for this table's fields, or `2` for [version 2](#roster-version-2-levels-and-scopes). |
-| `$comment` | no | A string, allowed in every object. |
-| `exclude` | no | `provider/id` refs or `provider/*` patterns, added to the built-in exclusions `openai-codex-3/*`, `hermes/*`, `openrouter/openrouter/auto` and `smart-router/*`, which no roster can remove. A role ref that matches an exclusion is an error. |
-| `roles` | yes | The ladder, cheapest or weakest first. Each role has a `name` (`^[a-z][a-z0-9-]{0,31}$`, unique), `models` (exact `provider/id` refs, no patterns, each in one role only) and an optional `thinking`: `"selected"` (the default, the session's level) or a fixed `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`. |
-| `routing.default` | yes | The role of runs that classify as nothing else. |
-| `routing.trivial`, `routing.complex`, `routing.planning` | no | Roles for those classifications; each defaults to `routing.default`. |
-| `routing.fallback` | no | `{ "role": "role" }`: one hop, never to itself. Without an entry, a role that cannot take a request refuses it. |
-| `accounts` | for subscription providers | A binding for every subscription provider a role uses. See below. |
-| `local` | no | `role` (the local role), `providers` (every provider of the local role, and nothing qualifies as local unless it is listed) and `hosts` (base-URL host names). Without it, `smart-router/local` always refuses. |
-| `stickyIdleMinutes` | no | Accepted and ignored: nothing holds a session on a model by time. When given it must still be 0 to 1440, and `/smart-router check` says it is ignored. |
-| `cooldownMinutes` | no | 1 to 1440, default 30. How long a usage-limit or authentication error takes a model out of routing, and with it every model of the same subscription account. |
-| `unreachableMinutes` | no | 1 to 60, default 5. How long a local model whose server could not be reached is passed over while another model can take the request. |
-
-A ref splits at its first `/`: `openrouter/deepseek/deepseek-v4.1-flash-1017` is provider `openrouter`,
-model `deepseek/deepseek-v4.1-flash-1017`. Every ref is compared whole, so
-`openai-codex-2/gpt-6.1-sol` and `openai-codex-3/gpt-6.1-sol` are different models.
-
-Each `local.hosts` entry must be `localhost`, a loopback, private (RFC 1918), link-local or
-unique-local address, or a name ending in `.lan`, `.local` or `.home.arpa`; anything else is a
-validation error, so a roster edit cannot make a cloud API count as local. Tailnet names and
-addresses are not accepted. A model is local when its provider is in `local.providers` and the host
-of its catalog base URL is in `local.hosts`. The router sees only the catalog's base URL: a base URL
-that a stored credential supplies replaces it at request time, so keep local providers' credentials
-free of base URLs.
-
-### Account bindings
-
-A provider id does not identify an account: Multi-Pass aliases are positional, and a native login
-is whichever account the browser had signed in at `/login`. So every subscription provider in the
-roster needs a binding. Subscription providers are `openai-codex`, `anthropic` and `github-copilot`,
-and their Multi-Pass aliases such as `openai-codex-2`.
-
-- **A Multi-Pass alias** is bound with `{ "multiPassLabel": "<label>" }`. The router reads the label
-  Multi-Pass stores for that alias in `<agentDir>/multi-pass.json`, which holds no credentials, and
-  the labels must match, ignoring case and surrounding spaces. A missing file, entry or label, or a
-  file that is unsafe or malformed, refuses the alias.
-- **A native login** is bound with `{ "native": "<label>" }`. That is your acknowledgement of which
-  account is logged in; the router cannot check it, and `status` shows it as unverified, with the
-  provider's auth source. Run `/smart-router status` after any `/login`, `/logout`, `/subs add` or
-  `/subs remove` on hosts that route to native `openai-codex`.
-- **A label with the word `work` or `positron`** (a whole word, in any case) is refused wherever it
-  appears, in the roster or in Multi-Pass's file, except on a version 2 work binding, which must
-  carry one, and which only a work-scope session accepts.
-
-`status` reports each binding, the label Multi-Pass stores and the auth source (configured, stored or
-environment), never a credential.
-
-## Roster version 2: levels and scopes
-
-Version 2 replaces the routing table with the four levels of each scope the roster serves,
-personal, work or both, binds each account to a scope, and may configure the classifier, the
-demand and the switching. Version 1 rosters keep working, in personal scope only: the keyword
-classifier picks the role, with no demand and no cost rule.
-
-### Hera, version 2
+A version 2 roster for one personal ChatGPT login, with a fallback chain and one local model:
 
 ```json
 {
   "version": 2,
-  "$comment": "Hera, version 2. Personal levels take Codex first, on openai-codex-2 (John's personal ChatGPT account, labelled 'personal' in Multi-Pass), then OpenRouter. Work levels take only openai-codex-3, the work account, which the router excludes everywhere else. Plain openai-codex is excluded here because Hera reserves it for the work account.",
-  "exclude": ["openai-codex/*"],
   "roles": [
-    { "name": "local", "$comment": "private or extreme economy; free; only smart-router/local", "models": ["omlx-hera/GLM-5.3-Flash-oQ4e-mtp"], "thinking": "max" },
-    { "name": "low", "$comment": "Nyx's ref is a Nix-store basename that changes whenever its model is rebuilt", "models": ["openai-codex-2/gpt-6-luna", "nyx/g3mjym7raqj6147biq46zxym32gyda9g-Qwen3.8-27B-exl3-6fe61ad", "omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp"] },
-    { "name": "medium", "models": ["openai-codex-2/gpt-6.1-terra", "openrouter/deepseek/deepseek-v4.1-flash-1017"] },
-    { "name": "high", "models": ["openai-codex-2/gpt-6.1-sol", "openrouter/z-ai/glm-5.3"] },
-    { "name": "super", "models": ["openai-codex-2/gpt-6-astra", "openrouter/moonshotai/kimi-k3.1-pro"] },
-    { "name": "work-low", "models": ["openai-codex-3/gpt-6-luna"] },
-    { "name": "work-medium", "models": ["openai-codex-3/gpt-6.1-terra"] },
-    { "name": "work-high", "models": ["openai-codex-3/gpt-6.1-sol"] },
-    { "name": "work-super", "models": ["openai-codex-3/gpt-6-astra"] }
-  ],
-  "scopes": {
-    "personal": {
-      "levels": {
-        "low": { "role": "low", "describe": "Mechanical or trivial work that follows a clear specification" },
-        "medium": { "role": "medium", "describe": "Engineering, implementation and validation" },
-        "high": { "role": "high", "describe": "Deep thought, review, and the design of verification" },
-        "super": { "role": "super", "describe": "Deep thought, research, design and planning" }
-      }
-    },
-    "work": {
-      "$comment": "The directory is an example: list the directories of Hera's work checkouts.",
-      "levels": {
-        "low": { "role": "work-low", "describe": "Mechanical or trivial work that follows a clear specification" },
-        "medium": { "role": "work-medium", "describe": "Engineering, implementation and validation" },
-        "high": { "role": "work-high", "describe": "Deep thought, review, and the design of verification" },
-        "super": { "role": "work-super", "describe": "Deep thought, research, design and planning" }
-      },
-      "directories": ["/Users/johnw/src/positron"]
-    }
-  },
-  "accounts": {
-    "openai-codex-2": { "multiPassLabel": "personal" },
-    "openai-codex-3": { "multiPassLabel": "Positron work", "scope": "work", "$comment": "the label Multi-Pass stores for openai-codex-3, which must name work or Positron" }
-  },
-  "classifier": { "model": "openrouter/typesafe/jev-1.14", "timeoutMs": 1000, "context": { "messages": 6, "messageChars": 1500, "totalChars": 12000 } },
-  "local": { "role": "local", "providers": ["omlx-hera", "nyx"], "hosts": ["hera.lan", "nyx.lan"] }
-}
-```
-
-- **The personal ladder** takes Codex first at every level, then OpenRouter; LOW takes luna, then
-  Nyx's Qwen, then Hera's. A level is represented by the first available candidate of its role, so
-  a level returns to Codex as soon as Codex is available again.
-- **The work ladder** holds only `openai-codex-3`, Hera's work account, bound as work. The built-in
-  exclusion of `openai-codex-3/*` still holds in personal scope, so no personal level can name it.
-- **Nyx's ref** is a Nix-store basename that changes whenever its model is rebuilt, so the roster
-  needs an edit after each rebuild until nix-config gives it a stable id. Pi offers it only once
-  `NYX_API_KEY` reaches Pi's environment; until then, LOW falls through to Hera's Qwen whenever luna
-  is unavailable.
-- **The local section** keeps Nyx, so Nyx's Qwen counts as local although `smart-router/local`
-  routes only to GLM: when its server cannot be reached, LOW passes it over for a few minutes, as
-  it does any local model ([Routing in detail](#routing-in-detail)).
-
-A work machine's roster has only the work roles, on its native `openai-codex` login bound as work:
-
-```json
-{
-  "version": 2,
-  "$comment": "A shared-work machine: work scope only. Native openai-codex is the work ChatGPT login there; the binding is John's acknowledgement, which the router cannot verify.",
-  "roles": [
-    { "name": "work-low", "models": ["openai-codex/gpt-6-luna"] },
-    { "name": "work-medium", "models": ["openai-codex/gpt-6.1-terra"] },
-    { "name": "work-high", "models": ["openai-codex/gpt-6.1-sol"] },
-    { "name": "work-super", "models": ["openai-codex/gpt-6-astra"] }
-  ],
-  "scopes": {
-    "work": {
-      "levels": {
-        "low": { "role": "work-low", "describe": "Mechanical or trivial work that follows a clear specification" },
-        "medium": { "role": "work-medium", "describe": "Engineering, implementation and validation" },
-        "high": { "role": "work-high", "describe": "Deep thought, review, and the design of verification" },
-        "super": { "role": "work-super", "describe": "Deep thought, research, design and planning" }
-      }
-    }
-  },
-  "accounts": { "openai-codex": { "native": "Positron work", "scope": "work" } }
-}
-```
-
-Without a `classifier` section, the heuristics alone give every untagged prompt its demand; with
-one, Jev's request goes through whatever OpenRouter account Pi has on that machine.
-
-### A fallback chain
-
-A scope may say what takes a run when its level's own models cannot: `"fallback"`, a list of roles
-in the order to try them. This roster is John's routing of 2026-11-17 for Hera: on a personal
-session `smart-router/auto` uses astra, sol, terra or luna by difficulty; when the Codex account
-has no tokens left, OpenRouter's GLM-5.3-Flash and then its Qwen3.8; then GLM-5.3-Flash on Hera,
-Qwen3.8 on Nyx and Qwen3.8 on Hera. `smart-router/local` uses only those last three. A work
-session uses only the work account.
-
-```json
-{
-  "version": 2,
-  "$comment": "Hera, version 2, with John's routing of 2026-11-17. Personal levels take one Codex model each, on openai-codex-2 (John's personal ChatGPT account, labelled 'personal' in Multi-Pass). When a level's model cannot take a request, every level falls back along one chain: OpenRouter's GLM and Qwen, then the local models. Work levels take only openai-codex-3, the work account, and declare no fallback. Plain openai-codex is excluded here because Hera reserves it for the work account.",
-  "exclude": ["openai-codex/*"],
-  "roles": [
-    { "name": "local", "$comment": "smart-router/local, in this order; also the end of the personal fallback chain. Nyx's ref is a Nix-store basename that changes whenever its model is rebuilt", "models": ["omlx-hera/GLM-5.3-Flash-oQ4e-mtp", "nyx/g3mjym7raqj6147biq46zxym32gyda9g-Qwen3.8-27B-exl3-6fe61ad", "omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp"], "thinking": "max" },
-    { "name": "openrouter", "$comment": "the start of the personal fallback chain: another vendor, on another quota", "models": ["openrouter/z-ai/glm-5.3-flash", "openrouter/qwen/qwen3.8-27b"] },
-    { "name": "low", "models": ["openai-codex-2/gpt-6-luna"] },
-    { "name": "medium", "models": ["openai-codex-2/gpt-6.1-terra"] },
-    { "name": "high", "models": ["openai-codex-2/gpt-6.1-sol"] },
-    { "name": "super", "models": ["openai-codex-2/gpt-6-astra"] },
-    { "name": "work-low", "models": ["openai-codex-3/gpt-6-luna"] },
-    { "name": "work-medium", "models": ["openai-codex-3/gpt-6.1-terra"] },
-    { "name": "work-high", "models": ["openai-codex-3/gpt-6.1-sol"] },
-    { "name": "work-super", "models": ["openai-codex-3/gpt-6-astra"] }
+    { "name": "local", "models": ["omlx-hera/GLM-5.3-Flash-oQ4e-mtp"], "thinking": "max" },
+    { "name": "openrouter", "models": ["openrouter/z-ai/glm-5.3-flash"] },
+    { "name": "low", "models": ["openai-codex/gpt-6-luna"] },
+    { "name": "medium", "models": ["openai-codex/gpt-6.1-terra"] },
+    { "name": "high", "models": ["openai-codex/gpt-6.1-sol"] },
+    { "name": "super", "models": ["openai-codex/gpt-6-astra"] }
   ],
   "scopes": {
     "personal": {
@@ -391,1481 +98,1706 @@ session uses only the work account.
         "super": { "role": "super", "describe": "Deep thought, research, design and planning" }
       },
       "fallback": ["openrouter", "local"]
-    },
-    "work": {
-      "levels": {
-        "low": { "role": "work-low", "describe": "Mechanical or trivial work that follows a clear specification" },
-        "medium": { "role": "work-medium", "describe": "Engineering, implementation and validation" },
-        "high": { "role": "work-high", "describe": "Deep thought, review, and the design of verification" },
-        "super": { "role": "work-super", "describe": "Deep thought, research, design and planning" }
-      },
-      "directories": ["/Users/johnw/src/positron"]
     }
   },
-  "accounts": {
-    "openai-codex-2": { "multiPassLabel": "personal" },
-    "openai-codex-3": { "multiPassLabel": "Positron work", "scope": "work", "$comment": "the label Multi-Pass stores for openai-codex-3, which must name work or Positron" }
-  },
-  "classifier": { "model": "openrouter/typesafe/jev-1.14", "timeoutMs": 1000, "closeCall": 0.15, "context": { "messages": 6, "messageChars": 1500, "totalChars": 12000 } },
-  "local": { "role": "local", "providers": ["omlx-hera", "nyx"], "hosts": ["hera.lan", "nyx.lan"] }
+  "accounts": { "openai-codex": { "native": "personal" } },
+  "classifier": { "model": "openrouter/typesafe/jev-1.14" },
+  "local": { "role": "local", "providers": ["omlx-hera"], "hosts": ["hera.lan"] }
 }
 ```
 
-`node src/check-cli.ts` reads it back as:
+Save it as `smart-router.json` in Pi's agent directory, owned by you and not writable by group or
+others. `/smart-router check` in a session, or `node src/check-cli.ts <roster.json>` anywhere,
+reads a roster back in plain words, or gives the first error and its place. The manual has
+[the roster's fields](docs/manual.md#the-roster), [version 2](docs/manual.md#roster-version-2-levels-and-scopes),
+[the edits that change the routing](docs/manual.md#changing-the-routing) and John's own rosters.
+
+### The fork's commands
+
+| Command | Does |
+|---|---|
+| `/smart-router` or `/smart-router status` | The roster, the selection, the scope, every role's models and why any cannot route, the last decision and its terms, and what can still leave the machine |
+| `/smart-router history [n]` | The last `n` routing decisions, as model ids and reason codes |
+| `/smart-router scope [work\|personal\|status]` | The session's scope, or a change of it |
+| `/smart-router was low\|medium\|high\|super` | Record the level a run should have had: the run in flight, or else the latest one recorded. Nothing is sent again |
+| `/smart-router check` | Read the roster back, or give its first error |
+| `/smart-router reload` | Read the roster and its prompt files again now |
+
+The manual covers what this section only names:
+[levels, the demand and the choice by cost](docs/manual.md#levels),
+[fallback chains](docs/manual.md#a-fallback-chain), [Jev](docs/manual.md#jev) and
+[what redaction hides](docs/manual.md#what-redaction-hides),
+[scope](docs/manual.md#scope-personal-or-work),
+[a model picked by hand](docs/manual.md#a-model-picked-by-hand),
+[records](docs/manual.md#records-and-training),
+[other extensions](docs/manual.md#interactions-with-other-extensions) and
+[development](docs/manual.md#development). The gate is `npm run check`, and
+[AGENTS.md](AGENTS.md) holds the rules for coding agents.
+
+## Upstream's README
+
+**Auto-model router middleware for the [pi](https://pi.dev) coding agent.**
+
+> **v1.0 — SemVer stable (honest defaults).** From the `1.0.0` release on, the public API and documented operator surface follow [semantic versioning](https://semver.org): breaking changes land only in a new major version, each accompanied by a migration guide — start with [docs/migration-v1.md](docs/migration-v1.md). **1.0 means stable API + honest calibration floors + gates that catch Sept-class failures** — not a claim that cheap-tier routing is behaviorally proven. [#95](https://github.com/beettlle/pi-smart-router/issues/95) / [#110](https://github.com/beettlle/pi-smart-router/issues/110) remain open for verifier-graded recalibration. The published release always mirrors `package.json` ([npm](https://www.npmjs.com/package/pi-smart-router)).
+
+pi-smart-router intercepts every LLM inference request and dynamically routes it to the optimal execution engine — balancing cost, capability, latency, and time-to-first-token (TTFT) — without requiring you to manually pick a model for each turn.
+
+| pi-smart-router is | pi-smart-router is not |
+|--------------------|------------------------|
+| A pi extension that auto-selects the best model per request | A replacement for pi or your LLM provider |
+| A three-tier router: local, economical cloud, frontier cloud | A post-generation output judger (FrugalGPT-style) |
+| Cache-aware with session pinning to preserve prompt-cache economics | A turn-by-turn model switcher that shatters provider caching |
+| Registry-driven in pi (no YAML copy for normal use) | An RL-trained router requiring agent trace datasets |
+
+## How it works
 
 ```text
-smart-router/auto in personal scope: a tag, else the demand from Jev (openrouter/typesafe/jev-1.14) and the heuristics, pick the level; each level tries its own models in order:
-  LOW    openai-codex-2/gpt-6-luna  (role low)
-  MEDIUM openai-codex-2/gpt-6.1-terra  (role medium)
-  HIGH   openai-codex-2/gpt-6.1-sol  (role high)
-  SUPER  openai-codex-2/gpt-6-astra  (role super)
-  then, for every level, when its own models cannot take a request, the fallback chain in this order:
-    1. openrouter/z-ai/glm-5.3-flash  (role openrouter)
-    2. openrouter/qwen/qwen3.8-27b  (role openrouter)
-    3. omlx-hera/GLM-5.3-Flash-oQ4e-mtp  (role local, thinking max)
-    4. nyx/g3mjym7raqj6147biq46zxym32gyda9g-Qwen3.8-27B-exl3-6fe61ad  (role local, thinking max)
-    5. omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp  (role local, thinking max)
+request → hardware probe → loop escalation → turn envelope → typed judgment* → context-fit gate
+        → low-intensity tier gate → session pin → deterministic triage
+        → local zero-tier → triage cloud fallback → HyDRA embedding matcher
+        → safe cloud default → context overflow fallback
 ```
 
-The read-back goes on with the demand and switching settings, the local set and the rest.
+The pipeline runs **12 stages sequentially with early exit** — the moment any stage reaches a routing decision, subsequent stages are skipped. Every decision includes the stage name, reason code, candidates considered, estimated cost, and routing latency for full observability.
 
-How the chain works:
+\* `typed_judgment` is an additional **opt-in, non-deciding** stage (default off) that runs between turn envelope and the context-fit gate when enabled — it records judge answers for later consumers and never decides. See [Typed judgment (opt-in)](#typed-judgment-opt-in-183).
 
-- **A level's own models come first, always.** The chain is tried only when none of them can take
-  the request: not in the catalog, not available, no credentials, a refused account binding, or
-  cooling down after a usage-limit or authentication error.
-- **The order is the order written:** each role of the list in turn, and within a role its models
-  in turn. A model that cannot take the request is passed over by the same checks as any other.
-- **One chain serves every level of its scope.** A run keeps its level while any chain model can
-  take it: the level takes the chain before it passes the run up, so a LOW run that falls back is
-  still recorded as LOW, with `fallback` in its record. Only when none of the chain's models can
-  take the request, or, with Pi's compaction disabled, they are too small for the conversation,
-  does the run step up ([Levels](#levels)).
-- **The first request that hits a usage limit fails.** Pi retries some errors and asks the router
-  where the retry goes; it does not retry Codex's "You have hit your ChatGPT usage limit (plus
-  plan). Try again in ~N min.", nor a spent credit. So that one run ends unanswered. The router
-  says so at that moment and tells you what to do: "gpt-6-luna could not take this run (the
-  account openai-codex-2 is out of use until 14:42), and nothing was answered. Send the request
-  again: it goes to the fallback openrouter (z-ai/glm-5.3-flash)." Send it again, and it does.
-  A run that had already answered or run tools before the limit is told otherwise: "it stopped
-  partway. What it did so far stands: do not send the request again. To go on, say: continue. It
-  goes on with the fallback openrouter (…)." When nothing else can take the request, the notice
-  says when the account is back; in a work session it does not offer another work Codex model,
-  which is on the same account, and says that another model picked by hand is sent as it is.
-  That failed run is the whole cost of a cooldown window: the account cools as one, for the time
-  the error names, so every level's next run goes straight to the chain.
-  The router does not send the request again itself. Pi 1.5.2 has a hook that could
-  (`agent_before_settle`), and it was built and removed: in Pi's own runtime, merely registering
-  it stopped the cache warming Pi wanted, and it makes Pi rebuild a session's context at the end
-  of every run.
-- **The session returns to the level's own model** as soon as it can take requests again: each new
-  run starts again from the level it needs, and goes to the chain only while none of that level's
-  own models can take it. So does a run that starts without a prompt
-  ([Runs without a prompt](#runs-without-a-prompt)). A chain model is never a candidate of the cost
-  rule. A run under way stays on the model it has. A cooled account is tried again when its time is
-  up; if it is still out of tokens, that one request fails and the account cools again.
-- **A retry never goes back.** When a chain model itself fails with a limit, or a local one cannot
-  be reached, the retry takes another model of the same role, then the roles after it in the chain,
-  never an earlier role and never the level's own, and no model twice in one run.
-- **A chain belongs to the scope that declares it.** Here the work scope declares none, so a work
-  session behaves exactly as before: its levels' own work-account models, a step up, or a refusal.
-- **Validation keeps each scope's account rules.** No role of a chain is a level's role, in either
-  scope, and no role is in two chains. A personal chain takes no model of a work-bound provider. A
-  work chain takes only work-bound Codex models: no OpenRouter, local or personal-account model can
-  be named there. A model still sits in exactly one role, so a chain cannot repeat a level's model.
-- **The local role may end a chain.** That is the one way `smart-router/auto` reaches the local
-  models. `smart-router/local` never uses a chain: it routes to the local role alone, as before.
-- **It says so.** A run planned onto a chain model shows a notice, "no LOW model can take this
-  run, so it goes to the fallback openrouter (z-ai/glm-5.3-flash)"; a run under way that moves
-  onto one says "gpt-6-astra can no longer take this run, so it goes on with the fallback
-  openrouter (z-ai/glm-5.3-flash)"; and the footer marks it:
-  `personal LOW → z-ai/glm-5.3-flash (demand 0.6, jev unavailable; fallback)`.
-  `/smart-router status` lists each scope's chain with every model's verdict, and says when the
-  last request went to one.
+| Stage | Budget | What it does |
+|-------|--------|--------------|
+| Hardware Probe | — | Checks platform/RAM/battery to gate local inference |
+| Loop Escalation | — | Detects repeated identical tool failures; escalates session to frontier |
+| Turn Envelope | <2ms | Classifies turn type: tool_result, planning, subagent, main_loop |
+| Typed Judgment (opt-in) | ~385–990ms per judged user turn when enabled; 0 otherwise | **Non-deciding** (default off): asks a Jev-compatible judge six questions about the turn and records the answers — never decides |
+| Context-Fit Gate | — | Filters fleet to models whose context window fits estimated input tokens |
+| Low-Intensity Gate | — | Structural tier hint, cluster match, and P(success) expected-cost scoring |
+| Session Pin | <1ms | Returns pinned model if session has one; breaks pin on compaction or overflow |
+| Deterministic Triage | <5ms | Aho-Corasick keyword scan + cyclomatic complexity analysis |
+| Local Zero-Tier | <15ms | Pings LM Studio + Ollama in parallel; routes locally when eligible |
+| Triage Cloud Fallback | <2ms | Trivial prompts not claimed locally route to the first healthy economical-cloud model |
+| HyDRA Matcher | 80-120ms | ONNX embeddings, 3D requirement projection, shortfall gate, multi-objective scoring |
+| Safe Cloud Default | — | First healthy economical-cloud model (context-fit aware) |
+| Context Overflow Fallback | — | Escalates to largest-fit model when economical tiers cannot fit |
 
-> **A fallback sends the conversation somewhere else.** When the chain takes a run, the whole
-> conversation so far, not only the new message, goes to that role's vendor: here to OpenRouter and
-> the provider behind the model, under their retention terms, and then to the LAN models on Hera
-> and Nyx. Delete the `fallback` line, or the roles you do not want, to be refused or stepped up
-> instead. A work scope's chain can only name the work account, so work conversations cannot reach
-> a personal account, OpenRouter or a LAN model through one.
+## Research lineage
 
-Three things to know:
+pi-smart-router builds on ideas from several production and research routing systems:
 
-- **A local server that is down gives way.** When Nyx cannot be reached, the request goes to
-  Hera's Qwen, and Nyx is passed over for `unreachableMinutes`, 5 by default
-  ([Routing in detail](#routing-in-detail)). A hold is a preference: when Hera's Qwen cannot take
-  the request either, Nyx is tried again rather than the request refused. A server that accepts
-  the connection and then answers slowly or not at all is not passed over: a timeout, a 503 while
-  a model loads and a 504 retry the same model.
-- **The whole Codex account cools together.** The four personal levels share one ChatGPT account,
-  so a usage limit on any of them sends every level to the chain until the account's time is up.
-  In work scope, which has no chain, a limit on one work model refuses the other work levels for
-  that time; the refusal says when the account is tried again, and that another model picked by
-  hand is sent as it is.
-- **The local role has one `thinking` setting**, so the three local models share it.
+- **Adopted:** [GitHub Copilot HyDRA](https://arxiv.org/abs/2409.08379) (shortfall matching decoupled from model identities), Zero-Tier local edge-cache pattern, [Weave Router](https://github.com/workweave/router) session pinning and multi-objective selection
+- **Rejected:** FrugalGPT sequential cascading (tail latency), RouteLLM matrix factorization (confounder vulnerability), turn-by-turn dynamic routing (cache destruction)
 
-### Fields in version 2
+See [docs/PRD.md](docs/PRD.md) for full architectural justification, [docs/deep-research.md](docs/deep-research.md) for the research survey, [docs/routing-roadmap.md](docs/routing-roadmap.md) for the prioritized quality backlog, [docs/gemini-research.md](docs/gemini-research.md) for the second-source agent-router report, and [docs/research/README.md](docs/research/README.md) for research provenance.
 
-| Field | Required | Meaning |
-|---|---|---|
-| `version` | yes | Exactly `2`. |
-| `$comment`, `exclude`, `roles`, `accounts`, `local`, `stickyIdleMinutes`, `cooldownMinutes`, `unreachableMinutes` | as in version 1 | As in [version 1](#fields), with the rules below. There is no `routing`: the levels replace it, and a scope's `fallback` replaces `routing.fallback`. |
-| `scopes` | yes | `personal`, `work` or both. `smart-router/auto` refuses a session in a scope the roster does not have. |
-| `scopes.<scope>.levels` | yes | `low`, `medium`, `high` and `super`, each `{ "role": "<role>", "describe": "<text>" }`: the role the level's runs go to, and the description Jev reads, a non-empty text of at most 2000 characters. `"describeFile": "<name>"` in place of `describe` takes the text from a prompt file ([Jev's prompts](#jevs-prompts)); a level gives exactly one of the two. No role serves two levels, in one scope or across both, the local role serves none, and a scope's level roles rank up the ladder from low to super. |
-| `scopes.<scope>.fallback` | no | Role names, in the order to try them after any level's own models ([A fallback chain](#a-fallback-chain)): not empty, none twice, none a level's role in either scope, none in both scopes' chains. The local role may be one. A personal chain takes no work-bound model; a work chain takes only work-bound Codex models. Without the field, the scope has no fallback. |
-| `scopes.work.directories` | no | Absolute paths whose sessions are in work scope ([Scope](#scope-personal-or-work)), written plainly: no trailing `/`, no empty, `.` or `..` segment, and not `/` itself. |
-| `accounts.<provider>.scope` | no | `"personal"`, the default, or `"work"`. |
-| `classifier` | no | Jev's settings; without them, Jev is never asked. `model`, an exact ref, default `openrouter/typesafe/jev-1.14`; `timeoutMs`, 100 to 1000, default 1000; and `context`: `messages`, 0 to 20, default 6; `messageChars`, 200 to 8000, default 1500; `totalChars`, 1000 to 32000, default 12000. `closeCall`, which earlier versions used, is still accepted from 0 to 0.5 and ignored, and the checker says so: `demand.closeCall` decides a close call. The model names a Jev version, so that tuned demand settings keep their meaning; moving to a newer Jev is a roster edit. `instructions`, the question Jev is asked, as a text of at most 4000 characters, or `instructionsFile`, the name of a prompt file that holds it; not both, and with neither the built-in question is asked ([Jev's prompts](#jevs-prompts)). |
-| `demand` | no | How a prompt's demand is weighed ([The level a prompt needs](#the-level-a-prompt-needs)). `jevWeight` and `heuristicsWeight`, each 0 to 100, defaults 4 and 1, not both 0; `minConfidence`, 0 to 1, default 0.6; `closeCall`, 0 to 0.5, default 0.1; `cuts`, three numbers that ascend, each above 0 and below 3, default `[0.75, 1.5, 2.25]`; `deepSessionFloor`, `low`, `medium`, `high` or `super`, default `medium`; and `weights`, any of the twelve heuristic signals, each 0 to 100 and not all 0, by default upstream's weights with `requirement_low` and `cluster_signal` at 0. Every field is optional, and a field left out keeps its default. |
-| `adaptiveReasoning` | no | The thinking effort each request is sent ([Thinking effort](#thinking-effort)), upstream's `adaptive_reasoning`: `enabled`, `true` or `false`, default `true`; `minLevel`, the floor, and `maxLevel`, the ceiling, each one of `minimal`, `low`, `medium`, `high`, `xhigh` and `max`, with no default, the floor never above the ceiling. A floor above the selected `/thinking` level raises it; a ceiling never lowers it. A version 1 roster has none, and the defaults. |
-| `switching` | no | When a session moves to another model ([Choosing the model](#choosing-the-model)). `margin`, 0 to 0.9, default 0.15; `horizonCap`, a whole number of runs from 1 to 20, default 5; and `cacheSurvival`, 1 to 32 pairs of `[seconds, chance]`, the seconds rising and the chances from 1 to 0 never rising, by default the table in [Choosing the model](#choosing-the-model). Every field is optional. |
+## Prerequisites
 
-### Account bindings in version 2
+| Dependency | Required | Notes |
+|------------|----------|-------|
+| [Node.js](https://nodejs.org/) >= 22.19.0 | Yes | ES module package; matches `package.json` `engines.node` and CI (workflows pin Node `22.19.0`) |
 
-- **A binding without `scope`** is personal, and keeps version 1's rules: its label must not name
-  work or Positron.
-- **`"scope": "work"`** binds the work account. Its label must name work or Positron, and for a
-  Multi-Pass alias it must still match the label Multi-Pass stores. Each binding serves only its
-  own scope's sessions: a personal session refuses a work binding, and a work session refuses a
-  personal one.
-- **Levels, chains and accounts.** Validation refuses a model of a work-bound provider in a personal
-  level or a personal fallback chain, and anything but a work-bound Codex model in a work level or a
-  work chain: no OpenRouter, local or personal-account model.
-- **The built-in `openai-codex-3/*` exclusion** holds in personal scope only. A work-scope session
-  lifts it for a model of a work level or a work chain whose provider is bound as work. The roster's own exclusions
-  are never lifted.
-- **The classifier's model** must match no exclusion, built-in or the roster's own, and none is
-  lifted for it, because Jev reads text from both scopes. So a roster with a classifier must not
-  exclude `openrouter/*`. It needs no such exclusion: work levels hold only work-bound Codex models.
-  An exclusion binds the router's routes only: a model picked by hand is sent as it is.
+> **Engine floor:** `package.json` declares `engines.node >= 22.19.0`. If you (or your environment) enable `engine-strict=true` in `.npmrc`, installs on Node < 22.19.0 fail with `EBADENGINE`; on a supported Node (>= 22.19.0), `npm ci` completes with no `EBADENGINE` warnings.
+| [pi](https://pi.dev) coding agent | Yes | Extension host |
+| macOS Apple Silicon | MVP | Primary supported platform |
+| Linux (x64/arm64) | Experimental | Probe logic supported; not validated on real hardware |
+| Windows (x64/arm64) | Experimental | Probe logic supported; not validated on real hardware |
+| [LM Studio](https://lmstudio.ai/) or [Ollama](https://ollama.com) | Optional | Required for zero-tier local routing |
+| Authenticated cloud providers in pi | Recommended | Anthropic, OpenAI, Google, etc. |
 
-## Changing the routing
+## Install
 
-Every decision has one place in the roster, `~/.config/pi/agent/smart-router.json`. Edit it, run
-the check, and the next prompt of every running session uses it: no restart, no rebuild.
+> **Security:** Pi packages run with full system access. Extensions execute arbitrary code. Review source before installing third-party packages ([pi packages docs](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/packages.md)).
 
-| To change | Edit |
-|---|---|
-| The model a level uses | The `models` of that level's role in `roles`. `scopes.<scope>.levels.<level>.role` names the role; the first model listed is the one used, the rest are tried after it. |
-| What takes over when a level's model cannot | `scopes.<scope>.fallback`: the roles, in order. Each role's own `models` order is the order inside it. |
-| The local set, for `smart-router/local` | The `models` of the local role, in order. A new server also needs its provider in `local.providers` and its host in `local.hosts`. |
-| A work session's models | The `work-*` roles, which take only the work Codex account. |
-| What a level means to Jev | That level's `describe`, or the file its `describeFile` names. |
-| How Jev judges a message | `classifier.instructions`, or the file `classifier.instructionsFile` names. |
-| How much Jev counts against the heuristics | `demand.jevWeight` (4) and `demand.heuristicsWeight` (1). |
-| Where one level ends and the next begins | `demand.cuts` (0.75, 1.5, 2.25). |
-| How readily a close call goes to the higher level | `demand.closeCall` (0.1). |
-| The lowest level of a very deep session | `demand.deepSessionFloor` (`medium`; `low` turns the floor off). |
-| How much cheaper a move must be | `switching.margin` (0.15). |
-| How long a model's prompt cache is taken to last | `switching.cacheSurvival`. |
-| How long an exhausted account is left alone | `cooldownMinutes` (30). |
-| How long a local server that could not be reached is passed over | `unreachableMinutes` (5). |
+### Via pi (recommended)
 
-Roles are named, rather than a level listing its models inline, because the role is what a model
-has exactly one of: it gives the model its `thinking`, its place on the ladder, its line in
-`status`, and, for the local role, its membership of the local policy. A level and
-a fallback chain only point at roles, so swapping a model is still one edit, in `roles`.
+Install from [npm](https://www.npmjs.com/package/pi-smart-router) / [pi.dev/packages](https://pi.dev/packages):
 
-**Swap a level's model.** Move HIGH to a newer sol:
-
-```diff
--    { "name": "high", "models": ["openai-codex-2/gpt-6.1-sol"] },
-+    { "name": "high", "models": ["openai-codex-2/gpt-6.2-sol"] },
+```bash
+pi install npm:pi-smart-router
+pi --list-models | grep smart-router
 ```
 
-**Add a fallback, or reorder the chain.** Put Kimi ahead of the others, and try the local models
-before OpenRouter:
+Project-local install (writes to `.pi/settings.json`):
 
-```diff
--    { "name": "openrouter", "models": ["openrouter/z-ai/glm-5.3-flash", "openrouter/qwen/qwen3.8-27b"] },
-+    { "name": "openrouter", "models": ["openrouter/moonshotai/kimi-k3.1-pro", "openrouter/z-ai/glm-5.3-flash", "openrouter/qwen/qwen3.8-27b"] },
+```bash
+pi install -l npm:pi-smart-router
 ```
 
-```diff
--      "fallback": ["openrouter", "local"]
-+      "fallback": ["local", "openrouter"]
+Then in pi:
+
+```text
+/model smart-router/auto
+/smart-router status
 ```
 
-With `local` first, OpenRouter is reached only when no local model can take the request: a
-local-role model is never cooled, so it is passed over only while Pi does not offer it, and a
-held one is tried again when nothing else is left. Deleting the `fallback` line removes the
-chain; deleting `"local"` from it keeps `smart-router/auto` off the LAN models.
+**First run:** `pi install` runs `npm install` for package dependencies (`better-sqlite3` compiles natively). The first routed request downloads HyDRA ONNX weights to `.pi-smart-router/models/` under your state directory.
 
-**Change the local set.** Drop Nyx, and prefer Hera's Qwen to its GLM:
+### Via npm (library API)
 
-```diff
--    { "name": "local", "models": ["omlx-hera/GLM-5.3-Flash-oQ4e-mtp", "nyx/g3mjym7raqj6147biq46zxym32gyda9g-Qwen3.8-27B-exl3-6fe61ad", "omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp"], "thinking": "max" },
-+    { "name": "local", "models": ["omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp", "omlx-hera/GLM-5.3-Flash-oQ4e-mtp"], "thinking": "max" },
+```bash
+npm install pi-smart-router
 ```
 
-The same edit changes the end of any chain that names `local`.
+Use `createRouter()` / `createRouterFromFleet()` for programmatic integration without the pi extension. That path is the **catalog / routing-core** composition root (not full extension wiring). See [Library vs extension](#library-vs-extension) and [Optional: YAML fleet (library API)](#optional-yaml-fleet-library-api).
 
-**Sharpen a level's description.** In the roster:
+### From source (contributors)
 
-```diff
--        "high": { "role": "high", "describe": "Deep thought, review, and the design of verification" },
-+        "high": { "role": "high", "describe": "Code review, debugging that crosses modules, concurrency, and designing tests or proofs" },
+```bash
+git clone https://github.com/beettlle/pi-smart-router.git
+cd pi-smart-router
+npm install
 ```
 
-or, once the level names a file (`"describeFile": "personal-high.md"`), by editing
-`~/.config/pi/agent/smart-router/personal-high.md` alone ([Jev's prompts](#jevs-prompts)).
+The repo ships a **project-local pi extension** at `.pi/extensions/smart-router/`. pi auto-discovers it when you run `pi` from the repo root (after the project is trusted — see [Develop from clone](#develop-from-clone)).
 
-**Weigh the demand, or the cost of a move, differently.** A version 2 roster may carry two more
-sections at its top level, `demand` and `switching`. Without them, or without any of their fields,
-the defaults apply, so no roster needs them. Here they are with every field at its default; added to
-a roster as they are, they change nothing:
+## Quick start
+
+After installing via `pi install npm:pi-smart-router` (or from clone — see below):
+
+1. Authenticate providers (`/login`) and enable models in your scoped list if you use one (`/scoped-models`)
+2. `/model smart-router/auto` — every turn runs through the routing pipeline
+3. `/smart-router status`, `/smart-router history`, or `/smart-router stats` — inspect routing decisions and window aggregates
+
+Set `SMART_ROUTER_LOG_ROUTING=1` before starting pi to print each routing decision to stderr (see [Environment variables](#environment-variables)).
+
+## Use with pi
+
+Detailed steps for the operator path above.
+
+### Installed via npm
+
+Global install (`pi install npm:pi-smart-router`) registers the extension from `~/.pi/agent/settings.json`. No project `/trust` prompt is required for npm-installed extensions — start `pi` from any directory.
+
+After auth or model list changes, restart pi or run `/reload`.
+
+### Develop from clone
+
+Requires **Pi ≥ 0.85.1** (`pi.minPiVersion`). The extension loads TypeScript from this repo via pi’s loader — no `npm run build` needed for dogfooding.
+
+**Recommended (works from any cwd):** install the clone as a **path package** and remove any published npm copy. npm and path packages have different identities; leaving both installed can double-load and you may keep running a stale npm tarball.
+
+```bash
+# From anywhere — remove published package if present
+pi remove npm:pi-smart-router
+
+# Prefer an absolute path (relative paths are resolved from the install cwd first).
+# Pi stores a path relative to ~/.pi/agent/ in settings (same pattern as other local packages).
+pi install /path/to/pi-smart-router
+
+# Pi does not run npm install for path packages
+cd /path/to/pi-smart-router && npm install
+
+pi list   # must show this clone path, not ~/.pi/agent/npm/.../pi-smart-router
+pi --list-models | grep smart-router
+```
+
+**Alternative (repo-root discovery only):** with the npm package removed, start `pi` with cwd at this repo root. Project-local extensions under `.pi/extensions/` load only after the project is trusted — without trust, `smart-router` never appears in `/scoped-models` or `/model`.
+
+**On first run**, pi prompts you to trust the project when it detects `.pi/extensions/`. Accept the prompt.
+
+**Later or missed prompt:** run `/trust` inside pi to save a trust decision for this directory (or its parent) to `~/.pi/agent/trust.json`. Trust on a **parent folder** (for example `~/Documents/github`) applies to this repo as well. After `/trust`, **restart pi** — the current session is not reloaded automatically.
+
+**Verify the extension loaded:**
+
+```bash
+pi --list-models | grep smart-router
+```
+
+You should see `smart-router  auto`. If the line is missing:
+
+1. Confirm `pi list` points at this clone (path package) or that cwd is the repo root (discovery mode).
+2. Confirm no `npm:pi-smart-router` entry remains in settings while developing from clone.
+3. Confirm the project is trusted if relying on `.pi/extensions/` discovery (`/trust`, or check `~/.pi/agent/trust.json`).
+4. Restart pi or run `/reload` after trusting or changing packages.
+
+Non-interactive one-shot checks can pass `--approve` to trust project-local resources for that run only.
+
+### Select the auto model
+
+Switch to the smart-router provider (from any directory after npm install, or from repo root when developing from clone):
+
+```text
+/model smart-router/auto
+```
+
+If you use **scoped models** (`/scoped-models` or `enabledModels` in settings), enable `smart-router/auto` there first — when a scoped list is active, `/model` only resolves models in that list.
+
+This registers `smart-router` as a custom provider with a single `auto` model. Every inference request runs through the routing pipeline and delegates to the selected underlying provider's streaming API.
+
+#### `cursor/auto` vs `smart-router/auto`
+
+pi exposes two different **auto** models. They are easy to confuse but play different roles:
+
+| Model | Provider | Role |
+|-------|----------|------|
+| `smart-router/auto` | `smart-router` (this extension) | Runs the routing pipeline on every turn and **delegates** to whichever underlying model HyDRA selects |
+| `cursor/auto` | `cursor` (pi registry) | Cursor's opaque auto model — **direct** inference target when selected; Cursor picks the backend model |
+
+**Recommended dogfood setup:** use `/model smart-router/auto` so routing, pinning, and telemetry stay active. Enable `cursor/auto` (and other Cursor models such as `composer-latest`) in your scoped fleet so the router can select them when appropriate — for example on planning turns or when the [Gemini tool-history guard](#gemini-thought_signature-400-errors) excludes unrepairable Google replay state.
+
+**When to pin `/model cursor/auto` directly (bypass the router):**
+
+- You want Cursor's opaque auto selection on every turn with no routing overhead
+- You are debugging Cursor SDK auth or delegation outside the router
+- You need a stable, non-routed session for comparison with routed behavior
+
+**When to use `smart-router/auto`:**
+
+- You want cost/capability-aware model selection across your full authenticated fleet
+- You rely on session pinning, failover, or `/smart-router status` / `history` / `stats` telemetry
+- Tool-heavy sessions with Gemini economical models work via in-repo replay repair (cross-provider included); the tool-history guard reroutes to non-Google models such as `cursor/auto` for unrepairable replay state (see [pi-smart-router#85](https://github.com/beettlle/pi-smart-router/issues/85), [pi-smart-router#158](https://github.com/beettlle/pi-smart-router/issues/158))
+
+Cursor models (`cursor/*`, `composer-*`, and the opaque fleet id `default`) map to **frontier-cloud** tier in `pi-model-mapper.ts` so HyDRA can score them against Gemini and Claude instead of treating them as unknown economical models ([pi-smart-router#40](https://github.com/beettlle/pi-smart-router/issues/40), [pi-smart-router#70](https://github.com/beettlle/pi-smart-router/issues/70)). Related: [pi-smart-router#23](https://github.com/beettlle/pi-smart-router/issues/23) (turn envelope / pin order), [pi-smart-router#37](https://github.com/beettlle/pi-smart-router/issues/37) (Gemini `thought_signature` errors).
+
+#### Cursor subscription quota vs API cost
+
+Cursor models bill against your **Cursor Pro subscription quota**, not per-token API rates. The mapper sets `fallback_cost_per_1m: 0` (no API billing) and a separate **`quota_cost_per_1m`** virtual rate used only for frugality scoring and telemetry ([SP-096](https://github.com/beettlle/pi-smart-router/issues/70)). Economical API models (e.g. `gemini-flash-lite`) can outscore `composer-latest` on routine `main_loop` turns when capabilities are sufficient.
+
+**Quota-sensitive fleet hygiene:** if you are near Cursor usage limits, **exclude `composer-latest`** (and other heavy Cursor frontier models) from your pi scoped fleet enable-list. Leave economical API models enabled so turn envelope and HyDRA prefer paid API tiers over subscription quota. The opaque id `default` is mapped to frontier tier — do not rely on it as an economical fallback.
+
+### Operator commands
+
+| Command | Purpose |
+|---------|---------|
+| `/smart-router` | Same as `status` (default when no subcommand is given) |
+| `/smart-router status` | Show fleet mode, fleet size, pricing freshness/staleness, and the last routing decision (stage, tier, selected model, latency) |
+| `/smart-router history` | Show recent routing telemetry from SQLite (default limit; optional numeric limit, e.g. `/smart-router history 20`). Displays the concrete delegated model id (never bare virtual `auto`) |
+| `/smart-router stats` | Privacy-safe session/window aggregates from routing telemetry: count, mean cost/latency with `cost_basis` labeling (actual vs estimated, SP-241), planning_delegate vs direct share, local vs cloud when distinguishable, and role cost breakdown. Optional vs-always-frontier savings when frontier fleet prices exist (omitted otherwise). The JSON snapshot (`buildStatsSnapshot`, automation surface) additionally carries warm rolling `cost_calibration` actual/estimate buckets (SP-242). Optional numeric limit, e.g. `/smart-router stats 50` |
+| `/smart-router mode scoped` | Route only among pi's **enabled model patterns** (default) |
+| `/smart-router mode all` | Route among **all authenticated models** in the registry |
+| `/smart-router pricing refresh` | Manually fetch LiteLLM pricing from `LITELLM_PRICING_URL`, persist to SQLite, and rebuild the fleet with updated rates |
+| `/smart-router export dataset [--limit N]` | Export opt-in routing dataset as JSONL (requires `SMART_ROUTER_DATASET=1`) |
+| `/smart-router export telemetry-contrib [--limit N] [--embeddings]` | Export privacy-safe community telemetry JSON for calibration contributions (`--embeddings` opts in to captured 384-dim embedding rows) |
+| `/smart-router feedback good\|bad` | Label the last auto-routed request outcome (requires `SMART_ROUTER_DATASET=1`) |
+| `/smart-router unpin` | Clear the current session pin (in-memory and SQLite) so the next request runs the full routing pipeline |
+| `/smart-router plan [--json]` | **Read-only** local placement report: encoder resident status, local model warm/cold, RAM/disk constraints, cold vs warm TPS, and bottleneck guess. `--json` prints the schema-stable report for automation |
+| `/smart-router doctor` | **Read-only** local readiness checklist (✓/✗) with bottleneck guess and recommendation — validate placement without starting a route |
+
+Fleet mode persists in the session. Use `scoped` to respect your `/model` enable-list; use `all` when you want the router to consider every provider you have logged into.
+
+### Local placement plan / doctor (read-only, #116)
+
+`/smart-router plan` and `/smart-router doctor` report **local placement readiness without mutating anything** — no route, pin, or gate is touched. Inspired by Colibrì's `coli plan` / `coli doctor`.
+
+The report covers:
+
+- **Encoder** — whether HyDRA ONNX artifacts are resident in the cache (`.pi-smart-router/models/`) or will download on first route
+- **Local model warm/cold** — LM Studio / Ollama reachability and whether a model is actually loaded (`warm`) vs reachable-but-unloaded (`cold-start expected`)
+- **Hardware** — platform/arch, total/free RAM, hardware-probe verdict (`full_local` / `classification_only` / `disabled`), battery state
+- **Disk** — free GiB; flagged constrained below 2 GiB
+- **Throughput (cold vs warm TPS)** — see formula below
+- **Bottleneck guess** — one of `none`, `unsupported-platform`, `battery`, `memory`, `disk`, `no-local-runtime`, `cold-start`, `cold-throughput`, `warm-throughput`, with a rationale string
+- **Recommendation** — `local-ready`, `local-warmup-needed`, or `local-unavailable`
+
+`/smart-router plan --json` prints the same report as schema-stable JSON (`schemaVersion: 1`, `kind: "smart-router-placement-plan"`; all keys always present, unknowns are `null`) for automation.
+
+**Cold vs warm TPS formula.** Throughput samples are tagged by phase: `warm` samples measure steady-state generation after model load; `cold` samples include cold-start load cost and never count toward viability. `warmMedianTps = median(tps where phase='warm')`; viability is `warmSamples > 0 AND warmMedianTps >= threshold` (default 25 tok/s). **Cold-only windows fail closed**: when only cold samples exist, local viability is false by policy (`requireWarmSamples: true`) — cold-start cost must not masquerade as steady-state throughput.
+
+**Quality-preserving resource policy.** Under RAM/disk/battery pressure the router prefers **"local unavailable / escalate safely"** to a cloud default over silently weakening encoder fidelity (no quantization flips, no cheaper cascades, no FrugalGPT-style downgrade chains). `plan`/`doctor` surface this policy verbatim in the report's `policy` block.
+
+After typing `/smart-router ` (with a trailing space), press **TAB** to see subcommands. Continue TAB-completing after `mode` or `pricing` for sub-options (`scoped`/`all`, `refresh`).
+
+### 5. Verify
+
+```bash
+npm run verify:ci
+```
+
+## Concurrency contract
+
+`RouterPipeline.route()` calls on a single router instance are **single-flight**: concurrent calls are serialized internally (SP-230, [#141](https://github.com/beettlle/pi-smart-router/issues/141)). Each exclusive route owns one per-route `RoutingContext`; overlapping executions are queued rather than interleaved — each queued call waits at most one routing latency. This applies to `createRouter()` / `createRouterFromFleet()` handles: a shared `router.dispatch` is safe to call concurrently, and serialization does not change routing policy outcomes. For parallel routing throughput, create separate router instances.
+
+## Library vs extension
+
+pi-smart-router ships in two shapes, and they are **not** feature-identical ([#153](https://github.com/beettlle/pi-smart-router/issues/153)):
+
+| Path | What you get |
+|------|--------------|
+| **Pi extension** (`pi install npm:pi-smart-router`, or project-local `.pi/extensions/smart-router/` when developing from clone) — **supported product composition root** | The full product — the routing pipeline **plus** the stream-level behaviors below, with hardware probe + store-backed telemetry wired via `createDispatchOptions()` in `.pi/extensions/smart-router/fleet-bootstrap.ts` |
+| **npm library** (`createRouter()` / `createRouterFromFleet()` / `GatewayDispatch`) — **catalog / embedder composition root** | The routing core — the 12-stage pipeline, fleet mapping, gateway health/failover *selection*, and constructor defaults for **`costEstimator` + `localRuntime` only**. Hardware probe stays disabled and telemetry is opt-in unless you pass those ports. Stream-level behaviors are stubbed or left to your embedder loop |
+
+### Extension-only capabilities
+
+These behaviors run in `.pi/extensions/smart-router/` and have **no equivalent in the library API**:
+
+| Capability | Extension implementation | Library status |
+|------------|--------------------------|----------------|
+| **Planning delegate spawn** — cache-preserving ephemeral frontier sub-call on planning turns, with observation injection and bounded timeouts (SP-144, SP-213 / [#71](https://github.com/beettlle/pi-smart-router/issues/71), [#120](https://github.com/beettlle/pi-smart-router/issues/120)) | `.pi/extensions/smart-router/planning-delegate.ts` — compressed-context sub-call via `streamSimple`; falls back to direct frontier with a documented `fallback_reason` | The pipeline still emits `planning_delegate` decisions with delegate model and compressed limits, but **nothing spawns the delegate** — an embedder must implement the sub-call itself or accept direct-frontier routing |
+| **Stream failover loop** — live provider-error failover across candidate models with user-facing notices (atomic state machine, [#33](https://github.com/beettlle/pi-smart-router/issues/33)) | `.pi/extensions/smart-router/route-and-delegate.ts` (~L377–595) — retries stream delegation across alternates, emits failover notices, ends in SP-226 fail-open safe default | `GatewayDispatch.selectFailover()` only **selects** an alternate model; no stream retry loop runs. The embedder owns iterating over failures and re-dispatching |
+| **Output headroom escalation** — exclude failover candidates whose context window cannot fit input plus the required output floor (SP-108) | `route-and-delegate.ts` + `.pi/extensions/smart-router/delegation-runtime.ts` — per-attempt `computeOutputHeadroom` checks; `headroomExcludedModelIds` accumulate across the failover loop | `src/domain/delegation/output-headroom.ts` ships the helper, but **no library caller wires it** into `GatewayDispatch.dispatch()` — the embedder must apply it per attempt |
+| **Cursor quota handling** — subscription-quota exhaustion detection and failover to `cursor/auto` or economical API models with `cursor_quota_exhausted` telemetry (SP-097 / [#70](https://github.com/beettlle/pi-smart-router/issues/70)) | The extension stream loop catches quota errors from live streams and drives `selectFailover` reactively | Detection and failover *selection* exist in `src/infrastructure/gateway/gateway-dispatch.ts` (`isCursorQuotaExhaustedError`, per-model quota tracking), but the **reactive trigger lives in the extension's stream loop** — library dispatch alone does not observe provider stream errors |
+
+### The middleware is a lifecycle stub, not a router
+
+`createPiRouterMiddleware()` / `RouterHandle.register()` (`src/api/middleware/pi-router-middleware.ts`) registers **lifecycle hooks only** — compaction flags and `model_select` overrides consumed when building the next routing request. It does **not** intercept LLM streams, route requests, or delegate inference. The production stream path lives in the pi extension (`route-and-delegate.ts`, `stream-delegation.ts`, `delegate-stream.ts`), not in the npm-exported middleware. Treat `middleware` as a flag registrar; routing happens through your call to `router.dispatch.dispatch()` or the extension's stream path.
+
+### Recommended integration path
+
+- **pi users:** install the **extension** (`pi install npm:pi-smart-router`). It is the supported composition root — everything in the table above works out of the box, including failover, delegate spawn, headroom escalation, quota reaction, hardware probe, and store-backed routing telemetry.
+- **npm embedders:** you get the **routing core** (12-stage pipeline, fleet mapping, gateway health tracking, failover *selection*). Bare `createRouter()` does **not** wire hardware probe or telemetry by default — pass `GatewayDispatchOptions` on `createRouterFromFleet(fleet, options)` when you need those ports. Plan to implement your own stream delegation, failover iteration, headroom checks, and planning-delegate spawn around the decisions the pipeline returns — or track [#149](https://github.com/beettlle/pi-smart-router/issues/149) (**extension public facade**), the migration plan for exposing the extension's stream/delegation surface as supported library API so this gap closes over time. Until #149 lands, the extension modules also import `src/**` internals directly, so deep imports into `src/` are not a stable API. See [docs/extension-package-boundary.md](docs/extension-package-boundary.md) for the facade vs internal-API boundary, the deep-import lint guard, and the extension coverage gate. See also [Composition roots in the 1.0 migration guide](docs/migration-v1.md#composition-roots-library-createrouter-vs-pi-extension).
+
+```text
+pi extension path (full product)        npm library path (routing core)
+────────────────────────────────        ───────────────────────────────
+pi (host agent)                         your host application
+  └─ .pi/extensions/smart-router/         └─ createRouter() / createRouterFromFleet()
+       ├─ routing pipeline (src/)  ════════    ├─ routing pipeline (src/)        ← shared core
+       ├─ stream failover loop          ✗      ├─ GatewayDispatch: health tracking,
+       ├─ planning delegate spawn       ✗      │   failover selection only
+       ├─ output headroom escalation    ✗      ├─ lifecycle middleware (stub: hooks only)
+       └─ cursor quota failover         ✗      └─ embedder implements: stream loop,
+                                            delegate spawn, headroom checks, quota reaction
+```
+
+`✗` = capability exists only on the extension path today; [#149](https://github.com/beettlle/pi-smart-router/issues/149) is the plan to close the gap.
+
+## Fleet behavior
+
+When you use `smart-router/auto`, the extension does **not** read `config/models.yaml`. Instead:
+
+1. **Discover** — `modelRegistry.getAvailable()` returns authenticated models from pi.
+2. **Scope** — In `scoped` mode, filter to patterns from pi settings (`getEnabledModels()`). In `all` mode, use the full registry.
+3. **Map** — `src/config/pi-model-mapper.ts` maps each pi model to a `ModelProfile` (tier, capabilities, pricing) using provider and model-id patterns.
+4. **Route** — `createRouterFromFleet()` runs the 12-stage pipeline on each request.
+5. **Delegate** — The extension resolves the chosen model in the registry and forwards the stream via pi-ai's built-in provider APIs.
+
+Unknown models receive conservative economical-cloud defaults. Local providers (`lmstudio`, `ollama`) map to `zero-tier`. Cursor provider models (`cursor/*`, `composer-*`, opaque id `default`) map to `frontier-cloud` with explicit capability defaults (SP-086, SP-098). **v1.4.0 fleet coverage:** Kimi K3 / K3.1 Pro ids (`k3`, `k3.1-pro`, `kimi-k3`, …) map to `frontier-cloud` via pattern rules; `k3.1-pro` is benchmark-grounded when leaderboard scores exist (aliases cover highspeed / provider-prefixed forms). Gemini 4 `carbon` and `hydrogen` match the existing Gemini 4+ frontier rule like `argon` and stay on `pattern_default` in `provenance.ungrounded_fleet_ids` until public scores appear. Benchmark-grounded capability vectors (including multi-fleet `github-copilot/*`, Gemini, and Anthropic dogfood IDs, aliased family-by-family) are documented in the [capability profile coverage report](docs/capability-profile-coverage.md) ([#108](https://github.com/beettlle/pi-smart-router/issues/108) / [#124](https://github.com/beettlle/pi-smart-router/issues/124)).
+
+To refresh after auth or settings changes, restart pi or `/reload` extensions.
+
+## Optional: YAML fleet (library API)
+
+For programmatic integration **without** the pi extension, load a static fleet catalog from YAML and route via `GatewayDispatch.dispatch()`.
+
+This path is **catalog-oriented**: `createRouter()` loads `models.yaml` and constructs `GatewayDispatch` with library defaults (`costEstimator` + `localRuntime`). It does **not** call the extension's `createDispatchOptions()` — so hardware probe remains disabled and no store-backed `telemetryEmitter` is attached unless you pass those options yourself. Prefer the [pi extension](#library-vs-extension) when you want the full product composition root.
+
+```bash
+cp config/models.yaml.example ./config/models.yaml
+# Edit config/models.yaml — at least one model per tier
+```
+
+```typescript
+import { createRouter, createRouterFromFleet } from 'pi-smart-router';
+
+const router = createRouter({ modelsPath: './config/models.yaml' });
+router.register(piExtensionHooks); // lifecycle only: compaction + model override
+
+const decision = await router.dispatch.dispatch(routingRequest);
+// Embedder forwards inference to decision.selected_model_id
+
+// Optional: wire probe/telemetry yourself (same options bag as GatewayDispatch)
+// createRouterFromFleet(fleet, { systemInfoProvider, hardwareConfig, telemetryEmitter, ... })
+```
+
+### Embedder integration paths
+
+| Path | When to use | Routing | Lifecycle hooks |
+|------|-------------|---------|-----------------|
+| **Pi extension** (recommended) | Running inside pi | `pi install npm:pi-smart-router` (or project-local `.pi/extensions/smart-router/` when developing from clone) registers `smart-router/auto` and delegates streams | Extension calls `router.register()`; compaction/model overrides wired automatically |
+| **Library API** | Custom host, tests, or non-pi embedders | Your code calls `router.dispatch.dispatch()` (or wraps the pipeline) | Call `router.register(hooks)` to wire compaction and `model_select` events |
+
+The library `createPiRouterMiddleware()` / `RouterHandle.register()` registers **lifecycle hooks only** — not routing, context capture, or `before_provider_request`. Do not expect `middleware` to intercept LLM streams; that is the extension's `streamSimple` path or your embedder's dispatch loop.
+
+`createRouter()` returns a `RouterHandle`:
+
+| Property | Type | Purpose |
+|----------|------|---------|
+| `middleware` | `PiRouterMiddleware` | Lifecycle hook registrar (`register`, `lifecycleHookState`) |
+| `dispatch` | `GatewayDispatch` | Gateway with circuit breaker, failover, rate limiting |
+| `fleet` | `readonly ModelProfile[]` | Loaded fleet catalog |
+| `register` | `(hooks) => void` | Alias for `middleware.register` — attach pi lifecycle hooks |
+
+You can also pass a pre-built fleet:
+
+```typescript
+import { createRouterFromFleet } from 'pi-smart-router';
+
+const router = createRouterFromFleet(myFleetProfiles);
+```
+
+Example fleet entry:
+
+```yaml
+models:
+  - id: local-gemma-4-7b
+    tier: zero-tier
+    provider: lmstudio
+    endpoint: http://localhost:1234/v1
+    capabilities:
+      reasoning: 0.3
+      code_gen: 0.6
+      tool_use: 0.1
+    pricing:
+      registry_key: local/free
+      fallback_cost_per_1m: 0.0
+
+  - id: claude-3.5-haiku
+    tier: economical-cloud
+    provider: anthropic
+    # ...
+
+  - id: claude-3.5-sonnet
+    tier: frontier-cloud
+    provider: anthropic
+    # ...
+```
+
+Tiers: `zero-tier`, `economical-cloud`, `frontier-cloud`. See [config/models.yaml.example](config/models.yaml.example).
+
+### Routing cluster catalog (library API)
+
+Reference prompts grouped by tier bias for semantic cluster matching (SP-099). Operators tune clusters in YAML without code changes. Precomputed centroids live in `config/routing-centroids.json` (SP-114); when that file is absent, centroids are computed at load time as the mean embedding of each cluster's reference prompts.
+
+```bash
+cp config/routing-clusters.yaml.example ./config/routing-clusters.yaml
+cp config/routing-centroids.json.example ./config/routing-centroids.json
+# Edit reference_prompts, min_similarity, and min_margin per cluster
+# Regenerate centroids after catalog changes:
+npm run routing:bootstrap-centroids
+```
+
+The bootstrap script embeds each reference prompt via the HyDRA MiniLM ONNX pipeline (384-dim), mean-pools to centroid vectors, and writes `config/routing-centroids.json` with `{ cluster_id, tier_bias, centroid, reference_count }` per cluster. ONNX artifacts cache under `.pi-smart-router/models/` on first run.
+
+```typescript
+import { loadRoutingClusters } from 'pi-smart-router';
+
+const catalog = await loadRoutingClusters({
+  filePath: './config/routing-clusters.yaml',
+  embedder: myTextEmbedder, // shared ONNX embedder (SP-100)
+});
+// Reason codes: cluster_${id} — e.g. cluster_low_stakes_general
+
+// createClusterMatcher (cluster-matcher module) prefers routing-centroids.json when present.
+```
+
+Cluster IDs are stable reason-code prefixes (`cluster_low_stakes_general`, `cluster_architecture`, etc.). See [config/routing-clusters.yaml.example](config/routing-clusters.yaml.example).
+
+## Configuration
+
+### Environment variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `ROUTER_STATE_DB_PATH` | `./.pi-smart-router/state.db` | Override SQLite state store location (telemetry, pricing catalog, session data) |
+| `SMART_ROUTER_LOG_ROUTING` | (unset) | Set to `1` to log each routing decision to stderr as JSON (debugging dogfood sessions). Canonical payload builder (`buildRoutingDecisionLogPayload`) includes top-level `stage`, `reason_code`, `low_intensity_score`, `tier_hint`, `local_eligible_reason`, and `cluster_id` (plus nested `cluster_summary` / `features`). The pi extension’s live stderr logger is still a slim subset — see [LOG_ROUTING field checklist](#log_routing-field-checklist) |
+| `SMART_ROUTER_DATASET` | (unset) | Set to `1` to opt in to privacy-safe routing dataset capture (metadata and feature fields only; 30-day / 10k-row retention). Prompt text, messages, and tool arguments are never stored. Required for outcome labels and P(success) training export. See [#8](https://github.com/beettlle/pi-smart-router/issues/8). |
+| `SMART_ROUTER_DATASET_FINGERPRINT` | (unset) | Set to `1` (requires `SMART_ROUTER_DATASET=1`) to store an install-local HMAC-SHA256 fingerprint of each normalized prompt for duplicate detection within this install. The install pepper lives in `.pi-smart-router/.dataset-key` (gitignored) and is never exported. **Warning:** short or common prompts are vulnerable to offline rainbow-table guessing; use only when you accept that tradeoff. See [#10](https://github.com/beettlle/pi-smart-router/issues/10). |
+| `SMART_ROUTER_DATASET_EMBEDDINGS` | (unset) | Set to `1` (requires `SMART_ROUTER_DATASET=1`) to capture the raw 384-dim HyDRA encoder embedding on each dataset row (derived dense vector of the metadata-prefixed routing input — never prompt text). Embeddings stay local until you additionally export with `--embeddings`; they exist so the hydra_projection ≥100-row training floor can ever be met. See [#170](https://github.com/beettlle/pi-smart-router/issues/170). |
+| `MODELS_YAML_PATH` | `./config/models.yaml` | Fleet catalog path (library API only) |
+| `SMART_ROUTER_PLANNING_TURN_BUFFER` | `2` | SAAR planning buffer: frontier planning turns allowed before hard-lock ([v0.2.0 Continuity](https://github.com/beettlle/pi-smart-router/issues/72)) |
+| `SMART_ROUTER_PLANNING_DELEGATE_ENABLED` | `true` | Enable cache-preserving planning delegate ([#71](https://github.com/beettlle/pi-smart-router/issues/71)) |
+| `SMART_ROUTER_PLANNING_DELEGATE_MAX_MESSAGES` | `12` | Compressed-context message cap for frontier sub-call |
+| `SMART_ROUTER_PLANNING_DELEGATE_MAX_TOKENS` | `16384` | Compressed-context token cap for frontier sub-call |
+| `SMART_ROUTER_PLANNING_DELEGATE_EXCLUDE_EXECUTION_HISTORY` | `true` | Exclude tool execution history from delegate payload |
+| `SMART_ROUTER_PLANNING_DELEGATE_GLOBAL_TIMEOUT_MS` | `120000` | Global cap (ms) on the whole planning-delegate stage per planning turn — bounds fan-out wall-clock so a stalled worker cannot hang TTFT ([#120](https://github.com/beettlle/pi-smart-router/issues/120)) |
+| `SMART_ROUTER_PLANNING_DELEGATE_SUB_CALL_TIMEOUT_MS` | `30000` | Per-call cap (ms) on each delegate sub-call worker; on expiry the worker is cancelled/abandoned and routing falls back to direct frontier with `planning_delegate_timeout` ([#120](https://github.com/beettlle/pi-smart-router/issues/120)) |
+| `SMART_ROUTER_ADAPTIVE_REASONING_ENABLED` | `true` | Master switch for the adaptive thinking-level policy ([#166](https://github.com/beettlle/pi-smart-router/issues/166)); `false` passes the session thinking level through unchanged |
+| `SMART_ROUTER_ADAPTIVE_REASONING_MIN_LEVEL` | (unset) | Floor on policy-derived thinking levels (`minimal\|low\|medium\|high\|xhigh\|max`) — see [Adaptive reasoning](#adaptive-reasoning-thinking-level-166) |
+| `SMART_ROUTER_ADAPTIVE_REASONING_MAX_LEVEL` | (unset) | Ceiling on policy-derived thinking levels (incl. turn-class upgrades) — see [Adaptive reasoning](#adaptive-reasoning-thinking-level-166) |
+| `SMART_ROUTER_PREFIX_CACHE_WEIGHT` | `0.20` | SAAR weight on warm prefix value in cache breakeven math (0–1; [#73](https://github.com/beettlle/pi-smart-router/issues/73)) |
+| `SMART_ROUTER_IDLE_TIMEOUT_SECONDS` | `300` | SAAR idle seconds before pin reopens for full re-route |
+| `SMART_ROUTER_SWITCH_THRESHOLD` | `0.5` | SAAR switch score gate (0–1) for tier upgrades during hard-lock |
+| `ROUTER_SAFE_DEFAULT_TIER` | `economical-cloud` | Fallback tier on any routing failure |
+| `LITELLM_PRICING_URL` | — | LiteLLM pricing JSON source |
+
+### LOG_ROUTING field checklist
+
+When `SMART_ROUTER_LOG_ROUTING=1`, prefer the canonical payload from `buildRoutingDecisionLogPayload` (library / tests). Checklist for [#99](https://github.com/beettlle/pi-smart-router/issues/99):
+
+| Field | In payload builder? | Notes |
+|-------|---------------------|-------|
+| `stage` | Yes (top-level) | Pipeline stage that decided |
+| `reason_code` | Yes (top-level) | Machine-readable reason |
+| `low_intensity_score` | Yes (top-level + `cluster_summary`) | Null when low-intensity stage did not run |
+| `tier_hint` | Yes (top-level + `cluster_summary`) | Null when no tier hint |
+| `local_eligible_reason` | Yes (top-level + `features`) | Null when local_zero did not evaluate eligibility |
+| `cluster_id` | Yes (top-level + `cluster_summary`) | Null when no cluster match |
+| `pricing_window` | Yes (top-level + `peak_pricing_summary`) | Peak vs off-peak rationale for the selected model (SP-244 / #165); the extension stderr logger carries `pricing_window` + `peak_pricing` |
+
+**Gap:** the pi extension’s live stderr path (`logRoutingDecision` in `.pi/extensions/smart-router`) still emits a slim JSON object (`selected_model_id`, `stage`, `reason_code`, `features`, `delegate`) and does **not** yet call `buildRoutingDecisionLogPayload`. SQLite `/smart-router history` and the payload builder carry the full checklist; wire the extension logger in a follow-up if dogfood needs identical stderr shape.
+
+**History model id:** `/smart-router history` resolves bare/`smart-router` virtual `auto` to the concrete planning-delegate primary (or qualifies Cursor opaque `auto` as `cursor/auto`) so operators see the delegated fleet model, not the virtual router id.
+
+### SAAR session pin and cache breakeven (v0.2.0 Continuity)
+
+v0.2.0 adds **Session-Aware Agentic Routing (SAAR)** pin knobs ([#72](https://github.com/beettlle/pi-smart-router/issues/72)) and a **cache breakeven gate** ([#73](https://github.com/beettlle/pi-smart-router/issues/73)) that blocks tier switches when `marginal_savings + future_cache_value <= cache_reprime_cost` — preventing cheap-turn savings from invalidating a warm prefix cache.
+
+| Knob | Env var | Default | Effect |
+|------|---------|---------|--------|
+| Planning buffer | `SMART_ROUTER_PLANNING_TURN_BUFFER` | `2` | First N turns may route planning to frontier while pin metadata stays economical |
+| Prefix cache weight | `SMART_ROUTER_PREFIX_CACHE_WEIGHT` | `0.20` | Discounted future cache credit in breakeven |
+| Idle reopen | `SMART_ROUTER_IDLE_TIMEOUT_SECONDS` | `300` | Seconds of inactivity before SAAR resets and pin reopens |
+| Hard-lock upgrade gate | `SMART_ROUTER_SWITCH_THRESHOLD` | `0.5` | Score threshold for tier upgrades after buffer exhaust |
+
+**Dogfood verification (multi-turn planning session)**
+
+1. Start pi with routing logs: `SMART_ROUTER_LOG_ROUTING=1 pi` (optional: tune SAAR env vars above).
+2. Run `/model smart-router/auto` and begin a multi-turn planning session (planning turns mixed with tool results).
+3. Inspect stderr JSON lines — confirm `saar_summary.buffer_active` / `saar_reason_code: saar_buffer_active` on early planning turns, then `hard_lock: true` / `saar_hard_lock` after the buffer exhausts.
+4. On a warm pinned session, trigger a `tool_result` sub-route — when breakeven fails, expect `breakeven_summary.decision: "blocked"` and `breakeven_reason_code: breakeven_blocked` while the pin holds.
+5. Use `pi router explain` (or `POST /v1/route/explain`) on the same session — `features.breakeven` and `features.saar` mirror telemetry fields for operator audit.
+
+See [routing-roadmap.md](docs/routing-roadmap.md) §2 P0 for design context.
+
+**Long-running pi sessions — in-memory state eviction (v0.21.0, [#145](https://github.com/beettlle/pi-smart-router/issues/145)).** Session pins and in-memory routing snapshots live in process memory, not in the SQLite telemetry store. When pi ends a session, the extension's `session_shutdown` handler (reason: `quit` / `reload` / `new` / `resume` / `fork`) calls `evictInMemorySessionState` (`src/api/session-eviction.ts`) and drops **all** in-memory routing state for that session — pins, cache-breakeven snapshots, turn metadata. A new session starts cold: no stale pin, no warm-cache assumption carries over. Persistent telemetry in `.pi-smart-router/state.db` is untouched. As a safety net for orphaned sessions (e.g. a crashed pi process that never emitted `session_shutdown`), a sweep on `session_start` evicts sessions idle longer than `ORPHAN_SESSION_TTL_MS` (**24 hours**, exported from `.pi/extensions/smart-router/session-lifecycle.ts`); the sweep fails open — a missing session id or sweep error never blocks session start.
+
+### Planning delegate (v0.4.0 Delegate)
+
+When a **planning** turn would route primary inference to frontier while a warm **economical** session pin is active, smart-router prefers **cache-preserving delegation** ([#71](https://github.com/beettlle/pi-smart-router/issues/71)):
+
+1. **Pipeline** (`turn_envelope`) emits `planning_delegate` — primary stays on the pinned economical model; `features.planning_delegate` names the frontier **delegate** model and compressed-context limits.
+2. **Pi extension** (`.pi/extensions/smart-router`) runs an ephemeral frontier sub-call with compressed context (tool execution history excluded by default), injects the result as an observation user message, then delegates **primary** streaming to the pinned economical model.
+3. **Fallback** — when delegate is disabled, spawn fails, or the delegate model is missing from the registry, the extension falls back to a **direct frontier** route with a documented `fallback_reason` in explain/telemetry.
+
+**Stream piping (SP-170):** Primary delegated inference **live-forwards** provider events to pi (`start` / `text_delta` / … as they arrive). The planning-delegate sub-call stays **buffered** — only the final observation text is injected into primary context; frontier tokens from the ephemeral sub-call are discarded and never reach the user-facing stream. On infra failover, a synthetic `text_delta` notice is pushed after the retry stream's `start` (no mutation of a buffered event array).
+
+| Knob | Env var | Default | Effect |
+|------|---------|---------|--------|
+| Delegate enabled | `SMART_ROUTER_PLANNING_DELEGATE_ENABLED` | `true` | When `false`, SAAR buffer allows direct frontier planning (`planning_direct_frontier` + `planning_delegate_disabled`) |
+| Compressed message cap | `SMART_ROUTER_PLANNING_DELEGATE_MAX_MESSAGES` | `12` | Max messages sent to the frontier sub-call |
+| Compressed token cap | `SMART_ROUTER_PLANNING_DELEGATE_MAX_TOKENS` | `16384` | Token budget for compressed delegate context |
+| Exclude tool history | `SMART_ROUTER_PLANNING_DELEGATE_EXCLUDE_EXECUTION_HISTORY` | `true` | Strip tool-call / tool-result turns from delegate payload |
+
+**Coordination boundary with pi core:** smart-router owns **routing** (when to delegate, which models, compressed limits, fallback reason codes). **Sub-agent spawn and observation injection** run in the pi extension via `streamSimple` — pi core must expose a delegate/stream API the extension can call; smart-router does not orchestrate pi's outer sub-agent scheduler. Operators enabling `/model smart-router/auto` get delegate behavior automatically when the extension is loaded; no separate pi sub-agent config is required beyond a frontier model in the registry.
+
+**Dogfood verification (planning delegate)**
+
+1. Start pi with routing logs: `SMART_ROUTER_LOG_ROUTING=1 pi` and `/model smart-router/auto`.
+2. Begin a session on an economical pin (routine prompts), then trigger planning turns (e.g. architecture or multi-step design work).
+3. Inspect stderr JSON — on delegate turns expect `reason_code: planning_delegate`, `planning_delegate_summary.path: "delegate"`, `primary_model_id` equal to the pin, and `delegate_model_id` pointing at frontier.
+4. Confirm primary inference stays on the economical model (cache-friendly) while stderr shows `[smart-router] planning delegate sub-call completed` with the frontier model id.
+5. Disable delegate (`SMART_ROUTER_PLANNING_DELEGATE_ENABLED=false`) and repeat — expect `planning_direct_frontier` with `fallback_reason: planning_delegate_disabled`.
+6. Use `pi router explain` (or `POST /v1/route/explain`) on the same session — `features.planning_delegate` mirrors live routing (`path: delegate` vs `direct`, `fallback_reason` when applicable).
+
+See [routing-roadmap.md](docs/routing-roadmap.md) §2 P0 and GitHub [#71](https://github.com/beettlle/pi-smart-router/issues/71) for acceptance criteria.
+
+### Adaptive reasoning (thinking level) (#166)
+
+Adaptive reasoning tunes the **thinking intensity of the model already selected** — it never changes which model runs. Per turn class:
+
+| Turn class | Policy level |
+|-----------|--------------|
+| `tool_result` | `minimal` |
+| `main_loop` | `low` |
+| planning / `planning_delegate` | `medium` |
+| frontier escalation / `loop_escalation` | `high` |
+
+pi passes the session thinking level on every call; the router treats pi's ambient default (`medium`) as adjustable by policy, and any **other** explicit level as an operator `/thinking` floor that is **never lowered** (a turn-class upgrade may still raise it). Chatty profiles (high `verbosity_factor`) additionally get a one-line conciseness nudge at `minimal`/`low`.
+
+**Three knobs that sound alike, do different things:**
+
+| Knob | Acts on | What it changes |
+|------|---------|-----------------|
+| **Adaptive reasoning** (`adaptive_reasoning.*`) | The delegated call's `reasoning` option | Thinking *intensity* of the already-selected model — cost of thinking, not model choice |
+| `frugality.lambda_verbosity` | Multi-objective **selection** scoring | Which model gets picked — penalizes verbose models while ranking candidates; never touches the delegated call's reasoning option |
+| `/thinking` (pi session command) | The caller-provided reasoning level | Explicit operator override — an explicit level is never lowered by policy or bounds |
+
+**Operator knobs** (config `adaptive_reasoning` / env):
+
+| Key | Env var | Default | Effect |
+|-----|---------|---------|--------|
+| `enabled` | `SMART_ROUTER_ADAPTIVE_REASONING_ENABLED` | `true` | When `false`, the policy is skipped — delegated calls pass the session thinking level through unchanged (`reasoning_reason_code: adaptive_reasoning_disabled`) |
+| `min_level` | `SMART_ROUTER_ADAPTIVE_REASONING_MIN_LEVEL` | (none) | Floor: policy-derived levels are raised to at least this level. Discrete level (`minimal\|low\|medium\|high\|xhigh\|max`) — deliberately **not** a free-form verbosity percent |
+| `max_level` | `SMART_ROUTER_ADAPTIVE_REASONING_MAX_LEVEL` | (none) | Ceiling: policy-derived levels (incl. turn-class upgrades) are capped at this level. When `min_level` exceeds `max_level` (e.g. via env), the ceiling wins (cost-safe) |
+
+Floor/ceiling bind only what the policy itself derives. An explicit operator `/thinking` choice is never **lowered** by either bound (a floor can still *raise* one via the policy-upgrade path). Both bounds re-clamp down to the model's supported levels.
+
+**Fail-open behavior:** models that do not support reasoning options (`reasoning: false`, or a `thinkingLevelMap` mapping every relevant level to `null`) pass caller options through unchanged — telemetry records `reasoning_reason_code: reasoning_unsupported` and the route never fails. Providers that ignore reasoning options degrade to a no-op.
+
+**Telemetry:** each routed delegation records `reasoning_level_requested` (the session/caller level), `reasoning_level_applied` (the effective delegated level), and `reasoning_reason_code` (e.g. `turn_envelope_main_loop`, `operator_thinking_floor`, `operator_floor_applied`, `operator_ceiling_applied`, `reasoning_unsupported`) on the routing telemetry row — enriched post-delegation like usage actuals ([SP-241](https://github.com/beettlle/pi-smart-router/issues/164)). Inspect via `/smart-router history`.
+
+### Typed judgment (opt-in) (#183)
+
+Typed judgment is an **opt-in, non-deciding** pipeline stage (`typed_judgment`, directly after `turn_envelope` and before `context_fit`) that asks a Jev-compatible “systemone” semantic judge six structured questions about each user-prompt turn and records the normalized answers on the routing context. **In v1.3.0 the answers are recorded only — they do not change routing decisions.** Downstream consumers (tier hints, capability gating, adaptive reasoning) land in later trains ([#188](https://github.com/beettlle/pi-smart-router/issues/188)–[#190](https://github.com/beettlle/pi-smart-router/issues/190)); do not expect any routing behavior change from enabling the stage today.
+
+The six questions (stable ids):
+
+| Question id | Kind | What it asks |
+|-------------|------|--------------|
+| `task_kind` | choice (10 anchored options) | The single kind of work the user message asks for: `plan`, `implement`, `debug`, `refactor`, `review`, `research`, `explain`, `operate`, `write`, `chat` |
+| `capability_deserved` | score 0–3 | Setting price aside, how much model capability the request deserves |
+| `needs_deep_reasoning` | noul (yes/no) | Whether the turn needs extended multi-step reasoning rather than recall, lookup, or a short direct edit |
+| `code_gen` | score 0–3 | How much code or configuration must be written or modified |
+| `tool_use` | score 0–3 | How much tool execution (shell, file, search, agentic calls) the turn requires |
+| `destructive` | noul (yes/no) | Whether satisfying the request could destroy, overwrite, or irreversibly modify data, state, or history |
+
+**Default off.** `typed_judgment.enabled` defaults to `false` — existing installs make no judge call and pay zero added latency. When enabled, the stage runs only on user-prompt turns: `tool_result` turns, acknowledgement-only turns, and explicit `force_model_id` turns skip it, and any timeout or judge error **fails open** — routing proceeds exactly as if the stage were unwired. Skip/failure reason codes recorded on the routing context: `typed_judgment_disabled`, `typed_judgment_tool_result`, `typed_judgment_acknowledgement`, `typed_judgment_force_model`, `typed_judgment_timeout`, `typed_judgment_error` (plus `typed_judgment_remote_key_missing` when a remote endpoint has no API key available — see privacy note below).
+
+**Running the judge locally (OpenJev).** The intended default is a local [OpenJev](https://github.com/beettlle/pi-smart-router/issues/183) server — no turn text leaves the machine:
+
+- Endpoint: `http://127.0.0.1:8080/v1/systemone` (default)
+- Model: `openjev-latest` (default)
+
+**Latency.** Measured on local OpenJev on Apple silicon: **~385–990 ms per judged user turn**; `timeout_ms` defaults to `1500` to cover p99 with headroom. `route()` is serialized per pipeline, so judge latency adds to user-turn routing latency only — `tool_result` turns never invoke the judge and pay nothing.
+
+**Config keys and env overrides** (SP-304):
+
+| Config key (`typed_judgment.*`) | Env var | Default | Effect |
+|---------------------------------|---------|---------|--------|
+| `enabled` | `SMART_ROUTER_TYPED_JUDGMENT_ENABLED` | `false` | Master switch — no judge calls when off |
+| `endpoint` | `SMART_ROUTER_TYPED_JUDGMENT_ENDPOINT` | `http://127.0.0.1:8080/v1/systemone` | Judge endpoint; must be loopback (`127.0.0.1`, `::1`, or `localhost`) unless `allow_remote` is true |
+| `model` | `SMART_ROUTER_TYPED_JUDGMENT_MODEL` | `openjev-latest` | Judge model id (OpenJev uses it; hosted Jev ignores it) |
+| `timeout_ms` | `SMART_ROUTER_TYPED_JUDGMENT_TIMEOUT_MS` | `1500` | Per-call timeout; on expiry the stage fails open with `typed_judgment_timeout` |
+| `samples` | `SMART_ROUTER_TYPED_JUDGMENT_SAMPLES` | `1` | Judge samples per question (OpenJev self-consistency extension; omitted for hosted Jev) |
+| `api_key_env` | `SMART_ROUTER_TYPED_JUDGMENT_API_KEY_ENV` | `TYPESAFE_API_KEY` | **Name** of the env var holding the API key — never the key itself |
+| `allow_remote` | `SMART_ROUTER_TYPED_JUDGMENT_ALLOW_REMOTE` | `false` | Permit non-loopback (hosted) endpoints; default false = fail closed to local judge only |
+| `min_confidence` | `SMART_ROUTER_TYPED_JUDGMENT_MIN_CONFIDENCE` | `0.6` | Minimum answer confidence for a judgment to influence routing (consumed by later trains; defined now to stabilize the config shape) |
+
+Invalid env overrides (e.g. a remote endpoint without `allow_remote`) fail closed: the base config stays intact and disabled, and no judge call is made.
+
+**Privacy note ([#184](https://github.com/beettlle/pi-smart-router/issues/184)).** With the default **local OpenJev** setup, turn text never leaves the machine — the judge state (token-capped, with no spend/budget keys) is sent only to the loopback endpoint. Pointing `endpoint` at a **hosted judge** (TypeSafe Jev or Codiv) sends turn text off-machine: that requires the explicit opt-in `allow_remote: true`, and the adapter reads the API key at call time from the environment variable named by `api_key_env` (default `TYPESAFE_API_KEY`). **API keys are never read from, or stored in, config files** — config carries only the env var *name*. If a remote endpoint is configured but the key env var is unset, the judge adapter is not created (`typed_judgment_remote_key_missing`) and routing proceeds without judgments. Prompt and judge-state text is never logged; errors are redacted before logging.
+
+**Attribution.** The question rubrics — level descriptions and criteria for `task_kind`, `capability_deserved`, and `needs_deep_reasoning` — are adapted from [pi-jev-model-router](https://github.com/da-vinci-noob/pi-jev-model-router) (MIT License, © 2026 Shah Rukh).
+
+### Degraded neural failover sandwich (#119)
+
+When the encoder/neural stage (HyDRA) **fails, is misconfigured, or exceeds its latency budget without a selection**, routing fails open through a cheap chain instead of crashing the host agent ([#119](https://github.com/beettlle/pi-smart-router/issues/119)):
+
+1. **learned** — optional privacy-safe map keyed by requirement fingerprint (SHA-256 of the rounded requirement vector) or cluster id → preferred tier. **Raw prompt text is never stored.** Exact-key policy: fingerprint match first, cluster id second (no fuzzy matching). Writes are validated (bounded floats, snake_case cluster ids, tier enum) and capped (FIFO eviction) so confounder attacks cannot poison routing memory.
+2. **heuristic** — optional operator **pattern pack** (router_rules-style regex overlay) for known-simple intents. Deny-by-default (no match → no decision) and **fail closed on invalid regex** (the rule is rejected at load and never applies).
+3. **safe_default** — context-fit aware safe economical/frontier default (`degraded_safe_default`).
+
+Explain/telemetry expose `route_path` (`neural` \| `learned` \| `heuristic` \| `safe_default`) plus `route_path_confidence` on every decision; degraded decisions carry reason codes `degraded_learned_route`, `degraded_pattern_<rule_id>`, or `degraded_safe_default`. A learned/pattern suggestion toward a cheaper tier is only honored when the cheap tool-use cue estimate is below `pattern_tool_use_ceiling` — a cheap overlay **never alone overrides a predicted capability shortfall**.
+
+| Knob (`degraded_route` operator config) | Default | Effect |
+|------|---------|--------|
+| `enabled` | `true` | When `false`, neural failures use the legacy `safe_default` stage pass-through |
+| `learned_min_confidence` | `0.6` | Minimum learned-entry confidence to honor a tier suggestion |
+| `learned_max_entries` | `512` | Learned-map cap per key space (FIFO eviction) |
+| `pattern_tool_use_ceiling` | `0.3` | Tool-use cue ceiling for honoring cheaper-tier learned/pattern suggestions |
+| `fail_closed_on_missing_weights` | `false` | When `true`, missing/placeholder neural weights fail **closed**: the matcher throws before paying embedding cost and the pipeline routes through the degraded sandwich (`neural_misconfigured`) with the SP-251 reason codes on the decision. When `false` (default), routing stays fail-open — placeholder weights score with neutral defaults and the reason codes are advisory telemetry only |
+
+**Missing-weights reason codes (v0.21.0, [#148](https://github.com/beettlle/pi-smart-router/issues/148)).** When the HyDRA matcher cannot load real neural weights, the decision surfaces structured reason codes (`src/domain/matching/missing-weights-reason-codes.ts`) on the routing decision / `requirement_reason_codes` — visible in explain (`pi router explain` / `POST /v1/route/explain`), `/smart-router history`, and telemetry — not stderr-only:
+
+| Reason code | Meaning | Operator action |
+|-------------|---------|-----------------|
+| `hydra_weights_missing` | HyDRA projection-head weights artifact is absent or unloadable, so neural scoring is running on fallback behavior | Restore the weights artifact (see [HyDRA model cache](#hydra-model-cache)); routing continues fail-open unless `fail_closed_on_missing_weights` is set |
+| `k4_heads_placeholder` | ModernBERT K4 heads are placeholder (untrained) weights — scores are neutral defaults, not learned predictions | Regenerate/install the trained K4 heads artifact; treat current K4 scores as non-authoritative |
+
+With the default fail-open behavior these codes are advisory: the route proceeds with safe defaults. Set `degraded_route.fail_closed_on_missing_weights: true` when you prefer an explicit degraded-route decision (sandwich chain above, `route_path` records the branch taken) over silently routing on placeholder neural scores.
+
+Distinct from soft heat affinity (healthy-path bias): this is failover / skip-expensive-stage only. Routing remains **pre-generation** — no FrugalGPT-style cascades (see [routing-roadmap.md](docs/routing-roadmap.md) §1).
+
+### Virtual cost v2 (v0.5.0 subscription economics)
+
+**Virtual cost v2** extends SP-096 flat `quota_cost_per_1m` with deterministic subscription-window economics ([#78](https://github.com/beettlle/pi-smart-router/issues/78)). It inflates effective frontier cost late in a rolling quota window and credits warm prefix-cache value on active pins — without MDP or reinforcement-learning quota policy (SeqRoute HBR+CQL is deferred).
+
+**Formula (per turn)**
+
+`effective_cost_usd = base × λ + quota_arbitrage_premium + exhaustion_risk_premium + kv_cache_savings`
+
+| Component | Meaning |
+|-----------|---------|
+| `base` | SP-096 subscription virtual cost (`quota_cost_per_1m`) or sticker `fallback_cost_per_1m` |
+| **λ (quota decay)** | Multiplier rising from 1 at full window toward `lambda_max_multiplier` as budget depletes |
+| **Quota arbitrage premium** | Opportunity-cost uplift for burning subscription quota late in the window |
+| **Exhaustion risk premium** | Extra penalty when remaining window fraction falls below `exhaustion_risk_threshold` |
+| **KV-cache savings** | Negative credit when pin is active and prefix is warm (`prefix_cache_discount` × `prefix_cache_weight`) |
+
+**Window position**
+
+Rolling-window position is supplied to the router pipeline as `quotaWindowPosition` (library API / telemetry integration). Use `remaining_window_fraction` in `[0, 1]` (1 = full budget). Optionally derive it from elapsed time and consumed quota via `deriveRemainingWindowFraction(elapsed_seconds, consumed_fraction)` in `virtual-cost-v2.ts` (defaults assume a Cursor-style **5h** window).
+
+**Quota window feed (producer, [#125](https://github.com/beettlle/pi-smart-router/issues/125))**
+
+There is no universal cross-provider "remaining quota" API, so `src/domain/pricing/quota-window-feed.ts` produces the position via an adapter + degrade chain: (1) a provider `QuotaWindowAdapter` when a trustworthy signal exists, (2) a telemetry-derived **pool-level** burn estimate over the rolling window (subscription-pool models = fleet entries with `quota_cost_per_1m`; enabled via `SMART_ROUTER_QUOTA_POOL_BUDGET_TOKENS` + `SMART_ROUTER_QUOTA_WINDOW_SECONDS`), (3) omit → flat virtual cost + SP-097 exhaustion failover. The smart-router extension resolves the feed at fleet rebuild and passes it through `createDispatchOptions` (SP-173 wiring gap closed). Soft bias only — no hard ban at any threshold; SP-097 reactive failover remains the safety net when the feed is missing or stale. Per-model fractions for shared pools are never invented.
+
+When `quotaWindowPosition` is omitted, λ stays at 1 and quota premiums are zero — behavior matches SP-096 flat virtual cost.
+
+**Operator knobs** (`VirtualCostV2Config` — wire through `RouterPipeline` options today; defaults in `DEFAULT_VIRTUAL_COST_V2_CONFIG`):
+
+| Knob | Default | Effect |
+|------|---------|--------|
+| `window_duration_seconds` | `18000` (5h) | Rolling window length for time-based remaining fraction |
+| `lambda_decay_exponent` | `2` | Curvature of λ rise as window depletes |
+| `lambda_max_multiplier` | `3` | λ cap at exhaustion |
+| `quota_arbitrage_weight` | `0.5` | Weight on late-window arbitrage premium |
+| `exhaustion_risk_weight` | `1` | Weight on exhaustion risk below threshold |
+| `exhaustion_risk_threshold` | `0.2` | Remaining fraction below which exhaustion premium applies |
+| `prefix_cache_discount` | `0.9` | Assumed prefix-cache discount on warm tokens |
+| `prefix_cache_weight` | `0.2` | Retained future cache value (aligned with SAAR `SMART_ROUTER_PREFIX_CACHE_WEIGHT`) |
+
+**Where v2 applies**
+
+- **Expected-cost tier selection** — frontier/composer effective cost rises near window exhaustion; economical tiers can win when subscription quota is scarce.
+- **Cache breakeven gate** — marginal switch savings and observability use v2 when `quotaWindowPosition` is set; KV credit on the pinned model reduces marginal savings and can block unnecessary pin breaks.
+
+**Dogfood verification**
+
+1. Configure a fleet with subscription `quota_cost_per_1m` on cursor/composer frontier models (see `config/models.yaml.example`).
+2. Run routing with `quotaWindowPosition: { remaining_window_fraction: 0.05 }` via library `RouterPipeline` options — inspect `tier_selection` / expected-cost rationale for `v2 λ=`, `quota_premium=`, `exhaustion=`, `cache_credit=` strings.
+3. On a warm pinned session with low `remaining_window_fraction`, trigger a `tool_result` sub-route — when cache credit plus reprime math fails breakeven, expect pin hold (`breakeven_blocked`) in routing logs and `features.breakeven` on explain.
+4. Compare `remaining_window_fraction: 1` vs `0.02` on the same request — late-window runs should show higher frontier `effective_cost_usd` in `features.tier_selection.tier_costs[].virtual_cost_v2`.
+
+See [routing-roadmap.md](docs/routing-roadmap.md) §2 P2 and GitHub [#78](https://github.com/beettlle/pi-smart-router/issues/78).
+
+### Usage actuals (post-turn capture)
+
+When pi reports an assistant message `usage` object after a delegated turn, the smart-router persists it onto that turn's routing telemetry row ([#164](https://github.com/beettlle/pi-smart-router/issues/164)): `actual_cost_usd`, `actual_input_tokens`, `actual_output_tokens`, and cache read/write token counts — while retaining `estimated_cost_usd`. Capture fails open: library embeds and non-pi hosts that report no usage simply leave the actual fields null, and a telemetry write error never fails the route. Subscription/OAuth models report `cost.total === 0`: token actuals are still recorded, but no USD is invented — `/smart-router stats` labels its totals `cost_basis: 'actual' | 'estimated' | 'mixed'` accordingly.
+
+### Rolling cost calibration (v0.20.0 usage actuals)
+
+**Rolling cost calibration** soft-biases future cost estimates with the ratio your models *actually* bill versus what the router estimated ([#164](https://github.com/beettlle/pi-smart-router/issues/164)). It is built from the privacy-safe post-turn [usage actuals](#usage-actuals-post-turn-capture) — no new state to configure, and prompt/message bodies are never touched.
+
+**How it works**
+
+1. Every routed turn records an `estimated_cost_usd` (input tokens × catalog rate) and, when pi reports it, an `actual_cost_usd` on the same telemetry row.
+2. `buildCostCalibrationPrior` derives per-**model** and per-**tier** mean `actual / estimate` ratios over the rolling telemetry window. Per-pair outliers are clamped (±10×) before averaging; the aggregate is clamped to a soft band of **[0.5, 2.0]** so calibration can never hard-ban or hard-favor a model on cost alone.
+3. When warm (≥ 3 usable pairs per bucket), the ratio multiplies the tier's base per-1M cost **before** the virtual-cost v2 λ/premium/KV chain — so quota decay and cache credits compound on the calibrated base. Model buckets win over tier buckets.
+4. `estimateRoutingCost` accepts the same prior as an optional argument, soft-biasing per-request cost estimates identically.
+
+**Cold start fails open.** No prior, an empty prior, or a bucket below the warmup threshold resolves ratio 1 — the catalog estimate is used unchanged. Subscription rows (host reports `cost.total === 0`) never contribute: stats and calibration never invent USD.
+
+**Where it applies**
+
+- **Expected-cost tier selection** — pass `costCalibration` into `selectTierByExpectedCost` / `computeExpectedCost` (library API, same pattern as `heatBias`). A warm ratio that doubles an economical tier's effective cost can flip the next selection to frontier; the price-delta and pin-economics hard gates still apply after the soft bias.
+- **Pre-route estimates** — `estimateRoutingCost(model, request, catalog, calibration?)`; the router pipeline's uncalibrated call is unchanged.
+- **`/smart-router stats`** — the aggregate's JSON snapshot (`aggregateSessionStats` / `buildStatsSnapshot`, the automation/MCP surface) carries a `cost_calibration` array (model buckets first, then tier buckets, each `{key, kind, ratio, samples}`); omitted entirely when cold so automation can treat absence as catalog-only. The human-readable stats text keeps rendering cost basis and role breakdown only.
+
+**Observing the bias** — run with `SMART_ROUTER_LOG_ROUTING=1` and read the expected-cost gate line: calibrated winners carry a `[cost-calib ×N.NN from rolling actuals (SP-242)]` note on the rationale, and each tier's `calibrationRatio` appears in the expected-cost breakdown (`features.tier_selection.tier_costs[]`).
+
+**Knobs** (`DEFAULT_COST_CALIBRATION_CONFIG`): `minSamples` 3 (warmup), `minRatio`/`maxRatio` 0.5/2.0 (soft band), `sampleMinRatio`/`sampleMaxRatio` 0.1/10 (per-pair outlier clamp). Not a vendor peak-clock schedule — see [#165](https://github.com/beettlle/pi-smart-router/issues/165) for time-of-day pricing.
+
+### Peak/off-peak pricing adapters (v0.20.0, #165)
+
+Two vendors publish documented **time-of-day rate cards**. The peak-pricing adapters (`src/domain/pricing/peak-pricing.js`, SP-243) soft-bias the resolved cost-per-1M by the current pricing window — they never hard-ban a model, and non-target providers (OpenAI / Anthropic / Gemini / local / unknown) always resolve `window: 'none'` with multiplier 1 (fail open).
+
+| Vendor | Adapter | Peak window | Off-peak rate | Docs |
+|--------|---------|-------------|---------------|------|
+| Z.ai GLM Coding Plan | `zai` (matches `zai`/`glm`/`zhipu` providers and `glm-*` ids) | Mon–Fri 14:00–18:00 Asia/Singapore (UTC+8) | 0.5× the standard credit rate | [Z.ai GLM Coding Plan docs](https://docs.z.ai/devpack/overview) |
+| DeepSeek pay-as-you-go API | `deepseek` (matches `deepseek` provider / ids) | Mon–Fri 01:00–04:00 and 06:00–10:00 UTC | ½ the peak rate on cache-hit input, cache-miss input, and output | [DeepSeek Models & Pricing](https://api-docs.deepseek.com/quick_start/pricing) |
+
+**Z.ai plan profiles.** The default plan profile is `credits` — off-peak usage at 0.5× the standard credit rate, peak at 1×. **Legacy plans** (e.g. GLM-5.3 legacy at 3× peak / 1× off-peak, Flash at 1.2× / 0.4×) share the same window but use different multipliers; they are available **only** via an explicit operator override (`PeakPricingConfig.zai`: `plan_profile: 'legacy'` plus documented `peak_multiplier` / `off_peak_multiplier`). The adapter never scrapes the live account plan — legacy multipliers are documented override inputs, not detected state.
+
+**Configuration.** Adapters are on by default; `PeakPricingConfig.enabled: false` returns to flat rates. `PeakPricingConfig.deepseek.off_peak_multiplier` overrides the documented 0.5 off-peak discount if DeepSeek changes its schedule.
+
+**Observing the window.** Every routed turn records `pricing_window: 'peak' | 'off_peak' | 'none'` on its telemetry row (SP-243). With `SMART_ROUTER_LOG_ROUTING=1`, the routing-decision payload surfaces the rationale as top-level `pricing_window` plus `peak_pricing_summary` (`window`, `cost_multiplier`, `adapter_id`) on the canonical `buildRoutingDecisionLogPayload`, and `pricing_window` + `peak_pricing` on the extension stderr logger (SP-244).
+
+### P(success) training export (baseline classifier)
+
+When `SMART_ROUTER_DATASET=1`, the router records privacy-safe dataset rows and behavioral outcome labels. Export labeled training data from pi:
+
+```bash
+/smart-router export dataset [--limit N]
+```
+
+Each JSONL row joins dataset features with `success_label` and `outcome_signals`. Success means no negative outcome signals were recorded for that `request_id` (for example `model_override` or `feedback_bad` mark failure). Prompt plaintext is never included.
+
+#### Behavioral-first bootstrap (zero manual labels)
+
+Primary path for [#110](https://github.com/beettlle/pi-smart-router/issues/110) (docs slice).
+
+Manual `/smart-router feedback good|bad` is **optional**. Passive dogfood signals already captured under `SMART_ROUTER_DATASET=1` (and privacy-safe telemetry-contrib export) are sufficient to train when you have enough rows:
+
+| Passive field / signal | Role |
+|------------------------|------|
+| `model_override` | Failure — operator overrode the routed model (behavioral) |
+| `compaction_pin_break` | Neutral/positive context — pin broke at compaction (not a cheap-tier failure by itself) |
+| Loop-escalation proxies (`tool_failure_chain`, pin reason `loop_escalation`) | Failure proxies for stuck tool loops (verifier-grade) |
+| `stop_reason` / `stop_reason_invalid` / `stop_reason_length` | Execution outcome — invalid or truncated stops mark failure |
+
+The train/aggregate paths derive a label per row (`deriveSuccessLabelFromExportRow` in `src/domain/routing/p-success-classifier.ts`) from the joined `outcome_signals` — **no operator annotation required**:
+
+- **Failure** (`success: false`) if any derived failure signal is present: behavioral (`model_override`, `feedback_bad`), verifier proxies (`tool_failure_chain`, `stop_reason_invalid`, `reprompt_detected`, `high_edit_distance`), or execution (`provider_failover`, `stop_reason_length`, `infra_error`).
+- **Success** (`success: true`) on explicit `feedback_good` only.
+- **Unlabeled** (`success: null`, skipped by training) when no outcome signals exist, or when only neutral signals such as `compaction_pin_break` were recorded — never coerced to success.
+
+Optional `feedback_good` / `feedback_bad` only refine labels when the operator chooses to annotate; they are not required for a valid train path. **Do not invent labels** — incomplete exports skip or stay unlabeled rather than fabricating outcomes.
+
+**Sample floor:** collect at least **≥30** labeled **economical-tier** rows (`minimum_training_samples.p_success_weights` / `isotonic_calibrator` in [`config/routing-calibration.json.example`](config/routing-calibration.json.example)) before relying on non-neutral `P(success)` or isotonic. Below that floor the classifier returns neutral `P_success_cheap = 0.5`.
+
+**Label provenance (SP-281 / [#168](https://github.com/beettlle/pi-smart-router/issues/168)):** every labeled export/contrib row may carry `label_provenance` — `human_feedback` (human-rated dogfood turn, [#95](https://github.com/beettlle/pi-smart-router/issues/95)), `llm_judge` (adversarial harness graders, [#169](https://github.com/beettlle/pi-smart-router/issues/169)), or `scripted_intent` (scripted pack intent / exit heuristics). **Ship-claim sample floors count only `human_feedback` | `llm_judge` rows** — `scripted_intent` and untagged (legacy) rows never count toward ship floors, and trainers skip `scripted_intent` rows entirely. `scripts/qa/dogfood-gather.sh` auto-tags all of its export output `scripted_intent`; `routing:calibration-aggregate` prints the provenance breakdown, rejects unknown grades, and `--ship-grade-only` emits just the verifier-grade rows for ship trains. Provenance is never invented — absent stays absent (untagged).
+
+**Provenance today (v1.1.0 trained ship):** checked-in `config/p-success-weights.json` and `config/routing-calibration.json` ship `provenance.source: verifier_grade_train_2026-09-12` with `trained_sample_count: 243` for P(success)/isotonic, triage threshold **5** (57 samples, serve-active via #171 loader), HyDRA still 0/≥100. Serve-time routing uses trained expected-cost tier hints (no longer neutral `P=0.5`). Scripted `scripts/qa/dogfood-gather.sh` labels stay **quarantined** (`scripted_intent`) and must not feed ship trains. TwinRouterBench CI corpus soft-fail remains a **harness adapter artifact** ([#112](https://github.com/beettlle/pi-smart-router/issues/112)). [#95](https://github.com/beettlle/pi-smart-router/issues/95) / [#110](https://github.com/beettlle/pi-smart-router/issues/110) stay open for human dogfood volume and HyDRA embeddings.
+
+**v1.1.0 update:** Sep 12 hard gates **PASSED** (ECE cal 0.0645) on 147 `human_feedback` + 96 live `llm_judge` packs — decision record [`hard-gate-pass-2026-09-12.md`](spine-tasks/_authoring/release-v1.1.0/hard-gate-pass-2026-09-12.md) and [migration guide](docs/migration-v1.md#behavioral-calibration-artifacts-110--168). Session-holdout ECE is implemented but not yet ship-cleared ([`session-holdout-retrain-2026-09-12.md`](spine-tasks/_authoring/release-v1.1.0/session-holdout-retrain-2026-09-12.md)). Issue bookkeeping: [`operator-notes-issues.md`](spine-tasks/_authoring/release-v1.1.0/operator-notes-issues.md) — no encoder/frugality default flips; `modernbert_k4` (#96) stays deferred.
+
+**SP-206 / hybrid interim:** July dogfood and a Sept hybrid were explored during the 1.0 train; Sept isotonic collapsed (same-x PAV overwrite) and scripted gather labels failed #110 honesty. Code now pools same-x scores and skips null labels; v1.1 ships verifier-graded weights after the Sep 12 PASS.
+
+**Zero-manual-label path (aggregate → train → verify):**
+
+```bash
+# 1) Opt in + dogfood (no /feedback required) — see docs/qa/shadow-dogfood-protocol.md
+SMART_ROUTER_DATASET=1
+# …sessions with /model smart-router/auto; prefer passive outcomes…
+/smart-router export dataset --limit 200
+/smart-router export telemetry-contrib
+
+# 2) Aggregate privacy-safe contrib / exports (reject tainted payloads)
+npm run routing:calibration-aggregate -- --contrib-dir data/contrib
+#    Verifier-grade trains: add --ship-grade-only (human_feedback | llm_judge rows only)
+
+# 3) Train when ≥30 economical-tier labeled rows exist
+npm run routing:train-p-success -- --input path/to/export.jsonl --output config/p-success-weights.json
+npm run routing:train-calibration -- --input path/to/aggregated.jsonl
+
+# 4) Verify artifact shapes / gates
+npm run routing:verify-calibration -- config/routing-calibration.json
+```
+
+Command cross-links: contrib export + aggregation details in [Community telemetry contribution (calibration)](#community-telemetry-contribution-calibration); standalone weights vs full bundle flags in [Operator train / reload](#operator-train--reload-no-prompt-text); OATS centroid refinement inside `routing:train-calibration` in [OATS cluster centroid refinement](#oats-cluster-centroid-refinement-offline-calibration); ECE/holdout gating in [Privacy-safe label packs + calibration dry-run](#privacy-safe-label-packs--calibration-dry-run-sp-189sp-191--102); one-line script summaries in the [Scripts](#scripts) table. The dogfood-side capture checklist lives in [`docs/qa/shadow-dogfood-protocol.md`](docs/qa/shadow-dogfood-protocol.md); the full dogfood → export → aggregate → train loop is diagrammed in [docs/migration-v1.md](docs/migration-v1.md#shadow-dogfood--calibration-behavioral-path).
+
+#### Operator train / reload (no prompt text)
+
+```bash
+# Opt in + dogfood, then export privacy-safe labeled JSONL (features + labels only)
+SMART_ROUTER_DATASET=1
+# …run sessions with /model smart-router/auto (optional: /smart-router feedback)…
+/smart-router export dataset --limit 200
+
+# Train standalone weights (≥30 labeled rows required)
+npm run routing:train-p-success -- --input path/to/export.jsonl --output config/p-success-weights.json
+
+# Retrain standalone weights from the synthetic fixture (fixture demo only — NOT behavioral;
+# the checked-in weights are real dogfood, see "Provenance today" above):
+npm run routing:train-p-success
+
+# Optional: merge isotonic into an existing calibration bundle (does not rewrite hydra/centroids)
+npm run routing:train-p-success -- --input path/to/export.jsonl \
+  --calibration-output config/routing-calibration.json
+
+# Full Phase-3 bundle (also refreshes standalone p-success-weights.json when the gate is met):
+npm run routing:train-calibration -- --input path/to/aggregated.jsonl
+```
+
+Reload is file-based: replace `config/p-success-weights.json` (and optionally `config/routing-calibration.json` for isotonic) and restart the host agent — no prompt text is ever written into training artifacts.
+
+**Isotonic calibration (shipped trained since v1.1.0):** serve-time isotonic calibration loads from `config/routing-calibration.json` (`isotonic_calibrator`). The checked-in bundle ships a **trained** calibrator (`trained_sample_count: 243`, provenance `verifier_grade_train_2026-09-12`). Below the ≥30 floor or when the bundle is missing, serve-time falls back to identity / neutral `0.5`. Operators who retrain should run `routing:train-calibration` with verifier-grade labels only (not `dogfood-gather.sh` scripted_intent) and `--require-hard-gates`. Explain and telemetry still expose `p_success_raw` vs `p_success_calibrated` / `p_success_cheap`.
+
+Library helpers (see `src/domain/routing/p-success-classifier.ts`):
+
+- `trainFromExportJsonl(exportContent)` — fit coefficients from labeled JSONL
+- `predictPSuccessCheap(features, weights)` — returns `P_success_cheap` in `[0, 1]`
+
+**Minimum sample guidance:** collect at least **30** labeled economical-tier rows before relying on non-neutral predictions; below that threshold the classifier returns neutral `P_success_cheap = 0.5`. **Online inference** is active in the low-intensity gate; without trained weights the router uses neutral defaults until you add `config/p-success-weights.json`.
+
+### Community telemetry contribution (calibration)
+
+When `SMART_ROUTER_DATASET=1`, you can export privacy-safe scalar routing features (plus outcome labels) for community calibration training. The export never includes prompt text, messages, raw session identifiers, or install-local pepper fields.
+
+```bash
+/smart-router export telemetry-contrib [--limit N] [--embeddings]
+# or from shell (cwd must contain .pi-smart-router/state.db):
+npx pi-smart-router export telemetry-contrib [--limit N] [--embeddings]
+```
+
+This writes schema-valid JSON to `.pi-smart-router/exports/telemetry-contrib-<timestamp>.json`. Each row conforms to [`telemetry-contrib.schema.json`](specs/001-build-smart-router/contracts/telemetry-contrib.schema.json).
+
+**Feature-complete rows (v1.1.0, [#170](https://github.com/beettlle/pi-smart-router/issues/170)).** Contrib rows now carry additive optional fields within format v2:
+
+- `row_id` — stable per-install HMAC-SHA256 of `request_id` (domain-separated `row:` prefix; raw request ids are never exported). Aggregation dedupes overlapping exports by `row_id`, and training splits stay reproducible as files are added or removed.
+- `prompt_length_chars` / `message_count` — count-only envelope fields that feed the P(success) prompt-length feature and edit-distance proxies (previously dropped on this path, starving the feature to zero).
+- `embedding` — **double opt-in**: captured only when `SMART_ROUTER_DATASET_EMBEDDINGS=1` was set at routing time, and exported only when you pass `--embeddings`. This is the raw 384-dim encoder vector HyDRA projection training needs to reach its ≥100-row floor; it is a derived dense vector of the metadata-prefixed routing input, never prompt text. `calibration-aggregate` reports how many aggregated rows carry embeddings and warns while the count is below the hydra_projection floor (honest-untrained defaults remain until the floor is met).
+
+**Export schema v2 — session-hash migration (v0.21.0, [#146](https://github.com/beettlle/pi-smart-router/issues/146)).** The contrib export schema was bumped **v1 → v2** (`TELEMETRY_CONTRIB_VERSION = 2` in `src/cli/smart-router-cli.ts`). In v1, `session_id_hash` was an **unsalted SHA-256** of the raw session id; in v2 it is an **HMAC-SHA256 keyed with an install-local pepper** (`hashSessionIdForTelemetryExport` in `src/infra/telemetry.ts`). The pepper is generated once per install at `.pi-smart-router/.dataset-key` (mode 0600) and is **never** included in export payloads — ingest strips pepper fields before aggregation. Consequences for operators comparing exports:
+
+- Hashes are **stable per install** (same session → same hash within one install/cwd) but **not correlatable across installs** — two machines routing the same prompt produce different hashes.
+- **v1 hashes are not comparable with v2 hashes.** If you maintain baselines that join or diff older v1 contrib exports, **re-baseline** on v2 output — do not mix rows across the version boundary.
+- Raw `session_id` / `request_id` values never appear in the JSONL in either version.
+
+**How to contribute**
+
+1. Opt in to dataset capture (`SMART_ROUTER_DATASET=1`) and dogfood with `/model smart-router/auto` for several sessions.
+2. Run `export telemetry-contrib` locally and review the export — confirm it contains no prompt content.
+3. Submit anonymized rows via **pull request** under `data/contrib/` (one `.json` array or `.jsonl` file per install) **or** attach the export to a [GitHub Discussion](https://github.com/beettlle/pi-smart-router/discussions) using the community telemetry template.
+4. Maintainers aggregate contributions with `npm run routing:calibration-aggregate -- --contrib-dir data/contrib`; ingest rejects tainted payloads (prompt/message keys) and strips install-local pepper fields before offline training (SP-116, SP-117).
+
+See the synthetic reference file at [`data/contrib/example.json`](data/contrib/example.json).
+
+### OATS cluster centroid refinement (offline calibration)
+
+**OATS** (outcome-aware cluster centroid refinement) shifts semantic cluster centroids during offline calibration toward cheap-tier **success** embeddings and away from loop-escalation **failure** embeddings. Refinement runs in Phase 3 of the calibration train path (`npm run routing:train-calibration`); it adds zero serving latency because refined centroids ship inside `config/routing-calibration.json`.
+
+**Regeneration workflow**
+
+1. Opt in to dataset capture (`SMART_ROUTER_DATASET=1`) and export contrib rows (`/smart-router export telemetry-contrib`).
+2. Aggregate community rows: `npm run routing:calibration-aggregate -- --contrib-dir data/contrib`.
+3. Train the bundle (includes OATS when enough labeled embeddings exist): `npm run routing:train-calibration -- --input <aggregated.jsonl>`.
+4. Copy the output to `config/routing-calibration.json` (or your operator config path).
+5. Verify artifact shapes and benchmark gates: `npm run routing:verify-calibration -- config/routing-calibration.json`.
+
+At runtime, `ClusterMatcher` prefers `routing_centroids` from the calibration bundle when `config/routing-calibration.json` is present; otherwise it falls back to `config/routing-centroids.json` (bootstrap via `npm run routing:bootstrap-centroids`).
+
+**Hyperparameters** (tunable in `scripts/lib/oats-centroid-refinement.ts` before train):
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `alpha` (α) | 0.15 | Attraction toward cheap-tier success embeddings |
+| `beta` (β) | 0.08 | Repulsion from loop-escalation failures (keep β < α) |
+
+**Minimum sample guidance**
+
+| Guard | Default | Meaning |
+|-------|---------|---------|
+| Global `routing_centroids` | 10 rows | Labeled contrib rows with embeddings required before any OATS shift |
+| `min_positive_samples` | 3 per cluster | Cheap-tier successes assigned to the cluster |
+| `min_negative_samples` | 2 per cluster | Loop-escalation failures before repulsion term applies |
+
+Below these thresholds the train path returns bootstrap centroids unchanged. The verify script reports `oats_refinement` metadata when refinement ran.
+
+These guards match `DEFAULT_OATS_MIN_POSITIVE_SAMPLES` / `DEFAULT_OATS_MIN_NEGATIVE_SAMPLES` in `scripts/lib/oats-centroid-refinement.ts` and `MINIMUM_TRAINING_SAMPLES.routing_centroids` (10) in `scripts/calibration-aggregate.ts`. The same global floors appear under `minimum_training_samples` in [`config/routing-calibration.json.example`](config/routing-calibration.json.example) (`hydra_projection` 100, `triage_thresholds` 50, `p_success_weights` / `isotonic_calibrator` 30, `routing_centroids` 10).
+
+See [routing-roadmap.md](docs/routing-roadmap.md) §2 P2 OATS and GitHub [#77](https://github.com/beettlle/pi-smart-router/issues/77).
+
+### Privacy-safe label packs + calibration dry-run (SP-189–SP-191 / #102)
+
+Offline **label packs** are feature-vector + binary-outcome JSONL (never prompt/message text). Schema: `scripts/lib/label-pack-schema.ts`. Provenance, pins, and field maps: [`tests/eval/corpus/label-packs/PROVENANCE.md`](tests/eval/corpus/label-packs/PROVENANCE.md).
+
+**Regenerate packs (offline / no network for CI fixtures):**
+
+```bash
+# SWE-Gym verifier-style → pack
+npm run routing:ingest-swe-gym -- \
+  --input tests/eval/corpus/label-packs/swe-gym/ci-fixture.jsonl \
+  --output /tmp/swe-gym-pack.jsonl
+
+# FC-RewardBench preference / flat → pack
+npm run routing:ingest-fc-rewardbench -- \
+  --input tests/eval/corpus/label-packs/fc-rewardbench/ci-fixture.jsonl \
+  --output /tmp/fc-rewardbench-pack.jsonl
+
+# Optional weak TwinRouterBench tier proxy (exclude from holdout ECE)
+# Preferred input: checked-in CI subset (SP-199/SP-201); full-track after SP-200 is local-only.
+npm run routing:ingest-twinrouterbench-weak -- \
+  --input tests/eval/corpus/twinrouterbench/ci-subset.json \
+  --output /tmp/trb-weak-from-ci-subset.jsonl
+
+npm run routing:ingest-twinrouterbench-weak -- \
+  --input tests/eval/corpus/label-packs/twinrouterbench-weak/ci-fixture.jsonl \
+  --output /tmp/trb-weak-pack.jsonl
+```
+
+**Calibration dry-run (holdout ECE):**
+
+```bash
+# CI fixtures (ingests packs in-memory; sample-starved → report-only)
+npm run routing:calibration-dry-run
+
+# Operator packs (schema-valid JSONL)
+npm run routing:calibration-dry-run -- --packs /tmp/swe-gym-pack.jsonl /tmp/fc-rewardbench-pack.jsonl
+
+# Warm-start: weak / exclude_from_holdout_ece rows join the **fit** pool only
+npm run routing:calibration-dry-run -- \
+  --packs /tmp/swe-gym-pack.jsonl /tmp/trb-weak-from-ci-subset.jsonl \
+  --include-excluded-in-fit
+
+# Soft ECE advisory fail (threshold 0.25 calibrated ECE; not a release-gate absolute)
+npm run routing:calibration-dry-run -- --packs /tmp/swe-gym-pack.jsonl --enforce-soft-ece
+```
+
+Dry-run behavior:
+
+| Condition | Result |
+|-----------|--------|
+| &lt; 30 ECE-eligible rows | `SAMPLE_STARVED` report-only (exit 0); no soft pass/fail |
+| ≥ 30 ECE-eligible rows | Fit logistic + isotonic; report `holdout_ece_raw` / `holdout_ece_calibrated` |
+| Rows with `exclude_from_holdout_ece` | Counted separately; **never** enter holdout ECE metrics (weak TwinRouterBench) |
+| `--include-excluded-in-fit` | Weak rows may warm-start the fit pool; `ece_eligible` / holdout ECE stay verifier-grade |
+| Soft threshold | Advisory `0.25` calibrated ECE — **does not** change `config/release-gates.json` |
+
+**#96 / `modernbert_k4` advisory:** when deciding whether to enable ModernBERT K=4 heads, use **pack holdout ECE / Top-1 error on verifier-grade packs** (SWE-Gym + FC-RewardBench), not fixture-only QR and **not** weak-fit ECE. Weak TwinRouterBench rows are warm-start only. This task does **not** flip `modernbert_k4` defaults. Go/no-go evidence (SP-204 / #113): [`spine-tasks/_authoring/release-v0.11.0/encoder-gonogo-artifact.md`](spine-tasks/_authoring/release-v0.11.0/encoder-gonogo-artifact.md). K=4 Top-1 / offline A/B decision (SP-219 / #114): [`spine-tasks/_authoring/release-v0.16.0/modernbert-k4-top1-artifact.md`](spine-tasks/_authoring/release-v0.16.0/modernbert-k4-top1-artifact.md) — recommendation: **keep default** (gate not measurable without trained heads; #96 open).
+
+### Operator tuning (frugality slider)
+
+The multi-objective scoring weights control the cost-vs-quality tradeoff:
+
+| Key | Default | Effect |
+|-----|---------|--------|
+| `frugality.lambda_cost` | 0.5 | Higher favors cheaper models at quality parity |
+| `frugality.lambda_latency` | 0.1 | Higher penalizes slow models |
+| `frugality.lambda_verbosity` | 0.15 | Higher penalizes verbose models |
+
+Additional operator defaults:
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `loop_escalation.threshold` | 3 | Consecutive identical failures before escalating to frontier. Also used as the default **zero-tier tool-call churn** threshold (SP-178 / [#99](https://github.com/beettlle/pi-smart-router/issues/99)): while pinned to `zero-tier`, unsupported/unknown tool results escalate immediately, and N `tool_result` turns escalate via the same `loop_escalation` pin path (FR-014) — not a cache-breakeven bypass |
+| `pin_only_fallback` | `false` | Emergency pin-on-first-turn mode — see [Pin-only emergency fallback](#pin-only-emergency-fallback) |
+| `local_zero.enabled` | `true` | When `false`, skip `local_zero` dispatch (fall through to later stages). Default keeps the cheap local path for true trivial traffic |
+| `local_zero.max_tool_use_requirement` | `0.25` | Ceiling (0–1) on cheap predicted tool_use for `local_zero`. Effective limit is `min(local model tool_use, this value)`. Skips agentic git/bash/edit/explore/delete/repo cues with telemetry reason `tool_use_capability_shortfall` (SP-177 / [#98](https://github.com/beettlle/pi-smart-router/issues/98)) |
+| `local.min_memory_gb_full` | 16 | Minimum RAM for full local inference |
+| `local.battery_threshold_pct` | 20 | Minimum battery to allow local inference |
+| `pricing.staleness_days` | 14 | Max age before re-fetching pricing data |
+
+### Pin-only emergency fallback
+
+**Not the default policy.** Multi-stage routing remains the design target. Enable `pin_only_fallback` only when shadow quality retention regresses or as a manual operator safety valve (GitHub [#83](https://github.com/beettlle/pi-smart-router/issues/83), [routing-roadmap.md](docs/routing-roadmap.md) §1).
+
+When `pin_only_fallback` is `true` in `config/operator-config.json`:
+
+1. **First turn** — normal multi-stage routing runs and establishes the session pin.
+2. **Subsequent turns** — the router reuses the pinned model, skipping `turn_envelope`, triage, HyDRA, and sub-routing (`reason_code: pin_only_fallback`).
+
+**Manual trigger:** set `"pin_only_fallback": true` in operator config and restart or reload config. Revert to `false` when shadow metrics recover.
+
+**Automated trigger (eval harness):** compare shadow QR from `npm run routing:eval-harness` against a frozen baseline aggregate. When mean quality retention drops more than **5 percentage points** (default threshold), enable pin-only fallback:
+
+```bash
+# Score current fixtures
+npm run routing:eval-harness:smoke > shadow-metrics.json
+
+# Compare against a saved baseline (same catalog_id + checkpoint_date)
+node --import tsx -e "
+import { readFileSync } from 'node:fs';
+import { evaluatePinOnlyFallbackFromHarness } from './scripts/eval/quality-retention.ts';
+const shadow = JSON.parse(readFileSync('shadow-metrics.json','utf8')).tracks.capability;
+const baseline = JSON.parse(readFileSync('baseline-metrics.json','utf8')).tracks.capability;
+const result = evaluatePinOnlyFallbackFromHarness(shadow, baseline);
+console.log(JSON.stringify(result, null, 2));
+if (result.pin_only_fallback) process.exit(2);
+"
+```
+
+Exit code `2` signals regression above threshold — operators can wire this into CI or a config reload hook. Override semantics: explicit `pin_only_fallback: true` in config always enables emergency mode; explicit `false` disables the automated recommendation.
+
+**Telemetry:** when fallback routes a request, telemetry rows include `pin_only_fallback_active: true` (and `reason_code: pin_only_fallback`). Filter operator audit logs on that field to confirm emergency mode is active.
+
+### HyDRA model cache
+
+The embedding matcher uses `@huggingface/transformers` with ONNX models (384-dim embeddings). Artifacts are downloaded at runtime and cached under `.pi-smart-router/models/` (configurable via `hydra.artifact_cache_path`). This directory is gitignored.
+
+**Abort / cancel limitation (SP-171):** `AbortSignal` is checked at phase boundaries before fleet refresh, HyDRA/dispatch, planning delegate, and each failover iteration. Mid-ONNX embedding inference cannot be cancelled — abort is fail-fast only before or after that stage, not during an in-flight ONNX run.
+
+| Encoder | Model | Context | Default |
+|---------|-------|---------|---------|
+| `minilm` | `Xenova/all-MiniLM-L6-v2` | 512 tokens | yes |
+| `granite` | `ibm-granite/granite-embedding-97m-multilingual-r2` (ONNX) | long context | trial (#80) |
+
+Set the encoder in operator config:
 
 ```json
 {
-  "demand": {
-    "jevWeight": 4, "heuristicsWeight": 1, "minConfidence": 0.6, "closeCall": 0.1,
-    "cuts": [0.75, 1.5, 2.25], "deepSessionFloor": "medium",
-    "weights": {
-      "prompt_shortness": 0.06, "token_shortness": 0.05, "cyclomatic_low": 0.08, "trivial_signal": 0.1,
-      "complex_inverse": 0.14, "triage_verdict": 0.18, "turn_type": 0.18, "no_tool_context": 0.05,
-      "message_shallow": 0.03, "prose_ratio": 0.03, "requirement_low": 0, "cluster_signal": 0
-    }
-  },
-  "switching": {
-    "margin": 0.15, "horizonCap": 5,
-    "cacheSurvival": [[60, 0.97], [300, 0.92], [1200, 0.87], [1800, 0.79], [3600, 0.66], [7200, 0.5], [21600, 0.38], [86400, 0.11]]
+  "hydra": {
+    "artifact_cache_path": ".pi-smart-router/models/",
+    "encoder": "granite"
   }
 }
 ```
 
-To make Jev count for more, raise `jevWeight`; to keep a session on a warm model longer, raise
-`margin`. [Levels](#levels) says what each figure does. The checker reads both sections back in
-plain words, and refuses weights that are negative or all zero, cuts that do not ascend, and a
-survival table whose seconds do not rise or whose chances rise. `requirement_low` and
-`cluster_signal` are upstream's signals for its embedding model and its cluster match, which have
-no input here; they weigh 0 so that a missing input does not read as easy work.
+MiniLM remains the default fallback when `encoder` is omitted. Both encoders produce 384-dim vectors compatible with the SP-115 learned projection head.
 
-**Bound or turn off the thinking effort.** A version 2 roster may also carry `adaptiveReasoning`
-([Thinking effort](#thinking-effort)). Without it the rule is on with no bounds. To keep every
-request at the selected level, as before this rule:
+**Opt-in per-prompt encoder cascade ([#173](https://github.com/beettlle/pi-smart-router/issues/173), v1.2.0 — default OFF).** Instead of a process-wide single encoder, an opt-in gate routes prompts whose estimated token count reaches a threshold to the long-context encoder, avoiding MiniLM's 512-token truncation on long turns:
 
 ```json
-{ "adaptiveReasoning": { "enabled": false } }
+{
+  "hydra": {
+    "artifact_cache_path": ".pi-smart-router/models/",
+    "encoder": "minilm",
+    "encoder_cascade": {
+      "enabled": true,
+      "long_context_encoder": "granite",
+      "token_threshold": 512
+    }
+  }
+}
 ```
 
-or to keep the turn's level between `low` and `high`:
-`{ "adaptiveReasoning": { "minLevel": "low", "maxLevel": "high" } }`. The checker reads the rule
-back in words and refuses a level it does not know and a floor above the ceiling.
+- **Default off** — existing single-encoder installs are unaffected and pay zero added cost (the gate is pre-embedding arithmetic, ~sub-microsecond p50 in replay).
+- **Lazy memory** — the Granite ONNX session loads only on the first over-threshold prompt; short prompts keep using the same MiniLM session, so their routing decisions are identical to the MiniLM-only baseline.
+- **Degrade, never mix** — encoders embed into different vector spaces. If Granite is unavailable at request time, routing continues on MiniLM with `granite_fallback` telemetry; the cascade never compares cross-encoder vectors. Per-encoder artifacts: bootstrap Granite centroids with `npm run routing:bootstrap-centroids -- --encoder granite` (namespaced `config/routing-centroids.granite.json`); `npm run routing:verify-calibration` rejects mixed-encoder bundles, and Granite-side projection ships honest-untrained.
+- **Telemetry** — cascade-enabled decisions carry `encoder_selected`, `token_estimate`, `cascade_threshold`, and `cascade_fallback_reason` on the feature sidecar.
+- **Evidence, not a default flip** — see the cascade replay report [`docs/qa/encoder-cascade-replay-v1.2.0.md`](docs/qa/encoder-cascade-replay-v1.2.0.md). Promoting the cascade (or Granite) to a default is a future ticket gated on the #173 eval table.
 
-A model belongs to one role. To use a model in two places, that is what a fallback chain is for;
-listing it in two roles is the error `"<model>" is already in role "<role>"`.
+**Latency budget:** the HyDRA embedding stage targets ~80–120 ms per turn. Compare MiniLM vs Granite on held-out agent turn samples:
 
-### Checking a roster
-
-```sh
-node /path/to/pi-smart-router/src/check-cli.ts ~/.config/pi/agent/smart-router.json
+```bash
+npm run benchmark:encoder
+# optional: --fixtures path --cache .pi-smart-router/models/
 ```
 
-or `/smart-router check` in a session. Both use the router's own parser. A valid roster is read
-back in plain language: for `smart-router/auto` in each scope, each level's models, the fallback
-chain in order; under version 2, how the demand is weighed and when a session moves; for
-`smart-router/local`, the local models in order; where each of Jev's prompts comes from; the
-account bindings; and each setting it accepts and ignores, with the reason. An invalid one gives
-the first error with its place, such as
-`INVALID: roles[3].models[1]: "omlx-hera/GLM-5.3-Flash-oQ4e-mtp" is already in role "local"`.
+The script reports p50/p95 latency for each encoder and asserts Granite p50/p95 stay within the 120 ms budget ceiling. Requires `@huggingface/transformers` and a one-time ONNX artifact download.
 
-- **The standalone checker needs no Pi, no session and no credentials,** and sends nothing. It
-  reads the file it is given, with the owner and mode checks the router applies, and that roster's
-  prompt files from the `smart-router/` directory beside it, so check a candidate roster where its
-  prompt files are. Exit status: 0 valid, 1 a roster the router would refuse or a prompt it could
-  not use, 2 a wrong invocation.
-- **It runs from the installed package.** It needs Node 22.19 or later, the package's own floor,
-  and a path that is not under a `node_modules` directory, where Node does not run TypeScript.
-  nix-config installs the package under `share/pi-packages/pi-smart-router/`, which is not, so
-  `node <that>/src/check-cli.ts` checks with the installed version's own parser. No built
-  JavaScript copy is shipped: it would be a second parser to keep equal to the first.
-- **A roster in the Nix store** is root's, and the checker reports it as the router would:
-  `UNSAFE: … is owned by uid 0`. For a build-time check, pass `--no-owner-check` before the path.
-  The flag is the checker's alone, the report says the owner was not checked, and a file others
-  can write is still unsafe. The router itself always requires a file you own.
-- **It reads the roster, not the host.** Whether Pi's catalog on a host lists a model, and whether
-  it has credentials, is for `/smart-router status` there: a model Pi does not list is passed over
-  at run time as `not-in-catalog`.
-- **An invalid roster still makes both models refuse everything.** That is deliberate: a last
-  valid copy kept in use would keep sending to a model or an account the edit had just removed.
-  The check is the remedy: run it before relying on an edit.
+#### Granite opt-in dogfood runbook ([#167](https://github.com/beettlle/pi-smart-router/issues/167))
 
-**One roster per host.** The hosts differ in more than names: on Hera, `openai-codex-2` is the
-personal account and plain `openai-codex` is the work one, while on the others plain `openai-codex`
-is the personal one, so one text for all would bind the wrong account somewhere; and the Nyx ref
-changes per rebuild. Keep the per-host files, and keep their `scopes`, `fallback` and prompt files
-alike.
+Operator enablement for the Granite 97M long-context encoder on dogfood installs. **MiniLM remains the shipped default** — this runbook never flips `encoder` defaults; promotion is decided only through [#96](https://github.com/beettlle/pi-smart-router/issues/96) with dogfood evidence. The code path already shipped in [#80](https://github.com/beettlle/pi-smart-router/issues/80); do not reimplement it.
 
-## Routing in detail
+**1. Fetch the model.** No manual download step is required — the ONNX artifact fetches on demand:
 
-These are version 1's rules. Version 2 keeps them, comparing levels rather than roles, except where
-[Levels](#levels) says otherwise.
+| Item | Value |
+|------|-------|
+| Runtime HF ONNX id | `onnx-community/granite-embedding-97m-multilingual-r2-ONNX` (`GRANITE_ONNX_MODEL` in `src/domain/matching/embedding-provider.ts`) |
+| Upstream weights | `ibm-granite/granite-embedding-97m-multilingual-r2` (384-dim, long context) |
+| Cache dir | `hydra.artifact_cache_path` (default `.pi-smart-router/models/` — gitignored) |
+| Fetch trigger | First HyDRA embed with `encoder: granite`, **or** `npm run benchmark:encoder` (downloads on demand) |
+| Offline | One-time Hugging Face download; fully offline after cache warm (see Supply-chain below for pin modes) |
 
-- **Classification uses the text you typed**, as Pi's `input` event delivers it, capped at its first
-  16 KiB and last 4 KiB. A prompt template or `/skill:` call is classified by its invocation, not its
-  expansion. Planning comes first: words such as plan, design, architecture, refactor, migration,
-  step 1, phase 2, breakdown, strategy and trade-off, a plan heading, and repo-hygiene or destructive
-  requests such as clean up, unstage, `git rm`, `rm -rf` or force push. File names and paths are
-  blanked out first, so `PLAN.org`, `plan.md` or `src/plan/` do not make a run a planning run. Then
-  upstream's triage engine decides complex and trivial. Anything else is default. Under version 2
-  the same text, capped the same way, feeds the demand's heuristics, and the planning signal is
-  their turn type ([The level a prompt needs](#the-level-a-prompt-needs)).
-- **One decision per run.** The run is planned when the prompt arrives, and its first request takes
-  the plan. Steering, follow-ups and tool continuations stay on the run's model, except that a
-  stuck run moves up once ([A stuck run](#a-stuck-run)). A run that starts without a prompt is
-  routed as [Runs without a prompt](#runs-without-a-prompt) says.
-- **A plan belongs to its message's run.** The router binds the two by a digest of the message's
-  text, an HMAC-SHA-256 under a key each router instance draws at random, so it holds no prompt
-  text. A run whose prompt is that message's text takes the plan; a run whose prompt is the text of
-  another message it saw, whose own run has not started, takes none; and a custom message's run
-  takes none. A run that takes no plan is routed as a
-  [run without a prompt](#runs-without-a-prompt). A prompt can match no message's text, because Pi
-  expands a template or `/skill:` call after the input handlers, and a later extension can change
-  the text: such a run takes the plan of the one idle message since the latest prompt's run started,
-  and none when there were two. A run that drops a tagged message's plan says so. The limits:
-  - identical texts cannot be told apart, so a run can take the plan of another message with the
-    same text;
-  - a message that a later extension holds, and whose prompt that extension also rewrites, matches
-    no text, so its run can take the plan of the one idle message counted;
-  - the router remembers the 64 latest messages whose runs have not started, so a message held while
-    64 newer ones pass can do the same;
-  - after a counted message that never starts its own run (one a later extension handles, an idle
-    RPC steer or follow-up, a `prompt()` that throws), the next expanded or rewritten run goes
-    unplanned, and is routed as a run without a prompt;
-  - a message that a later extension rewrites into the text of a message still held goes unplanned,
-    but its run makes the router forget the held one, whose own run can then take the plan of the
-    one idle message counted.
-- **No hold.** Nothing holds a session on a model by time. Under version 1 a run goes to the role
-  its prompt classifies as at once, higher or lower than the latest response's; under version 2
-  the level its prompt needs and the cost of the coming work decide ([Levels](#levels)). A
-  conversation too large for the model is Pi's to compact, when its compaction is enabled. With
-  compaction disabled, version 1 sends a request too large for its model as it is: it has no fit
-  rule.
-- **Cooldowns.** A physical model's usage-limit, quota, billing or authentication error (401, 403,
-  `insufficient_quota`, `ResourceExhausted` and the like) takes it out of routing for
-  `cooldownMinutes`, so the next run of any kind moves to the role's next model or its fallback. A
-  content-filter or moderation refusal never cools a model and never triggers a fallback, so refused
-  content is not sent to another vendor. Local-role models are never cooled, so an oMLX restart does
-  not cost 30 minutes of refusals.
-- **Whose limit it is.** A limit-kind error is one of three things, and cools accordingly:
-  - *The account's:* a usage limit, a quota, billing, or a credential that was not accepted (401).
-    On a subscription provider (`openai-codex`, `anthropic`, `github-copilot`, or a Multi-Pass
-    alias such as `openai-codex-2`) it cools every model of that provider id at once, since they
-    share one account and one credential. So when luna runs out of tokens, the next run of any
-    level goes straight to the fallback chain without first failing on terra, sol or astra. On any
-    other provider it cools the one model: the text cannot tell an account-wide limit from a limit
-    on one model, and OpenRouter has both.
-  - *The account's money:* spent credit (402, "payment required", "insufficient credits",
-    "requires more credits"). It cools every model of the provider id, whatever the provider:
-    credit is the account's by its nature. With Codex cooled and OpenRouter out of credit, the
-    chain goes on to the local models.
-  - *The model's own:* a model that is not found, and a 403, which providers also give for one
-    model an account may not use. It cools that model alone.
-
-  A provider id is one account: the work account's cooldown never touches the personal account's
-  models, nor the other way round. `/smart-router status` shows one `Cooling:` line for an
-  account, however many of its models wait. Whether an error is the account's is decided by an
-  account error's own words ("usage limit", "insufficient_quota", "quota exceeded", "billing
-  details", "unauthorized", "authentication_error") or by 401 or 402 where the error text
-  begins, so a number or a word inside an unrelated error, such as a tool result quoted back,
-  cools no account. A model picked by hand that fails with such an error cools its account for
-  the router's own picks too: the account is out of use whoever asked.
-- **How long.** A limit that names its wait ("Try again in ~42 min", "2 hours 30 min") cools for
-  that long, at least a minute and at most a day; any other cools for `cooldownMinutes`. When the
-  time is up, the first run tries its level's own model again.
-- **A rate limit moves nothing.** A 429, "rate limit" or "too many requests" is a throttle, not
-  an account out of tokens: Pi backs off and retries the same model, and the router lets it. It
-  cools nothing, holds nothing and triggers no fallback, so a run that ends on one leaves the next
-  run on the same model. (A 429 whose text is a usage limit or a quota is the account's, above.)
-- **A local server that cannot be reached is passed over.** When a request to a local model (one
-  of `local.providers` on one of `local.hosts`) fails before any output because a connection to
-  its server could not be made, the model is held for `unreachableMinutes`, and the retry goes to
-  the model written after it that is not held, round its role once, and then on along the
-  fallback chain. The runs that follow pass a held model over in the same way. This applies to
-  local-role models too, which are never cooled. It never leaves what the selection may use:
-  `smart-router/local` stays in the local role and its policy. `status` shows a held
-  model as `unreachable-until-HH:MM`, with an `Unreachable:` line.
-  - *A hold is a preference, never a refusal.* When every candidate that could take the request
-    is held, the hold gives way: a retry stays on the model it has, under Pi's backoff, as it
-    always did, so a server that is restarting is ridden out; a new run takes the first held
-    model in the written order. With one local model, a blip changes nothing. An answer from a
-    held model lifts its hold at once.
-  - *Unreachable* means the connection could not be made: refused or reset (`ECONNREFUSED`,
-    `ECONNRESET`, "reset before headers"); the name did not resolve (`ENOTFOUND`, `EAI_AGAIN`,
-    `getaddrinfo`); no route (`EHOSTUNREACH`, `ENETUNREACH`, `EHOSTDOWN`); the connect timed out
-    (`connect ETIMEDOUT`, `UND_ERR_CONNECT_TIMEOUT`, "connect timeout"); the SDK's "connection
-    error", "network error" or "fetch failed", "socket hang up", "other side closed", a closed
-    socket; a TLS handshake or certificate verification that failed (unable to verify, self-signed,
-    expired, name mismatch); or 502, "bad gateway".
-  - *Not unreachable,* because the server may be there and slow, loading or busy: a request or a
-    read that timed out (a bare `ETIMEDOUT`, "timed out", 504, "gateway time-out"), 503 and
-    "service unavailable", 500, a stream cut off, a rate limit, "overloaded", and a text that
-    merely mentions a certificate. Those retry the same model. Hera's models answer behind HTTPS,
-    where a long cold prefill can trip the proxy's timeout; that must not move a session to Nyx
-    and back.
-  - *Not after output has started.* A failure of a response that already carries text, thinking or
-    a tool call retries the same model, as every such failure always has; a half-answered request
-    is never sent on to another model.
-  - *Not for cloud models.* A cloud model's connection failure, the SDK's generic "Connection
-    error." included, retries the same model under Pi's backoff, so a network blip does not send
-    the conversation to another vendor.
-  - *Five minutes by default.* A server that is restarting or loading a model takes minutes, and
-    a session that moved to the other host has paid a cold prefill there, so moving back at once,
-    and again at the next hiccup, would pay it twice more. Five minutes bounds that to one move
-    each way per outage, and puts the preferred server back in use soon after it returns.
-- **Cooldowns and holds are per session.** Each router instance keeps its own, in memory: another
-  session finds an exhausted account or a dead server out for itself, with one failed request,
-  and a restarted session starts with none.
-- **Retries.** When Pi retries a failed request, a limit-kind failure moves to the role's next model
-  and then its fallback, skipping every model that failed with a limit earlier in the same run, so
-  a run tries each candidate once; a local server that could not be reached gives way as above; any
-  other failure, rate limits and context overflows included, retries the same model, because Pi has
-  already backed off or compacted. Pi does not retry every error: see
-  [A fallback chain](#a-fallback-chain) for what a usage limit costs.
-- **Compaction and other summaries** go to the model that answered last when it may take them, so
-  the transcript does not go to a new vendor; otherwise to the default role (under version 2, the
-  session's scope's medium level), or to the local role under `smart-router/local`.
-- **Thinking.** Both models offer every thinking level, so a `max` default is not clamped at
-  selection. A role with a fixed `thinking` sends it; any other request is sent the effort its turn
-  type gives ([Thinking effort](#thinking-effort)), and Pi clamps that to what the routed model
-  supports.
-- **Declared limits.** Pi and other extensions read a virtual model's context window and output
-  budget before the first response. At every session start the router registers both models again:
-  auto with the smallest window and output budget among the first available model of each role it
-  can reach (under version 2, every level's role and every fallback chain's role in both scopes,
-  each resolved in its own scope),
-  local with its first available local model's. Before that, both declare 128,000 and 16,384.
-
-The router also tells pi-cache-optimizer, through its `pi.routing.registry.v1` registry, which
-physical model each session's next request will use. Without that, the optimizer would rewrite
-Codex system prompts, which Codex's content filter rejects, and would drop oMLX session-affinity
-headers. Only the session's own agent loop changes what the optimizer reads, never a compaction or
-another session. Before a run without a prompt starts, the optimizer is told the model its first
-request will take ([Runs without a prompt](#runs-without-a-prompt)), worked out without changing
-anything, and not merely the model used last.
-
-## Levels
-
-Under a version 2 roster, `smart-router/auto` sends each run that a prompt starts to one of four
-levels of the session's scope. The meanings are the descriptions the example rosters give Jev:
-
-| Level | Meaning |
-|---|---|
-| SUPER | Deep thought, research, design and planning |
-| HIGH | Deep thought, review, and the design of verification |
-| MEDIUM | Engineering, implementation and validation |
-| LOW | Mechanical or trivial work that follows a clear specification |
-
-A run's model is chosen in two steps, when its prompt arrives: the level the prompt needs, and then,
-among the models good enough for that level, the one the coming work costs least on. Need sets the
-floor and cost picks above it: cost never takes a run below the level it needs.
-
-### The level a prompt needs
-
-The first rule that applies decides it:
-
-1. **A tag:** the message's last whitespace-separated word, in any case, when it is `#super`,
-   `#high`, `#medium` or `#low`, or `#s`, `#h`, `#m` or `#l`. The router removes it before any
-   model sees the text. A tag always wins, at once, up or down: no guard raises it, and the cost
-   rule does not price it, so the run takes the tagged level's first available model. `#high.`,
-   `#hashtag` and `fix issue #12` are not tags.
-2. **The demand**, a number from 0 (LOW) to 3 (SUPER) that weighs Jev's judgment together with
-   upstream's heuristics, after the guards below.
-
-**Jev's term.** When the roster has a classifier and Jev answers, its four probabilities give an
-expected level on the same scale, LOW 0, MEDIUM 1, HIGH 2 and SUPER 3, and its top probability is
-its confidence ([Jev](#jev)).
-
-**The heuristics' term.** Upstream's low-intensity scoring, vendored in
-`src/triage/tier-features.ts`, is a weighted mean of signals that a prompt is light work; the term
-is 3 × (1 − that score). Its signals: the prompt's length in characters and in tokens (the
-conversation's size by the latest usage, plus the prompt's), its cyclomatic score, its trivial and
-complex keyword hits and the triage engine's verdict on it, its turn type (planning, by the fork's
-planning detection in `src/classify.ts`, or ordinary), whether tool results are in the
-conversation, how many messages the conversation has, and how much of the prompt is code. The
-prompt is capped as the keyword classifier caps it: its first 16 KiB and last 4 KiB. Two of
-upstream's twelve signals, its requirement vector and its cluster match, have no input here and
-weigh 0, so that a missing input does not read as easy work.
-
-**Which messages the heuristics count.** The latest 20 messages of the conversation, as Pi would
-send them to the model: a tool result as a tool message, an assistant message as itself, and
-anything else as a user message, which is how Pi sends a `!` shell run. A `!!` shell run, which Pi
-keeps out of the model's context, is not counted. An extension's own entry in the session is not a
-message entry, so it is not read and not counted. The review script counts them by the same
-function, so that a replay sees what the router saw.
-
-**The blend.** With Jev's confidence `c`:
+Expected cache layout after fetch:
 
 ```text
-demand = (4 · c · Jev's term + 1 · the heuristics' term) / (4 · c + 1)
+.pi-smart-router/models/onnx-community/granite-embedding-97m-multilingual-r2-ONNX/
 ```
 
-4 and 1 are `demand.jevWeight` and `demand.heuristicsWeight`. A fully confident Jev carries four
-fifths of the result, an unsure one less, and without an answer from Jev the heuristics decide
-alone: when the roster has no classifier, when Jev fails (its failure then shows in the footer, as
-`jev timeout`, for example), and when the router cannot read the conversation, in which case Jev
-is not asked at all and its outcome is the failure `error`.
-
-**The guards**, in the order they apply:
-
-- **Low confidence raises only.** When Jev's confidence is under `demand.minConfidence` (0.6), the
-  demand is the higher of the blend and the heuristics' term.
-- **The cuts, and close calls.** `demand.cuts`, 0.75, 1.5 and 2.25, divide the scale: LOW under
-  0.75, MEDIUM under 1.5, HIGH under 2.25 and SUPER from there. A demand within `demand.closeCall`
-  (0.1) under a cut takes the level above it, so 0.66 is MEDIUM. (The old `classifier.closeCall`,
-  which compared Jev's two likeliest levels, is accepted and ignored: the expected value already
-  carries that.)
-- **Risky operations get at least HIGH**, whatever Jev says: force push, `git reset --hard`,
-  `rm -rf`, `git rm`, unstage, "clean up the repo" or "repo cleanup", and "accidentally added",
-  "mistakenly added" or "accidental add", with file names and paths blanked out first.
-- **A very deep session gets at least MEDIUM**, `demand.deepSessionFloor`: a conversation over
-  100,000 tokens by the latest usage, or an active context of over 1,000 entries where Pi counts
-  them. Pi counts the entries of the active context from the last compaction, an extension's own
-  entries included. This is upstream's planned floor for the terse "continue" in a long session,
-  which no classifier rates well. The floor holds for a run without a prompt too
-  ([Runs without a prompt](#runs-without-a-prompt)), so with this default, once the session has
-  planned a run, no run in a conversation known to be over 100,000 tokens routes to LOW unless its
-  tag says so. That section says when the size is not known. Before a session has planned a run, a
-  run without a prompt stays on the model the session used last.
-  `"deepSessionFloor": "low"` turns the floor off.
-
-The record of a run says what decided its level: `tag`, `jev` (the blend with Jev's answer),
-`heuristics` (the heuristics alone) or `floor` (a risky operation or a deep session raised it).
-
-### Choosing the model
-
-**The candidates** are the first available model of the needed level's own role and of each level
-above it, in the session's scope; a model that two levels would take counts once. A model of the
-scope's fallback chain is never a candidate. When none of the needed level's own models can take
-the run, the cost rule is not asked: the level takes its chain, then a step up, as below.
-
-**The current model** is the model of the latest assistant message on the branch that ended
-without an error, when it is one of the candidates.
-
-**The expected cost** of the coming work on a candidate uses the prices Pi's catalog gives for it,
-per token, at the price tier the conversation's size falls in: input, cached input and output.
-Uncached input counts at the input price, or at the cache-write price once this session's usage
-shows the model's provider reporting cache writes.
-
-- **The first request** reads the whole conversation. If the model's cache survives, what it has
-  cached costs the cached-input price and the rest the input price; if not, all of it costs the
-  input price. The chance it survives is the survival table's at the time since the model's last
-  answer (Cache survival, below).
-- **Each later request** reads the conversation so far at the cached-input price, and what the run
-  added since the request before at the input price.
-- **Every request's output** costs the output price.
-- **The run's shape** is the median of the branch's last 10 runs: its requests, output tokens per
-  request, tokens added per request, and seconds. With fewer than 3 runs it is 5 requests, 800
-  tokens, 1,500 tokens and 120 seconds.
-- **The horizon.** The requests priced are the run's requests times the horizon: 1, plus the
-  earlier prompts in a row on this branch that needed this level or less and stayed on a stronger
-  model, at most `switching.horizonCap` (5). Without it, a session that keeps asking for lighter
-  work would be kept on the stronger model one cheap-looking prompt at a time.
-- **Leaving the current model costs something more.** Every other candidate carries the current
-  model's cached size at its uncached premium (its input price less its cached-input price), times
-  the chance its cache is gone when this work ends (the survival table at its idle time plus the
-  run's seconds times the horizon), times the chance its level is needed again: the share of the
-  last 10 prompts that needed its level or more, 0.5 with fewer than 3, and never under 0.2.
-
-**The choice.** The cheapest candidate takes the run, the lower level on a tie. The current model
-keeps it unless another is cheaper by more than `switching.margin`, 15% of the current model's
-cost, so two costs that look equal in the footer are a stay inside the margin. When the model
-that answered last is no candidate (it is below the needed level, or is not a level's first
-available model, as a chain model is not), the run moves at once to the cheapest adequate model.
-That is usually the needed level's own, but a stronger model whose cache is warm can cost less than
-a cold one, and the footer then says `chose`.
-
-**Worked examples.** A 150,000-token conversation, all of it cached on astra, whose last answer was
-30 seconds ago; 1,000 output tokens per request; no growth; 60 seconds per run; a 0.5 chance that
-astra's level is needed again; uncached input at the input price; the default survival table; and
-the catalog prices Pi reports on Hera, in dollars per million tokens of input, cached input and
-output: astra (6.2) 8, 0.4 and 40; terra 1, 0.05 and 5; luna 0.1, 0.01 and 0.5. "Move" includes
-the cost of leaving astra. The tests pin these figures, rounded here to cents.
-
-| Prompt | Stay on astra | Move | Result |
-|---|---|---|---|
-| MEDIUM, a run of one request | $0.13 | terra: $0.16 + $0.05 = $0.20 | stays |
-| MEDIUM, a run of 20 requests over 20 minutes | $2.03 | terra: $0.39 + $0.12 = $0.51 | moves |
-| LOW, a run of one request | $0.13 | luna: $0.02 + $0.05 = $0.06 | moves |
-| MEDIUM, one request, the third such prompt in a row (horizon 3) | $0.33 | terra: $0.18 + $0.05 = $0.23 | moves |
-
-The LOW row tests the arithmetic: with the default deep-session floor, a 150,000-token conversation
-is never rated LOW.
-
-**Cache survival.** The chance that a model's cache still exists after an idle time is that of the
-first pair of `switching.cacheSurvival` whose seconds are not less than the idle time, and zero
-past the last pair. The default table is what was measured on Hera from two weeks of Pi session
-logs, 17,610 pairs of consecutive requests to one Codex model: still cached after under a minute
-97%, up to 5 minutes 92%, up to 20 minutes 87%, up to 30 minutes 79%, up to an hour 66%, up to two
-hours 50%, up to six hours 38% and up to a day 11%; the samples beyond 30 minutes are few. The Codex
-cache does not expire at five minutes. A model whose catalog entry states a cache lifetime counts
-as cached up to that lifetime and not after it.
-
-**Thinking effort.** A model's cached size counts only when the thinking effort it would be sent
-now is the effort of its last answer, compared after the model's own mapping of levels. On John's
-ChatGPT-account models a change of effort between two requests discards the model's whole prompt
-cache, so a change of effort leaves that model nothing cached in the figures: after a `/thinking`
-change in a session, the next choice prices the current model as cold, which it is. Each
-candidate is priced at the effort the request would be sent on it ([Thinking
-effort](#thinking-effort)): on SUPER an ordinary turn is sent `high`, and a planning turn `medium`,
-so whether astra's cache counts depends on the turn as well as on `/thinking`.
-
-**A conversation too large for a candidate.** With Pi's compaction enabled, as it is by default,
-size removes no candidate and holds no session. A candidate whose window, less Pi's reserve, the
-conversation does not fit is priced with the compaction Pi will make before sending to it: one
-summary request on the current model (on the candidate itself when there is no current model),
-then the run on what the compaction leaves, `keepRecentTokens` plus the summary, with nothing
-cached, at the price tier of that size. Pi writes the summary with a request of its own, its own
-system prompt and the serialized conversation, which no cache serves. So the summary's input is
-priced at the writing model's price for uncached input, on the conversation's size less what the
-compaction keeps (`keepRecentTokens`), and its output at 4,000 tokens. When Pi's cut falls inside
-a turn it writes two summaries; the second one's output is not priced. The summary's input is an
-upper bound, because Pi shortens long tool results before it sends them, and it errs toward
-staying. The reasoning a summary may add, the wait before the answer and the detail a summary
-loses are not priced. A candidate that compacts shows nothing cached in status, since its cost uses
-no cache. Leaving the current model then costs its uncached premium on that smaller conversation,
-times the chance its level is needed again. If the candidate wins, Pi compacts
-first, the summary written by the model that answered last. With compaction disabled Pi would send
-the request as it is, so there a candidate too small for the conversation is passed over, and a
-needed level whose first available model is too small passes the run up.
-
-**When the cost is unknown,** the run takes the needed level's own model, the footer says
-`cost unknown`, and `/smart-router status` says why: `no usage yet`, `no price` or
-`the clock went backwards`. It is unknown when:
-
-- the session has no usage yet: no answer on the branch, or an answer without usage or of 0 tokens,
-  whatever the size of the new prompt, as for a session's first prompt. A usage with a figure that
-  is not a finite number of zero or more is no usage either, and the session's figures record
-  nothing from it;
-- right after a compaction, after a move to another leaf of the session tree, and in a session that
-  starts right after a compaction: no answer has measured the conversation as it now is, until the
-  next answer does, and every model's cache is forgotten at the same moment. A move to another leaf
-  also starts the branch's run shapes, its count of lighter prompts and its last prompts afresh,
-  and the chance a level is needed again is 0.5 until three prompts are counted on the new branch;
-  the level the session last needed stays;
-- a level's model has no price: a catalog entry whose input or output price is missing or 0 is no
-  price at all, never free;
-- a candidate's last answer is dated after now: the clock went backwards.
-
-**Step-ups.** A level with no available model, among its own and then its scope's fallback chain,
-or, with compaction disabled, whose first available model is too small for the conversation,
-passes the run up to the next level, and a notice names the level the pick started at: "no LOW
-model can take this run, so it goes to MEDIUM (gpt-6.1-terra)". With compaction disabled, when no
-level's first available model fits, the highest level with one takes the run: fit alone never
-refuses a run. A run is refused only when neither its level nor any above it has an available
-model. A stronger model chosen by cost is no step-up. When a run's pick is an earlier model of its
-role than the one that answered last, which costs a prompt-cache miss, its record notes
-`returnedToFirst`.
-
-**Fallbacks are the scope's chain, if it declares one** ([A fallback chain](#a-fallback-chain)).
-Without one, cooldowns and retries work within a level's role: a retry after a usage-limit or
-authentication error goes to the role's next model, and is refused when there is none. With one,
-it goes on down the chain. A retry never goes to another level.
-
-### Runs without a prompt
-
-A run that starts without a prompt (a goal continuation, a loop's, any extension's message), and a
-prompt's run whose plan cannot be matched to it (another extension changed its text, or Pi expanded
-it while two messages were pending), take the highest level among the last three prompts planned
-on the branch (John, 2026-11-18). One short question in a goal session therefore does not drop the
-continuations that follow to LOW; three light prompts in a row do. With fewer than three prompts
-known, it is the highest of those known. With none known on the branch, as after a move to another
-leaf of the session tree or in a resumed session, it is the level the session last needed: that of
-its latest planned run, or, in a resumed session, of its latest level record. A run without a
-prompt is not one of the prompts. In a very deep session that level is raised to the deep-session
-floor, as a prompt's demand is: over 100,000 tokens by the latest usage, or over 1,000 entries in
-the active context, which Pi counts from the last compaction, an extension's own entries included.
-The size is unknown right after a compaction, after a move to another leaf of the session tree,
-and after an answer whose usage could not be read, and an unknown size counts as not over. Until
-the next answer only the count of entries can raise the level, and after a compaction that count
-has started again. A move to another leaf forgets every model's cache even when the new leaf is an
-ancestor of the old one, whose conversation the caches still hold. The risky floor needs a
-prompt's text and does not apply. Neither the prompts' needs nor the session's own need is raised:
-the next run without a prompt starts from them again.
-
-The run goes through the same choice a prompt's run makes, priced with nothing added for a prompt,
-and counts, for the horizon and for the chance a level is needed again, as a prompt that needed
-its level. Jev is not asked, and the run writes no level record. Its footer says `run` where a
-prompt's says its demand, and `run, floor` when the floor raised the level:
-`personal MEDIUM → gpt-6.1-terra (run, floor; cost unknown)`.
-
-All of this is `smart-router/auto` under a version 2 roster. Under version 1, on
-`smart-router/local`, and in a session that has planned no run yet, a run without a prompt stays
-on the model the session used last, as it always did.
-
-### A stuck run
-
-When a run's last three tool calls in a row failed, whatever the tool and whatever the text, its
-next request moves up (John, 2026-11-18: exactly upstream's test below its top tier). A failed call
-is a tool result that Pi marks as an error; a successful result among the last three means the run
-is not stuck. Upstream's test of identical failure text applies only on its top tier, where it
-moves to another top model; here a run on SUPER has no level above and never moves, so that test
-is not built. The three are looked for after the latest user message of the request; Pi sends an
-extension's own message as a user message, so a run an extension starts is bounded the same way.
-
-- **Where it goes:** one level up, to that level's own model, unpriced. It never goes to a fallback
-  chain, whose models may be weaker than the one the run is on, and never looks further up. When
-  that model is not available, or with compaction disabled the conversation does not fit it, the
-  run stays where it is and nothing is shown, and a later request of the same run can still move.
-- **Once per run.** Never from SUPER, never for a tagged run, and only on
-  `smart-router/auto` under a version 2 roster: not on `smart-router/local`, under a version 1
-  roster or on a model picked by hand. A run without a prompt can move up too. The next run starts
-  again from the level it needs.
-- **It says so,** once, where it happens: "pi-smart-router: this run's last three tool calls
-  failed, so it moves up from MEDIUM to HIGH (gpt-6.1-sol)." The notice names levels and a model,
-  never a tool's output. The footer says `escalated` in place of the cost, and the run's record
-  carries `escalated: true`.
-
-### Thinking effort
-
-John's ruling of 2026-11-18: "Exactly as upstream: effort follows each request's turn type." Every
-request the router routes is sent the thinking effort upstream's adaptive reasoning gives it
-(`src/effort.ts`, from upstream v1.4.0's `adaptive-reasoning.ts`), on both router models and under
-either roster version. The turn type comes from the request's last message, as upstream reads it:
-a tool result is a *tool result*; a user message whose text holds "plan", "architect" or "design",
-in any case and inside a longer word, is a *planning* turn; anything else is an *ordinary* turn.
-
-| The request | Sent at `/thinking medium` (Pi's default) or `off` |
-|---|---|
-| after a tool result | `minimal` |
-| an ordinary turn | `low` |
-| a planning turn, on any level | `medium` |
-| any other turn on SUPER's model, or in a run that moved up for being stuck | `high` |
-
-- **Any other `/thinking` level** is your own choice and is never lowered: at `high`, `xhigh` and
-  `max` nothing changes. At `minimal` or `low` a turn that asks for more is raised to it, as
-  upstream raises it: at `low`, a planning turn goes out at `medium`.
-- **A role with a fixed `thinking`** keeps it, whatever the turn: the local role's `max` stays.
-- **The roster's `adaptiveReasoning`** section turns the rule off (`"enabled": false`: every request
-  is sent the selected level, as before), or sets a floor (`minLevel`) and a ceiling (`maxLevel`)
-  on the level the turn gives. The ceiling wins over the floor.
-- **A model that does not reason**, or one whose catalog maps every level up to the turn's to
-  `null`, is sent the selected level. A model whose catalog has no `minimal` and no level below it
-  therefore gets its requests after a tool result at the selected level, which Pi clamps to what
-  the model supports, while its ordinary prompts go at `low`: at `/thinking medium` such a run
-  alternates between the two. This is upstream's rule as written, and a roster floor does not
-  change it.
-- **A change of effort costs that model's cache.** On John's ChatGPT-account models the prompt cache
-  holds only between two requests at one effort, and `minimal` is sent as `low` there, so those
-  two are one effort. An ordinary turn after a planning one on the same model, or a tool result's
-  request after a planning one, reads the conversation again at the full input price. The cost
-  choice prices each candidate at the effort its run's first request would be sent, so that
-  request carries the effort its price assumed; a later change of effort within the run is not
-  priced.
-- **The footer** shows the effort the latest request carried, and why, under a key of its own,
-  `smart-router-effort`: `thinking minimal (after a tool result)`,
-  `thinking low (an ordinary turn)`, `thinking medium (planning)`, `thinking high (SUPER)`, `thinking high (a stuck run)`,
-  `thinking max (as selected, never lowered)`, `thinking medium (raised from the selected level for
-  planning)`, `thinking max (the role's own level)`, or `(the roster's floor)` and `(the roster's
-  ceiling)`, `(as selected)` where the rule leaves the level, as for a model that does not
-  reason, and `(as selected; adaptive effort is off)`. Both name the level the router returned;
-  Pi then clamps it to what the model supports, so a model that does not reason is sent none and
-  a ChatGPT-account model shown `minimal` is sent `low`. `/smart-router status` says the same on
-  its line `Thinking sent on the latest request`. A model picked by hand is never routed: status
-  shows nothing for it at once, and the footer from the next run's start.
-
-What upstream does that the router does not: it adds a line asking for brevity to the system
-prompt of a verbose model at `minimal` or `low`, which a route cannot do; it keeps the session's
-level on a request its session pin holds, and the router has no session pin; and it reads three
-environment variables for the switches, where the router reads the roster.
-
-### Tags elsewhere
-
-A message that is only a tag sends nothing, with a notice. A tag is removed wherever it is typed,
-and where it cannot set its run's level a notice says it has no effect: in a steer or follow-up
-typed while a run streams, whose model is fixed until the run ends; on `smart-router/local` or on a
-physical model; under a version 1 roster; and in a scope that `smart-router/auto` refuses. An
-extension's resend of the latest message's text, as pi-idle-check makes, keeps that message's
-level, from its tag or its demand, and Jev is not asked again.
-
-### The footer and status
-
-The thinking effort of each request has an item of its own, `smart-router-effort`
-([Thinking effort](#thinking-effort)).
-
-**The footer** shows each run under a status key of its own, `smart-router-level`: its scope, the
-level it needs, the model that took it, and in brackets what decided. The level is the one needed,
-so `personal MEDIUM → gpt-6-astra` is a MEDIUM prompt that stayed on astra.
-
-| Footer | Meaning |
-|---|---|
-| `personal SUPER → gpt-6-astra (tag)` | A tag set the level; nothing was priced. |
-| `personal MEDIUM → gpt-6.1-terra (demand 1.3; moved, $0.63 vs $2.00)` | The demand, to one decimal; the run moved, and the cost on the model it moved to is compared with the cost of staying. |
-| `personal MEDIUM → gpt-6-astra (demand 1.2; stayed, $0.10 vs $0.16)` | The run stayed: the cost of staying against the cheapest other candidate. |
-| `personal HIGH → gpt-6-astra (demand 1.8; chose, $0.14 vs $0.31)` | No current model was a candidate, and a stronger, warm model cost less than the needed level's own: the chosen model's cost against that one's. |
-| `personal MEDIUM → gpt-6.1-terra (demand 1.0; cost unknown)` | A figure was missing, so the needed level's own model took the run. |
-| `personal LOW → gpt-6.1-terra (demand 0.4)` | Nothing to compare: the run stepped up or went to the chain, or took the needed level's own model with no current model among the candidates, or stayed with no other candidate. |
-| `personal MEDIUM → gpt-6.1-terra (run; moved, $0.23 vs $0.33)` | A run without a prompt, at the highest level of the last three prompts, or the level its session last needed when none is known; also `(run; cost unknown)`, and `(run)` when nothing was compared. `run, floor`, as in `(run, floor; cost unknown)`, when the deep-session floor raised that level. |
-| `personal MEDIUM → gpt-6.1-sol (demand 1.0; escalated)` | A stuck run moved up a level; `escalated` replaces the cost, as in `(run; escalated)`. |
-
-Two marks can follow the demand, and one closes the brackets:
-
-- **`, jev <failure>`** when Jev was asked and gave no answer, so the heuristics decided:
-  `personal MEDIUM → gpt-6.1-terra (demand 0.9, jev timeout; cost unknown)`. The failures are
-  `unavailable`, `error`, `timeout`, `aborted`, `malformed` and `prompt` ([Jev](#jev)).
-- **`, floor`** when a risky operation or a deep session raised the level: the demand shown is the
-  one before the floor, as in `personal HIGH → gpt-6.1-sol (demand 0.7, floor; cost unknown)`.
-- **`; fallback`**, last, when the model is one of the scope's fallback chain:
-  `personal LOW → z-ai/glm-5.3-flash (tag; fallback)`.
-
-`/smart-router history` shows each planned run in the footer's form, on the run's first request: the
-level the run needs, and the model that took it after the arrow, as
-`[personal HIGH → gpt-6.1-sol (demand 1.6; cost unknown)]`. It has no `; escalated` mark: the
-escalation is an entry of its own, with the code `escalate`.
-
-**`/smart-router status`** shows the terms of the run the last decision belongs to, a run without a
-prompt included, however many requests the run has made: the demand,
-with Jev's term and confidence, the heuristics' term with the three signals that raise it most, and
-every guard that applied, in the order applied; then the run priced, and each candidate, the
-strongest first, with its expected cost, what it has cached and the chance that survives, and what
-leaving the current model adds. For a MEDIUM prompt in the first worked example's session, on the
-6.2 models whose prices the example uses (the prompt, "Add a test for the parser's error path",
-is made up, as is Jev's answer, 80% MEDIUM and 10% each for LOW and HIGH; the conversation's
-latest 20 messages include a tool result; the figures are the router's):
-
-```text
-  Demand 1.08 → MEDIUM: Jev 1.00 at 80%, heuristics 1.33 (trivial_signal 0.11, triage_verdict 0.09, turn_type 0.09).
-  Cost of 1 request, horizon 1: gpt-6.2-astra $0.13 (150,000 cached, 97%); gpt-6.2-sol $0.36 (nothing cached; leaving gpt-6.2-astra $0.05); gpt-6.1-terra $0.20 (nothing cached; leaving gpt-6.2-astra $0.05).
-```
-
-The footer of that run is `personal MEDIUM → gpt-6.2-astra (demand 1.1; stayed, $0.13 vs $0.20)`.
-A guard that applied ends the demand line, as in `; guards: close-call, risky.`; a cost that was
-unknown gives `  Cost unknown: no usage yet.` in place of the second line. A run without a prompt
-shows the level it needed, where that level came from and the level that took it in place of the
-demand line, as in `  Need HIGH → HIGH: a run without a prompt, at the highest of the last 3
-prompts.`, then its cost line. With fewer prompts known it says `the highest of the last 2 prompts`
-or `the level of the last prompt`; with none known, `the level the session last needed`; and
-`, raised to the deep-session floor` when the floor raised it. A tagged run shows no terms, since
-nothing was weighed, and a model picked by hand shows none.
-
-Two things the footer shows that are not faults:
-
-- **After a restart, a `/reload` or a move in the session tree**, the session's run shapes start
-  again from the defaults. The first lighter prompt is then priced as a run of five requests and
-  may move down where a run of one request would have stayed.
-- **Unattended runs take the highest of the last three prompts.** A run without a prompt takes the
-  highest level among the last three planned prompts on the branch, raised to the deep-session
-  floor as before. A prompt another extension sends and the router plans, such as pi-idle-check's
-  resend of the latest message, counts too. One short question in a goal session no longer drops
-  the continuations to LOW; three light prompts in a row do.
-
-## Jev
-
-Jev is TypeSafe AI's non-generative decision model, reached through OpenRouter. It takes a set of
-labelled choices and returns one, with a probability for each. Under a version 2 roster with a
-`classifier`, `smart-router/auto` asks it about each message typed while the session is idle:
-
-- **Through Pi.** The router calls only `ctx.modelRegistry.findOfType("classifier", provider, id)`
-  and `ctx.modelRegistry.classify(model, context, { timeoutMs, maxRetries: 0 })`. Pi's registry
-  holds the credentials and makes the one HTTP attempt; the router reads no credential. A model the
-  registry does not list as a classifier is unavailable, and nothing is sent.
-- **One request per prompt.** An untagged run waits for the answer. A tagged run never waits:
-  Jev's answer is only recorded, as an opinion for training.
-- **The 1 s limit.** `timeoutMs`, 1000 ms by default and at most 1000, is pi-ai's timeout for that
-  one attempt. The router sets no timer of its own, so the limit bounds the attempt, not the
-  registry's credential lookup before it.
-- **What it reads:** the message without its tag; up to `context.messages` (6) of the user and
-  assistant messages before it on the branch, as text only, without tool calls, tool results, images
-  or thinking, read through the bounded `getRecentActiveEntries`; the four descriptions of the
-  session's scope, as the criteria of the choices; and its one question, the instructions, which by
-  default asks how much model intelligence the message needs for the work it asks for now. The
-  instructions and the descriptions are yours to edit: see [Jev's prompts](#jevs-prompts).
-- **Redaction runs first**, in both scopes: the message and the earlier messages go through
-  `src/redact.ts` before any cap. [What redaction hides](#what-redaction-hides) names the kinds of
-  secret it looks for, with tested examples and its known gaps.
-- **Then the caps.** The message keeps its first 16 KiB and last 4 KiB, as the heuristics see it,
-  then its head and tail within `totalChars` (12000); each earlier message keeps its last
-  `messageChars` (1500) characters; and earlier messages are kept, newest first, only while the
-  whole stays within `totalChars`.
-- **Its answer is one term of the demand.** All four probabilities are kept: their expected level
-  and Jev's confidence, its top probability, go into the blend with the heuristics
-  ([The level a prompt needs](#the-level-a-prompt-needs)).
-- **Failures leave the heuristics to decide.** A classifier the registry does not have
-  (`unavailable`), an error (an OpenRouter refusal arrives as one), a timeout, an aborted request,
-  a malformed answer (a choice that is not one of the four levels, or probabilities that miss one
-  or add another label), or a prompt file that cannot be used (`prompt`; then nothing is sent to
-  Jev) counts as a failure, and the heuristics decide alone. So does a conversation the router
-  cannot read: Jev is then not asked, and its outcome is the failure `error`. The run's record
-  names the failure, and so does its footer: `(demand 0.9, jev timeout; cost unknown)`.
-- **Never asked** on `smart-router/local` or a physical model, for a steer or follow-up, for a run
-  without a prompt, without a classifier, under a version 1 roster, in a session whose scope
-  cannot be read or that the roster does not serve, for a message that is only a tag, or for an
-  extension's resend of the latest message's text.
-- **Where the text goes:** to OpenRouter, then to TypeSafe in the US. TypeSafe does not train on
-  inputs, but it states no retention period. `/smart-router status` lists the classifier among what
-  can still send data off the machine.
-
-### Jev's prompts
-
-What Jev is told is two kinds of text, and both are yours to change without touching code:
-
-- **The instructions:** the one question asked about every message, in every scope. Built in:
-  "How much model intelligence does `message` need for the work it asks for now? `recent` holds the
-  conversation just before it, oldest first." Replace it with `classifier.instructions` (a string
-  in the roster) or `classifier.instructionsFile` (a file's name). With neither, the built-in
-  question is asked and the request is exactly what it was before 1.4.0-jw.4.
-- **The level descriptions:** per scope, what kind of work belongs at each level, and so which
-  model gets it. Each level gives `describe` (a string in the roster, as before) or `describeFile`
-  (a file's name).
-
-**Prompt files** are plain text or Markdown in `<agentDir>/smart-router/`, which is
-`~/.config/pi/agent/smart-router/` on John's hosts. The roster names each by a plain lower-case
-name ending in `.md` or `.txt`, with no directory part:
+**2. Switch config (operator).** Edit `config/operator-config.json` on the dogfood host:
 
 ```json
-"classifier": { "model": "openrouter/typesafe/jev-1.14", "instructionsFile": "classifier.md" },
-"scopes": { "personal": { "levels": {
-  "low":    { "role": "low",    "describeFile": "personal-low.md" },
-  "medium": { "role": "medium", "describe": "Engineering, implementation and validation" }
-} } }
+{
+  "hydra": {
+    "artifact_cache_path": ".pi-smart-router/models/",
+    "encoder": "granite",
+    "hydra_heads": "learned_projection"
+  }
+}
 ```
 
-- **Files rather than long JSON strings,** because prose is iterated on: a file has line breaks,
-  needs no escaping and diffs cleanly. The roster points at each file, rather than a fixed file
-  name being picked up when present, so that the roster and the checker always say which text is
-  in force, and a stray or forgotten file changes nothing.
-- **What is sent** is the file's text without HTML comments (`<!-- … -->`, your notes) and without
-  surrounding blank space. Jev reads the rest as it is written.
-- **Limits:** the instructions at most 4000 characters, a level description at most 2000, a file
-  at most 16 KiB of plain UTF-8 text, with no control characters.
-- **A prompt file must be yours:** a regular file you own, writable by no one else, in
-  `<agentDir>/smart-router/`, by the roster's own rules. A link is followed to its target, which
-  must pass the same checks, so a link into `/nix/store`, whose files are root's, is refused as
-  unsafe: keep prompt files as real files you edit.
-- **Prompts are redacted like messages.** The instructions and the descriptions go through the
-  same redaction as the message before Jev reads them
-  ([What redaction hides](#what-redaction-hides)), so a prompt file that is, or links to, something
-  else of yours does not send its secrets. Write prompts in prose: a `key: value` line whose key
-  marks a secret loses its value.
-- **Edits take effect** at the next idle prompt of a running session, as roster edits do.
-- **A file that cannot be used** (missing, unsafe, empty, too long, not text, an unclosed comment,
-  or one that still holds a `{{placeholder}}` or a line starting with `TODO`) stops no route. Jev
-  is not asked in the scopes that need that file, the heuristics alone give their demand, the
-  footer marks it, as in `(demand 0.5, jev prompt; cost unknown)`, the session says so once when it
-  starts, and `/smart-router status` and the checker name the file and the cause. The router never
-  falls back to an older text.
-- **`/smart-router status`** shows the source of every prompt in force: `built-in`,
-  `inline in the roster`, or `file <path>`, with its length.
+Keep `hydra_heads: learned_projection` — Granite stays 384-dim compatible with the SP-115 projection (`config/hydra-projection-weights.json`). Do **not** enable `modernbert_k4` (still blocked on trained `config/modernbert-k4-heads.json`; tracked by #96).
 
-**You edit guidance, not the protocol.** These stay fixed in code, whatever a prompt says:
+**3. Verify resident.** After a routed request, run `/smart-router plan` or `/smart-router doctor` to confirm the Granite encoder model and cache path are loaded. Smoke-check that routing still selects tiers and that there is **no silent MiniLM fallback** — if the encoder errors or exceeds budget, the neural stage fails open by design (#119 / #148) and telemetry/`reason_code` surfaces it; a crash or silent downgrade is a bug, not expected behavior.
 
-- the request has one question, a choice among exactly `low`, `medium`, `high` and `super`;
-- an answer counts only when it names one of those four and gives a probability for each;
-  anything else is discarded as malformed and the heuristics decide alone;
-- the level is routed within the session's scope, by that scope's levels, account bindings and
-  exclusions; a prompt cannot name a model or change the scope;
-- redaction, the size caps, the tag syntax (`#low` … `#super`) and the guards, the floor for risky
-  operations among them.
+**4. Measure and archive.** Run the encoder benchmark and archive output for the issue trail:
 
-`test/prompts.test.ts` gives the router a prompt that asks for another label, a work-account
-model, work scope and the lifting of the local-only pin of earlier versions, with a classifier that
-does as it says, and shows that none of it happens.
-
-### What redaction hides
-
-Redaction looks for these kinds of secret, and writes `[redacted]` where it finds one:
-
-- passwords in URLs;
-- `Authorization` headers;
-- JWTs;
-- private-key blocks;
-- keys and tokens with a vendor's prefix (`sk-`, `sk_live_`, `ghp_`, `github_pat_`, `glpat-`,
-  `hf_`, `npm_`, `xoxb-`, `AIza`, `AKIA` and others);
-- values after a key or a flag whose name marks a secret (`password`, `token`, `api_key` and the
-  like);
-- passwords behind curl's `-u`, `--user` and `-U`, and behind `--proxy-user`;
-- passwords glued to `-p` in mysql and mariadb commands;
-- netrc passwords;
-- the text of XML elements whose name marks a secret;
-- passwords in Python auth pairs;
-- cookie values in `Cookie` and `Set-Cookie` headers;
-- long mixed-case runs of letters and digits, or of base64 characters.
-
-Redaction is pattern matching. It hides the shapes its tests pin, and other spellings of the same
-secret can stay: the list names what it looks for, not what it finds. Other programs give `-u`,
-`--user` and `-U` other meanings (`date -u`, `docker run -u`), so the examples show them behind
-`curl`, and show `--proxy-user` behind `wget`. Redaction's time grows in proportion to the text:
-a test holds it to under a second on each of its hostile inputs, of 90,000 characters and more.
-
-For example, with each row a test of the suite, which reads these tables and checks them against
-the code. In a cell `⏎` stands for a line break and `⇥` for a tab:
-
-| Example | Input | What Jev reads |
-|---|---|---|
-| a URL's password | `git clone https://bob:Hunter2pw@example.com/a/b` | `git clone https://bob:[redacted]@example.com/a/b` |
-| a URL's password behind a DOMAIN\user name, whose \t then reads as a space | `http://CORP\tom:Hunter2pw@proxy.corp:8080` | `http://CORP om:[redacted]@proxy.corp:8080` |
-| escaped line breaks and an escaped tab, which read as spaces and end a value | `{"log": "password: hunter2\napi_key: Zz9y8x7w\r\ntoken: Aa1b2c3d\tdone"}` | `{"log": "password: [redacted] api_key: [redacted]  token: [redacted] done"}` |
-| an Authorization header with a scheme | `Authorization: Bearer q8Zt1rLm9XaQ` | `[redacted]` |
-| an Authorization header with no scheme | `Authorization: q8Zt1rLm9XaQ and more` | `[redacted] and more` |
-| a JWT | `jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl ok` | `jwt [redacted] ok` |
-| a private-key block | `-----BEGIN OPENSSH PRIVATE KEY-----⏎b3BlbnNzaC1rZXktdjEA⏎-----END OPENSSH PRIVATE KEY-----⏎after` | `[redacted]⏎after` |
-| keys and tokens with a vendor's prefix | `sk-abcdefghij0123456789 sk_live_aB3dE5gH ghp_abcdefghijklmnopqrstuvwxyz0123456789 github_pat_x glpat-abcdefghij0123456789 hf_abcdefghij0123456789 npm_abcdefghij0123456789 xoxb-1 AIzaabcde_ghij-123456789abcdefghij01234 AKIA0ABCDEFGHIJKLMNO` | `[redacted] [redacted] [redacted] [redacted] [redacted] [redacted] [redacted] [redacted] [redacted] [redacted]` |
-| values after keys whose names mark a secret | `client_secret=a1 password=a2 passwd=a3 passphrase=a4 credential=a5 authorization=a6 token=a7 api_key_id=a8 access_key_id=a9 private_key_id=b1 monkey=b2 db_pass=b3 pwd=b4` | `client_secret=[redacted] password=[redacted] passwd=[redacted] passphrase=[redacted] credential=[redacted] authorization=[redacted] token=[redacted] api_key_id=[redacted] access_key_id=[redacted] private_key_id=[redacted] monkey=[redacted] db_pass=[redacted] pwd=[redacted]` |
-| values after flags whose names mark a secret | `run --password a1 --api-key a2 --token a3 --db-pass a4` | `run --password [redacted] --api-key [redacted] --token [redacted] --db-pass [redacted]` |
-| a long mixed-case run of letters and digits | `aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dE3fG5hJ7k` | `[redacted]` |
-| a long base64 run | `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` | `[redacted]` |
-| curl's -u, --user and -U | `curl -u admin:Hunter2pw --user bob:Hunter3pw -U proxy:Hunter4pw https://h` | `curl -u admin:[redacted] --user bob:[redacted] -U proxy:[redacted] https://h` |
-| curl named by its path | `/usr/bin/curl -u admin:Hunter2pw https://h` | `/usr/bin/curl -u admin:[redacted] https://h` |
-| a curl word behind a dot | `my.curl -u admin:Hunter2pw https://h` | `my.curl -u admin:[redacted] https://h` |
-| curl before a tab | `curl⇥-u admin:Hunter2pw https://h` | `curl⇥-u admin:[redacted] https://h` |
-| sort -u behind the pipe that ends a curl command | `curl -s https://h \| sort -u -t: -k1` | unchanged |
-| date -u behind the semicolon that ends a curl command | `curl -s https://h; date -u +%H:%M:%S` | unchanged |
-| date -u behind the && that ends a curl command | `curl -s https://h && date -u +%H:%M:%S` | unchanged |
-| date -u on the line after a curl command | `curl -s https://h⏎date -u +%H:%M:%S` | unchanged |
-| curl's -u on a line that a backslash continues | `curl -s https://h \⏎  -u admin:Hunter2pw` | `curl -s https://h \⏎  -u admin:[redacted]` |
-| curl's -u behind a semicolon inside a quoted argument | `curl -H 'Accept: a; b' -u admin:Hunter2pw https://h` | `curl -H 'Accept: a; b' -u admin:[redacted] https://h` |
-| date -u on the line after a curl argument whose quote never closes | `curl -H 'Accept: a; b⏎date -u +%H:%M:%S` | unchanged |
-| curl's -u in a command inside a JSON string, behind escaped quotes | `{"command": "curl -H \"x; y\" -u admin:Hunter2pw https://h"}` | `{"command": "curl -H \"x; y\" -u admin:[redacted] https://h"}` |
-| curl's -u behind a double-quoted argument that holds escaped quotes | `curl -d "{\"a\": \"b; c\"}" -u admin:Hunter2pw https://h` | `curl -d "{\"a\": \"b; c\"}" -u admin:[redacted] https://h` |
-| date -u and docker run -u, with no curl command | `date -u +%H:%M:%S; docker run -u 1000:1000 img` | unchanged |
-| --proxy-user behind wget, behind curl and behind no command | `wget --proxy-user bob:Hunter2pw https://h; curl --proxy-user amy:Hunter3pw https://h⏎pass --proxy-user=cat:Hunter4pw to it` | `wget --proxy-user bob:[redacted] https://h; curl --proxy-user amy:[redacted] https://h⏎pass --proxy-user=cat:[redacted] to it` |
-| -p glued to its password behind mysql, mysqldump and mariadb | `mysql -uroot -pHunter2pw db; mysqldump -pHunter3pw db; mariadb -pHunter4pw db` | `mysql -uroot -p[redacted] db; mysqldump -p[redacted] db; mariadb -p[redacted] db` |
-| cp -pr and docker run -p8080:80 | `cp -pr src dst; docker run -p8080:80 img` | unchanged |
-| a netrc password on a line that says machine | `machine example.com password Hunter2pw` | `machine example.com password [redacted]` |
-| a netrc password on a line that says login | `login bob password Hunter2pw` | `login bob password [redacted]` |
-| the word after password on a line that says neither | `the password Hunter2pw was typed twice` | unchanged |
-| an XML element whose name marks a secret | `<server><username>bob</username><password>Hunter2pw</password></server>` | `<server><username>bob</username><password>[redacted]</password></server>` |
-| a Python auth pair | `requests.get(url, auth=('bob', 'Hunter2pw'))` | `requests.get(url, auth=('bob', [redacted]))` |
-| HTTPBasicAuth | `HTTPBasicAuth('bob', 'Hunter2pw')` | `HTTPBasicAuth('bob', [redacted])` |
-| the cookies of a Cookie header | `Cookie: a=Hunter2pw; b=Hunter3pw` | `Cookie: a=[redacted]; b=[redacted]` |
-| the cookie of a Set-Cookie header | `Set-Cookie: sid=Hunter2pw; Path=/; HttpOnly` | `Set-Cookie: sid=[redacted]; Path=/; HttpOnly` |
-
-It also hides some text that is no secret. For example:
-
-| Text | Input | What Jev reads |
-|---|---|---|
-| the text of a plist's key element | `<key>CFBundleName</key>` | `<key>[redacted]</key>` |
-| the port of docker run on a line that names mysql | `docker run --name mysql -p8080:80 img` | `docker run --name mysql -p[redacted] img` |
-| the word after password on a line that also says login | `enter your login and password carefully` | `enter your login and password [redacted]` |
-| the end of a time format behind a curl word and a single & | `curl -s https://h & date -u +%H:%M:%S` | `curl -s https://h & date -u +%H:[redacted]` |
-
-Its known gaps include the shapes below; each entry gives an input whose secret, or the part of
-it the entry names, stays in the text that Jev reads, and the list is not complete. In the inputs
-`pw` stands for a password:
-
-| Shape | Input | What Jev reads |
-|---|---|---|
-| a quoted argument that runs over several lines, before the flag | `curl -d '{⏎"a": 1⏎}' -u admin:pw https://h` | unchanged |
-| a -u value in JSON-escaped quotes | `curl -u \"admin:pw\" https://h` | unchanged |
-| a command in a JSON string whose argument holds quotes escaped twice around a separator | `{"command": "curl -d \"{\\\"a\\\": \\\"b; c\\\"}\" -u admin:pw"}` | unchanged |
-| such a command with one quote escaped twice and the separator in a later quoted argument | `{"command": "curl -d \"5\\\" wide\" -H \"Accept: text/html; q=0.9\" -u admin:pw https://h"}` | unchanged |
-| a password that holds an escaped quote, whose part behind that quote stays | `curl -u "admin:pw\"Xyz9" https://h` | `curl -u "admin:[redacted]"Xyz9" https://h` |
-| a user name that holds an escaped quote | `curl -u "ad\"min:pw" https://h` | unchanged |
-| a quoted -u value whose user holds a space | `curl -u "John Smith:Hunter2pw" https://h` | unchanged |
-| a flag behind a value that holds an escaped quote and a quoted separator | `curl -u "admin:x\"y" -H "Accept: a; b" -U proxy:pw https://h` | `curl -u "admin:[redacted]"y" -H "Accept: a; b" -U proxy:pw https://h` |
-| a quoted password that holds the other kind of quote, whose part from that quote on stays | `curl -u "admin:O'Brien1x" https://h` | `curl -u "admin:[redacted]'Brien1x" https://h` |
-| a $'…' string that holds a separator, before the flag | `curl -d $'it\'s; here' -u admin:pw` | unchanged |
-| a command substitution with quotes of its own, before the flag | `curl -d "$(jq -c ".a; .b" f)" -u admin:pw` | unchanged |
-| a backslash before a separator outside quotes, before the flag | `curl https://h/a\;b -u admin:pw` | unchanged |
-| a line continuation between the flag and its value | `curl -u \⏎admin:pw https://h` | unchanged |
-| combined short flags | `curl -sSu admin:pw https://h` | unchanged |
-| a quoted password after the colon | `curl -u admin:"pw with space" https://h` | unchanged |
-| an argument array | `["curl", "-u", "admin:pw"]` | unchanged |
-| curl.exe | `curl.exe -u admin:pw https://h` | unchanged |
-| wget's --user | `wget --user admin:pw https://h` | unchanged |
-| http's -u | `http -u admin:pw https://h` | unchanged |
-| a .netrc file written over several lines | `machine example.com⏎login bob⏎password pw` | unchanged |
-| an Authorization name with an equals sign and no quotes, whose token stays | `Authorization=Bearer q8Zt1rLm9XaQ` | `Authorization=[redacted] q8Zt1rLm9XaQ` |
-| a header name glued behind an underscore, whose token stays | `HTTP_AUTHORIZATION: Bearer q8Zt1rLm9XaQ` | `HTTP_AUTHORIZATION: [redacted] q8Zt1rLm9XaQ` |
-| an Authorization scheme that holds a hyphen, whose credential stays | `Authorization: Api-Key q8Zt1rLm9XaQ` | `[redacted] q8Zt1rLm9XaQ` |
-| an Authorization scheme that holds a digit, whose credential stays | `{"Authorization": "OAuth2 q8Zt1rLm9XaQ"}` | `{"[redacted] q8Zt1rLm9XaQ"}` |
-| an Authorization credential of several words, whose words behind the first stay | `Authorization: Digest username="bob", response="6629fae49393a05397450978507c4ef1"` | `[redacted]"bob", response="6629fae49393a05397450978507c4ef1"` |
-| a credential of letters only before an escaped line break and another header, whose key stays | `Authorization: abcdef\r\nX-Api-Key: Zz9y8x7w6v` | `[redacted] Zz9y8x7w6v` |
-| a name that ends in tokens | `refresh_tokens: q8Zt1rLm9XaQ` | unchanged |
-| a name in which String stands behind token | `tokenString = q8Zt1rLm9XaQ` | unchanged |
-| PowerShell's -Password | `New-LocalUser -Name bob -Password hunter2` | unchanged |
-| a quoted cookie value | `Set-Cookie: sid="Hunter2pw"` | unchanged |
-| mysql.exe | `mysql.exe -pHunter2pw db` | unchanged |
-| mysql's -p on a line that a backslash continues | `mysql -h db.example.com -u root \⏎  -pHunter2pw mydb` | unchanged |
-| an unquoted cookie value behind a quoted one | `Cookie: a="x"; session=Hunter2pw` | unchanged |
-| a value that holds an apostrophe, whose part from the apostrophe on stays | `password: O'Brien1x` | `password: [redacted]'Brien1x` |
-| a value that holds a comma, whose part from the comma on stays | `DB_PASSWORD=Hunter2,pw9` | `DB_PASSWORD=[redacted],pw9` |
-| an XML element whose text is a CDATA section | `<password><![CDATA[Hunter2&pw]]></password>` | unchanged |
-| a Python auth pair written over several lines | `requests.get(url, auth=(⏎    'bob',⏎    'Hunter2pw',⏎))` | unchanged |
-| a comparison | `if (password === "pw") ok()` | `if (password =[redacted] "pw") ok()` |
-| a bytes string | `password=b"pw"` | `password=[redacted]"pw"` |
-| a raw string | `token = r'pw'` | `token = [redacted]'pw'` |
-| a value on the line after its name | `password:⏎pw` | unchanged |
-| JSON escaped twice | `{\\"password\\": \\"pw\\"}` | unchanged |
-| a JWT glued behind an underscore | `x_eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl` | unchanged |
-| a URL password that holds a slash | `https://bob:p/w@host` | unchanged |
-| a URL password that holds an at sign, whose part from the at sign on stays | `postgres://bob:Hunt@er2pw@db.example.com/app` | `postgres://bob:[redacted]@er2pw@db.example.com/app` |
-| a Python auth pair whose password holds the other kind of quote | `auth=("bob", "O'Brien1x")` | unchanged |
-| a Python auth pair behind a name that only ends in _auth | `http_auth=('bob', 'Hunter2pw')` | unchanged |
-
-## A model picked by hand
-
-John's decision of 2026-11-16: a manual choice always wins. A model selected with `/model` or by
-cycling, or restored with a session, stays selected and is sent as it is, in personal scope and in
-work scope. The router routes only while the selection is `smart-router/auto` or
-`smart-router/local`.
-
-Each row below is asserted by the tests under "the router's handlers", "a model picked by hand in
-work scope" and "a restored selection" in `test/selection.test.ts`, on Hera's rosters. Scenarios 6
-to 9, 11 and 26, and L5, L6 and L10, of `test/behaviour.test.ts` show the same in Pi's own runtime.
-
-| In a work session | What happens |
-|---|---|
-| `/model openrouter/moonshotai/kimi-k3.1-pro`, or cycling to `openai-codex-2/gpt-6.1-sol` | That model is the selection. The router shows no notice and selects nothing. |
-| `xai/grok-4.7` picked in a work session, the case John reported | It stays. The notice "so xai/grok-4.7 was not kept, and the selection is smart-router/auto again" no longer exists. |
-| Four picks in the same instant | Each is kept. Nothing counts picks, and no session is locked. |
-| The prompt "fix the build", and a steer typed while it runs | Both are sent. |
-| The run's `turn_start` | Nothing is switched, and the run is not aborted. |
-| The provider request | The router registers no handler for it, so the payload arrives whole. |
-| Cache warming | The router registers no handler for it, so Pi's own decision stands. |
-| A compaction, and `/tree` with a summary | Each proceeds, on the model picked by hand. |
-| A work session resumed on such a model, by its entry or its work directory; a session of a latched process at startup, resume, reload, `/new` or a fork | It starts on that model, and nothing is selected in its place. |
-| Another extension selects a model, as Multi-Pass `allowedSubs` does | Its selection stands as a hand's does. The router cannot tell the two apart, and answers neither. |
-
-The consequence, which John accepted: in a work session, a personal-account or OpenRouter model
-picked by hand receives that conversation under that account.
-
-**The router's own models keep their policies, in their routes.** A request their policy does not
-allow is refused by the model that was asked, and the selection stays where it was:
-
-| Selection | Session | Its requests |
-|---|---|---|
-| `smart-router/auto` | work scope | Go only to the work-bound Codex account. Refused when the roster serves no work scope, or the scope cannot be read. |
-| `smart-router/local` | either scope, or a scope that cannot be read | Go only to the local role, and never to a cloud model. Refused only when no local model can take the request. |
-
-John's decision of 2026-11-16, "Let smart-router/local route in work scope": selecting
-`smart-router/local` is itself the request for local routing, so it routes in a work session too.
-The consequence: in a work session, on the shared work machines too, selecting
-`smart-router/local` sends the conversation to the roster's local models, not to the work account.
-Until 1.4.0-jw.1 that request was refused unless the session was pinned, with the local-only pin
-that has since been removed.
-
-John's decision of 2026-11-17, "Let local route there too": `smart-router/local` routes in a
-session whose scope cannot be read as well, so it refuses no scope at all. Until 1.4.0-jw.2 it
-refused such a session unless it was pinned. `smart-router/auto` still refuses one, since it cannot
-tell which account the session's requests may use.
-
-In work scope a refusal names only `smart-router/auto` and work Codex models as
-models to choose, since those keep the conversation on the work account. Any other model you pick
-is kept all the same.
-
-**No switch.** No command and no event selects a model. The local-only pin's
-`/smart-router local on`, which selected `smart-router/local`, was the one place that did, and it
-has been removed. Each of these is a test in `test/commands.test.ts`:
-
-- `/smart-router scope work` with Kimi selected answers "pi-smart-router: scope work (entry)." and
-  "The selection stays openrouter/moonshotai/kimi-k3.1-pro. A model picked by hand is sent as it is,
-  in work scope too."
-- `/smart-router scope work` with `smart-router/local` selected answers "The selection stays
-  smart-router/local. In work scope smart-router/local routes to the local models, so its next
-  requests go to them, not to the work account."
-- `/smart-router scope personal` changes no selection.
-
-## Scope: personal or work
-
-Every session has a scope, and version 2 routes it within that scope's levels, exclusions and
-account bindings. The first rule that applies decides it:
-
-1. **The latch.** `PI_SMART_ROUTER_SCOPE=work`, exactly, puts every session of the process in work
-   scope. It is read each time the router loads; once seen, it holds for the life of the process,
-   even if the variable is removed later. nix-config's shared-work profile is to set it.
-2. **The session's entry.** `/smart-router scope work` and `/smart-router scope personal` record a
-   `smart-router.scope` entry in the session, and resume keeps it.
-   - Personal to work takes effect at once, for the routes of the router's own models. The selection
-     stays as it is, and the answer says what it will do: a model picked by hand is sent as it is,
-     and `smart-router/local` routes to the local models.
-   - Work to personal asks first and says that the earlier turns are work content; Enter keeps
-     work scope. It is refused under the latch, and in modes without dialogs.
-3. **The roster's work directories**, on every read. A session without an entry whose working
-   directory lies under one is in work scope, whether it is new, resumed or running, so a roster
-   edit that lists a running session's directory moves it at the next roster load (the next idle
-   prompt, or `/smart-router status`, `scope` or `reload`). The first time this rule decides a
-   session's scope, at its start, at its next idle prompt or when its next run starts, the router
-   records a work entry, with a notice, so that the session stays in work scope whatever the roster
-   says later. The working directory is Pi's `ctx.cwd`, compared as text on whole path segments:
-   `/x/work` holds `/x/work` and `/x/work/a`, but not `/x/workshop`. Nothing is resolved, so a
-   symlinked spelling of a work directory is not under it.
-4. Otherwise **personal**.
-
-A fork or `/new` carries the scope that the latch, an entry or the work directories gave into the
-session it creates, which records it as an entry of its own, with a notice. The personal default is
-not carried, so the new session decides its own. A scope that cannot be read is carried as work
-scope, the scope the router routes that session in.
-
-**It fails closed.** A malformed `smart-router.scope` entry, a custom message of that type, or a
-session whose entries cannot be read has an unreadable scope: `smart-router/auto` refuses until
-`/smart-router scope work` or `/smart-router scope personal` records a scope again.
-`smart-router/local` routes to the local role's models all the same: its requests carry no
-account, so there is nothing for the scope to decide. Such a request resolves in work scope, the
-narrower one, and records no scope.
-
-**Where each scope's requests go.** Scope governs the router's own two models, and nothing else.
-`smart-router/auto` never sends a personal session to a work-bound account, and sends a work
-session only to a work-bound Codex account. A version 1 roster serves no work scope: `smart-router/auto` refuses a
-work session, and the check every pick passes refuses it again. A latched process whose roster has
-no work scope refuses every request on `smart-router/auto`, and `/smart-router status` says why.
-`smart-router/local` serves both scopes, and a scope that cannot be read, since it carries no
-account: a work session on it goes to the local role's models, under a roster that serves no work
-scope too, and never to a cloud model. In either scope a model picked by hand
-is sent as it is, a work-account model in a personal session included
-([A model picked by hand](#a-model-picked-by-hand)).
-
-### Work scope and the selection
-
-Work scope has no hold on the selection. Until 1.3.0-jw.2 a work guard switched any selection but
-`smart-router/auto` and the work account's models back to `smart-router/auto`, and locked a session
-that something kept switching away. John's decision of 2026-11-16 removed it: a model picked by
-hand stays selected in a work session and is sent as it is.
-
-- **A failed reload moves no session.** While the roster fails to load, the scope reads the work
-  directories of the last valid roster loaded in the process, which the process slot keeps. Both
-  of the router's models refuse until the roster loads; a model picked by hand is sent as it is.
-- **Leaving work scope** is `/smart-router scope personal`, which asks first and which the latch
-  refuses.
-
-### What work scope does not cover
-
-Work scope governs the requests the router routes: those a session sends through
-`smart-router/auto` or `smart-router/local`, and those that go through such a session's route, as
-the default goal-x auditor's do. It blocks no tools. Still able to send a work session's content
-elsewhere, the latch included:
-
-- **A model picked by hand.** It stays selected and is sent as it is, a personal-account or
-  OpenRouter model included ([A model picked by hand](#a-model-picked-by-hand)).
-- **Extensions with their own models:** pi-warden's judge (it sends redacted context to its backend
-  while enabled), a goal-x auditor configured with its own model, and pi-btw.
-- **Workflow tiers and subagent agents with explicit models**, whether or not the child loads the
-  router: an explicit model is sent as it is. A child that loads the router is in work scope by
-  the latch and the work directories as any session is, so its `smart-router/auto` goes to the
-  work account, but it starts in personal scope when only its parent's entry set work scope.
-- **Tools** that send data themselves: web fetch and web search tools, which send URLs and queries;
-  browser tools; and whatever the bash tool can read and send.
-- **Pi's own `/share`, `/export` and `/bug`**, which run before any extension hook, and extension
-  commands, which run before the router sees the input.
-- **Turns sent before the session was in work scope**, and processes outside Pi.
-
-### Limits and rollout
-
-- A scope set by an entry reaches what goes through its session: the default goal-x auditor routes
-  in it, and a fork made from the command line (`pi --fork`) copies
-  the entry with the rest of the session. pi-subagents children start with no entries, so it does
-  not reach them. Run work in a work directory or in a latched process, which reach a child that
-  loads the router as they reach any session.
-- **Rollout order.** Write the version 2 work roster before setting `PI_SMART_ROUTER_SCOPE=work`: in
-  a latched process with a version 1 roster, `smart-router/auto` sends nothing, and
-  `smart-router/local` sends only to the local models; with no roster loaded, both refuse every
-  request.
-
-## Routing locally
-
-To route a session locally, select the local model: `/model smart-router/local`. It routes only to
-the roster's local role, in the role's order and inside the local section's providers and hosts,
-in either scope and in a session whose scope cannot be read, and never falls back to a cloud model:
-when no local model can take a request, the request is refused with "Nothing was sent". Like work
-scope, it governs only the requests the router routes. A model picked by hand afterwards is sent as
-it is, and `/smart-router status` lists what else can send data off the machine. For strictly
-private work, keep using a dedicated session on a local model with pi-warden off
-(`NIX_MANAGED_PI_WARDEN=off`).
-
-Earlier versions also had a local-only pin: `/smart-router local on|off|status`, a
-`smart-router.pin` session entry and the `PI_SMART_ROUTER_LOCAL_ONLY` environment variable, which
-kept both of the router's models on local models. John's decision of 2026-11-18 removed it:
-`smart-router/local` already routes locally. A second decision of the same day left no trace of it:
-
-- **`/smart-router local`** is an unknown subcommand: whatever follows, it answers with the usage,
-  as any unknown subcommand does, and records and selects nothing.
-- **`PI_SMART_ROUTER_LOCAL_ONLY` is ignored.** Nothing reads it and nothing is shown for it. It
-  selects and routes nothing.
-- **An old pin entry is ignored.** The router does not look for one, and nothing is shown for it.
-  A session file that holds one, and level records of earlier versions, still load without an
-  error, and `smart-router/auto` routes the session by level.
-
-## Records and training
-
-A run that still holds a level when it settles leaves one `smart-router.level` entry in its session,
-however it ended. A message that arrives on `smart-router/local`, on a physical model or under a
-version 1 roster gets no level, and a run without a level leaves no entry; nor does a run without a
-prompt, which takes its level from the last prompts but plans none of its own.
-
-The router can drop a level before its run settles, and a run can record a level that another
-message planned. These can happen when messages overlap, as when several wait for Jev together or a
-steer arrives while a run settles, and when the selection, the scope or the roster changes
-after a message was planned. A run that stays on a model picked by hand after its message was
-planned is different: its requests do not go through the router, so the plan is not compared, and
-the entry keeps the planned level, with the hand-picked model as its `ref` when that model answered.
-The tests under "a run's record" in `test/router-levels.test.ts` pin some of these cases, and the
-rest can vary. A record is a label, so check it against its session before training on it.
-
-The entry's fields:
-
-- `v`; `at`, when the run was planned; and `scope`;
-- `source`, what decided the level: `tag`, `jev` (the blend with Jev's answer), `heuristics` (the
-  heuristics alone) or `floor` (a risky operation or a deep session raised it);
-- `need`, the level the run needed, its tag's or its demand's after the guards; `tier`, the level
-  whose model took it, `need` or a level above it; and `tag`, for a tagged run;
-- `trigger`, the risky operation that raised the run to HIGH;
-- `demand`, for an untagged run: its `value` before the floors; `tier`, the level after every guard,
-  floors included; Jev's term (`value` and `confidence`) when Jev answered, the heuristics' term
-  (`value`, upstream's `score`, and the three signals that raise it most, each with its share), and
-  the `guards` that applied, in the order applied (`low-confidence`, `close-call`, `risky`,
-  `deep-session`);
-- `keyword`, the keyword classifier's signal and reason; its planning signal gives the heuristics
-  their turn type;
-- `jev`: Jev's model, choice, probabilities, confidence and latency (`ms`), or its failure
-  (`unavailable`, `error`, `timeout`, `aborted`, `malformed` or `prompt`). A tagged
-  run whose answer had not come when it settled records `{ "late": true }`. The field can be absent,
-  as it is without a classifier, and an extension's resend can repeat the answer its message got
-  before;
-- `ref`, the model of the run's last assistant message that ended without an error, absent when no
-  model answered;
-- `cost`, when the cost rule was asked: its `outcome`, `unknown` with the reason `why`, or
-  `stayed`, `moved` or `only` (no current model among the candidates); the model `chosen` and the
-  `current` one; the run's expected `requests`, the `horizon` and the chance `again` that the
-  current model's level is needed again; and for each candidate its `ref`, `tier`, expected `cost`
-  (leaving included), the `leaving` part, the tokens `cached`, the chance `survival` and whether it
-  `compacts` first. A tagged run, and one that stepped up or went to the chain, has none;
-- `steppedUp`, `returnedToFirst`, `escalated` (a stuck run moved up a level) and `aborted`, when
-  they apply; and `fallback`, when the model that answered is one of the scope's fallback chain.
-  `tier` is the level whose model the plan picked all the same: a fallback or an escalation never
-  changes it.
-
-Records of earlier versions still read: one with `source: "keyword"` and `asked` in place of
-`need`, as 1.4.0-jw.4 and before wrote them, is read with its `tier` as the run's need, by a
-resumed session and by `/smart-router was`.
-
-A record holds no prompt text and no digest of it: model refs, numbers, level names, signal and
-guard names, outcome names. It normally follows its run's first user message,
-earlier in the same session, and the run's steers and follow-ups can sit between them; that message
-lacks the tag, which the record keeps.
-
-`/smart-router was low|medium|high|super` labels a run with the level it should have had: the run in
-flight, when it holds a level, from its start until its record is written, and otherwise the run of
-the latest record on the active branch, not the level of a message whose run has not started. It
-appends a record with source `correction`, that level, and `refers`, the `at` of the run it names; a
-correction of a correction names the same run. With no run to name, it says so and appends nothing.
-Nothing is sent again.
-
-**Training** is an agent review, when John asks for one. An agent session on the host reads that
-host's session files for these records and the user messages they pair with, reports per scope and
-per level where John's tags and corrections disagree with Jev, the heuristics and the blend, and
-proposes revised descriptions and instructions, and revised `demand` weights and cuts or a revised
-`switching.margin`, as a diff to that host's roster and prompt files. Nothing changes until John
-approves it. Records stay on the host that made them, and work records are read only there. The
-router itself reads no other session and does not write the roster.
-
-**The review script**, `scripts/review-demand.ts`, is the review's tool:
-
-```sh
-node --experimental-strip-types scripts/review-demand.ts <session.jsonl>...
+```bash
+mkdir -p .pi-smart-router/measurements/
+npm run benchmark:encoder | tee .pi-smart-router/measurements/benchmark-encoder-$(date +%Y%m%d).txt
+# optional: --fixtures path --cache .pi-smart-router/models/
 ```
 
-It replays the runs the named session files recorded and reports, for the runs John judged (he typed
-a tag, or corrected the level afterwards), how often the heuristics alone, Jev's top choice alone
-and the blend named the level he meant. For each such run it replays the first user message at or
-after the record's time, less two seconds, else the latest one before it, through the router's own
-demand code at the default settings. It is a development script, not part of the extension: Pi never
-loads it and the package does not ship it. It reads only the files named on its command line,
-contacts nothing, and prints counts, levels, rates and file names, never a prompt's text. Since
-John's session files are under Pi's agent directory, it runs on them only at his word.
+Expectation: Granite p50/p95 within the ≤120 ms HyDRA embedding-stage budget (SP-204 go/no-go measured ~17 ms p50 for both encoders; [artifact](spine-tasks/_authoring/release-v0.11.0/encoder-gonogo-artifact.md)). `.pi-smart-router/measurements/` is gitignored — post a short summary comment on #167 with the numbers.
 
-Its facts differ from the router's in two ways. It counts every entry on the chain, where Pi counts
-the active context's entries from the last compaction, and it takes the conversation's size from
-the latest usage even after a compaction, where the router counts the size as unknown until the
-next answer. A replay can therefore raise the deep-session floor where the router did not.
+**5. Post-switch follow-ups (feed #96 — evidence only, no default flip).** Track after Granite is live on the dogfood host:
 
-## Commands
+- **Latency regression watch** — HyDRA stage stays within ~80–120 ms on dogfood hardware vs SP-204 baselines; re-run `npm run benchmark:encoder` after fleet/catalog changes.
+- **Centroid / cluster space** — centroids were bootstrapped with MiniLM (`npm run routing:bootstrap-centroids`). Same 384-dim space, but embedding geometry differs; dry-run compare cluster match quality under Granite and document whether `config/routing-centroids.json` / the calibration bundle need refresh **before** any default flip.
+- **Projection / calibration** — SP-115 weights were trained on MiniLM embeddings. Run `npm run routing:calibration-dry-run` under Granite; if holdout ECE worsens, retrain the projection **or** keep MiniLM as the shipped default.
+- **Truncation / quality signal** — confirm long agent turns no longer hit MiniLM's 512-token wall (the primary motivation); note any residual encoder truncation surfaced in explain/telemetry.
+- **Degraded / fail-open path** — with Granite ONNX missing or slow, confirm neural failover still fails open (#119 / #148) rather than crashing the host agent.
+- **Feed #96** — after dogfood evidence, comment on #96 with *promote Granite as default?* yes/no + evidence. Only then open a separate issue/PR to flip defaults — never from dogfood alone (see `docs/qa/shadow-dogfood-protocol.md`).
+- **Do not conflate with ModernBERT** — K=4 stays blocked on trained `config/modernbert-k4-heads.json` (SP-218/219); out of scope here.
 
-| Command | Does |
-|---|---|
-| `/smart-router` or `/smart-router status` | The roster's path and state; the selection and its thinking level; the session's scope and what set it, under a version 2 roster or whenever `smart-router/auto` refuses the scope; every role's models on this host with `ok` or the reason they cannot route, and catalog prices; the accounts cooling and the local models held as unreachable; account bindings, checked in the session's scope, and auth sources; a version 1 roster's routing table and fallbacks, or a version 2 roster's levels and fallback chain in each scope, its classifier and the source of each of Jev's prompts; the last decision, and whether it went to a fallback chain's model; the terms of the run that decision belongs to, kept from that run's choice however many requests it has made: a planned run's demand with every guard that applied, or a run without a prompt's need and level, and each candidate's expected cost, or why the cost was unknown; none for a tagged run or while a model picked by hand is selected ([The footer and status](#the-footer-and-status)); the thinking effort the latest request carried and why ([Thinking effort](#thinking-effort)); what can still leave the machine, a model picked by hand first and then the classifier when `smart-router/auto` may ask it; and a warning for any fallback that would move a run onto Codex's API from another one. |
-| `/smart-router history [n]` | The last `n` routing decisions (10 by default, at most 50), with reason codes, and on a version 2 run's first request the footer's words: its scope, the level it needs, the model that took it, what decided the level and what the cost rule compared. Model ids and codes only, never prompt text. |
-| `/smart-router scope [work\|personal\|status]` | The session's scope and what set it: `latch`, `entry`, `directory` or `default`. `work` records work scope at once; `personal` asks first in work scope, and is refused under `PI_SMART_ROUTER_SCOPE=work`. Neither changes the selection. |
-| `/smart-router was low\|medium\|high\|super` | Record that the run in flight, when it holds a level, or else the run of the latest record, should have gone to that level. Nothing is sent again. |
-| `/smart-router check` | Read the roster and its prompt files again and read them back: what each selection and scope routes to, in order, the demand and switching settings, where each of Jev's prompts comes from, and the settings accepted and ignored; or the first error, with its place. It selects, records and sends nothing. [Checking a roster](#checking-a-roster). |
-| `/smart-router reload` | Read the roster, its prompt files and Multi-Pass's labels again now, and register both models again if their limits changed. |
+#### Supply-chain: artifact pins, offline cache, and audit posture
 
-## Interactions with other extensions
+**Digest pinning (SP-259, [#147](https://github.com/beettlle/pi-smart-router/issues/147)).** The embedder verifies cached ONNX artifacts against SHA-256 pins before they are used. Pins live in [`config/onnx-artifact-pins.json`](config/onnx-artifact-pins.json) (`pins[modelId][cacheRelativePath] = sha256`; digests are the HuggingFace LFS oids for the default quantized artifacts). Pin mode is controlled by `SMART_ROUTER_ONNX_PIN_MODE`:
 
-- **pi-cache-optimizer** works through the routing registry, as described above.
-- **pi-openai-codex-compat** still wraps routed `openai-codex` requests, but whatever it keys on the
-  *selected* model does not apply to them: its request options, its Codex tool surface and its remote
-  compaction. On a branch with a native Codex compaction checkpoint it switches the selection back
-  to Codex, and the router leaves it there: the session is then on Codex. Start local work outside
-  such a branch. Hera's `openai-codex-2` never uses codex-compat.
-- **goal-x**: continuations route like any
-  [run that starts without a prompt](#runs-without-a-prompt), and they get cooldowns and fallbacks.
-  The default auditor routes through the session, on the selection it inherits; a configured auditor
-  bypasses the router, so leave it unset in private work. Leave `auditorProjectResources` and
-  `projectResources` off: each loads a second router into every audit. The default auditor routes in
-  the session's scope too, one an entry set included; a configured auditor bypasses work scope as it
-  bypasses the router ([What work scope does not cover](#what-work-scope-does-not-cover)).
-- **pi-subagents**: foreground children inherit the selection but load the router only when it is
-  registered for children, as nix-config's integration is meant to do; otherwise a child on
-  `smart-router/*` fails with "model not found". Give children explicit models where that
-  registration is absent. Children start with no entries, so a scope that only an entry set does not
-  reach them; the latch and the work directories do, in a child that loads the router.
-- **Multi-Pass**: its subscription-pool failover keys on the selected provider, so routed requests
-  lose it; a role's next candidates and version 1's `routing.fallback` replace it. In a project
-  whose `.pi/multi-pass.json` sets `allowedSubs`, list `smart-router` there, or Multi-Pass switches
-  away from it, and the router does not switch back.
-- **pi-flag** reads the declared limits, which are real and recomputed at each session start.
-- **pi-idle-check and hashline** key per-model settings on `smart-router/*`; configure them for those
-  ids as you would for the models behind them. pi-idle-check's resend of a message keeps the level
-  its tag or its demand gave it.
-- **pi-warden** aggregates statistics under the virtual id. Its judge is independent of the router.
-- **pi-btw** starts a runtime of its own without the router and probably refuses under
-  `smart-router/*`.
+| Mode | Behavior |
+|------|----------|
+| `off` (default) | No verification — first run downloads unpinned (local dogfood preserved). |
+| `verify` | Configured pins are verified after load; models without pins still download unpinned. |
+| `enforce` | CI/prod: pins are **required** for the loaded model — missing pin file, missing pins for the model, missing cached artifact, or any digest mismatch all fail closed. |
 
-Other things to know:
+Override the pin file location with `SMART_ROUTER_ONNX_PIN_FILE`. Verification runs **after** the transformers.js pipeline loads but **before** the embedder is returned, so even a first-run anonymous download is checked against configured pins — tampered or unexpected bytes fail closed and the session is never usable. Anonymous fetch does not silently bypass pins when they are configured. When upgrading model revisions, re-fetch digests from the HuggingFace API out-of-band and update the pin file; never pin a digest you have not verified.
 
-- Pi does not warm prompt caches for routed requests.
-- `compaction.modelOverrides` must name `smart-router/auto` or `smart-router/local` to apply: Pi
-  looks token settings up under the selection.
-- Cycling through scoped models may show stale limits for the router's models until the next
-  session start.
-- If Pi starts without this extension, a session resumed on `smart-router/*` falls back to the
-  physical model that answered last, or to the settings default, which is a cloud model on every
-  host.
+**Offline / air-gapped cache warm.** The artifact cache (`hydra.artifact_cache_path`, default `.pi-smart-router/models/`) is fully self-contained once warmed:
 
-## Opting out
+1. On a networked host, warm the cache with the encoder you deploy — run any routed request, or `npm run benchmark:encoder -- --cache .pi-smart-router/models/`.
+2. Enable pin mode (`verify` or `enforce`) during the warm so digest mismatches surface on the networked host, before rollout.
+3. Copy the cache directory (and `config/onnx-artifact-pins.json` when pinning) to the offline host and point `hydra.artifact_cache_path` at the copy.
+4. Defense in depth: embedders can set `env.allowRemoteModels = false` (from `@huggingface/transformers`) before routing to forbid any network fetch, so no anonymous download path exists in production.
 
-- **Per run:** choose another model with `/model`. It stays selected, in work scope too.
-- **Per session:** `/smart-router scope personal` moves a work session to personal scope after
-  confirmation, except under the latch.
-- **Entirely:** stop loading the extension. Because a resumed session on `smart-router/*` would then
-  fall back to a cloud model, a launcher that leaves the router out should register two refusing
-  models with the same ids instead. nix-config's integration, which is to be written there and is
-  not part of this repository, is meant to do that when `NIX_MANAGED_PI_SMART_ROUTER` is set to
-  any non-blank value other than `on`, `1`, `true` or `yes`, and when the router fails to load.
+**`npm audit` posture for the transformers chain.** The audit baseline includes high-severity advisories in `@huggingface/transformers` → `onnxruntime-node` → `adm-zip` ([GHSA-xcpc-8h2w-3j85](https://github.com/advisories/GHSA-xcpc-8h2w-3j85) — crafted ZIP triggers a 4GB memory allocation) and `sharp` (libvips CVEs), both **with no upstream fix available**. Accepted-risk rationale:
+
+- Model bytes in the pinned production path come only from the operator-controlled local cache, verified by SHA-256 — the vulnerable archive-decompression path is not exposed to untrusted input there.
+- Inference runs locally with no gradients and no untrusted deserialization; untrusted bytes enter only on first cache warm, over TLS from the HuggingFace hub, and (with pin mode on) are digest-checked before use.
+
+**Monitoring policy:** run `npm audit` at each release and record the baseline. A *new* high-severity advisory in the transformers/onnxruntime chain requires a documented exception with rationale (release notes or a linked issue) — never silently dismiss; exceptions without rationale are release blockers.
+
+## Architecture
+
+### Three execution tiers
+
+| Tier | Catalog Name | Purpose | Example |
+|------|-------------|---------|---------|
+| Local | `zero-tier` | Free on-device inference for trivial tasks | Gemma via LM Studio |
+| Cheap Cloud | `economical-cloud` | Budget API models for routine work | Claude Haiku |
+| Frontier Cloud | `frontier-cloud` | Top-tier models for complex reasoning | Claude Sonnet |
+
+### Pi extension
+
+The pi integration path (npm install or project-local clone):
+
+- Registers provider **`smart-router`** with model **`auto`**
+- Implements **`streamSimple`** — runs the pipeline, resolves the target in `ModelRegistry`, delegates to the built-in streaming API for that provider
+- Wires lifecycle hooks via `router.register()` for session state:
+
+| Event | Purpose |
+|-------|---------|
+| `session_compact` / `session_before_compact` | Breaks session pin on compaction (via `LifecycleHookState`) |
+| `model_select` | Records user-forced model overrides when `source === "set"` |
+| `session_start` | Restores fleet mode from session entries |
+
+Conversation context for routing is read from the stream delegation path (`buildRoutingRequest`), not from a library `context` hook. Library embedders supply `messages` / `prompt_text` when calling `dispatch.dispatch()`.
+
+### Session pinning
+
+Sessions pin to the first routed model to preserve provider-side prompt prefix caching. Pins break only on:
+
+- Session compaction
+- User model override (`/model` in pi)
+- Loop escalation (repeated identical tool failures)
+- Cache-warmup economics threshold
+
+Sub-routing within a pin is allowed: small `tool_result` turns may use an economical model on the same provider without breaking the pin.
+
+### Gateway resilience
+
+The `GatewayDispatch` layer wraps the pipeline with:
+
+- **Circuit breaker** — Per-model, tracks consecutive 5xx/network errors (CLOSED → OPEN → HALF_OPEN). 4xx and safety errors do not trip the breaker.
+- **Failover chains** — On open circuit, routes to same-tier alternative via inverse-cost weighted selection.
+- **Rate limiting** — Per-operator-key token bucket with `429 + Retry-After` responses.
+
+### Troubleshooting
+
+#### Gemini `thought_signature` 400 errors
+
+If Gemini returns **400 INVALID_ARGUMENT** mentioning `thought_signature`, the router treats this as a **protocol validation error** (incomplete tool-call replay), not provider unavailability — it is never classified as an infrastructure failure and never trips the circuit breaker. If the error survives repair and the tool-history guard, the router fails over **once** to a non-Google fleet model automatically (telemetry `reason_code: gemini_replay_incompatible`, distinct from infra failover) so the agent loop continues; only when no non-Google candidate exists does it surface a terminal error with actionable guidance.
+
+See [Google's thought signatures documentation](https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures).
+
+**Primary path — silent repair and reroute (SP-127/128, SP-231/232):** in the common cross-provider case (tool-heavy turns on OpenAI/Anthropic/GLM/Cursor, then a Gemini selection) you do **not** need `/new` or manual model switching. Before every Google-target delegation, smart-router repairs tool-call replay state for **any** prior provider: unsigned tool calls receive the Google-accepted skip sentinel, captured signatures are preserved, and assistant identity aligns so pi-ai replays the turns without a 400. When history carries replay state repair cannot make Google-safe, the tool-history guard silently reroutes to a non-Google model instead (`reason_code: gemini_tool_history_excluded`) — see below.
+
+**Guard fail-safe (SP-129, expanded SP-232):** sessions with **unrepairable** replay state exclude Gemini from routing unless the operator sets `force_model_id` via `/model`. Unrepairable means: Google-origin turns with redacted thinking or captured signatures (SP-129), and — after SP-232 — **cross-provider** turns whose state repair preserves but Google rejects, such as foreign provider signatures (Claude signed thinking, signed text, or signed tool calls) or redacted thinking from any origin replayed toward a Google target. Unsigned cross-provider tool calls alone are repairable and stay routable to Gemini.
+
+**Empty fleet fail-safe (SP-084):** when the guard filters every model in the scoped fleet (e.g. Google/Gemini-only dogfood configs with unrepairable replay risk), the router throws an actionable error instead of delegating with `selected_model_id: unknown`. Add a non-Google model such as `openai/gpt-4o-mini` or `cursor/auto` to the fleet, or pin `/model` to force a specific model.
+
+**Residual path — one-shot non-Google failover (SP-233):** when a `thought_signature` 400 still reaches the stream (repair could not make the session replay state Google-safe), smart-router selects at most one non-Google fleet member and continues the stream with it. This is protocol-affinity failover, not infra failover: it is not recorded as a provider outage, does not trip the circuit breaker, and never retries Gemini↔Gemini for this error. If the scoped fleet has no non-Google model, the router fails fast with terminal guidance instead of looping silently.
+
+**If you still see a `thought_signature` error:**
+
+1. Add a non-Google model (e.g. `openai/gpt-4o-mini` or `cursor/auto`) to the scoped fleet so the residual failover can reroute automatically — or switch manually with `/model openai/gpt-4o-mini` for that session.
+2. Start a fresh session with `/new` in pi (clears unrepairable history) — last resort, rarely needed outside Google-only fleets or residual edge cases.
+3. Upstream: [pi#6342](https://github.com/earendil-works/pi/issues/6342) tracks pi preserving thought signatures in session replay; smart-router repair covers the common cross-model routing case without waiting on that fix.
+
+Related: [pi-smart-router#37](https://github.com/beettlle/pi-smart-router/issues/37), [pi-smart-router#38](https://github.com/beettlle/pi-smart-router/issues/38), [pi-smart-router#40](https://github.com/beettlle/pi-smart-router/issues/40), [pi-smart-router#41](https://github.com/beettlle/pi-smart-router/issues/41), [pi-smart-router#85](https://github.com/beettlle/pi-smart-router/issues/85), [pi-smart-router#158](https://github.com/beettlle/pi-smart-router/issues/158), [pi-smart-router#159](https://github.com/beettlle/pi-smart-router/issues/159).
+
+### Explain endpoint (library API)
+
+The explain handler runs the identical pipeline but returns the `RoutingDecision` without dispatching upstream inference — guaranteeing bit-for-bit decision equivalence with the live path. Useful for debugging, operator trust, and shadow runs. Exposed via the library API (`src/api/explain/router-explain.ts`); HTTP/CLI wiring is embedder-specific.
+
+## API
+
+### Public exports
+
+```typescript
+import {
+  createRouter,
+  createRouterFromFleet,
+  createPiRouterMiddleware,
+  LifecycleHookState,
+  type RoutingDecision,
+  type ModelProfile,
+  type PiRouterMiddleware,
+  type PiExtensionHooks,
+  type RouterHandle,
+} from 'pi-smart-router';
+```
+
+`createPiRouterMiddleware()` is exported for advanced embedders that need a standalone lifecycle hook registrar. Most callers should use `createRouter()` / `createRouterFromFleet()` and call `register()` on the returned handle.
+
+### `RoutingDecision`
+
+Every routing decision includes:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `selected_model_id` | `string` | Fleet model ID chosen |
+| `tier` | `Tier` | `zero-tier`, `economical-cloud`, or `frontier-cloud` |
+| `stage` | `string` | Pipeline stage that decided (triage, session_pin, local_zero, etc.) |
+| `reason_code` | `string` | Machine-readable reason |
+| `candidates` | `string[]` | Models considered before selection |
+| `estimated_cost_usd` | `number` | Per-request cost estimate |
+| `routing_latency_ms` | `number` | Time spent in the routing pipeline |
 
 ## Development
 
-```sh
-npm install --ignore-scripts    # the pinned devDependencies; .npmrc also sets ignore-scripts
-npm run check                   # tsc, the unit suites, the package surface
-npm run check:sandbox           # the same, with the behaviour suite, under sandbox-exec (macOS)
+```bash
+git clone https://github.com/beettlle/pi-smart-router.git
+cd pi-smart-router
+npm install
+npm run build
+npm run verify:ci
 ```
 
-- Never use `npx`, `bunx` or global installs.
-- The tests run offline in an isolated root, with an environment built from an allow-list and a
-  tripwire that refuses network and child-process use.
-- The behaviour suite runs Pi 1.5's own runtime from npm with faux providers and a fake classifier,
-  registered through pi-ai's provider `classifiers` hook, so no test asks Jev or any other real
-  model. It runs only sandboxed: under `npm run check:sandbox`, or in the offline Nix build.
-  `npm run check` leaves it out and says so.
-- `src/check-cli.ts` is the standalone roster checker. It is not part of the extension, and it and
-  what it imports stay free of Pi's packages; `test/check.test.ts` walks its imports.
-- A source scan (`test/scan.test.ts`) holds `index.ts` and `src/` to the runtime rules, comments
-  included: an import allow-list, no whole-history session reads, no dynamic code, no `fetch(` or
-  `WebSocket`, and no timers (`setTimeout`, `setInterval`, `setImmediate`, `AbortSignal.timeout`).
-- `scripts/` holds development scripts, which never run in a session and are not shipped:
-  `vendor-drift.mjs` compares the vendored upstream files with an upstream clone, and
-  `review-demand.ts` is the review script ([Records and training](#records-and-training)), which
-  reads only the session files it is given.
-- Never run Pi's own test suites on the host, and never start a real Pi session from a test.
-- [AGENTS.md](AGENTS.md) holds the rules for coding agents.
+Contributors must run `npm run build` before publishing or consuming the library API from `dist/`. The pi extension uses TypeScript source directly (via pi's jiti loader) and does not require a local build for clone-based dogfooding.
+
+### Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `npm run build` | Compile library to `dist/` (`tsc --project tsconfig.build.json`) |
+| `npm run release:check` | Pre-release gate: `verify:ci` + consumer pack + Tier 0 functional smoke |
+| `npm run release:functional-smoke` | Tier 0 functional smoke: calibration verify (`--skip-embed`), benchmark profiles, release gate assertions |
+| `npm run release:consumer-pack` | Pack tarball and verify production dependencies resolve (catches missing runtime deps) |
+| `npm run verify:ci` | Full CI parity: build, typecheck, lint, test, coverage (baseline PR gate; see [PR and pre-release quality gate set](#pr-and-pre-release-quality-gate-set)) |
+| `npm run typecheck` | TypeScript strict mode check (`tsc --noEmit`) |
+| `npm test` | Run test suite (`vitest run`) |
+| `npm run coverage:check` | Tests with line-coverage thresholds (src + extension, 80% floor — see [docs/extension-package-boundary.md](docs/extension-package-boundary.md#extension-coverage-gate-144)) |
+| `npm run lint` | ESLint + fleet catalog validation |
+| `npm run routing:bootstrap-centroids` | Regenerate `config/routing-centroids.json` from cluster catalog |
+| `npm run routing:calibration-aggregate` | Aggregate community telemetry for calibration |
+| `npm run routing:train-calibration` | Train routing calibration artifact bundle |
+| `npm run routing:train-p-success` | Train standalone `config/p-success-weights.json` (synthetic fixture by default) |
+| `npm run routing:verify-calibration` | Verify calibration bundle against benchmark prompts |
+| `npm run routing:calibration-dry-run` | Pack-fed isotonic dry-run: holdout ECE on label packs (CI fixtures by default); optional `--include-excluded-in-fit` |
+| `npm run routing:ingest-swe-gym` | Convert SWE-Gym verifier-style JSONL → privacy-safe label pack |
+| `npm run routing:ingest-fc-rewardbench` | Convert FC-RewardBench JSONL → privacy-safe label pack |
+| `npm run routing:ingest-twinrouterbench-weak` | Convert TwinRouterBench weak tier labels → pack (prefer `ci-subset.json`; exclude from ECE) |
+| `npm run routing:ingest-benchmarks` | Regenerate `config/benchmark-profiles.json` from leaderboard fixtures |
+| `npm run routing:verify-benchmark-profiles` | CI smoke: assert checked-in profiles match fixture ingest |
+| `npm run routing:eval-replay` | Counterfactual replay on eval trace fixtures |
+| `npm run routing:eval-harness` | Three-track eval harness (capability, cost, continuity) on fixture traces |
+| `npm run routing:eval-harness:smoke` | Harness summary JSON only (CI smoke; no network) |
+| `npm run routing:eval-harness:corpus-smoke` | Harness summary on TwinRouterBench CI corpus subset (`tests/eval/corpus/twinrouterbench`) |
+| `npm run routing:assert-release-gates:corpus-report` | Soft-feed: assert corpus vs absolute gates with `--report-only` (exit 0; does not gate releases) |
+| `npm run routing:analyze-overrouting` | TwinRouterBench over-routing breakdown by stage / reason_code / tiers (#112; see `spine-tasks/_authoring/release-v0.11.0/over-routing-analysis.md`) |
+| `npm run routing:twinrouterbench:full-track` | Local/nightly: pin fetch → full convert (no `--limit`) → harness + gates `--report-only` (gitignored cache) |
+| `npm run routing:twinrouterbench:full-ingest` | Convert cached `question_bank.jsonl` → full static-track JSON (no `--limit`) |
+| `npm run routing:twinrouterbench:full-report` | Harness summary + gates `--report-only` on cached full track |
+| `npm run routing:ingest-twinrouterbench` | Convert TwinRouterBench `question_bank.jsonl` → CI subset / full corpus JSON |
+| `npm run routing:ingest-llmrouterbench` | Convert LLMRouterBench BaselineRecord JSONL → static-track subset JSON |
+| `npm run routing:llmrouterbench-regret` | Offline regret / CS report on vendored LLMRouterBench subset (optional; not PR CI) |
+| `npm run routing:community-bench` | Privacy-safe community bench report (Track A TwinRouterBench + optional Track B/C) |
+| `npm run benchmark:encoder` | Compare MiniLM vs Granite encoder latency on held-out agent turns |
+
+### Offline eval harness (agent-native routing)
+
+The eval harness scores routing decisions on **fixture traces** — multi-turn agent sessions with step-level `prefix_hash` identifiers and frozen model catalog metadata. Fixtures live under `tests/eval/fixtures/` (native eval trace JSON) and `tests/eval/fixtures/twinrouterbench/` (TwinRouterBench-compatible static track format adapted at load time).
+
+**Frozen catalog rule:** every published QR/CS number must cite `catalog_id` + `checkpoint_date` from the fixture's `frozen_catalog` block (see `docs/routing-roadmap.md` §5).
+
+Run locally:
+
+```bash
+# Full metrics JSON (per-fixture + aggregate track summaries)
+npm run routing:eval-harness
+
+# CI-style summary only (default fixtures under tests/eval/fixtures)
+npm run routing:eval-harness:smoke
+
+# TwinRouterBench CI corpus subset (≤150 code/tool records; offline)
+npm run routing:eval-harness:corpus-smoke
+
+# Custom fixture directory (includes TwinRouterBench static track subdirs)
+npm run routing:eval-harness -- --fixtures tests/eval/fixtures
+
+# Counterfactual replay only (SP-151)
+npm run routing:eval-replay
+
+# Full ~970-row static track (local / nightly only — do not check JSON into git)
+npm run routing:twinrouterbench:full-track
+```
+
+**CI smoke:** `.github/workflows/eval-harness-smoke.yml` runs on PRs that touch eval scripts, fixtures, **any `src/**` or `.pi/extensions/smart-router/**` change**, or the workflow. It executes `routing:eval-harness:smoke`, `routing:eval-harness:corpus-smoke`, and eval unit tests — fast, offline, no provider network calls. Job timeout stays at 10 minutes. The optional full-track nightly (`.github/workflows/twinrouterbench-full-nightly.yml`, `schedule` + `workflow_dispatch` only) is **not** on `pull_request` and must not be configured as a required status check — failures there do not gate PR CI or `release:functional-smoke`.
+
+**Calibration verify:** `.github/workflows/calibration-verify.yml` runs on PRs that touch calibration config/scripts (`config/routing-calibration.json*`, `config/p-success-weights.json`, `scripts/train-routing-calibration.ts`, `scripts/verify-routing-calibration.ts`, `scripts/lib/isotonic-calibrator.ts`, `scripts/lib/oats-centroid-refinement.ts`) **or calibration-consuming routing code** (`src/domain/routing/**`, `src/domain/pipeline/**`, `src/domain/types/**`, `src/cli/**`). It builds the library and verifies `config/routing-calibration.json.example` against benchmark prompts via `npm run routing:verify-calibration`.
+
+**TwinRouterBench static track:** import step-level router-visible prefixes with execution-verified target tiers (`track: "static"`). The adapter in `scripts/eval/twinrouterbench-adapter.ts` converts static track records into native eval fixtures for the three-track harness. See `docs/gemini-research.md` §9 for methodology context.
+
+#### TwinRouterBench CI corpus (SP-186 / SP-187 / SP-188 / SP-199)
+
+| Item | Location / command |
+|------|--------------------|
+| **Pinned upstream** | CommonstackAI/TwinRouterBench `@430acecac71141de77afd8e5e13690d236d58e93` (Apache-2.0) |
+| **CI subset** | `tests/eval/corpus/twinrouterbench/ci-subset.json` (≤150 code/tool records) |
+| **Provenance** | `tests/eval/corpus/twinrouterbench/PROVENANCE.md` |
+| **Regenerate** | `npm run routing:ingest-twinrouterbench -- --input <question_bank.jsonl> --output tests/eval/corpus/twinrouterbench/ci-subset.json --limit 150 --prefer-code-tool` |
+| **Harness smoke** | `npm run routing:eval-harness:corpus-smoke` |
+| **Gate soft-feed** | `npm run routing:assert-release-gates:corpus-report` |
+| **Over-routing breakdown** | `npm run routing:analyze-overrouting` · [v0.11.0 analysis](spine-tasks/_authoring/release-v0.11.0/over-routing-analysis.md) (#112 / #95) |
+| **Human QA protocol** | [`docs/qa/shadow-dogfood-protocol.md`](docs/qa/shadow-dogfood-protocol.md) · `npm run qa:shadow-dogfood` |
+| **Dogfood export → gates soft-feed** | `npm run qa:dogfood-soft-feed -- --export <track-b-export.json>` (dry-run, always exit 0 on gate outcome; never invents labels — #111) |
+
+**Absolute release gates stay on default fixtures.** `npm run release:functional-smoke` continues to assert `tests/eval/fixtures` against `config/release-gates.json` — do not point it at the corpus without operator review. Today the corpus subset fails `mean_over_routing_rate_max` (≈0.85 vs absolute max 0.15); that gap is intentional soft signal for the [#95](https://github.com/beettlle/pi-smart-router/issues/95) public static-track acceptance criteria alongside live dogfood traces. Use `--fixtures tests/eval/corpus/twinrouterbench` (or the corpus-report script) for #95 public-track scoring; keep absolute threshold edits out of band until operators approve. For live shadow dogfood steps and sign-off, see the [shadow dogfood protocol](docs/qa/shadow-dogfood-protocol.md).
+
+#### TwinRouterBench full static track (SP-200 / #107)
+
+First-class **local / optional nightly** path for the pinned ~970-row bank. **Do not check the full JSON into git.**
+
+| Item | Location / command |
+|------|--------------------|
+| **One-shot** | `npm run routing:twinrouterbench:full-track` |
+| **Cache (gitignored)** | `.pi-smart-router/eval-cache/twinrouterbench/` (override with `TRB_CACHE_DIR`) |
+| **Steps** | pin fetch → `routing:ingest-twinrouterbench` **without** `--limit` → harness `--summary-only` + gates `--report-only` |
+| **Nightly** | `.github/workflows/twinrouterbench-full-nightly.yml` (`schedule` + `workflow_dispatch`) — advisory only |
+| **Provenance** | `tests/eval/corpus/twinrouterbench/PROVENANCE.md` |
+
+PR corpus smoke remains the vendored ≤150 subset. Absolute `config/release-gates.json` thresholds and `release:functional-smoke` stay fixture-backed.
+
+**[#95 dual-gate protocol](https://github.com/beettlle/pi-smart-router/issues/95):** (1) live shadow dogfood (`docs/qa/shadow-dogfood-protocol.md` · `npm run qa:shadow-dogfood`, plus `npm run qa:dogfood-soft-feed` to attach labeled dogfood exports to the gates as a dry-run) and (2) public static-track soft-feed (CI subset report, or full-track report above). Neither path edits absolute release thresholds.
+
+**Deferred:** RouterBench classic (outcome-matrix) smoke is out of scope for SP-188; prefer TwinRouterBench static track + dogfood for #95.
+
+#### LLMRouterBench offline regret (SP-192 / SP-193)
+
+Optional local / nightly report on the **pinned code/tool subset** — not part of PR CI (no full HF corpus download).
+
+| Item | Location / command |
+|------|--------------------|
+| **Pinned upstream** | HF `NPULH/LLMRouterBench` `@0e5af1b84bf73437a01a1849c0f1d2468baa93fc` + git schema `@c77cb0506949d8f959e97967d2fefca0e8ff1b05` (MIT) |
+| **CI subset** | `tests/eval/corpus/llmrouterbench/ci-subset.json` (≤20 synthetic offline records) |
+| **Provenance / refresh** | `tests/eval/corpus/llmrouterbench/PROVENANCE.md` (quarterly pin refresh; re-run report after catalog/subset changes) |
+| **Regenerate subset** | `npm run routing:ingest-llmrouterbench -- --input <jsonl> --output tests/eval/corpus/llmrouterbench/ci-subset.json --limit 20 --prefer-code-tool` |
+| **Regret / CS report** | `npm run routing:llmrouterbench-regret` |
+| **Community Track C** | `npm run routing:community-bench -- --llmrouterbench` (same vendored subset; optional) |
+
+PR CI continues to smoke TwinRouterBench only (`routing:eval-harness:corpus-smoke`). Absolute `config/release-gates.json` thresholds are unchanged. See [Contribute a community bench report](#contribute-a-community-bench-report) for Track A + optional Track C sharing.
+
+#### Contribute a community bench report
+
+Share a privacy-safe setup fingerprint + Track A (TwinRouterBench) gate result with maintainers. No SMTP auto-send and no upload server — you copy artifacts yourself.
+
+**Maintainer contact** (must match the CLI footer constant `COMMUNITY_BENCH_MAINTAINER_CONTACT`):
+
+`https://github.com/beettlle/pi-smart-router/issues/new?labels=community-bench`
+
+```bash
+# Track A offline smoke (vendored TwinRouterBench corpus — no network)
+npm run routing:community-bench -- \
+  --output /tmp/community-bench-report.json \
+  --email-file /tmp/community-bench-report.txt
+
+# Optional Track B: labeled dogfood export → harness gates (skips if incomplete — never invents labels)
+npm run routing:community-bench -- \
+  --dogfood-export tests/eval/dogfood-track-b/synthetic-labeled-export.json \
+  --output /tmp/community-bench-report.json \
+  --email-file /tmp/community-bench-report.txt
+
+# Optional Track C: offline LLMRouterBench regret/CS on the vendored subset (no full HF download)
+npm run routing:community-bench -- \
+  --llmrouterbench \
+  --output /tmp/community-bench-report.json \
+  --email-file /tmp/community-bench-report.txt
+```
+
+**How to send:**
+
+1. **Email `.txt`** — open `/tmp/community-bench-report.txt` (or your `--email-file` path). It includes a `Subject:` line, privacy blurb, fingerprint, Track A PASS/FAIL, and optional Track B/C metrics. Paste into your mail client; attach `community-bench-report.json` if useful. Do **not** expect the CLI to send mail.
+2. **GitHub issue** — open the [maintainer contact](https://github.com/beettlle/pi-smart-router/issues/new?labels=community-bench) URL, or run with `--print-issue-body` and paste stdout into a new issue. Issues list: https://github.com/beettlle/pi-smart-router/issues
+
+**Tracks:**
+
+| Track | Corpus | When |
+|-------|--------|------|
+| **A (required)** | [TwinRouterBench CI corpus](#twinrouterbench-ci-corpus-sp-186--sp-187--sp-188) (`tests/eval/corpus/twinrouterbench`) | Always |
+| **B (optional)** | Labeled dogfood export (`--dogfood-export PATH`) | Runs when adapter + export present with required outcome labels (`success_label`, `min_tier`, `min_model_id`); skips with an explicit reason when incomplete — never invents labels. Example: `tests/eval/dogfood-track-b/synthetic-labeled-export.json` ([#111](https://github.com/beettlle/pi-smart-router/issues/111)) |
+| **C (optional)** | [LLMRouterBench offline subset](#llmrouterbench-offline-regret-sp-192--sp-193) (`tests/eval/corpus/llmrouterbench`) | `--llmrouterbench` or `--full`; offline only |
+
+PR CI does **not** download full TwinRouterBench / LLMRouterBench corpora. Absolute gate thresholds in `config/release-gates.json` are unchanged by this CLI.
+
+Sample fixtures under `tests/eval/fixtures/twinrouterbench/` remain the small adapter unit-test inputs and are unchanged by corpus ingest.
+
+Capability scores in `config/benchmark-profiles.json` are grounded from public leaderboard snapshots under `tests/fixtures/benchmark-leaderboards/` (and optional **recorded** live snapshots under `tests/fixtures/benchmark-leaderboards/recorded/`). Each artifact records provenance (`source_urls`, `scrape_date`, `catalog_freeze_date`) in its header.
+
+**Fleet ID aliases (SP-174):** live pi/Cursor scoped-fleet model IDs often differ from leaderboard `model_id` strings. The artifact’s optional `aliases` map sends those fleet IDs to an existing grounded row (never invents scores). `mapPiModelToProfile` sets `capability_source` to `benchmark` when a direct row or alias hits, otherwise `pattern_default`. Operators can also call `getCapabilitySource(modelId)` / `resolveBenchmarkModelId(modelId)`.
+
+**Add a new fleet ID after ingest:**
+
+1. Ensure the canonical model has fixture scores (edit `tests/fixtures/benchmark-leaderboards/*.json` if needed).
+2. Run `npm run routing:ingest-benchmarks` (and commit the regenerated `config/benchmark-profiles.json`).
+3. Add `"your-fleet-id": "canonical-model_id"` under `aliases` in `config/benchmark-profiles.json` (target must already appear in `models[].model_id`).
+4. Re-run ingest anytime — the CLI **preserves** existing `aliases` from the output file. Seed defaults live in `DEFAULT_FLEET_BENCHMARK_ALIASES` when no prior artifact exists.
+5. Confirm with `npm run routing:verify-benchmark-profiles` and a mapper unit test that `capability_source === 'benchmark'` for the fleet id.
+
+**Operator refresh command (SP-179 / SP-180):**
+
+| Mode | Command | Network? | When to use |
+|------|---------|----------|-------------|
+| **Fixtures (default)** | `npm run routing:ingest-benchmarks` | No | Local edits, CI, PR smoke |
+| **Recorded replay** | `npm run routing:ingest-benchmarks -- --recorded` | No | Replay last successful live snapshots offline |
+| **Live + record** | `npm run routing:ingest-benchmarks -- --live` | Yes | Operator refresh; writes `tests/fixtures/benchmark-leaderboards/recorded/` then regenerates profiles |
+
+Optional flags: `--catalog-freeze-date YYYY-MM-DD`, `--scrape-date YYYY-MM-DD`, `--record-dir DIR`, `--live-url BENCHMARK=URL`, `--output PATH`. See `npm run routing:ingest-benchmarks -- --help`.
+
+**Live sources (per benchmark):** each `--live` run resolves independently — live adapter → recorded → checked-in fixtures. One failing source never invents scores or blocks siblings. Logs: `ingest-benchmark-profiles: <id> source=live|recorded|fixture (…)`.
+
+| Benchmark | Default live fetch | Score field | Fallback |
+|-----------|-------------------|-------------|----------|
+| `swebench_verified` | Native: [SWE-bench `leaderboards.json`](https://raw.githubusercontent.com/SWE-bench/swe-bench.github.io/master/data/leaderboards.json) (Verified board) | `resolved` → `score` (0–100) | recorded → fixtures |
+| `livecodebench` | Native: [LCB `performances_generation.json`](https://raw.githubusercontent.com/LiveCodeBench/livecodebench.github.io/main/src/mocks/performances_generation.json) | aggregate `pass@1` | recorded → fixtures |
+| `bfcl` | Native: [Gorilla `data_overall.csv`](https://raw.githubusercontent.com/ShishirPatil/gorilla/gh-pages/data_overall.csv) | `Overall Acc` | recorded → fixtures |
+| `terminal_bench` | **No free stable JSON** (tbench.ai is HTML; HF leaderboard is submissions-only; paid Parse API is **not** the default). Pass `--live-url terminal_bench=URL` at a fixture-shaped mirror | `score` (0–100) | recorded → fixtures |
+
+**Terminal-Bench operator mirror schema** (SP-185 / #104):
+
+```json
+{
+  "benchmark": "terminal_bench",
+  "source_url": "https://www.tbench.ai/leaderboard",
+  "scrape_date": "YYYY-MM-DD",
+  "entries": [{ "model_id": "claude-opus-4-5", "score": 72.5 }]
+}
+```
+
+Example: `npm run routing:ingest-benchmarks -- --live --live-url terminal_bench=https://example.com/tb-mirror.json`. HTML bodies fail fast; without `--live-url`, TB uses recorded/fixtures. `release:refresh-benchmarks` uses the same `--live` path (fixture fallback on total failure).
+
+**Cadence (release-tied, not calendar):**
+
+| Trigger | When | Behavior |
+|---------|------|----------|
+| **Pre-tag release gate** | `npm run release:check` → `release:refresh-benchmarks` | Attempt **live** ingest; on failure fall back to fixtures; **fail if** `config/benchmark-profiles.json` or recorded snapshots are dirty — commit on `main`, re-run, then `npm version` / tag |
+| **Manual dispatch** | Actions → *Benchmark Profile Refresh* → `workflow_dispatch` (`use_live` default `true`) | Same live-or-fixture path; opens a bot PR when scores change; set `use_live=false` for fixtures-only |
+| **PR smoke** | PRs touching fixtures / ingest / artifact / workflow | **Fixtures only** — `npm run routing:verify-benchmark-profiles` (offline, no network) |
+
+There is **no monthly cron**. Refresh runs when you ship so each release packages the latest grounded scores. Tag-triggered Release publish uses `--ignore-scripts` and does not re-fetch (profiles are already frozen in the tag). Offline skip: `SMART_ROUTER_SKIP_LIVE_BENCHMARK_REFRESH=1 npm run release:check`.
+
+**Operator policy:**
+
+1. **PR smoke** — fixture-only verify so PRs never require live network.
+2. **Every release** — live with fixture fallback via `release:check`; commit any profile/recorded diffs on `main` before tagging.
+3. **Ad-hoc** — Actions dispatch or local `--live` when refreshing between releases.
+4. **Manual local updates** — prefer fixtures or `--recorded` for offline work; use `--live` when refreshing from public leaderboard JSON endpoints.
+
+Verify after any regenerate:
+
+```bash
+npm run routing:ingest-benchmarks
+# or: npm run routing:ingest-benchmarks -- --live
+# or: npm run routing:ingest-benchmarks -- --recorded
+npm run routing:verify-benchmark-profiles
+```
+
+### Releasing
+
+Tag-triggered publish via GitHub Actions (requires `NPMSECRET` repository secret). pi.dev gallery listing syncs automatically from npm (`pi-package` keyword); no separate submit step.
+
+#### PR and pre-release quality gate set
+
+Operators should treat the following as the full gate set before merging routing changes and before tagging a release ([#135](https://github.com/beettlle/pi-smart-router/issues/135)):
+
+| Gate | Workflow / command | Runs when |
+|------|--------------------|-----------|
+| Build / typecheck / lint / coverage | `.github/workflows/ci.yml` (`npm run verify:ci`) | Every PR and push to `main` |
+| Eval harness smoke (offline) | `.github/workflows/eval-harness-smoke.yml` | PRs touching `scripts/eval/**`, `tests/eval/**`, **`src/**`**, **`.pi/extensions/smart-router/**`**, `package.json`, or the workflow |
+| Calibration verify | `.github/workflows/calibration-verify.yml` | PRs touching calibration config/scripts or calibration-consuming routing code (`src/domain/routing/**`, `src/domain/pipeline/**`, `src/domain/types/**`, `src/cli/**`) |
+| Benchmark profile smoke | `.github/workflows/benchmark-profile-refresh.yml` (`routing:verify-benchmark-profiles`) | PRs touching fixtures / ingest / profiles |
+| Pre-release functional smoke | `npm run release:check` (Tier 0: calibration `--skip-embed` + benchmark profiles + release-gate assertions) | Operator-run before `npm version` / tag |
+| TwinRouterBench full track | `.github/workflows/twinrouterbench-full-nightly.yml` | Nightly / manual only — **never** a required PR check |
+
+Required-check configuration for branch protection is a human-operator repo-settings decision; the workflow path filters above guarantee the jobs **run** on routing code edits regardless of which subset the operator marks required.
+
+**Scope composition:** use `/skill:router-release-operator` for themed release planning (not open-ended backlog cycles). **Patch** = docs + bugfixes only; **minor** = new capability (1–3 related issues under one theme). Budgets and audit rules: [`skills/router-release-operator/references/release-profiles.md`](skills/router-release-operator/references/release-profiles.md).
+
+**Tier 0 functional smoke** (`release:functional-smoke`) runs before tag publish and chains:
+
+1. `routing:verify-calibration --skip-embed` — artifact shape + triage benchmark gates (no ONNX embedding)
+2. `routing:verify-benchmark-profiles` — checked-in capability profiles match fixture ingest
+3. `assert-release-gates --fixtures tests/eval/fixtures --baseline-version 0.6.0` — eval harness aggregate metrics vs `config/release-gates.json` and semver baseline regression vs `tests/eval/baselines/v0.6.0.json`
+
+The TwinRouterBench CI corpus is **not** part of Tier 0: use `routing:eval-harness:corpus-smoke` / `routing:assert-release-gates:corpus-report` for offline public-track soft-feed ([#95](https://github.com/beettlle/pi-smart-router/issues/95)). Absolute thresholds in `config/release-gates.json` stay fixture-backed until operators approve a change.
+
+`release:check` runs the full pre-release path: **live benchmark profile refresh** (fixture fallback; dirty-tree fail), then `verify:ci`, consumer pack verify, then Tier 0 functional smoke.
+
+**Baseline re-capture (post-tag):** after shipping a new semver (e.g. v0.7.0), freeze harness metrics for the next regression reference:
+
+```bash
+# Capture aggregate metrics from current fixtures (writes tests/eval/baselines/v0.7.0.json)
+npm run routing:capture-baseline -- --version 0.7.0
+
+# Point release gates at the new reference (config/release-gates.json + release:functional-smoke --baseline-version)
+```
+
+Commit the new baseline JSON and update `baseline_regression.reference_version` in `config/release-gates.json` plus the `--baseline-version` flag in `release:functional-smoke`. Re-run `npm run release:check` before tagging the next release.
+
+1. `npm run release:check` (live benchmark refresh → CI parity + consumer pack + Tier 0 functional smoke)
+   - If refresh rewrites profiles/recorded snapshots, **commit them on `main`** and re-run until clean
+2. `npm version 0.1.1` (creates commit + `v0.1.1` tag)
+3. `git push && git push --tags`
+4. Actions → **Release** runs pack smoke, consumer pack verify, Tier 0 functional smoke, `npm publish`, and creates a GitHub Release
+
+Re-publish a failed release: Actions → Release → Run workflow with existing tag (e.g. `v0.1.1`).
+
+Dry-run tarball contents locally:
+
+```bash
+npm run release:check
+npm pack --dry-run
+```
+
+**Post-publish smoke (manual, macOS):** CI does not run `pi install`. After publish (use the version just published; remove any path-package clone entry first if dogfooding):
+
+```bash
+pi remove ../../Documents/github/pi-smart-router   # if path dogfood was installed
+pi install npm:pi-smart-router@<published-version>
+pi --list-models | grep smart-router
+# in pi: /model smart-router/auto, /smart-router status
+```
+
+Confirm https://pi.dev/packages/pi-smart-router shows the new version (may lag npm by a few minutes).
+
+### Test suite
+
+1117 tests across 61 test files covering:
+
+- Unit tests for every pipeline stage, domain module, and infrastructure component
+- Contract tests validating routing request/decision schemas
+- Integration tests for full pipeline routing, session pinning, latency budgets, and cost baselines
+- Pi extension tests (`tests/integration/pi-extension.test.ts`) for registry → fleet → stream delegation
+- Resilience tests for circuit breaker, failover, and rate limiting
+
+## Documentation
+
+| Document | Purpose |
+|----------|---------|
+| [docs/migration-v1.md](docs/migration-v1.md) | Upgrading to 1.0: raised requirements (pi ≥ 0.85.1, Node ≥ 22.19.0), calibration artifacts, pipeline architecture notes, SemVer stability surface |
+| [docs/PRD.md](docs/PRD.md) | Product requirements, research lineage, pipeline specification |
+| [docs/constitution.md](docs/constitution.md) | Project principles and non-negotiable rules |
+| [specs/001-build-smart-router/spec.md](specs/001-build-smart-router/spec.md) | Detailed feature specification |
+| [specs/001-build-smart-router/data-model.md](specs/001-build-smart-router/data-model.md) | Entity definitions, schemas, configuration reference |
+| [specs/001-build-smart-router/quickstart.md](specs/001-build-smart-router/quickstart.md) | Setup and verification guide |
+| [config/models.yaml.example](config/models.yaml.example) | Fleet catalog template (library API) |
+| [config/routing-clusters.yaml.example](config/routing-clusters.yaml.example) | Routing cluster reference-prompt catalog (library API) |
+
+## Develop with pi-spine (agent models)
+
+This repo is developed with [pi-spine](https://github.com/beettlle/pi-spine) batches. Agent model pins live in [`.spine/spine-config.json`](.spine/spine-config.json) under `agents.*`. Use **canonical** `provider/model` ids from `pi --list-models` (not TUI labels like `glm-5.3 [zai]`). Run `spine doctor` before real-pi batches.
+
+Named profiles (`agents.profiles` + `agents.activeProfile`) and `agents.escalatePolicy` are configured in spine-config ([pi-spine#216](https://github.com/beettlle/pi-spine/issues/216) / SP-664). Live stack resolves from `activeProfile` over the base `agents` block. Hybrid cost/quality recipes are documented upstream in [pi-spine#210](https://github.com/beettlle/pi-spine/issues/210).
+
+**Sale window (through 2026-09-09 UTC+8):** plan review and supervisor use `zai/glm-5.3-flash` (Z.AI 50% promo). After the promo, revert plan to `google/gemini-flash-latest` and supervisor to `google/gemini-flash-lite-latest` if desired.
+
+### Default profile (`activeProfile: "default"`)
+
+| Role | Model | Thinking |
+|------|--------|----------|
+| Worker | `kimi-coding/k3.1-pro` | `high` |
+| Plan review | `zai/glm-5.3-flash` | `low` |
+| Code review | `kimi-coding/kimi-for-coding` | `high` |
+| Final review | `google/gemini-3.1-pro-preview` | `high` |
+| Supervisor | `zai/glm-5.3-flash` | `off` |
+
+### When to escalate (hard packets / sticky failures)
+
+Escalate when:
+
+- The same SP fails final or code review **2+** times with substantive `REVISE` (not broad `testCommand` / lane noise)
+- The worker stalls or oscillates on multi-file design
+- The packet needs deeper reasoning than the default stack delivered
+
+### Tier 1 — budget escalate
+
+Switches the worker to `zai/glm-5.3` (same list price as 5.2; plan/supervisor stay on sale Flash).
+
+```bash
+spine settings set agents.activeProfile budget
+spine batch retry <SP-ID>
+# restore:
+spine settings set agents.activeProfile default
+```
+
+### Tier 2 — hard escalate
+
+| Role | Model | Thinking |
+|------|--------|----------|
+| Worker | `anthropic/claude-opus-5-5` | `high` |
+| Plan | `google/gemini-flash-latest` | `medium` |
+| Code | `google/gemini-3.1-pro-preview` | `high` |
+| Final | `google/gemini-3.1-pro-preview` | `high` |
+
+`escalatePolicy.toProfile` is `hard`. Switch explicitly when a packet is sticky:
+
+```bash
+spine settings set agents.activeProfile hard
+spine doctor
+spine batch retry <SP-ID>
+# restore:
+spine settings set agents.activeProfile default
+```
+
+## Built with
+
+- [pi](https://pi.dev) — Coding agent harness (extension host)
+- [@earendil-works/pi-ai](https://pi.dev) — Provider streaming APIs
+- [pi-spine](https://github.com/beettlle/pi-spine) — Batch orchestration (used to build this project)
+- [stet](https://github.com/beettlle/stet) — Local code review (guardrails during development)
+- [better-sqlite3](https://github.com/WiseLibs/better-sqlite3) — Shared state store
+- [zod](https://zod.dev) — Runtime schema validation
+- [@huggingface/transformers](https://huggingface.co/docs/transformers.js) — ONNX embedding inference for HyDRA matcher
 
 ## License
 
-MIT; see [LICENSE](LICENSE). Copyright (c) 2026 beettlle and contributors, and Copyright (c) 2026
-John Wiegley for the port. The triage engine, the entropy check and the low-intensity scoring
-(`tier-features.ts`) in `src/triage/` are upstream's, taken at commit
-`54bee53d908a81260a34b94cbe124bfd61f57df7` (v1.4.0) and changed only in their import specifiers
-(`tier-features.ts` also carries a header and reads its types from `types.ts`).
-`scripts/vendor-drift.mjs` compares them with an upstream clone.
+MIT

@@ -55,6 +55,11 @@ beettlle/pi-smart-router to the virtual models of Pi 1.5. `CLAUDE.md` is a link 
   (`src/decide.ts`), so the effort a request is sent at is the one its price assumed; a change of
   effort costs that model's whole prompt cache. A role's fixed `thinking` is never changed, and the
   roster's `adaptiveReasoning` section holds upstream's off switch, floor and ceiling.
+- `README.md` is upstream's README at the upstream release the fork has merged, byte for byte, plus
+  one section, "This fork", that says how the fork differs and ends at the heading "Upstream's
+  README", as John asked on 2026-11-19. Keep that section short, and write nothing else into the
+  README. The fork's documentation is `docs/manual.md`, whose rosters and redaction tables the
+  tests hold to the code (`test/check.test.ts`, `test/redact.test.ts`).
 - Signed commits only (`git commit -S`), one logical change each, with explicit paths staged.
   Never bypass hooks, and never stash, reset or rewrite published history.
 - Pushing, tagging and creating remotes need John's explicit authorization.
