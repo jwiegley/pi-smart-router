@@ -100,12 +100,11 @@ export const ROUTING_REGISTRY_KEY = "pi.routing.registry.v1";
 
 /**
  * The scope's session entry and its environment switch, whose one value `work` puts every session
- * of the process in work scope; the session entry that records each routed run's level, and the
- * status item that shows it; and the status item that shows the thinking effort the owner loop's
- * latest request carried, and why (src/effort.ts).
+ * of the process in work scope; the session entry that records each routed run's level; and the
+ * footer's one status item, which shows the run's level, the thinking effort the owner loop's
+ * latest request carried (src/effort.ts) and the model (records.ts, footerText).
  */
 export const SCOPE_ENTRY = "smart-router.scope";
 export const ENV_SCOPE = "PI_SMART_ROUTER_SCOPE";
 export const LEVEL_ENTRY = "smart-router.level";
 export const LEVEL_KEY = "smart-router-level";
-export const EFFORT_KEY = "smart-router-effort";

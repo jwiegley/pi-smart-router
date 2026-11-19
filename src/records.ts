@@ -6,8 +6,9 @@
 // user message sits earlier in the same session, which is where a training review reads both, on
 // the host that made them.
 //
-// Also the words the footer and history use for a run's level: its scope, its level, what decided
-// it and what the cost rule compared; and the terms behind it, which /smart-router status shows.
+// Also the footer's item, a run's level, effort and model in three words; the words history uses
+// for a run's level: its scope, its level, what decided it and what the cost rule compared; and the
+// terms behind it, which /smart-router status shows.
 import type { RiskyTrigger, Signal } from "./classify.ts";
 import { LEVEL_ENTRY } from "./constants.ts";
 import type { Priced } from "./cost.ts";
@@ -307,15 +308,25 @@ function costLines(cost: CostTerms | undefined): string[] {
 }
 
 /**
- * The footer's item for a run: its scope, the level it needs, the model, and what decided the
- * level. `fallback`: whether the model is one of the scope's fallback chain, as the plan's pick was
- * unless the caller knows the model that answered. `escalated`: the run moved up for being stuck,
- * which the footer says in place of what the cost rule compared, since the cost no longer decides
- * its model.
+ * History's words for a planned run: its scope, the level it needs, the model, what decided the
+ * level and what the cost rule compared, and whether the plan's pick is one of the scope's fallback
+ * chain.
  */
-export function footerText(level: PlanLevel, modelId: string, fallback: boolean = level.fallback === true, escalated = false): string {
-  const note = escalated ? `${decidedNote(level)}; escalated` : levelNote(level);
-  return `${level.scope} ${tierLabel(level.need)} → ${modelId} (${note}${fallback ? "; fallback" : ""})`;
+export function levelText(level: PlanLevel, modelId: string): string {
+  return `${level.scope} ${tierLabel(level.need)} → ${modelId} (${levelNote(level)}${level.fallback === true ? "; fallback" : ""})`;
+}
+
+/**
+ * The footer's one item (John, 2026-11-19: "Just the model tier, the thinking level, and which
+ * model it's actually using"): the level the run needs, the thinking effort its latest request
+ * carried, and the model, as `super high → gpt-6.2-astra`. A run without a level, as on
+ * smart-router/local or under a version 1 roster, shows its effort and model, `max → GLM-5.3`;
+ * a planned run whose first request has not been routed shows its level and the model the plan
+ * picked, `super → gpt-6.2-astra`. The scope, what decided the level, what the cost rule compared
+ * and why the effort was sent are /smart-router status's and history's to say.
+ */
+export function footerText(parts: { readonly tier?: Tier | undefined; readonly effort?: string | undefined; readonly model: string }): string {
+  return [parts.tier, parts.effort, "→", parts.model].filter((part) => part !== undefined).join(" ");
 }
 
 /**
@@ -331,15 +342,4 @@ export interface NeedRun {
   /** The deep-session floor raised the level the run took (from the last prompts or the session's need) to `need`. */
   readonly floor?: true;
   readonly cost?: CostTerms;
-}
-
-/**
- * The footer's item for a run without a plan of its own: its scope, its level, the model, "run",
- * ", floor" when the deep-session floor raised the level, and what the cost rule compared
- * (costNote), or "; escalated" once the run moved up for being stuck; then "; fallback" for a model
- * of the scope's chain.
- */
-export function runFooterText(run: NeedRun, modelId: string, fallback: boolean, escalated: boolean): string {
-  const floor = run.floor === true ? ", floor" : "";
-  return `${run.scope} ${tierLabel(run.need)} → ${modelId} (run${floor}${escalated ? "; escalated" : costNote(run.cost)}${fallback ? "; fallback" : ""})`;
 }

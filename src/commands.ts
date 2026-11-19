@@ -30,7 +30,7 @@ import { firstLine, rosterNamed } from "./errors.ts";
 import type { Loaded } from "./files.ts";
 import { promptLines, promptProblem, promptUses } from "./prompts.ts";
 import type { PromptReader } from "./prompts.ts";
-import { correctionRecord, decisionLines, footerText, levelRecord, needRunLines, readLevelRecord } from "./records.ts";
+import { correctionRecord, decisionLines, levelRecord, levelText, needRunLines, readLevelRecord } from "./records.ts";
 import type { LevelRecord } from "./records.ts";
 import { clock, describeHold, resolveCandidate } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
@@ -156,13 +156,13 @@ function rosterLine(roster: Loaded<Roster>): string {
 }
 
 /**
- * A decision, and on a version 2 run's planned request, the footer's words (footerText): its scope,
+ * A decision, and on a version 2 run's planned request, its level's words (levelText): its scope,
  * the level it needs, the model that took it after the arrow, and what decided the level.
  */
 function describeEntry(entry: HistoryEntry): string {
   const trigger = entry.trigger === undefined ? "" : `, ${entry.trigger}`;
   const { level } = entry;
-  const tier = level === undefined ? "" : ` [${footerText(level, parseRef(entry.ref)?.id ?? entry.ref)}]`;
+  const tier = level === undefined ? "" : ` [${levelText(level, parseRef(entry.ref)?.id ?? entry.ref)}]`;
   return `${stamp(entry.at)} ${PROVIDER}/${entry.virtual} ${entry.reason}: ${entry.role} → ${entry.ref} (${entry.code}${trigger})${entry.foreign ? ", foreign" : ""}${tier}`;
 }
 
@@ -550,7 +550,7 @@ export async function run(host: CommandHost, ctx: ExtensionContext, args: string
     if (answer !== undefined) return answer;
   }
   if (sub === "was" && extra === undefined) {
-    // The footer shows tiers in capitals, so a tier is taken in any case.
+    // Status and the notices show tiers in capitals, so a tier is taken in any case.
     const tier = option?.toLowerCase();
     if (isTier(tier)) return was(host, ctx, tier);
   }

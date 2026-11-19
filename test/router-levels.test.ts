@@ -24,7 +24,7 @@ import { TIERS } from "../src/tiers.ts";
 import type { Tier } from "../src/tiers.ts";
 import { ASTRA, CHATGPT, DEEPSEEK, FakeCatalog, GLM, GLM_CLOUD, HERA_LAN, heraModels, KIMI, model, NOW, SOL } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
-import { agentDir, assistant, failure as failedRequest, FakeRuntime, load, request, resetSlot, routed, start } from "./support/pi.ts";
+import { agentDir, assistant, failure as failedRequest, FakeRuntime, footerOf, load, plannedWords, request, resetSlot, routed, start } from "./support/pi.ts";
 import type { Loaded, LoadOptions } from "./support/pi.ts";
 
 const HERA_V2 = fixture("roster-hera-v2.json");
@@ -546,7 +546,7 @@ describe("Jev's request", () => {
       loaded.runtime.answer = async () => jevAnswer(LOW);
       await say(loaded, "go ahead");
       assert.equal(
-        loaded.session.statuses.get(LEVEL_KEY),
+        plannedWords(loaded),
         footer,
         `${entries} entries: a very deep session gets at least MEDIUM, from more than 1,000 entries; with no usage yet a missing figure is said: cost unknown`,
       );
@@ -637,14 +637,14 @@ describe("Jev's request", () => {
     const level = recordOf(loaded)?.plan?.level;
     assert.deepEqual(level?.jev, { kind: "failure", model: JEV, failure: "error", ms: 0 }, "Jev fails as an error, as when its own read threw");
     assert.deepEqual([level?.source, level?.need, level?.demand?.jev], ["heuristics", "medium", undefined], "without an answer the heuristics decide alone: 0.89, MEDIUM");
-    assert.equal(loaded.session.statuses.get(LEVEL_KEY), "personal MEDIUM → gpt-6.1-terra (demand 0.9, jev error; cost unknown)", "with no usage yet a missing figure is said: cost unknown");
-    assert.deepEqual(loaded.session.notices, [], "no failure is reported beyond the footer");
+    assert.equal(plannedWords(loaded), "personal MEDIUM → gpt-6.1-terra (demand 0.9, jev error; cost unknown)", "with no usage yet a missing figure is said: cost unknown");
+    assert.deepEqual(loaded.session.notices, [], "no failure is reported beyond history and status");
     // A tagged run does not use the shared window: it goes to its tag's level at once.
     await finish(loaded, await runPrompt(loaded, "go ahead"));
     await say(loaded, "x #high");
     await settled();
     assert.deepEqual([recordOf(loaded)?.plan?.level?.source, recordOf(loaded)?.plan?.level?.need], ["tag", "high"], "the tag decides");
-    assert.equal(loaded.session.statuses.get(LEVEL_KEY), "personal HIGH → gpt-6.1-sol (tag)");
+    assert.equal(plannedWords(loaded), "personal HIGH → gpt-6.1-sol (tag)");
     assert.equal(calls(loaded), 0, "its opinion's own read fails before anything is sent, as before");
   });
 
@@ -1919,7 +1919,10 @@ describe("a run's record", () => {
         await finish(loaded, ref);
       }
       assert.deepEqual(levelEntries(loaded), [], loaded.session.id);
-      assert.equal(loaded.session.statuses.has(LEVEL_KEY), false, `${loaded.session.id}: the footer's level item is never set`);
+      // A model picked by hand is never routed, so it shows nothing; the router's own requests
+      // without a level show their effort and model alone.
+      if (loaded === physical) assert.equal(loaded.session.statuses.has(LEVEL_KEY), false, "physical: the footer's item is never set");
+      else assert.match(footerOf(loaded) ?? "", /^(high|max) → \S+$/, `${loaded.session.id}: no level in the footer: ${footerOf(loaded)}`);
     }
   });
 
@@ -1987,50 +1990,53 @@ describe("a run's record", () => {
   });
 });
 
-describe("the footer", () => {
-  const footer = (loaded: Loaded): string | undefined => loaded.session.statuses.get(LEVEL_KEY);
+describe("the footer, and history's words for a planned run", () => {
+  const footer = footerOf;
 
-  test("shows a planned run's scope, tier, model and what decided it, under its own key", async (t) => {
+  test("shows a planned run's level and model, under its own key, and nothing of what decided it", async (t) => {
     const loaded = await hera(t);
     loaded.runtime.answer = () => new Promise(() => {});
     await say(loaded, "x #high");
-    assert.equal(footer(loaded), "personal HIGH → gpt-6.1-sol (tag)");
-    assert.deepEqual([...loaded.session.statuses.keys()], [LEVEL_KEY], "the level's item is the only status item the router sets");
+    assert.equal(footer(loaded), "high → gpt-6.1-sol", "John, 2026-11-19: the level, the effort once a request carries one, and the model");
+    assert.equal(plannedWords(loaded), "personal HIGH → gpt-6.1-sol (tag)", "history has the scope and what decided the level");
+    assert.deepEqual([...loaded.session.statuses.keys()], [LEVEL_KEY], "the footer's item is the only status item the router sets");
   });
 
-  test("after a Jev timeout, names the demand and the timeout", async (t) => {
+  test("after a Jev timeout, history names the demand and the timeout", async (t) => {
     const loaded = await hera(t);
     loaded.runtime.answer = async () => jevFailure("Request timed out after 1000ms");
     await say(loaded, "go ahead");
-    assert.equal(footer(loaded), "personal MEDIUM → gpt-6.1-terra (demand 0.9, jev timeout; cost unknown)", "without an answer the heuristics decide alone: 0.89, MEDIUM; with no usage yet a missing figure is said: cost unknown");
+    assert.equal(plannedWords(loaded), "personal MEDIUM → gpt-6.1-terra (demand 0.9, jev timeout; cost unknown)", "without an answer the heuristics decide alone: 0.89, MEDIUM; with no usage yet a missing figure is said: cost unknown");
+    assert.equal(footer(loaded), "medium → gpt-6.1-terra", "the footer says nothing of the timeout");
   });
 
-  test("names the demand, rounded to one decimal, which an unsure answer pulls less than a sure one", async (t) => {
+  test("history names the demand, rounded to one decimal, which an unsure answer pulls less than a sure one", async (t) => {
     const loaded = await hera(t);
     loaded.runtime.answer = async () => jevAnswer({ low: 0.05, medium: 0.1, high: 0.824, super: 0.026 });
     await say(loaded, "go ahead");
-    assert.equal(footer(loaded), "personal HIGH → gpt-6.1-sol (demand 1.6; cost unknown)", "the blend of 82% HIGH and the heuristics is 1.61, HIGH; with no usage yet a missing figure is said: cost unknown");
+    assert.equal(plannedWords(loaded), "personal HIGH → gpt-6.1-sol (demand 1.6; cost unknown)", "the blend of 82% HIGH and the heuristics is 1.61, HIGH; with no usage yet a missing figure is said: cost unknown");
     // An unsure Jev no longer takes the higher of two close leaders: the blend is 1.31, MEDIUM.
     loaded.runtime.answer = async () => jevAnswer({ low: 0.05, medium: 0.45, high: 0.4, super: 0.1 });
     await say(loaded, "go ahead again");
     assert.equal(
-      footer(loaded),
+      plannedWords(loaded),
       "personal MEDIUM → gpt-6.1-terra (demand 1.3; cost unknown)",
       "an unsure Jev no longer takes the higher of two close leaders: the blend is 1.31; with no usage yet a missing figure is said: cost unknown",
     );
   });
 
-  test("after a step-up, names the level the run needs and its demand, as history does; after a higher run, a lower answer moves down", async (t) => {
+  test("after a step-up, names the level the run needs, as history does with its demand; after a higher run, a lower answer moves down", async (t) => {
     const runtime = heraRuntime();
     for (const ref of [LUNA, NYX_QWEN, HERA_QWEN]) runtime.catalog.unavailable.add(ref);
     const stepped = await hera(t, { id: "stepped", runtime });
     stepped.runtime.answer = async () => jevAnswer(LOW);
     await say(stepped, "rename foo to bar");
-    assert.equal(footer(stepped), "personal LOW → gpt-6.1-terra (demand 0.4)", "no LOW model is available, so the run steps up: the footer names the level the prompt needs");
+    assert.equal(footer(stepped), "low → gpt-6.1-terra", "no LOW model is available, so the run steps up: the footer names the level the prompt needs");
+    assert.equal(plannedWords(stepped), "personal LOW → gpt-6.1-terra (demand 0.4)");
     assert.equal(lastNotice(stepped)?.message, "pi-smart-router: no LOW model can take this run, so it goes to MEDIUM (gpt-6.1-terra).", "beside the step-up notice");
     await finish(stepped, firstRequest(stepped));
     await stepped.host.command("smart-router", "history");
-    assert.match(lastNotice(stepped)?.message ?? "", / \[personal LOW → gpt-6\.1-terra \(demand 0\.4\)\]$/, "history in the footer's form: the level the run needs, and the model that took it after the arrow");
+    assert.match(lastNotice(stepped)?.message ?? "", / \[personal LOW → gpt-6\.1-terra \(demand 0\.4\)\]$/, "history: the level the run needs, and the model that took it after the arrow");
     const down = await hera(t, { id: "down" });
     down.runtime.answer = async () => jevAnswer(HIGH);
     await say(down, "go ahead");
@@ -2039,45 +2045,51 @@ describe("the footer", () => {
     down.runtime.answer = async () => jevAnswer(LOW);
     await say(down, "and the docs");
     assert.equal(
-      footer(down),
+      plannedWords(down),
       "personal LOW → gpt-6-luna (demand 0.5; cost unknown)",
       "nothing holds a session by time: the blend of 80% LOW and the heuristics is 0.50 with the last response's 1,000 tokens; this catalog has no prices, so a missing figure is said: cost unknown",
     );
+    assert.equal(footer(down), "low → gpt-6-luna");
   });
 
-  test("names the heuristics' demand without a classifier, the floor that raised a run, and work scope in a work session", async (t) => {
+  test("history names the heuristics' demand without a classifier, the floor that raised a run, and work scope in a work session; the footer names no scope", async (t) => {
     const roster = JSON.parse(HERA_V2);
     delete roster.classifier;
     const none = await hera(t, { id: "none", roster: JSON.stringify(roster) });
     await say(none, "go ahead");
-    assert.equal(footer(none), "personal MEDIUM → gpt-6.1-terra (demand 0.9; cost unknown)", "without a classifier the heuristics decide alone: 0.89, MEDIUM; with no usage yet a missing figure is said: cost unknown");
+    assert.equal(plannedWords(none), "personal MEDIUM → gpt-6.1-terra (demand 0.9; cost unknown)", "without a classifier the heuristics decide alone: 0.89, MEDIUM; with no usage yet a missing figure is said: cost unknown");
     const floor = await hera(t, { id: "floor" });
     floor.runtime.answer = async () => jevAnswer(LOW);
     await say(floor, "force push the branch");
-    assert.equal(footer(floor), "personal HIGH → gpt-6.1-sol (demand 0.7, floor; cost unknown)", "the demand of 0.67 is raised to HIGH by the risky floor; with no usage yet a missing figure is said: cost unknown");
+    assert.equal(plannedWords(floor), "personal HIGH → gpt-6.1-sol (demand 0.7, floor; cost unknown)", "the demand of 0.67 is raised to HIGH by the risky floor; with no usage yet a missing figure is said: cost unknown");
+    assert.equal(footer(floor), "high → gpt-6.1-sol", "the footer names the raised level");
     const work = await hera(t, { id: "work", setup: (session) => session.appendCustom(SCOPE_ENTRY, scopeEntry("work", "command", NOW)) });
     work.runtime.answer = async () => jevAnswer(LOW);
     await say(work, "go ahead");
-    assert.equal(footer(work), "work LOW → gpt-6-luna (demand 0.5; cost unknown)", "the blend of 80% LOW and the heuristics is 0.48, LOW; with no usage yet a missing figure is said: cost unknown");
+    assert.equal(plannedWords(work), "work LOW → gpt-6-luna (demand 0.5; cost unknown)", "the blend of 80% LOW and the heuristics is 0.48, LOW; with no usage yet a missing figure is said: cost unknown");
+    assert.equal(footer(work), "low → gpt-6-luna", "John, 2026-11-19: the footer does not say which scope the session is in");
   });
 
-  test("at message_end, names the model that answered for the run's route; a model the route did not pick changes nothing", async (t) => {
+  test("follows the run's requests: each names its effort and its model, a retry's at once, and an answer changes nothing", async (t) => {
     const loaded = await hera(t);
     await say(loaded, "x #high");
     const signal = loaded.session.startRun();
     await loaded.host.emit("before_agent_start", { messageType: "user", prompt: "x" });
+    assert.equal(footer(loaded), "high → gpt-6.1-sol", "the run starts with what its plan showed");
     assert.equal(routed(loaded.runtime.route("auto", request("user", { signal }))), SOL);
+    assert.equal(footer(loaded), "high high → gpt-6.1-sol", "the first request adds the effort it carries");
     const limit = "You've hit your usage limit.";
     await loaded.host.emit("message_end", { message: assistant(SOL, { stopReason: "error", errorMessage: limit }) });
-    assert.equal(footer(loaded), "personal HIGH → gpt-6.1-sol (tag)", "an error is no answer");
+    assert.equal(footer(loaded), "high high → gpt-6.1-sol", "an error is no request");
     assert.equal(routed(loaded.runtime.route("auto", request("retry", { signal, failed: failedRequest(loaded.runtime, SOL, limit) }))), GLM_CLOUD);
+    assert.equal(footer(loaded), "high high → z-ai/glm-5.3", "the retry's model, as soon as the retry is routed");
     await loaded.host.emit("message_end", { message: assistant(KIMI) });
-    assert.equal(footer(loaded), "personal HIGH → gpt-6.1-sol (tag)", "the route did not pick KIMI");
+    assert.equal(footer(loaded), "high high → z-ai/glm-5.3", "an answer from a model the route did not pick changes nothing");
     await loaded.host.emit("message_end", { message: assistant(GLM_CLOUD) });
-    assert.equal(footer(loaded), "personal HIGH → z-ai/glm-5.3 (tag)");
+    assert.equal(footer(loaded), "high high → z-ai/glm-5.3");
     await loaded.host.emit("agent_settled", { aborted: false });
     loaded.session.endRun();
-    assert.equal(footer(loaded), "personal HIGH → z-ai/glm-5.3 (tag)", "it stays once the run settled");
+    assert.equal(footer(loaded), "high high → z-ai/glm-5.3", "it stays once the run settled");
   });
 
   test("is cleared by a run without a level of its own, and by a plan that found no model", async (t) => {
@@ -2085,13 +2097,13 @@ describe("the footer", () => {
     const loaded = await hera(t, { runtime });
     await say(loaded, "x #high");
     await finish(loaded, await runPrompt(loaded, "x"));
-    assert.equal(footer(loaded), "personal HIGH → gpt-6.1-sol (tag)");
+    assert.equal(footer(loaded), "high high → gpt-6.1-sol");
     // A goal-x continuation has no level.
     await loaded.host.emit("before_agent_start", { messageType: "custom", message: GOAL_X });
     assert.deepEqual([loaded.session.statuses.has(LEVEL_KEY), footer(loaded)], [true, undefined]);
     loaded.session.endRun();
     await say(loaded, "x #high");
-    assert.equal(footer(loaded), "personal HIGH → gpt-6.1-sol (tag)");
+    assert.equal(footer(loaded), "high → gpt-6.1-sol", "the next plan shows no effort of the run before");
     for (const ref of [TERRA, DEEPSEEK, SOL, GLM_CLOUD, ASTRA, KIMI]) runtime.catalog.unavailable.add(ref);
     await say(loaded, "x #medium");
     assert.equal(footer(loaded), undefined);
