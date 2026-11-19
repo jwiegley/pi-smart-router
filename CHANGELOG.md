@@ -27,7 +27,8 @@ accepted and ignored. These are visible without a roster change:
   shows the terms behind the last decision.
 - A run without a prompt, such as a goal continuation, takes the level its session last needed,
   at least MEDIUM in a very deep session.
-- A run whose last three tool calls failed the same way moves up one level, with a notice.
+- A run whose last three tool calls were the same call and failed the same way moves up to a
+  higher level's own model, with a notice.
 - `/smart-router local on|off|status` and `PI_SMART_ROUTER_LOCAL_ONLY` do nothing but say that the
   pin is gone.
 
@@ -40,11 +41,14 @@ Jev's request is unchanged, byte for byte, at `classifier.context.messages` of 5
   from 0 (LOW) to 3 (SUPER): Jev's expected level, weighted by its confidence, blended with
   upstream's heuristics, `(4·c·Jev + 1·heuristics) / (4·c + 1)`. Guards: under 60% confidence the
   heuristics can only raise it; within 0.1 under a cut (0.75, 1.5, 2.25) it takes the level above;
-  a risky operation gets at least HIGH, as before; and a conversation over 100,000 tokens or 1,000
-  entries gets at least MEDIUM. That floor holds for a prompt and for a run without a prompt, so
-  such a conversation never routes to LOW without a tag. Without an answer from
+  a risky operation gets at least HIGH, as before; and a conversation over 100,000 tokens, or whose
+  active context holds over 1,000 entries (Pi counts them from the last compaction, an extension's
+  own entries included), gets at least MEDIUM. That floor holds for a prompt and for a run without a
+  prompt, so once the session has planned a run such a conversation never routes to LOW without a
+  tag; before that, a run without a prompt stays on the model used last. Without an answer from
   Jev, or when the conversation cannot be read, the heuristics decide alone. The heuristics count
-  the latest 20 messages as Pi would send them to the model (`src/demand.ts`).
+  the latest 20 messages as Pi would send them to the model, and an extension's own entry, which is
+  not a message entry, is not read (`src/demand.ts`).
 - **The cost choice.** Among the first available model of the needed level and of each level above
   it, the run goes to the one its expected run costs least on (`src/cost.ts`): the first request
   at the cached-input price for what survives in the model's cache, by a survival table measured on
@@ -53,18 +57,25 @@ Jev's request is unchanged, byte for byte, at `classifier.context.messages` of 5
   with lighter prompts in a row. Leaving the current model adds the cost of its cache, should its
   level be needed again. The current model keeps the run unless another is cheaper by more than the
   margin. A change of thinking effort counts as a lost cache. With a figure missing (no usage yet, a
-  model without a price, a clock that went backwards, or right after a compaction or a move in the
-  session tree), the needed level's own model takes the run and the footer says `cost unknown`.
+  usage whose figures are not finite numbers of zero or more, a model without a price, a clock that
+  went backwards, or right after a compaction or a move in the session tree), the needed level's
+  own model takes the run and the footer says `cost unknown`.
 - **The ledger** (`src/ledger.ts`): what each session has measured, kept in memory: each model's
   cached size, time and effort, keyed by `provider/id`; which providers report cache writes; the
   shape of the branch's last ten runs; and the level each of its last ten prompts needed. A resumed
-  session seeds it from one bounded read, so a warm model is priced warm. A compaction forgets the
-  caches; a move to another leaf forgets the branch's figures too.
-- **Escalation** (`src/stuck.ts`): after three failed tool calls in a row with the same tool and the
-  same first 256 characters of error text, the run's next request moves up one level, once per run,
+  session seeds it from one bounded read, so a warm model is priced warm; an answer older than the
+  branch's latest compaction seeds nothing. A compaction forgets the caches; a move to another leaf
+  forgets the branch's figures too, even when the new leaf is an ancestor of the old one. A usage
+  whose figures are not finite numbers of zero or more is recorded as nothing.
+- **Escalation** (`src/stuck.ts`): after three failed tool calls in a row that were the same call
+  (the same tool with the same arguments, each found by its id in the assistant message before its
+  result) and gave the same first 256 characters of result text, the run's next request moves to
+  the first available model that is a higher level's own, starting one level up, once per run,
   never from SUPER and never for a tagged run, with the notice "pi-smart-router: this run's last
   three tool calls failed the same way, so it moves up from MEDIUM to HIGH (gpt-6.1-sol)." and
-  `escalated` in the footer and the record.
+  `escalated` in the footer and the record. Three different shell commands that fail without
+  output, which Pi's shell tool gives one text, are not stuck. A stuck run never moves to a
+  fallback chain: with no higher level's own model available it stays, and nothing is shown.
 - **Two optional roster sections**, `demand` (`jevWeight`, `heuristicsWeight`, `minConfidence`,
   `closeCall`, `cuts`, `deepSessionFloor`, `weights`) and `switching` (`margin`, `horizonCap`,
   `cacheSurvival`), with the defaults above (`src/settings.ts`). The checker reads both back in
@@ -82,8 +93,11 @@ Jev's request is unchanged, byte for byte, at `classifier.context.messages` of 5
 - **Footers** for every outcome: `(demand 1.2; stayed, $0.10 vs $0.16)`,
   `(demand 1.8; chose, $0.14 vs $0.31)`, `(demand 1.0; cost unknown)`, and for a run without a
   prompt `(run; moved, $0.23 vs $0.33)`, `(run; cost unknown)` and `(run)`; with `, jev <failure>`,
-  `, floor`, `; escalated` and `; fallback` as marks. `/smart-router status` shows the demand's
-  terms, every guard that applied, and each candidate's cost, cache and survival.
+  `, floor`, `; escalated` and `; fallback` as marks. `/smart-router status` shows the terms of the
+  run the last decision belongs to, a run without a prompt included, however many requests the run
+  has made: the demand's terms, or a run without a prompt's need and level, every guard that
+  applied, and each candidate's cost, cache and survival. A hand-picked model shows none.
+  `/smart-router history` shows each planned run in the footer's form.
 
 ### Changed
 
@@ -95,15 +109,23 @@ Jev's request is unchanged, byte for byte, at `classifier.context.messages` of 5
   close call on the demand's scale.
 - **Compaction before a move.** With Pi's compaction enabled, a model too small for the conversation
   is still a candidate, priced with one summary request on the current model and the conversation
-  the compaction leaves; if it wins, Pi compacts first. With compaction disabled, such a model is
+  the compaction leaves; if it wins, Pi compacts first. Pi writes the summary with a request of its
+  own that no cache serves, so its input is priced at the writing model's uncached input price, on
+  the conversation less what the compaction keeps (`keepRecentTokens`): an upper bound, which errs
+  toward staying. Its output is priced at 4,000 tokens. The reasoning a summary may add, the wait
+  before the answer and the detail a summary loses are not priced. With compaction disabled, such a model is
   passed over and a too-small level steps up, as before. A version 1 roster, which has no fit rule
   left, sends a request too large for its model as it is when compaction is disabled.
 - **A run without a prompt**, and a prompt's run whose plan cannot be matched to it, takes the level
-  its session last needed, through the same choice, instead of the model used last or the level's
-  first model. pi-cache-optimizer is told the model that choice will take. Such a run writes no
+  its session last needed, raised to the deep-session floor in a very deep session, through the
+  same choice, instead of the model used last or the level's first model. pi-cache-optimizer is told the model that choice will take. Such a run writes no
   level record.
 - A level record writes `need` where earlier versions wrote `asked`; records with `asked` or
   `source: "keyword"` still read.
+- **A version 1 role no longer prefers the model that answered last.** The preference went with the
+  level hold: a new run planned onto the role of the model that answered last now takes that role's
+  first available model, not the last responder. Within a run, requests still stay on the run's
+  model.
 - AGENTS.md: the classifier rule no longer mentions the pin, and `scripts/` holds development
   scripts that never run in a session.
 - The package version is `1.4.0-jw.5`.

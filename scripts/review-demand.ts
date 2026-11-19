@@ -18,6 +18,12 @@
 // refers to the run's `at`, and a correction made after the tag wins. The script reads the record
 // forms of both the earlier and the later version of the router: it needs only `tag`, `tier`,
 // `refers` and `jev.probabilities`, which both write.
+//
+// Its facts differ from the router's in two ways. It counts every entry on the chain, where Pi
+// counts the active context's entries from the last compaction, and it takes the conversation's
+// size from the latest usage even after a compaction, where the router counts the size as unknown
+// until the next answer. A replay can therefore raise the deep-session floor where the router did
+// not.
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { pathToFileURL } from "node:url";

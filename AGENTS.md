@@ -27,7 +27,10 @@ beettlle/pi-smart-router to the virtual models of Pi 1.5. `CLAUDE.md` is a link 
   the router writes holds text or a digest.
 - Runtime code never reads a session's whole history: no `getEntries()` or `getBranch()`. It uses
   the bounded readers `getLatestCustomEntry` and `getRecentActiveEntries`, and Pi's
-  `getHistoryMetrics` where Pi has it.
+  `getHistoryMetrics` where Pi has it. One call the source scan cannot see reads more:
+  `ctx.getContextUsage()`, made once at session start to learn whether the session starts right
+  after a compaction, builds the session's projection in a compacted session and walks the whole
+  branch in npm's Pi 1.5.2. Make no other such call, and none per request.
 - Runtime code does no I/O relative to the working directory or HOME, and it writes no files: its
   session entries (the scope's and the level records) go through `pi.appendEntry`. It
   reads only the roster, Multi-Pass's subscription labels and the prompt files the roster names in

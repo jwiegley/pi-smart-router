@@ -589,7 +589,8 @@ John to confirm or overrule. Where a line differs from the text above, the line 
   model: a tool result as a tool message, an assistant message as itself, and anything else as a
   user message, which is how Pi sends a `!` shell run. A `!!` shell run, which Pi keeps out of the
   model's context, is not counted. The live router and the review script share one function for
-  this, so a replay sees what the router saw.
+  this, so a replay sees what the router saw. An extension's own entry in the session is not a
+  message entry, so it is not read and not counted.
 - **A conversation that cannot be read.** When the one bounded read of the conversation fails, Jev
   is not asked, its outcome is the failure `error` (the footer says `jev error`), and the
   heuristics decide alone. This is what happened before, when Jev's own read failed.
@@ -613,6 +614,13 @@ John to confirm or overrule. Where a line differs from the text above, the line 
 - **A candidate is priced at the size it will be sent.** A candidate that fits is priced at the
   conversation's size. A candidate that Pi compacts for first is priced at the size the compaction
   leaves, which matters for a catalog price that steps up with the size of the request.
+- **What a compaction's summary costs.** Pi writes the summary with a request of its own, which
+  no cache serves. Its input is priced at the writing model's price for uncached input, on the
+  conversation's size less what the compaction keeps. That is an upper bound, because Pi shortens
+  long tool results before it sends them, and it errs toward staying. Its output is priced at
+  4,000 tokens. The reasoning a summary may add, the wait before the answer and the detail a
+  summary loses are not priced. The design's "one summary request on the current model", read
+  through that model's cache, priced a compaction several times too low.
 - **A choice by cost when the current model cannot take the run.** When the current model is not
   adequate for the needed level, or is not one of the scope's level models, the cheapest adequate
   model takes the run. When that is a warm stronger model and not the needed level's own, the
@@ -626,17 +634,26 @@ John to confirm or overrule. Where a line differs from the text above, the line 
   used last.
 - **The deep-session floor holds for a run without a prompt too.** Such a run takes the level
   the session last needed, raised to the deep-session floor when the conversation is over 100,000
-  tokens or 1,000 entries. A conversation of that size therefore never routes to LOW without a
-  tag, as the guards above promise. Its footer then says `run, floor`. Right after a compaction
-  the size is unknown, and only the count of entries can raise the level.
+  tokens or its active context holds more than 1,000 entries. Pi counts those entries from the
+  last compaction, an extension's own entries included. Once a session has planned a run, a
+  conversation of that size therefore never routes to LOW without a tag, as the guards above
+  promise. Its footer then says `run, floor`. Right after a compaction the size is unknown and
+  the count has started again, so the floor waits for the next answer.
 - **pi-cache-optimizer is told the same choice.** Before a run starts, the router tells
   pi-cache-optimizer which model the run will reach, and that extension decides from the answer
   whether to rewrite the system prompt. For a run without a prompt the answer is now the choice the
   route will make, computed without side effects, and not the model used last.
-- **Where a stuck run goes.** It moves to the first available model starting one level up. When
-  the level above has only its fallback chain, it goes to the chain; when the level above has
-  nothing, it goes on to the next level, as any step-up does. One notice says so, and names the
-  level and the model the run reached.
+- **What makes three failures the same.** The calls must be the same, not only their results:
+  the same tool with the same arguments, each call found by its id in the assistant message
+  before its result, and the same first 256 characters of result text. The design's "the same
+  tool and the same error text" is not enough in Pi, whose shell tool gives every command that
+  fails without output the same text, so three different searches that find nothing would count.
+  A failed result whose call cannot be found counts for nothing.
+- **Where a stuck run goes.** It moves to the first available model that is a higher level's
+  own, starting one level up. It never moves to a fallback chain, whose models may be weaker than
+  the one the run is on. When no higher level has a model of its own available, the run stays
+  where it is and nothing is shown. When it moves, one notice says so, and names the level and
+  the model the run reached.
 - **What counts as the run under way.** The three failed tool calls are looked for after the
   latest user message of the request. Pi sends an extension's own message to the model as a user
   message, so a run an extension starts is bounded in the same way.
@@ -650,11 +667,18 @@ John to confirm or overrule. Where a line differs from the text above, the line 
   After an escalation the footer says `escalated` in place of the cost phrase. The router moves
   only when the other model is cheaper by more than the margin, so two figures that look equal are
   a stay inside the margin.
-- **`/smart-router status`** shows the terms of the run the last decision belongs to, and none
-  when that run was not planned by level (a hand-picked model, a run without a prompt). Its demand
-  line names every guard that applied: `guards: close-call, risky`.
+- **`/smart-router status`** shows the terms of the run the last decision belongs to, a run
+  without a prompt included, however many requests the run has made. A hand-picked model shows
+  none. Its demand line names every guard that applied: `guards: close-call, risky`.
+- **`/smart-router history`** shows each planned run in the footer's form.
 - **Records.** The level record of a planned run that escalated carries `escalated: true`. A run
   without a prompt writes no level record.
+- **After a restart, a `/reload` or a move in the session tree**, the session's run shapes start
+  again from the defaults. The first lighter prompt is then priced as a run of five requests and
+  may move down where a run of one request would have stayed.
+- **Unattended runs follow the last prompt.** A run without a prompt takes the level of the last
+  prompt John typed. After a short question in a goal session under the deep-session floor, the
+  continuations that follow run at that question's level until a heavier prompt.
 
 ### Rosters and the review script
 

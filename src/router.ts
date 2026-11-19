@@ -111,8 +111,9 @@ export interface RouterOptions {
 
 /**
  * How deep the session is, as the deep-session floor reads it (isDeepSession): the conversation's
- * size from the last response's usage, unknown right after a compaction, and the branch's entry
- * count, both without a read of the history. A prompt's facts and a run without a prompt read the
+ * size from the last response's usage, unknown right after a compaction or a move to another leaf,
+ * and the active context's entry count, which Pi counts from the last compaction, both without a
+ * read of the history. A prompt's facts and a run without a prompt read the
  * same.
  */
 function depthOf(record: SessionRecord, sessionManager: unknown): SessionDepth {
@@ -764,7 +765,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   /**
    * Plan an idle input's run with the session as it is now: after a wait, its selection, scope and
    * roster may have moved. `roles`: what the heuristics read of the input's window (rolesOf), none
-   * for a run that read none; the conversation's size and the branch's entry count are read here,
+   * for a run that read none; the conversation's size and the active context's entry count are read here,
    * without a read of the history.
    */
   const plan = (ctx: ExtensionContext, record: Session, text: string, digest: string, level: LevelInput, token: number, roles: readonly string[]): Plan | undefined => {

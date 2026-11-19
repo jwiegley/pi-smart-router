@@ -204,8 +204,9 @@ export function boundedHistory(sessionManager: unknown): BoundedHistory | undefi
 }
 
 /**
- * The branch's entry count from Pi's history metrics, where this Pi has them: John's Pi gives
- * `getHistoryMetrics().session_active_entries` without reading the history. Pi 1.5.0's npm types
+ * The active context's entry count from Pi's history metrics, where this Pi has them: John's Pi
+ * gives `getHistoryMetrics().session_active_entries` without reading the history, counted from the
+ * last compaction, an extension's own entries included. Pi 1.5.0's npm types
  * lack it, so it is detected; undefined when it is absent, throws, or gives anything but a finite
  * count of zero or more.
  */

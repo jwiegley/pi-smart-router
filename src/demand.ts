@@ -21,7 +21,7 @@ export interface PromptFacts {
   readonly contextTokens: number | undefined;
   /** The roles of the latest messages, oldest first, at most HEURISTIC_MESSAGES; "tool" for a tool result. */
   readonly roles: readonly string[];
-  /** The branch's entry count, where Pi's history metrics give one. */
+  /** The active context's entry count, where Pi's history metrics give one: counted from the last compaction, an extension's own entries included. */
   readonly entries: number | undefined;
 }
 
@@ -31,7 +31,8 @@ export interface PromptFacts {
  * Pi would send the model (its convertToLlm): a tool result as "tool", an assistant message as
  * "assistant", and any other role as "user", as Pi sends a ! shell run (bashExecution) or a custom
  * message. A message Pi keeps out of the context (`excludeFromContext`, a !! shell run) is not
- * counted, nor is anything without a string role. The live router and the review script both use
+ * counted, nor is anything without a string role. An extension's own entry in the session is not a
+ * message entry, so the window read, which asks for message entries, never reads it. The live router and the review script both use
  * this, so that a replay sees the roles the router saw.
  */
 export function rolesOf(messages: readonly unknown[]): string[] {
@@ -47,12 +48,13 @@ export function rolesOf(messages: readonly unknown[]): string[] {
 
 export type DemandGuard = "low-confidence" | "close-call" | "risky" | "deep-session";
 
-/** What says how deep a session is: the conversation's size and the branch's entry count, each undefined when unknown. */
+/** What says how deep a session is: the conversation's size and the active context's entry count, each undefined when unknown. */
 export type SessionDepth = Pick<PromptFacts, "contextTokens" | "entries">;
 
 /**
  * Whether a session is deep enough for the deep-session floor: more than DEEP_SESSION_TOKENS tokens
- * in the conversation or more than DEEP_SESSION_ENTRIES entries on the branch. An unknown figure,
+ * in the conversation or more than DEEP_SESSION_ENTRIES entries in the active context, which Pi
+ * counts from the last compaction, an extension's own entries included. An unknown figure,
  * such as the size right after a compaction, is not over. The demand's guard and a run without a
  * prompt (src/route.ts) both use it.
  */

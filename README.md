@@ -877,7 +877,8 @@ weigh 0, so that a missing input does not read as easy work.
 **Which messages the heuristics count.** The latest 20 messages of the conversation, as Pi would
 send them to the model: a tool result as a tool message, an assistant message as itself, and
 anything else as a user message, which is how Pi sends a `!` shell run. A `!!` shell run, which Pi
-keeps out of the model's context, is not counted. The review script counts them by the same
+keeps out of the model's context, is not counted. An extension's own entry in the session is not a
+message entry, so it is not read and not counted. The review script counts them by the same
 function, so that a replay sees what the router saw.
 
 **The blend.** With Jev's confidence `c`:
@@ -905,12 +906,14 @@ is not asked at all and its outcome is the failure `error`.
   `rm -rf`, `git rm`, unstage, "clean up the repo" or "repo cleanup", and "accidentally added",
   "mistakenly added" or "accidental add", with file names and paths blanked out first.
 - **A very deep session gets at least MEDIUM**, `demand.deepSessionFloor`: a conversation over
-  100,000 tokens by the latest usage, or over 1,000 entries on its branch where Pi counts them.
-  This is upstream's planned floor for the terse "continue" in a long session, which no classifier
-  rates well. The floor holds for a run without a prompt too
-  ([Runs without a prompt](#runs-without-a-prompt)), so with this default no run in a conversation
-  over 100,000 tokens routes to LOW unless its tag says so. `"deepSessionFloor": "low"` turns the
-  floor off.
+  100,000 tokens by the latest usage, or an active context of over 1,000 entries where Pi counts
+  them. Pi counts the entries of the active context from the last compaction, an extension's own
+  entries included. This is upstream's planned floor for the terse "continue" in a long session,
+  which no classifier rates well. The floor holds for a run without a prompt too
+  ([Runs without a prompt](#runs-without-a-prompt)), so with this default, once the session has
+  planned a run, no run in a conversation over 100,000 tokens routes to LOW unless its tag says so.
+  Before that, a run without a prompt stays on the model the session used last.
+  `"deepSessionFloor": "low"` turns the floor off.
 
 The record of a run says what decided its level: `tag`, `jev` (the blend with Jev's answer),
 `heuristics` (the heuristics alone) or `floor` (a risky operation or a deep session raised it).
@@ -996,9 +999,14 @@ does not change the effort a request is sent with: a role sends the session's le
 size removes no candidate and holds no session. A candidate whose window, less Pi's reserve, the
 conversation does not fit is priced with the compaction Pi will make before sending to it: one
 summary request on the current model (on the candidate itself when there is no current model),
-which reads the conversation and writes a summary taken to be 4,000 tokens, and then the run on
-what the compaction leaves, `keepRecentTokens` plus that summary, with nothing cached, at the price
-tier of that size. Leaving the current model then costs its uncached premium on that smaller
+then the run on what the compaction leaves, `keepRecentTokens` plus the summary, with nothing
+cached, at the price tier of that size. Pi writes the summary with a request of its own, its own
+system prompt and the serialized conversation, which no cache serves. So the summary's input is
+priced at the writing model's price for uncached input, on the conversation's size less what the
+compaction keeps (`keepRecentTokens`), and its output at 4,000 tokens. That input is an upper
+bound, because Pi shortens long tool results before it sends them, and it errs toward staying. The
+reasoning a summary may add, the wait before the answer and the detail a summary loses are not
+priced. A candidate that compacts shows nothing cached in status, since its cost uses no cache. Leaving the current model then costs its uncached premium on that smaller
 conversation, times the chance its level is needed again. If the candidate wins, Pi compacts
 first, the summary written by the model that answered last. With compaction disabled Pi would send
 the request as it is, so there a candidate too small for the conversation is passed over, and a
@@ -1009,7 +1017,9 @@ needed level whose first available model is too small passes the run up.
 `the clock went backwards`. It is unknown when:
 
 - the session has no usage yet: no answer on the branch, or an answer without usage or of 0 tokens,
-  whatever the size of the new prompt, as for a session's first prompt;
+  whatever the size of the new prompt, as for a session's first prompt. A usage with a figure that
+  is not a finite number of zero or more is no usage either, and the session's figures record
+  nothing from it;
 - right after a compaction, after a move to another leaf of the session tree, and in a session that
   starts right after a compaction: no answer has measured the conversation as it now is, until the
   next answer does, and every model's cache is forgotten at the same moment. A move to another leaf
@@ -1042,9 +1052,12 @@ prompt's run whose plan cannot be matched to it (another extension changed its t
 it while two messages were pending), take the level the session last needed: that of its latest
 planned run, or, in a resumed session, of its latest level record. In a very deep session that
 level is raised to the deep-session floor, as a prompt's demand is: over 100,000 tokens by the
-latest usage, or over 1,000 entries on the branch. Right after a compaction no answer has measured
-the conversation yet, so its size is unknown and counts as not over, and only the count of entries
-can raise the level. The risky floor needs a prompt's text and does not apply. The session's own
+latest usage, or over 1,000 entries in the active context, which Pi counts from the last
+compaction, an extension's own entries included. Right after a compaction, and after a move to
+another leaf of the session tree, no answer has measured the conversation yet, so its size is
+unknown and counts as not over; after a compaction the count of entries has started again too, so
+the floor waits for the next answer. A move to another leaf forgets every model's cache even when
+the new leaf is an ancestor of the old one, whose conversation the caches still hold. The risky floor needs a prompt's text and does not apply. The session's own
 need is not raised: the next run without a prompt starts from it again.
 
 The run goes through the same choice a prompt's run makes, priced with nothing added for a prompt,
@@ -1059,17 +1072,21 @@ on the model the session used last, as it always did.
 
 ### A stuck run
 
-When a run's last three tool calls in a row failed the same way, with the same tool and the same
-first 256 characters of error text, its next request moves up one level. Any failure does not
-count: in Pi every shell command that exits non-zero is a failed call, and three of those in a row
-is ordinary work. The three are looked for after the latest user message of the request; Pi sends
-an extension's own message as a user message, so a run an extension starts is bounded the same
-way.
+When a run's last three tool calls in a row failed the same way, its next request moves up. The
+three are the same when their calls are the same, not only their results: the same tool with the
+same arguments (compared with the keys of every object sorted), each call found by its id in the
+assistant message before its result, and the same first 256 characters of result text. Any failure
+does not count: in Pi every shell command that exits non-zero is a failed call, and its shell tool
+gives every command that fails without output the same text, so three different searches that find
+nothing are ordinary work. A failed result whose call cannot be found counts for nothing. The three
+are looked for after the latest user message of the request; Pi sends an extension's own message as
+a user message, so a run an extension starts is bounded the same way.
 
-- **Where it goes:** to the first available model one level above the run's, unpriced. When that
-  level's own models cannot take it, it goes to the scope's fallback chain, and when the chain
-  cannot either, on to the next level, as any step-up does.
-- **Once per run, one level.** Never from SUPER, never for a tagged run, and only on
+- **Where it goes:** to the first available model that is a higher level's own, starting one level
+  above the run's, unpriced. It never goes to a fallback chain, whose models may be weaker than the
+  one the run is on. When no higher level has a model of its own available, the run stays where it
+  is and nothing is shown, and a later request of the same run can still move.
+- **Once per run.** Never from SUPER, never for a tagged run, and only on
   `smart-router/auto` under a version 2 roster: not on `smart-router/local`, under a version 1
   roster or on a model picked by hand. A run without a prompt that took its session's level can
   move up too. The next run starts again from the level it needs.
@@ -1114,11 +1131,13 @@ Two marks can follow the demand, and one closes the brackets:
 - **`; fallback`**, last, when the model is one of the scope's fallback chain:
   `personal LOW → z-ai/glm-5.3-flash (tag; fallback)`.
 
-`/smart-router history` shows the footer's words, without its `; escalated` and `; fallback` marks,
-on a run's first request, with the level whose model took it:
-`[personal HIGH (demand 1.6; cost unknown)]`.
+`/smart-router history` shows each planned run in the footer's form, on the run's first request: the
+level the run needs, and the model that took it after the arrow, as
+`[personal HIGH → gpt-6.1-sol (demand 1.6; cost unknown)]`. It has no `; escalated` mark: the
+escalation is an entry of its own, with the code `escalate`.
 
-**`/smart-router status`** shows the terms of the run the last decision belongs to: the demand,
+**`/smart-router status`** shows the terms of the run the last decision belongs to, a run without a
+prompt included, however many requests the run has made: the demand,
 with Jev's term and confidence, the heuristics' term with the three signals that raise it most, and
 every guard that applied, in the order applied; then the run priced, and each candidate, the
 strongest first, with its expected cost, what it has cached and the chance that survives, and what
@@ -1134,9 +1153,20 @@ latest 20 messages include a tool result; the figures are the router's):
 
 The footer of that run is `personal MEDIUM → gpt-6.2-astra (demand 1.1; stayed, $0.13 vs $0.20)`.
 A guard that applied ends the demand line, as in `; guards: close-call, risky.`; a cost that was
-unknown gives `  Cost unknown: no usage yet.` in place of the second line. A run that was not
-planned by level shows no terms: a tagged run, one on a model picked by hand, and a run without a
-prompt.
+unknown gives `  Cost unknown: no usage yet.` in place of the second line. A run without a prompt
+shows the level it needed and the level that took it in place of the demand line, as in
+`  Need MEDIUM → MEDIUM: a run without a prompt, at the level the session last needed.`, then its
+cost line. A tagged run shows no terms, since nothing was weighed, and a model picked by hand shows
+none.
+
+Two things the footer shows that are not faults:
+
+- **After a restart, a `/reload` or a move in the session tree**, the session's run shapes start
+  again from the defaults. The first lighter prompt is then priced as a run of five requests and
+  may move down where a run of one request would have stayed.
+- **Unattended runs follow the last prompt.** A run without a prompt takes the level of the last
+  prompt John typed. After a short question in a goal session under the deep-session floor, the
+  continuations that follow run at that question's level until a heavier prompt.
 
 ## Jev
 
@@ -1659,12 +1689,17 @@ loads it and the package does not ship it. It reads only the files named on its 
 contacts nothing, and prints counts, levels, rates and file names, never a prompt's text. Since
 John's session files are under Pi's agent directory, it runs on them only at his word.
 
+Its facts differ from the router's in two ways. It counts every entry on the chain, where Pi counts
+the active context's entries from the last compaction, and it takes the conversation's size from
+the latest usage even after a compaction, where the router counts the size as unknown until the
+next answer. A replay can therefore raise the deep-session floor where the router did not.
+
 ## Commands
 
 | Command | Does |
 |---|---|
-| `/smart-router` or `/smart-router status` | The roster's path and state; the selection and its thinking level; the session's scope and what set it, under a version 2 roster or whenever `smart-router/auto` refuses the scope; every role's models on this host with `ok` or the reason they cannot route, and catalog prices; the accounts cooling and the local models held as unreachable; account bindings, checked in the session's scope, and auth sources; a version 1 roster's routing table and fallbacks, or a version 2 roster's levels and fallback chain in each scope, its classifier and the source of each of Jev's prompts; the last decision, and whether it went to a fallback chain's model; the terms of the run that decision belongs to, when it was planned by level: its demand with every guard that applied, and each candidate's expected cost, or why the cost was unknown ([The footer and status](#the-footer-and-status)); what can still leave the machine, a model picked by hand first and then the classifier when `smart-router/auto` may ask it; and a warning for any fallback that would move a run onto Codex's API from another one. |
-| `/smart-router history [n]` | The last `n` routing decisions (10 by default, at most 50), with reason codes, and on a version 2 run's first request its scope, level, what decided the level and what the cost rule compared. Model ids and codes only, never prompt text. |
+| `/smart-router` or `/smart-router status` | The roster's path and state; the selection and its thinking level; the session's scope and what set it, under a version 2 roster or whenever `smart-router/auto` refuses the scope; every role's models on this host with `ok` or the reason they cannot route, and catalog prices; the accounts cooling and the local models held as unreachable; account bindings, checked in the session's scope, and auth sources; a version 1 roster's routing table and fallbacks, or a version 2 roster's levels and fallback chain in each scope, its classifier and the source of each of Jev's prompts; the last decision, and whether it went to a fallback chain's model; the terms of the run that decision belongs to, kept from that run's choice however many requests it has made: a planned run's demand with every guard that applied, or a run without a prompt's need and level, and each candidate's expected cost, or why the cost was unknown; none for a tagged run or while a model picked by hand is selected ([The footer and status](#the-footer-and-status)); what can still leave the machine, a model picked by hand first and then the classifier when `smart-router/auto` may ask it; and a warning for any fallback that would move a run onto Codex's API from another one. |
+| `/smart-router history [n]` | The last `n` routing decisions (10 by default, at most 50), with reason codes, and on a version 2 run's first request the footer's words: its scope, the level it needs, the model that took it, what decided the level and what the cost rule compared. Model ids and codes only, never prompt text. |
 | `/smart-router local …` | Whatever follows, says that the local-only pin of earlier versions has been removed and that `/model smart-router/local` routes locally. It records and selects nothing. [Routing locally](#routing-locally). |
 | `/smart-router scope [work\|personal\|status]` | The session's scope and what set it: `latch`, `entry`, `directory` or `default`. `work` records work scope at once; `personal` asks first in work scope, and is refused under `PI_SMART_ROUTER_SCOPE=work`. Neither changes the selection. |
 | `/smart-router was low\|medium\|high\|super` | Record that the run in flight, when it holds a level, or else the run of the latest record, should have gone to that level. Nothing is sent again. |
