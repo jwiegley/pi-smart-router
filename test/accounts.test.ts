@@ -39,12 +39,28 @@ function refused(check: AccountCheck, reason: RegExp): void {
   if (!check.ok) assert.match(check.reason, reason);
 }
 
-test("subscription providers are the native logins Multi-Pass clones and their aliases", () => {
-  for (const provider of ["openai-codex", "anthropic", "github-copilot"]) assert.equal(subscriptionKind(provider), "native");
+test("subscription providers include Claude Code and Multi-Pass aliases", () => {
+  for (const provider of ["openai-codex", "anthropic", "github-copilot", "claude-code"]) assert.equal(subscriptionKind(provider), "native");
   for (const provider of ["openai-codex-2", "anthropic-3", "github-copilot-12"]) assert.equal(subscriptionKind(provider), "alias");
   for (const provider of ["openai", "openrouter", "omlx-hera", "openai-codex-x", "codex-2", "anthropic-", "xanthropic-2"]) {
     assert.equal(subscriptionKind(provider), undefined, provider);
   }
+});
+
+test("Claude Code needs a personal account binding and cannot cross scopes", () => {
+  const base = rosterFixtureV2("roster-hera-v2.json");
+  const noBinding = { ...base, accounts: new Map(base.accounts) };
+  refused(checkAccount("claude-code", noBinding, undefined, "personal"), /no account binding/);
+  const personal = { ...base, accounts: new Map([...base.accounts, ["claude-code", { kind: "native", label: "personal", scope: "personal" } as const]]) };
+  assert.deepEqual(checkAccount("claude-code", personal, undefined, "personal"), { ok: true, kind: "native", label: "personal", verified: false });
+  refused(checkAccount("claude-code", personal, undefined, "work"), /binds claude-code to the personal scope/);
+  const value = JSON.parse(fixture("roster-hera-v2.json"));
+  value.roles.find((role: { name: string }) => role.name === "low").models.push("claude-code/claude-haiku-5-5");
+  const missing = parseRoster(JSON.stringify(value));
+  assert.ok(!missing.ok);
+  assert.match(missing.error, /claude-code.*needs a binding/);
+  value.accounts["claude-code"] = { native: "personal" };
+  assert.ok(parseRoster(JSON.stringify(value)).ok);
 });
 
 describe("Multi-Pass labels", () => {

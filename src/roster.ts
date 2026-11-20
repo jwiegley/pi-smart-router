@@ -492,7 +492,7 @@ function bindingLabel(
   const path = `accounts.${provider}`;
   const kind = subscriptionKind(provider);
   if (kind === undefined) {
-    fail(path, `${provider} is not a subscription provider: openai-codex, anthropic, github-copilot, or a Multi-Pass alias of one`);
+    fail(path, `${provider} is not a subscription provider: openai-codex, anthropic, github-copilot, claude-code, or a Multi-Pass alias`);
   }
   const binding = object(item, path, keys);
   if (kind === "alias" && own(binding, "native") !== undefined) fail(path, 'a Multi-Pass alias is bound with "multiPassLabel", not "native"');

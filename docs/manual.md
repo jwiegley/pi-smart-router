@@ -243,10 +243,10 @@ free of base URLs.
 
 ### Account bindings
 
-A provider id does not identify an account: Multi-Pass aliases are positional, and a native login
-is whichever account the browser had signed in at `/login`. So every subscription provider in the
-roster needs a binding. Subscription providers are `openai-codex`, `anthropic` and `github-copilot`,
-and their Multi-Pass aliases such as `openai-codex-2`.
+A provider id does not identify an account: Multi-Pass aliases are positional, a native login is
+whichever account was signed in, and Claude Code manages its login outside Pi. Every subscription
+provider in the roster needs a binding. Native providers are `openai-codex`, `anthropic`,
+`github-copilot` and `claude-code`; Multi-Pass aliases such as `openai-codex-2` also need bindings.
 
 - **A Multi-Pass alias** is bound with `{ "multiPassLabel": "<label>" }`. The router reads the label
   Multi-Pass stores for that alias in `<agentDir>/multi-pass.json`, which holds no credentials, and
@@ -754,8 +754,8 @@ These are version 1's rules. Version 2 keeps them, comparing levels rather than 
   not cost 30 minutes of refusals.
 - **Whose limit it is.** A limit-kind error is one of three things, and cools accordingly:
   - *The account's:* a usage limit, a quota, billing, or a credential that was not accepted (401).
-    On a subscription provider (`openai-codex`, `anthropic`, `github-copilot`, or a Multi-Pass
-    alias such as `openai-codex-2`) it cools every model of that provider id at once, since they
+    On a subscription provider (`openai-codex`, `anthropic`, `github-copilot`, `claude-code`, or a
+    Multi-Pass alias such as `openai-codex-2`) it cools every model of that provider id at once, since they
     share one account and one credential. So when luna runs out of tokens, the next run of any
     level goes straight to the fallback chain without first failing on terra, sol or astra. On any
     other provider it cools the one model: the text cannot tell an account-wide limit from a limit

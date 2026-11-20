@@ -38,10 +38,11 @@ export const BUILTIN_EXCLUDES: readonly string[] = [
 ];
 
 /**
- * Subscription providers: the account types Multi-Pass clones, and the aliases it names
- * `<provider>-<index>`. A roster ref to any of them needs an account binding.
+ * Subscription providers: native accounts and the aliases Multi-Pass names
+ * `<provider>-<index>`. Claude Code owns its native login outside Pi and is
+ * not a Multi-Pass provider.
  */
-export const SUBSCRIPTION_PROVIDERS: readonly string[] = ["openai-codex", "anthropic", "github-copilot"];
+export const SUBSCRIPTION_PROVIDERS: readonly string[] = ["openai-codex", "anthropic", "github-copilot", "claude-code"];
 export const SUBSCRIPTION_ALIAS = /^(openai-codex|anthropic|github-copilot)-[0-9]+$/;
 
 /**
