@@ -50,8 +50,9 @@ answered, and Pi's footer shows it.
   back before anything is sent. See [Changing the routing](#changing-the-routing).
 - **`smart-router/local`** routes only to the roster's local roles and never to cloud. With local
   tiers it uses offline heuristics or a tag to select a tier; an empty tier refuses, as does a new
-  run with no planned tier. Without local tiers it uses the one local role in order. This works in
-  either scope, and when the scope cannot be read. The local-only pin of earlier versions is gone;
+  run with no planned tier. Without local tiers it uses the one local role in order. Normally it
+  works in either scope or an unreadable scope; a personal-only restriction refuses work and
+  unreadable scope. The local-only pin of earlier versions is gone;
   see [Routing locally](#routing-locally).
 - **A model picked by hand always stays selected.** The router routes only while the selection is
   `smart-router/auto` or `smart-router/local`. A model you choose with `/model` or by cycling is
@@ -1551,19 +1552,20 @@ allow is refused by the model that was asked, and the selection stays where it w
 | Selection | Session | Its requests |
 |---|---|---|
 | `smart-router/auto` | work scope | Use a work-bound Codex or Claude Code model, or an explicitly configured per-level local fallback. Refuse when the roster serves no work scope, or the scope cannot be read. |
-| `smart-router/local` | either scope, or a scope that cannot be read | Use only local roles, never a cloud model. With local tiers, a disabled or unplanned tier refuses. |
+| `smart-router/local` | either scope, or a scope that cannot be read | Use only local roles, never a cloud model. With local tiers, a disabled or unplanned tier refuses. A personal-only restriction refuses work and unreadable scope. |
 
 John's decision of 2026-11-16, "Let smart-router/local route in work scope": selecting
-`smart-router/local` is itself the request for local routing, so it routes in a work session too.
+`smart-router/local` is itself the request for local routing, so it normally routes in a work session.
 The consequence: in a work session, on the shared work machines too, selecting
 `smart-router/local` sends the conversation to the roster's local models, not to the work account.
+A personal-only restriction refuses that work session instead.
 Until 1.4.0-jw.1 that request was refused unless the session was pinned, with the local-only pin
 that has since been removed.
 
-John's decision of 2026-11-17, "Let local route there too": `smart-router/local` routes in a
-session whose scope cannot be read as well, so it refuses no scope at all. Until 1.4.0-jw.2 it
-refused such a session unless it was pinned. `smart-router/auto` still refuses one, since it cannot
-tell which account the session's requests may use.
+John's decision of 2026-11-17, "Let local route there too": normally `smart-router/local` routes in
+an unreadable scope too; the personal-only restriction refuses it. Until 1.4.0-jw.2 an unreadable
+scope was refused unless pinned. `smart-router/auto` still refuses one, since it cannot tell which
+account the session's requests may use.
 
 In work scope a refusal names only `smart-router/auto` and work Codex models as
 models to choose, since those keep the conversation on the work account. Any other model you pick
@@ -1686,8 +1688,9 @@ elsewhere, the latch included:
 ## Routing locally
 
 To route a session locally, select `/model smart-router/local`. It uses only the roster's local
-roles, inside the configured providers and LAN hosts, in either scope and when scope cannot be
-read. With `local.levels`, offline demand or a tag selects a tier. A null tier or an unplanned new
+roles, inside the configured providers and LAN hosts. Normally it works in either scope or an
+unreadable scope; a personal-only restriction refuses work and unreadable scope. With `local.levels`,
+offline demand or a tag selects a tier. A null tier or an unplanned new
 run is refused with "Nothing was sent"; it does not step down or ask Jev. Without `local.levels`,
 the legacy local role is tried in order. A model picked by hand afterwards is sent as it is, and
 `/smart-router status` lists what else can send data off the machine. For strictly private work,
