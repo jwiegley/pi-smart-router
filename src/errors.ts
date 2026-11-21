@@ -233,12 +233,12 @@ const TAG_IGNORED = {
   scope: "smart-router/auto refuses this session's scope",
 } as const;
 
-/** Why a tag cannot set its run's level: a fixed cause, or the selection when it is not smart-router/auto. */
+/** Why a tag cannot set its run's level: a fixed cause, or a selection that does not route by level. */
 export type TagIgnored = keyof typeof TAG_IGNORED | { readonly selection: string };
 
 /** Shown when a tag was removed from a message but cannot set its run's level. */
 export function tagIgnoredNotice(tier: Tier, why: TagIgnored): string {
-  const cause = typeof why === "string" ? TAG_IGNORED[why] : `only smart-router/auto routes by level, and the selection is ${why.selection}`;
+  const cause = typeof why === "string" ? TAG_IGNORED[why] : `the selection ${why.selection} does not route by level under this roster`;
   return `pi-smart-router: the ${tierLabel(tier)} tag was removed and has no effect, because ${cause}.`;
 }
 

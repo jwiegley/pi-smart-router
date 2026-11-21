@@ -179,28 +179,28 @@ describe("the roster's fallback chain: parsing and validation", () => {
     invalid(edited((r) => r.roles[2].models.push(GLM)), `roles[2].models[1]: "${GLM}" is already in role "local"`);
   });
 
-  test("the work scope's chain takes only work-bound Codex models: no OpenRouter, local or personal-account model", () => {
+  test("the work scope's chain takes only work-bound Codex or Claude Code: no OpenRouter, local or personal-account model", () => {
     invalid(edited((r) => (r.scopes.work.fallback = ["openrouter"])), 'scopes.work.fallback[0]: "openrouter" is already in the personal scope\'s fallback');
     invalid(
       edited((r) => {
         delete r.scopes.personal.fallback;
         r.scopes.work.fallback = ["openrouter"];
       }),
-      `roles[1].models[0]: "${OR_GLM}" is in the work scope's fallback, which takes only work-bound Codex models`,
+      `roles[1].models[0]: "${OR_GLM}" is in the work scope's fallback, which takes only work-bound Codex or Claude Code models`,
     );
     invalid(
       edited((r) => {
         delete r.scopes.personal.fallback;
         r.scopes.work.fallback = ["local"];
       }),
-      `roles[0].models[0]: "${GLM}" is in the work scope's fallback, which takes only work-bound Codex models`,
+      `roles[0].models[0]: "${GLM}" is in the work scope's fallback, which takes only work-bound Codex or Claude Code models`,
     );
     invalid(
       edited((r) => {
         r.roles.push({ name: "spare", models: ["openai-codex-2/gpt-6-nova"] });
         r.scopes.work.fallback = ["spare"];
       }),
-      'roles[10].models[0]: "openai-codex-2/gpt-6-nova" is in the work scope\'s fallback, which takes only work-bound Codex models',
+      'roles[10].models[0]: "openai-codex-2/gpt-6-nova" is in the work scope\'s fallback, which takes only work-bound Codex or Claude Code models',
     );
   });
 
@@ -233,7 +233,7 @@ describe("the roster's fallback chain: parsing and validation", () => {
 
   test("the field belongs to a version 2 scope only", () => {
     invalid(edited((r) => (r.fallback = ["openrouter"])), "fallback: unknown key");
-    invalid(edited((r) => (r.scopes.personal.levels.low.fallback = ["openrouter"])), "scopes.personal.levels.low.fallback: unknown key");
+    invalid(edited((r) => (r.scopes.personal.levels.low.fallback = ["openrouter"])), 'scopes.personal.levels.low.fallback[0]: "openrouter" is not a local role');
     invalid(edited((r) => (r.scopes.personal.fallbacks = ["openrouter"])), "scopes.personal.fallbacks: unknown key");
   });
 });

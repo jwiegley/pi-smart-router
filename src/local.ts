@@ -1,10 +1,16 @@
-// What counts as local: the built-in local-host rule, the local policy taken from the roster's
-// `local` section, and the check a model must pass while a request is local-only, which only
-// smart-router/local's requests are.
-import type { Roster } from "./roster.ts";
+// What counts as local: the built-in local-host rule and the policy from the roster's `local`
+// section. Local-only routing and local fallback candidates both pass this check.
+import type { LocalSection, Roster } from "./roster.ts";
+import { TIERS } from "./tiers.ts";
+
+/** The local role and all roles assigned to a local tier. */
+export function localRoles(local: LocalSection | undefined): readonly string[] {
+  if (local === undefined) return [];
+  return [...new Set([local.role, ...TIERS.map((tier) => local.levels?.[tier]).filter((role): role is string => typeof role === "string")])];
+}
 
 export interface LocalPolicy {
-  /** The local role's refs, which are the only refs routing may pick while local-only. */
+  /** The refs in local roles, the only refs local-only routing may pick. */
   readonly refs: readonly string[];
   readonly providers: readonly string[];
   /** Base-URL host names in canonical form (see `canonicalHost`). */
@@ -86,10 +92,11 @@ export function baseUrlHost(baseUrl: unknown): string | undefined {
 /** The policy the roster's `local` section defines; empty without one. */
 export function policyFromRoster(roster: Roster): LocalPolicy {
   const local = roster.local;
-  const role = local === undefined ? undefined : roster.roles.find((entry) => entry.name === local.role);
-  if (local === undefined || role === undefined) return EMPTY_POLICY;
+  if (local === undefined) return EMPTY_POLICY;
+  const roles = localRoles(local);
+  const refs = roles.flatMap((name) => roster.roles.find((role) => role.name === name)?.models ?? []);
   return Object.freeze({
-    refs: Object.freeze([...role.models]),
+    refs: Object.freeze(refs),
     providers: Object.freeze([...local.providers]),
     hosts: Object.freeze([...local.hosts]),
   });

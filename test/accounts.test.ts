@@ -40,7 +40,7 @@ function refused(check: AccountCheck, reason: RegExp): void {
 }
 
 test("subscription providers include Claude Code and Multi-Pass aliases", () => {
-  for (const provider of ["openai-codex", "anthropic", "github-copilot", "claude-code"]) assert.equal(subscriptionKind(provider), "native");
+  for (const provider of ["openai-codex", "anthropic", "github-copilot", "claude-code", "claude-code-2", "claude-code-12"]) assert.equal(subscriptionKind(provider), "native");
   for (const provider of ["openai-codex-2", "anthropic-3", "github-copilot-12"]) assert.equal(subscriptionKind(provider), "alias");
   for (const provider of ["openai", "openrouter", "omlx-hera", "openai-codex-x", "codex-2", "anthropic-", "xanthropic-2"]) {
     assert.equal(subscriptionKind(provider), undefined, provider);
@@ -61,6 +61,23 @@ test("Claude Code needs a personal account binding and cannot cross scopes", () 
   assert.match(missing.error, /claude-code.*needs a binding/);
   value.accounts["claude-code"] = { native: "personal" };
   assert.ok(parseRoster(JSON.stringify(value)).ok);
+});
+
+test("numbered Claude Code instances are explicitly bound native accounts, not Multi-Pass", () => {
+  const value = JSON.parse(fixture("roster-hera-v2.json"));
+  value.roles.find((role: { name: string }) => role.name === "work-low").models.push("claude-code-2/claude-haiku-5-5");
+  const missing = parseRoster(JSON.stringify(value));
+  assert.ok(!missing.ok);
+  assert.match(missing.error, /claude-code-2.*needs a binding/);
+  value.accounts["claude-code-2"] = { native: "Positron work", scope: "work" };
+  const parsed = parseRoster(JSON.stringify(value));
+  assert.ok(parsed.ok, parsed.ok ? "" : parsed.error);
+  assert.deepEqual(checkAccount("claude-code-2", parsed.value, undefined, "work"), { ok: true, kind: "native", label: "Positron work", verified: false });
+  refused(checkAccount("claude-code-2", parsed.value, undefined, "personal"), /binds claude-code-2 to the work scope/);
+  value.roles.find((role: { name: string }) => role.name === "low").models.push("claude-code-2/claude-opus-5-5");
+  const crossed = parseRoster(JSON.stringify(value));
+  assert.ok(!crossed.ok);
+  assert.match(crossed.error, /work-bound/);
 });
 
 describe("Multi-Pass labels", () => {

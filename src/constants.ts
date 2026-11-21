@@ -39,8 +39,8 @@ export const BUILTIN_EXCLUDES: readonly string[] = [
 
 /**
  * Subscription providers: native accounts and the aliases Multi-Pass names
- * `<provider>-<index>`. Claude Code owns its native login outside Pi and is
- * not a Multi-Pass provider.
+ * `<provider>-<index>`. Claude Code owns its login outside Pi; its independent
+ * native provider instances use `claude-code` and `claude-code-<index>`, not Multi-Pass.
  */
 export const SUBSCRIPTION_PROVIDERS: readonly string[] = ["openai-codex", "anthropic", "github-copilot", "claude-code"];
 export const SUBSCRIPTION_ALIAS = /^(openai-codex|anthropic|github-copilot)-[0-9]+$/;
@@ -100,12 +100,11 @@ export const SLOT_KEY = "jwiegley.pi-smart-router.v1";
 export const ROUTING_REGISTRY_KEY = "pi.routing.registry.v1";
 
 /**
- * The scope's session entry and its environment switch, whose one value `work` puts every session
- * of the process in work scope; the session entry that records each routed run's level; and the
- * footer's one status item, which shows the run's level, the thinking effort the owner loop's
- * latest request carried (src/effort.ts) and the model (records.ts, footerText).
+ * The scope's session entry and process switches; the entry that records each routed run's level;
+ * and the footer's status item, showing the level, thinking effort and model.
  */
 export const SCOPE_ENTRY = "smart-router.scope";
 export const ENV_SCOPE = "PI_SMART_ROUTER_SCOPE";
+export const ENV_PERSONAL_ONLY = "PI_SMART_ROUTER_PERSONAL_ONLY";
 export const LEVEL_ENTRY = "smart-router.level";
 export const LEVEL_KEY = "smart-router-level";

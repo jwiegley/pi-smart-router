@@ -5,14 +5,11 @@
 // is one of its own two models, smart-router/auto or smart-router/local, and its policies live in
 // those two models' routes (src/router.ts, src/route.ts):
 //
-//   work scope  smart-router/auto routes only to the work account, and smart-router/local routes
-//               only to the local role's models, as in personal scope: selecting it is the request
-//               for local routing (John's decision of 2026-11-16, "Let smart-router/local route in
-//               work scope")
+//   work scope  smart-router/auto routes to work-bound Codex or Claude Code, or an explicitly
+//               configured local fallback. smart-router/local routes only to local roles.
 //   a scope that cannot be read
 //               smart-router/auto refuses, since it cannot tell which account to use, and
-//               smart-router/local routes only to the local role's models, as in either scope
-//               (John's decision of 2026-11-17, "Let local route there too")
+//               smart-router/local routes only to local roles, as in either scope.
 //
 // At no event does the router change or revert a selection, lock a session, refuse a prompt, cancel
 // a compaction or a tree summary, empty a provider request, stop cache warming or abort a run

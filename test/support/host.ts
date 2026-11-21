@@ -77,7 +77,7 @@ import type {
   SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 
-import { ENV_SCOPE, ROUTING_REGISTRY_KEY, SLOT_KEY } from "../../src/constants.ts";
+import { ENV_PERSONAL_ONLY, ENV_SCOPE, ROUTING_REGISTRY_KEY, SLOT_KEY } from "../../src/constants.ts";
 import { ENV_PIN } from "./legacy.ts";
 import { ensureRoutingRegistry, resolveActiveRoute } from "./co.ts";
 import type { Snapshot } from "./co.ts";
@@ -691,13 +691,14 @@ export interface PiOptions {
   readonly tools?: readonly string[];
 }
 
-/** Forget the process slot, the routing registry and both environment switches: a fresh process. */
+/** Forget the process slot, routing registry and environment switches: a fresh process. */
 function resetProcess(): void {
   const store = globalThis as Record<symbol, unknown>;
   delete store[Symbol.for(SLOT_KEY)];
   delete store[Symbol.for(ROUTING_REGISTRY_KEY)];
   delete process.env[ENV_PIN];
   delete process.env[ENV_SCOPE];
+  delete process.env[ENV_PERSONAL_ONLY];
 }
 
 function writeOwned(dir: string, name: string, value: unknown): void {

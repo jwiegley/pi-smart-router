@@ -14,7 +14,7 @@ import { readUserFile } from "./files.ts";
 import type { ReadOptions } from "./files.ts";
 import { promptLines, promptProblem, promptReader, promptUses } from "./prompts.ts";
 import type { PromptReader, PromptUse } from "./prompts.ts";
-import { candidatesOf, parseRoster, SCOPES, unreachableMinutesOf } from "./roster.ts";
+import { parseRoster, SCOPES, unreachableMinutesOf } from "./roster.ts";
 import type { Roster, RosterV1, RosterV2 } from "./roster.ts";
 import { DEEP_SESSION_ENTRIES, DEEP_SESSION_TOKENS, DEFAULT_EFFORT, SIGNALS } from "./settings.ts";
 import { tierLabel, TIERS } from "./tiers.ts";
@@ -38,12 +38,22 @@ function numbered(roster: Roster, candidates: ReadonlyArray<{ readonly role: str
 
 /** What smart-router/local routes to. */
 function localLines(roster: Roster): string[] {
-  const role = roster.local?.role;
-  if (role === undefined) return ["smart-router/local, in any scope:", "  refused: the roster has no local section"];
+  const local = roster.local;
+  if (local === undefined) return ["smart-router/local, in any scope:", "  refused: the roster has no local section"];
+  if (local.levels !== undefined) {
+    return [
+      "smart-router/local, in any scope: offline demand and tags pick a tier; only its local models are tried:",
+      ...TIERS.map((tier) => {
+        const role = local.levels?.[tier];
+        return `  ${tierLabel(tier).padEnd(6)} ${role === null || role === undefined ? "refused: no models" : `${modelsOf(roster, role).join(", then ")}  (role ${role}${thinkingOf(roster, role)})`}`;
+      }),
+      `  local means: a provider of ${local.providers.join(", ")} whose base URL is on ${local.hosts.join(", ")}`,
+    ];
+  }
   return [
     "smart-router/local, in any scope: only these, in this order, never a cloud model:",
-    ...numbered(roster, modelsOf(roster, role).map((ref) => ({ role, ref })), "  "),
-    `  local means: a provider of ${roster.local?.providers.join(", ")} whose base URL is on ${roster.local?.hosts.join(", ")}`,
+    ...numbered(roster, modelsOf(roster, local.role).map((ref) => ({ role: local.role, ref })), "  "),
+    `  local means: a provider of ${local.providers.join(", ")} whose base URL is on ${local.hosts.join(", ")}`,
   ];
 }
 
@@ -69,13 +79,19 @@ function describeV2(roster: RosterV2): string[] {
     const decides = roster.classifier === undefined ? "the demand the heuristics give" : `the demand from Jev (${roster.classifier.model}) and the heuristics`;
     lines.push(`smart-router/auto in ${scope} scope: a tag, else ${decides}, pick the level; each level tries its own models in order:`);
     for (const tier of TIERS) {
-      const role = section.levels[tier].role;
-      lines.push(`  ${tierLabel(tier).padEnd(6)} ${modelsOf(roster, role).join(", then ")}  (role ${role}${thinkingOf(roster, role)})`);
+      const level = section.levels[tier];
+      const role = level.role;
+      const models = modelsOf(roster, role);
+      const own = `${models.length === 0 ? "disabled: no models" : models.join(", then ")}  (role ${role}${thinkingOf(roster, role)})`;
+      const fallback = (level.fallback ?? []).flatMap((name) => modelsOf(roster, name).map((ref) => `${ref} (role ${name}${thinkingOf(roster, name)})`));
+      lines.push(`  ${tierLabel(tier).padEnd(6)} ${own}${fallback.length === 0 ? "" : `, then ${fallback.join(", then ")}`}`);
     }
     if (section.fallback === undefined) {
-      lines.push("  no fallback: a level with no available model passes its run up to the next level; with none above, the run is refused");
+      lines.push(TIERS.some((tier) => section.levels[tier].fallback !== undefined)
+        ? "  no scope-wide fallback: a level whose candidates are unavailable passes its run up to the next level; with none above, the run is refused"
+        : "  no fallback: a level with no available model passes its run up to the next level; with none above, the run is refused");
     } else {
-      const chain = candidatesOf(roster, scope, section.levels.low.role).filter((candidate) => candidate.role !== section.levels.low.role);
+      const chain = section.fallback.flatMap((role) => modelsOf(roster, role).map((ref) => ({ role, ref })));
       lines.push("  then, for every level, when its own models cannot take a request, the fallback chain in this order:", ...numbered(roster, chain, "    "));
     }
     if (scope === "work" && section.directories.length > 0) lines.push(`  sessions under these directories are in work scope: ${section.directories.join(", ")}`);

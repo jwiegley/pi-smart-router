@@ -35,7 +35,7 @@ import { smartRouterCommand } from "./commands.ts";
 import type { CommandHost, Files } from "./commands.ts";
 import { ALL_LEVELS, COMMAND, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, LEVEL_ENTRY, LEVEL_KEY, PROVIDER, SCOPE_ENTRY, VIRTUAL_API, VIRTUAL_IDS } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
-import { compactionFor, pickInRole, planUserTurn } from "./decide.ts";
+import { compactionFor, eligibleRole, pickInRole, planUserTurn } from "./decide.ts";
 import type { CostFigures, Decision, LastResponder, LevelInput, Plan } from "./decide.ts";
 import { HEURISTIC_MESSAGES, rolesOf } from "./demand.ts";
 import type { PromptFacts, SessionDepth } from "./demand.ts";
@@ -50,6 +50,7 @@ import {
   historyNotice,
   looksRetryable,
   promptNotice,
+  refusal,
   resendNotice,
   rosterNotice,
   rosterRefusal,
@@ -70,8 +71,8 @@ import { askJev, buildContext, jevAsk, recentMessages } from "./jev.ts";
 import type { JevAsk, JevOutcome } from "./jev.ts";
 import { answerOf, forgetBranch, forgetCaches, noteAnswer, noteRunEnd, seedAnswer, usable } from "./ledger.ts";
 import type { Ledger } from "./ledger.ts";
-import { policyFromRoster } from "./local.ts";
-import { healDisplaced, isLive, isLiveOwner, join, leave, leaveScopeHandoff, ownerBySignal, rememberedRoster, rememberRoster, scopeLatched, sessionHash, takeScopeHandoff } from "./owners.ts";
+import { localRoles, policyFromRoster } from "./local.ts";
+import { healDisplaced, isLive, isLiveOwner, join, leave, leaveScopeHandoff, ownerBySignal, personalOnlyLatched, rememberedRoster, rememberRoster, scopeLatched, sessionHash, takeScopeHandoff } from "./owners.ts";
 import type { Owner, OwnerRouter, RosterMemory, Slot } from "./owners.ts";
 import { promptProblem, promptStore, promptUses, scopePrompts } from "./prompts.ts";
 import { footerText, levelRecord, readLevelRecord } from "./records.ts";
@@ -86,6 +87,7 @@ import type { ScopeEntryData, ScopeState, WorkDirectories } from "./scope.ts";
 import { describeModel } from "./selection.ts";
 import { parseTag } from "./tags.ts";
 import type { Tagged } from "./tags.ts";
+import { TIERS } from "./tiers.ts";
 import type { Tier } from "./tiers.ts";
 
 export interface Limits {
@@ -406,18 +408,16 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     return scopeUnserved("auto", scope.scope, value.version, scope.scope === "work", scope.source !== "latch");
   };
 
-  /**
-   * Why one of the router's models refuses this session for its scope, if it does. prepare() throws
-   * the refusal; what pi-cache-optimizer is told and an input's plan follow it.
-   *
-   * Only smart-router/auto has one. Local-only requests carry no account, and selecting
-   * smart-router/local is itself the request for local routing, so it refuses no scope, whatever
-   * scopes the roster serves: neither scope (John's decision of 2026-11-16, "Let
-   * smart-router/local route in work scope"), nor one that cannot be read (his decision of
-   * 2026-11-17, "Let local route there too"). Such a request resolves in work scope
-   * (resolvedScope), where a local model passes every check as it does in work scope itself.
-   */
-  const refusalFor = (id: VirtualId, value: Roster, ctx: ExtensionContext): RouterError | undefined => (id === "auto" ? scopeRefusal(value, ctx) : undefined);
+  /** A personal-only process refuses work or unreadable scope on both models, before classification. */
+  const refusalFor = (id: VirtualId, value: Roster, ctx: ExtensionContext): RouterError | undefined => {
+    if (personalOnlyLatched(slot)) {
+      const scope = scopeOf(ctx);
+      if (scope.kind !== "ok" || scope.scope !== "personal") {
+        return refusal(id, "work scope is disabled for the router or this session's scope cannot be verified on this personal-only host", "Use a verified personal-scope session; hand-selected models and other extensions are not blocked.");
+      }
+    }
+    return id === "auto" ? scopeRefusal(value, ctx) : undefined;
+  };
 
   /** Pi's settings, for the compaction figures a route prices with; Pi's defaults (compactionFor) when they cannot be read. */
   // The input path lets a settings throw surface, through its handler's report; a route cannot
@@ -458,8 +458,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         return [...roles(scope)].map((role) => pickInRole(rc, role, { fallback: false, code: "limits" }));
       });
     const auto = smallest(picks("auto", (scope) => autoRoles(value, scope)));
-    const role = value.local?.role;
-    const local = role === undefined ? DEFAULT_LIMITS : smallest(picks("local", () => [role]));
+    const roles = localRoles(value.local);
+    const local = roles.length === 0 ? DEFAULT_LIMITS : smallest(picks("local", () => roles));
     return { auto, local };
   };
 
@@ -801,16 +801,17 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   };
 
   /**
-   * The one bounded window of the conversation an untagged idle input on smart-router/auto reads,
-   * under a version 2 roster, in a scope that reads and that the roster serves: the latest
-   * HEURISTIC_MESSAGES messages, or four for each message Jev reads when that is more. Undefined
-   * where nothing is planned by level; UNREAD when the read throws, so that Jev fails as an error
-   * without a request, as it did when its own read threw, and the heuristics see no conversation.
+   * The bounded conversation window read for an untagged idle input on auto, or on tiered local.
+   * Auto requires a readable, served scope. The window holds HEURISTIC_MESSAGES messages, or four
+   * for each message Jev reads when that is more. UNREAD makes Jev fail without a request and
+   * leaves the heuristics no conversation; local never asks Jev.
    */
   const demandWindow = (ctx: ExtensionContext, id: VirtualId | undefined, value: Roster | undefined, scope: ScopeState): Window | undefined => {
     const history = boundedHistory(ctx.sessionManager);
-    if (!ctx.isIdle() || id !== "auto" || value?.version !== 2 || scope.kind !== "ok" || history === undefined) return undefined;
-    if (scopeSection(value, scope.scope) === undefined) return undefined;
+    if (!ctx.isIdle() || value?.version !== 2 || history === undefined) return undefined;
+    if (id === "auto") {
+      if (scope.kind !== "ok" || scopeSection(value, scope.scope) === undefined) return undefined;
+    } else if (id !== "local" || value.local?.levels === undefined) return undefined;
     const limit = Math.max(4 * (value.classifier?.context.messages ?? 0), HEURISTIC_MESSAGES);
     try {
       return history.getRecentActiveEntries({ type: "message", limit });
@@ -850,11 +851,11 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     const value = state.kind === "ok" ? state.value : undefined;
     if (tier !== undefined) {
       const why: TagIgnored | undefined =
-        id !== "auto"
+        id !== "auto" && !(id === "local" && value?.version === 2 && value.local?.levels !== undefined)
           ? { selection: describeModel(ctx.model) }
           : value?.version === 1
             ? "version"
-            : value !== undefined && scopeRefusal(value, ctx) !== undefined
+            : id === "auto" && value !== undefined && scopeRefusal(value, ctx) !== undefined
               ? "scope"
               : undefined;
       if (why !== undefined) notify(ctx, tagIgnoredNotice(tier, why), "warning");
@@ -862,7 +863,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     // An extension's resend of the latest message's text (pi-idle-check) keeps that message's level.
     const reused = tagged === undefined && event.source === "extension" && previous?.digest === digest ? previous.level : undefined;
     const scope = scopeOf(ctx);
-    const ask = jevAsk({
+    const blocked = value !== undefined && id !== undefined && refusalFor(id, value, ctx) !== undefined;
+    const ask = blocked ? undefined : jevAsk({
       idle: ctx.isIdle(),
       selection: id,
       roster: value,
@@ -876,8 +878,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     // heuristics and Jev's context. A tagged run, or one that reuses a tagged message's level, reads
     // none for it; an extension's resend of an untagged message reads it again for its own facts.
     const window = tier === undefined && reused?.tag === undefined ? demandWindow(ctx, id, value, scope) : undefined;
-    // A level input counts only where levels route: planUserTurn ignores it under version 1 and on
-    // smart-router/local, and plan() plans nothing off the router's models.
+    // Level input counts on version 2 auto and tiered local. Legacy local and version 1 ignore it;
+    // plan() plans nothing off the router's own models.
     let level: LevelInput = reused ?? (tier === undefined ? {} : { tag: tier });
     let opinion = false;
     if (asked !== undefined && tier !== undefined) {
@@ -912,7 +914,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     const state = roster.current();
     if (state.kind !== "ok") return false;
     const role = roleOf(state.value, ref)?.name;
-    return role !== undefined && (scopeSection(state.value, scope)?.fallback?.includes(role) ?? false);
+    const section = scopeSection(state.value, scope);
+    return role !== undefined && (section?.fallback?.includes(role) === true || TIERS.some((tier) => section?.levels[tier].fallback?.includes(role) === true));
   };
 
   /**
@@ -932,7 +935,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     // A new run starts in its level's role, the one this run's level had; on smart-router/local, in the local role.
     const section = rc.localOnly ? undefined : scopeSection(value, rc.scope);
     const tier = record.pendingLevel?.level.tier;
-    const start = section !== undefined && tier !== undefined ? section.levels[tier].role : rc.localOnly ? value.local?.role : undefined;
+    const start = section !== undefined && tier !== undefined ? section.levels[tier].role : rc.localOnly ? eligibleRole(rc, failover.ref) : undefined;
     const next = afterFailure(rc, failover, start);
     const chain = next !== undefined && !rc.localOnly && inChain(rc.scope, next.ref) ? next.role : undefined;
     notify(
@@ -1073,6 +1076,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       return { ...filesNow(state), limitsChanged };
     },
     scopeOf,
+    personalOnly: () => personalOnlyLatched(slot),
     session: (ctx) => records.get(ctx.sessionManager.getSessionId()),
     resolver: contextFor,
     readPrompt: prompts.read,

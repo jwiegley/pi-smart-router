@@ -143,7 +143,7 @@ export function interpret(result: ClassifierResult, model: string, ms: number): 
 export interface JevGate {
   /** Whether the session is idle: a message that arrives while a run is under way is a steer or a follow-up. */
   readonly idle: boolean;
-  /** The router model selected, if one is: only smart-router/auto routes by level. */
+  /** The router model selected, if one is: only smart-router/auto asks Jev. */
   readonly selection: VirtualId | undefined;
   /** The roster, when it loaded. */
   readonly roster: Roster | undefined;

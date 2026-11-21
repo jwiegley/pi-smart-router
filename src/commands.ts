@@ -26,6 +26,7 @@ import { LEVEL_ENTRY, PROVIDER, SCOPE_ENTRY } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { effortWords } from "./effort.ts";
 import type { SentEffort } from "./effort.ts";
+import { localRoles } from "./local.ts";
 import { firstLine, rosterNamed } from "./errors.ts";
 import type { Loaded } from "./files.ts";
 import { promptLines, promptProblem, promptUses } from "./prompts.ts";
@@ -69,6 +70,8 @@ export interface CommandHost {
   reload(ctx: ExtensionContext): Files & { readonly limitsChanged: boolean };
   /** The session's scope, as routing reads it: the latch, the session's entry, then the work directories. */
   scopeOf(ctx: ExtensionContext): ScopeState;
+  /** The process refuses work scope on a personal-only host. */
+  personalOnly(): boolean;
   /** The session's records: its decisions, and the level of the run planned or in flight, marked once that run starts. */
   session(ctx: ExtensionContext): SessionView | undefined;
   /** A resolver context for one of the two models, built as routing builds it: in the session's scope, or in `scope`. */
@@ -186,15 +189,18 @@ function verdict(ref: string, rc: ResolveContext): string {
 /** Each role's candidates with their verdicts and prices: auto's roles as `auto` resolves them, in the session's scope, and the local role as smart-router/local does. */
 function roleLines(host: CommandHost, ctx: ExtensionContext, roster: Roster, auto: ResolveContext): string[] {
   const localRole = roster.local?.role;
+  const locals = new Set(localRoles(roster.local));
   const local = host.resolver(ctx, roster, "local");
   const reached = autoRoles(roster, auto.scope);
   const chains = SCOPES.filter((scope) => scopeSection(roster, scope)?.fallback !== undefined);
   return roster.roles.map((role) => {
-    const rc = role.name === localRole ? local : auto;
+    const isLocal = locals.has(role.name);
+    const rc = isLocal ? local : auto;
     const tags = [
-      role.name === localRole ? "the local role" : undefined,
+      role.name === localRole ? "the local role" : isLocal ? "a local tier role" : undefined,
       ...chains.filter((scope) => scopeSection(roster, scope)?.fallback?.includes(role.name)).map((scope) => `a ${scope} fallback`),
-      role.name !== localRole && !reached.has(role.name) ? "smart-router/auto never routes here" : undefined,
+      ...SCOPES.flatMap((scope) => TIERS.filter((tier) => scopeSection(roster, scope)?.levels[tier].fallback?.includes(role.name)).map((tier) => `a ${scope} ${tier} fallback`)),
+      !isLocal && !reached.has(role.name) ? "smart-router/auto never routes here" : undefined,
       role.thinking === "selected" ? undefined : `thinking ${role.thinking}`,
     ].filter((tag) => tag !== undefined);
     const candidates = role.models.map((ref) => `${verdict(ref, rc)}${price(catalogModel(rc, ref))}`);
@@ -300,12 +306,17 @@ function otherSelection(ctx: ExtensionContext): "hand" | "local" | undefined {
  */
 function levelLines(host: CommandHost, ctx: ExtensionContext, roster: RosterV2): string[] {
   const anyChain = SCOPES.some((scope) => roster.scopes[scope]?.fallback !== undefined);
-  return SCOPES.flatMap((scope) => {
+  const modelsOf = (name: string): readonly string[] => roster.roles.find((role) => role.name === name)?.models ?? [];
+  const result = SCOPES.flatMap((scope) => {
     const section = roster.scopes[scope];
     if (section === undefined) return [];
     const rc = host.resolver(ctx, roster, "auto", scope);
-    const modelsOf = (name: string): readonly string[] => roster.roles.find((role) => role.name === name)?.models ?? [];
-    const tiers = TIERS.map((tier) => `${tierLabel(tier)} → ${modelsOf(section.levels[tier].role).map((ref) => verdict(ref, rc)).join(", ")}`);
+    const tiers = TIERS.map((tier) => {
+      const level = section.levels[tier];
+      const own = modelsOf(level.role).map((ref) => verdict(ref, rc));
+      const fallback = (level.fallback ?? []).flatMap(modelsOf).map((ref) => verdict(ref, rc));
+      return `${tierLabel(tier)} → ${[...(own.length === 0 ? ["disabled: no models"] : own), ...fallback].join(", ")}`;
+    });
     const lines = [`Levels (${scope}): ${tiers.join("; ")}`];
     if (section.fallback !== undefined) {
       const chain = section.fallback.map((name) => `${name} → ${modelsOf(name).map((ref) => verdict(ref, rc)).join(", ")}`);
@@ -315,6 +326,16 @@ function levelLines(host: CommandHost, ctx: ExtensionContext, roster: RosterV2):
     }
     return lines;
   });
+  if (roster.local?.levels !== undefined) {
+    const rc = host.resolver(ctx, roster, "local");
+    const levels = roster.local.levels;
+    const tiers = TIERS.map((tier) => {
+      const role = levels[tier];
+      return `${tierLabel(tier)} → ${role === null ? "refused: no models" : modelsOf(role).map((ref) => verdict(ref, rc)).join(", ")}`;
+    });
+    result.push(`Levels (local): ${tiers.join("; ")}`);
+  }
+  return result;
 }
 
 /** The accounts cooling now, one line each however many models wait for them, then the local models skipped because their servers could not be reached. */
@@ -330,7 +351,11 @@ function holdLines(rc: ResolveContext): string[] {
 /** Said when the session's last request on smart-router/auto went to a model of a scope's fallback chain. */
 function onFallbackLine(roster: RosterV2, last: HistoryEntry | undefined): string | undefined {
   if (last === undefined || last.virtual !== "auto") return undefined;
-  const scope = SCOPES.find((name) => roster.scopes[name]?.fallback?.includes(last.role));
+  const matches = SCOPES.filter((name) => {
+    const section = roster.scopes[name];
+    return section?.fallback?.includes(last.role) === true || TIERS.some((tier) => section?.levels[tier].fallback?.includes(last.role) === true);
+  });
+  const scope = last.level !== undefined && matches.includes(last.level.scope) ? last.level.scope : matches.length === 1 ? matches[0] : undefined;
   if (scope === undefined) return undefined;
   return `On a fallback: the last request went to ${last.ref}, in the ${scope} fallback role ${last.role}; each new run tries its level's own models first.`;
 }
@@ -387,6 +412,7 @@ export function statusText(host: CommandHost, ctx: ExtensionContext): string {
   ];
   const scope = roster.kind === "ok" ? scopeLine(roster.value, host.scopeOf(ctx)) : undefined;
   if (scope !== undefined) lines.push(scope);
+  if (host.personalOnly()) lines.push("Policy: personal-only; work scope is disabled for the router models and classifier. Hand-selected models and other extensions are not blocked.");
   if (roster.kind === "ok") {
     const { value } = roster;
     const auto = host.resolver(ctx, value, "auto");
@@ -432,6 +458,7 @@ function scopeAnswer(scope: ScopeState): Answer {
  * stays: the answer says what a model picked by hand, or smart-router/local, does in work scope.
  */
 function scopeWork(host: CommandHost, ctx: ExtensionContext, roster: Loaded<Roster>): Answer {
+  if (host.personalOnly()) return warning("pi-smart-router: work scope is disabled for the router on this personal-only host; nothing was changed. Hand-selected models and other extensions are not blocked.");
   host.pi.appendEntry(SCOPE_ENTRY, scopeEntry("work", "command", host.now()));
   const scope = host.scopeOf(ctx);
   const answer = scopeAnswer(scope);

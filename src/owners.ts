@@ -64,6 +64,8 @@ export interface EnvLatch {
   policy: LocalPolicy | undefined;
   /** True for the life of the process once any instance saw PI_SMART_ROUTER_SCOPE=work; set only then. */
   work?: boolean;
+  /** True for the process lifetime after a personal-only restriction is seen. */
+  personalOnly?: boolean;
 }
 
 export interface Slot {
@@ -95,7 +97,8 @@ function isSlot(value: unknown): value is Slot {
     (value.scopeHandoffs === undefined || value.scopeHandoffs instanceof Map) &&
     isRecord(env) &&
     typeof env.on === "boolean" &&
-    (env.work === undefined || typeof env.work === "boolean")
+    (env.work === undefined || typeof env.work === "boolean") &&
+    (env.personalOnly === undefined || typeof env.personalOnly === "boolean")
   );
 }
 
@@ -120,16 +123,18 @@ export function processSlot(host: object = globalThis): Slot {
   return existing;
 }
 
-/**
- * Latch the scope switch: PI_SMART_ROUTER_SCOPE=work, exactly, puts every session of the process in
- * work scope for the life of the process. Any other value, set or not, leaves the latch as it is.
- */
-export function latchEnvScope(slot: Slot, value: string | undefined): void {
+/** Process-lifetime scope restrictions. Conflicting latches leave work sessions refused, not personal. */
+export function latchEnvScope(slot: Slot, value: string | undefined, personalOnly?: string): void {
   if (value === "work") slot.env.work = true;
+  if (value === "personal-only" || personalOnly === "1") slot.env.personalOnly = true;
 }
 
 export function scopeLatched(slot: Slot): boolean {
   return slot.env.work === true;
+}
+
+export function personalOnlyLatched(slot: Slot): boolean {
+  return slot.env.personalOnly === true;
 }
 
 /** At session_shutdown: the scope handed to the session a fork or /new creates, under its file. Never in slot.handoffs, which the removed pin used. */

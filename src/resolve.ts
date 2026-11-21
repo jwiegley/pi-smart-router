@@ -4,7 +4,7 @@
 //   excluded, not-in-catalog, virtual, not-available, no-credentials, account,
 //   cooling-until-HH:MM, a hold (unreachable-until-HH:MM, lifted when nothing else resolves),
 //   not-routable-by-auto (smart-router/auto only),
-//   not-local (local-only requests only).
+//   not-local (local-only requests and any candidate in a local role).
 //
 // A version 2 roster resolves within the session's scope: the exclusions, the account bindings and
 // the roles auto reaches, its levels' and its fallback chain's, are that scope's. Version 1 ignores
@@ -31,7 +31,7 @@ import type { Labels } from "./accounts.ts";
 import { PROVIDER, VIRTUAL_API } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import type { Loaded } from "./files.ts";
-import { checkLocal, policyFromRoster } from "./local.ts";
+import { checkLocal, localRoles, policyFromRoster } from "./local.ts";
 import type { LocalCandidate, LocalPolicy } from "./local.ts";
 import { autoRoles, excludedBy, excludesFor, parseRef, roleOf, scopeSection, unreachableMinutesOf } from "./roster.ts";
 import type { Roster, Scope } from "./roster.ts";
@@ -89,7 +89,8 @@ export function clock(ms: number): string {
 
 /** Whether a ref belongs to the roster's local role, whose models are never cooled. */
 export function inLocalRole(roster: Roster, ref: string): boolean {
-  return roster.local !== undefined && roleOf(roster, ref)?.name === roster.local.role;
+  const role = roleOf(roster, ref)?.name;
+  return role !== undefined && localRoles(roster.local).includes(role);
 }
 
 export function resolveCandidate(ref: string, rc: ResolveContext): Resolution {
@@ -131,7 +132,7 @@ export function resolveCandidate(ref: string, rc: ResolveContext): Resolution {
       return refuse("not-routable-by-auto", `${why}, so smart-router/auto never routes to it`);
     }
   }
-  if (rc.localOnly) {
+  if (rc.localOnly || inLocalRole(rc.roster, ref)) {
     const local = checkLocal(model, rc.policy, true);
     if (!local.ok) return refuse("not-local", local.reason);
   }

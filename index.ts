@@ -12,7 +12,7 @@
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionVirtualModel } from "@earendil-works/pi-coding-agent";
 
-import { ALL_LEVELS, ENV_SCOPE, NAMES, PROVIDER, VIRTUAL_IDS } from "./src/constants.ts";
+import { ALL_LEVELS, ENV_PERSONAL_ONLY, ENV_SCOPE, NAMES, PROVIDER, VIRTUAL_IDS } from "./src/constants.ts";
 import type { VirtualId } from "./src/constants.ts";
 import { firstLine, loadFailed, loadFailedNotice } from "./src/errors.ts";
 import { latchEnvScope, processSlot } from "./src/owners.ts";
@@ -43,7 +43,7 @@ export function install(pi: ExtensionAPI, build: BuildRouter = createRouter): vo
   try {
     for (const id of VIRTUAL_IDS) register(id, DEFAULT_LIMITS);
     const slot = processSlot();
-    latchEnvScope(slot, process.env[ENV_SCOPE]);
+    latchEnvScope(slot, process.env[ENV_SCOPE], process.env[ENV_PERSONAL_ONLY]);
     router = build(pi, { slot, register, agentDir: getAgentDir, now: Date.now });
     router.wire(pi);
   } catch (error) {

@@ -40,7 +40,7 @@
 // effort the cost choice priced (effortFor).
 import type { ModelRoute, ModelRouteReason, ModelRouteRequest } from "@earendil-works/pi-coding-agent";
 
-import { isWorkCodex, subscriptionKind } from "./accounts.ts";
+import { isClaudeCodeProvider, isWorkCodex, subscriptionKind } from "./accounts.ts";
 import type { Classification } from "./classify.ts";
 import { isDeepSession } from "./demand.ts";
 import type { SessionDepth } from "./demand.ts";
@@ -54,9 +54,9 @@ import { invariant, noBoundedHistory, unroutable } from "./errors.ts";
 import type { JevOutcome } from "./jev.ts";
 import { newLedger, notePlanned, notePrompt, recentNeed } from "./ledger.ts";
 import type { Ledger } from "./ledger.ts";
-import { checkLocal } from "./local.ts";
+import { checkLocal, localRoles } from "./local.ts";
 import type { NeedRun } from "./records.ts";
-import { clock, coolFrom, failureKind, holdFrom, refOf, resolveCandidate } from "./resolve.ts";
+import { clock, coolFrom, failureKind, holdFrom, inLocalRole, refOf, resolveCandidate } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
 import { autoRoles, excludedBy, excludesFor, isWorkBound, roleOf, scopeSection } from "./roster.ts";
 import type { ScopeSection } from "./roster.ts";
@@ -452,6 +452,15 @@ function escalation(input: RouteInput, section: ScopeSection): Leveled | undefin
 
 /** The planned model if it still resolves, else the planned role, then its fallback. */
 function fromPlan(rc: ResolveContext, plan: Plan): Decision {
+  const tiers = rc.localOnly ? rc.roster.local?.levels : undefined;
+  if (tiers !== undefined) {
+    if (plan.level === undefined) return { ok: false, attempts: [], problem: "the local tier configuration changed after planning; send the prompt again" };
+    const role = tiers[plan.level.need];
+    if (role === null) return { ok: false, attempts: [], problem: `the local ${plan.level.need.toUpperCase()} tier has no models` };
+    if (role !== plan.role || (plan.decision.ok && plan.decision.choice.role !== role)) {
+      return pickInRole(rc, role, { fallback: false, code: plan.code });
+    }
+  }
   if (plan.decision.ok) {
     const again = resolveCandidate(plan.decision.choice.ref, rc);
     if (again.ok) return { ok: true, choice: { ...plan.decision.choice, model: again.model } };
@@ -461,20 +470,20 @@ function fromPlan(rc: ResolveContext, plan: Plan): Decision {
 }
 
 /**
- * How a pick's provider breaks the session's scope, if it does. A personal session never sends to a
- * work-bound account. A work session sends only to the work-bound Codex account, which only a
- * version 2 roster binds: under a version 1 roster, which serves no work scope, it sends nothing.
- * In both, a local-only request, smart-router/local's, keeps the local policy, checked after this
- * one: a local model, which has no account. prepare() already refuses smart-router/auto for a scope the roster does not
- * serve; this check holds even if that refusal is bypassed.
+ * A personal pick never uses a work-bound account. A work pick uses a work-bound Codex or Claude
+ * Code account, or a model in a local role that passes the local policy. Version 1 serves no work
+ * scope. Local-only picks also pass the local policy in assertSafe; prepare refuses auto for an
+ * unserved scope before this independent check.
  */
-function outsideScope(rc: ResolveContext, provider: string): string | undefined {
+function outsideScope(rc: ResolveContext, choice: Choice): string | undefined {
   const { roster } = rc;
-  const local = rc.localOnly && subscriptionKind(provider) === undefined;
+  const provider = choice.model.provider;
+  const local = subscriptionKind(provider) === undefined &&
+    (rc.localOnly || (inLocalRole(roster, choice.ref) && checkLocal(choice.model, rc.policy, true).ok));
   if (roster.version === 1) return rc.scope === "work" && !local ? "is outside this session's work scope, which a version 1 roster does not serve" : undefined;
   if (rc.scope === "personal") return isWorkBound(roster, provider) ? "is on a work-bound account, and this session is in personal scope" : undefined;
-  if (isWorkCodex(roster.accounts, provider) || local) return undefined;
-  return "is not on a work-bound Codex account, and this session is in work scope";
+  if (isWorkCodex(roster.accounts, provider) || (isClaudeCodeProvider(provider) && isWorkBound(roster, provider)) || local) return undefined;
+  return "is not on a work-bound Codex or Claude Code account or an allowed local endpoint, and this session is in work scope";
 }
 
 /**
@@ -487,7 +496,7 @@ const workSession = (rc: ResolveContext): boolean => rc.scope === "work";
 /** The router's own invariants, checked on every pick before it is returned. */
 export function assertSafe(id: VirtualId, rc: ResolveContext, choice: Choice): void {
   const { roster } = rc;
-  const outside = outsideScope(rc, choice.model.provider);
+  const outside = outsideScope(rc, choice);
   const problem =
     excludedBy(excludesFor(roster, rc.scope, choice.ref), choice.ref) !== undefined
       ? "is excluded"
@@ -501,9 +510,9 @@ export function assertSafe(id: VirtualId, rc: ResolveContext, choice: Choice): v
               ? `is not in the role ${choice.role}`
               : rc.virtualId === "auto" && !autoRoles(roster, rc.scope).has(choice.role)
                 ? "is in a role smart-router/auto never routes to"
-                : rc.localOnly && choice.role !== roster.local?.role
-                  ? "is not in the local role"
-                  : rc.localOnly && !checkLocal(choice.model, rc.policy, true).ok
+                : rc.localOnly && !localRoles(roster.local).includes(choice.role)
+                  ? "is not in a local role"
+                  : (rc.localOnly || inLocalRole(roster, choice.ref)) && !checkLocal(choice.model, rc.policy, true).ok
                     ? "is outside the local policy"
                     : undefined;
   if (problem !== undefined) throw invariant(id, choice.ref, problem, workSession(rc));
@@ -547,6 +556,7 @@ export function routeOwned(input: RouteInput): ModelRoute {
   const unplanned = section === undefined || plan !== undefined || request.reason === "retry" ? undefined : starts ? chooseForNeed(rc, record, section, input.figures, input.compaction, input.depth) : undefined;
   const escalated = section === undefined || plan !== undefined || unplanned !== undefined ? undefined : escalation(input, section);
   if (plan !== undefined) decision = fromPlan(rc, plan);
+  else if (rc.localOnly && rc.roster.local?.levels !== undefined && starts) decision = { ok: false, attempts: [], problem: "no local tier was planned for this run; send the prompt again" };
   else if (request.reason === "retry") decision = retry(rc, request, record);
   else if (unplanned !== undefined) decision = unplanned.decision;
   else if (escalated !== undefined) decision = escalated.decision;

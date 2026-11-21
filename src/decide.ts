@@ -47,6 +47,7 @@ import { sentEffort } from "./effort.ts";
 import type { EffortSignal, SentEffort, TurnType } from "./effort.ts";
 import { isRecord, own } from "./files.ts";
 import type { JevOutcome } from "./jev.ts";
+import { localRoles } from "./local.ts";
 import { againChance, effortOf, horizonFor, runShape, usable } from "./ledger.ts";
 import type { Ledger } from "./ledger.ts";
 import { HELD_REASON, resolveCandidate } from "./resolve.ts";
@@ -259,7 +260,7 @@ export interface PlanInput {
 export function eligibleRole(rc: ResolveContext, ref: string): string | undefined {
   const role = roleOf(rc.roster, ref)?.name;
   if (role === undefined) return undefined;
-  if (rc.localOnly) return role === rc.roster.local?.role ? role : undefined;
+  if (rc.localOnly) return localRoles(rc.roster.local).includes(role) ? role : undefined;
   if (rc.virtualId === "auto" && !autoRoles(rc.roster, rc.scope).has(role)) return undefined;
   return role;
 }
@@ -570,7 +571,20 @@ export function planUserTurn(p: PlanInput): Plan {
     ...(level === undefined ? {} : { level }),
   });
   if (rc.localOnly) {
-    const role = rc.roster.local?.role;
+    const local = rc.roster.local;
+    if (rc.roster.version === 2 && local?.levels !== undefined) {
+      const { signal, reason } = classify(p.text);
+      // A local request never uses an external classifier, including a prior resend's opinion.
+      const input = { ...p, level: p.level?.tag === undefined ? {} : { tag: p.level.tag } };
+      const needed = needOf(input, rc.roster, signal);
+      const role = local.levels[needed.need] ?? undefined;
+      const level: PlanLevel = { ...needed, scope: rc.scope, tier: needed.need, steppedUp: false, returnedToFirst: false };
+      const decision: Decision = role === undefined
+        ? { ok: false, attempts: [], problem: `the local ${needed.need.toUpperCase()} tier has no models` }
+        : pickInRole(rc, role, { fallback: false, code: needed.source });
+      return plan(signal, reason, role, needed.source, decision, level);
+    }
+    const role = local?.role;
     if (role === undefined) return plan("local", "local-only", undefined, "local", { ok: false, attempts: [], problem: NO_LOCAL_SECTION });
     return plan("local", "local-only", role, "local", pickInRole(rc, role, { fallback: false, code: "local" }));
   }

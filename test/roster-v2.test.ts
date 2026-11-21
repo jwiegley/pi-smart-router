@@ -552,11 +552,11 @@ describe("each level's accounts", () => {
     );
   });
 
-  test("a work level holds only work-bound Codex models: no OpenRouter, no local model, no personal account", () => {
+  test("a work level holds only work-bound Codex or Claude Code models, not arbitrary cloud or personal accounts", () => {
     for (const ref of ["openrouter/qwen/qwen-9-max", "nyx/qwen-local", "omlx-hera/GLM-9", "openai-codex-2/gpt-6-nova"]) {
       invalid(
         edited((r) => r.roles[5].models.push(ref)),
-        `roles[5].models[1]: "${ref}" is in the work scope's low level, which takes only work-bound Codex models`,
+        `roles[5].models[1]: "${ref}" is in the work scope's low level, which takes only work-bound Codex or Claude Code models`,
       );
     }
     invalid(
@@ -564,7 +564,7 @@ describe("each level's accounts", () => {
         r.accounts.anthropic = { native: "Positron work", scope: "work" };
         r.roles[8].models.push("anthropic/claude-x");
       }),
-      "roles[8].models[1]: \"anthropic/claude-x\" is in the work scope's super level, which takes only work-bound Codex models",
+      "roles[8].models[1]: \"anthropic/claude-x\" is in the work scope's super level, which takes only work-bound Codex or Claude Code models",
     );
   });
 });
@@ -606,7 +606,7 @@ describe("exclusions in version 2", () => {
       ['accounts.openai-codex-3.scope: must be "personal" or "work"', (r) => (r.accounts["openai-codex-3"].scope = "team")],
       ['roles[5].models[0]: "openai-codex-3/gpt-6-luna" uses the subscription provider openai-codex-3, which needs a binding in accounts', (r) => delete r.accounts["openai-codex-3"]],
       ['scopes.personal.levels.low.role: "nobody" is not a role', (r) => (r.scopes.personal.levels.low.role = "nobody")],
-      ["roles[5].models[1]: \"openrouter/qwen/qwen-9-max\" is in the work scope's low level, which takes only work-bound Codex models", (r) => r.roles[5].models.push("openrouter/qwen/qwen-9-max")],
+      ["roles[5].models[1]: \"openrouter/qwen/qwen-9-max\" is in the work scope's low level, which takes only work-bound Codex or Claude Code models", (r) => r.roles[5].models.push("openrouter/qwen/qwen-9-max")],
     ];
     for (const [defect, edit] of later) {
       invalid(edited(edit), defect);
@@ -889,7 +889,7 @@ test("version 2 reports its first defect in order: keys, exclude, roles, account
     ['roles[1].models[0]: "hermes/x" is excluded by hermes/*', (r) => (r.roles[1].models[0] = "hermes/x")],
     ['accounts.openai-codex-3.scope: must be "personal" or "work"', (r) => (r.accounts["openai-codex-3"].scope = "team")],
     ['scopes.personal.levels.low.role: "nobody" is not a role', (r) => (r.scopes.personal.levels.low.role = "nobody")],
-    ["roles[5].models[1]: \"openrouter/qwen/qwen-9-max\" is in the work scope's low level, which takes only work-bound Codex models", (r) => r.roles[5].models.push("openrouter/qwen/qwen-9-max")],
+    ["roles[5].models[1]: \"openrouter/qwen/qwen-9-max\" is in the work scope's low level, which takes only work-bound Codex or Claude Code models", (r) => r.roles[5].models.push("openrouter/qwen/qwen-9-max")],
     ['roles[9].models[0]: "openai-codex-3/gpt-6-nova" is excluded by openai-codex-3/*', (r) => r.roles.push({ name: "spare", models: ["openai-codex-3/gpt-6-nova"] })],
     ['local.role: "nobody" is not a role', (r) => (r.local.role = "nobody")],
     ["classifier.timeoutMs: must be a whole number of milliseconds from 100 to 1000", (r) => (r.classifier.timeoutMs = 1001)],

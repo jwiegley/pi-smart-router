@@ -329,12 +329,12 @@ describe("a trailing tag", () => {
     assert.deepEqual(await say(local, "x #high"), [{ action: "transform", text: "x" }]);
     assert.deepEqual(lastNotice(local), {
       type: "warning",
-      message: "pi-smart-router: the HIGH tag was removed and has no effect, because only smart-router/auto routes by level, and the selection is smart-router/local.",
+      message: "pi-smart-router: the HIGH tag was removed and has no effect, because the selection smart-router/local does not route by level under this roster.",
     });
     assert.deepEqual([recordOf(local)?.plan?.signal, recordOf(local)?.pendingLevel], ["local", undefined]);
     const physical = await hera(t, { id: "physical", select: SOL });
     assert.deepEqual(await say(physical, "x #high"), [{ action: "transform", text: "x" }]);
-    assert.match(lastNotice(physical)?.message ?? "", /no effect, because only smart-router\/auto routes by level, and the selection is openai-codex-2\/gpt-6\.1-sol\.$/);
+    assert.match(lastNotice(physical)?.message ?? "", /no effect, because the selection openai-codex-2\/gpt-6\.1-sol does not route by level under this roster\.$/);
     assert.equal(recordOf(physical)?.plan, undefined);
     assert.deepEqual([calls(local), calls(physical)], [0, 0]);
   });

@@ -7,6 +7,18 @@ fork's releases on that base. Releases are signed tags; nothing is published to 
 
 ## [Unreleased]
 
+### Added
+
+- Version 2 rosters can declare ordered local roles for each tier and share those roles as fallback
+  candidates in personal and work scopes. `smart-router/local` classifies offline, and refuses an
+  explicitly empty tier instead of routing down. Every local candidate still passes the provider and
+  LAN-host checks.
+- Claude Code and its numbered native provider instances require explicit account bindings; work
+  scope can use only work-bound instances. The router cannot independently verify a native login.
+- `PI_SMART_ROUTER_PERSONAL_ONLY=1` restricts the router to a readable personal scope and refuses
+  work or unreadable scope before routing or Jev. Hand-selected models and other extensions remain
+  outside that restriction. An inherited work latch is preserved and refused, not reinterpreted.
+
 ### Changed
 
 - **The footer is one short item**, `super high → gpt-6.2-astra`: the level the run needs, the

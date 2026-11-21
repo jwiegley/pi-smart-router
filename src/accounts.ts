@@ -16,9 +16,16 @@ import type { Roster, RosterV1, RosterV2, Scope } from "./roster.ts";
 
 export type SubscriptionKind = "native" | "alias";
 
+const CLAUDE_CODE_PROVIDER = /^claude-code(?:-[1-9][0-9]*)?$/;
+
+/** Claude Code's independent native provider instances, not Multi-Pass aliases. */
+export function isClaudeCodeProvider(provider: string): boolean {
+  return CLAUDE_CODE_PROVIDER.test(provider);
+}
+
 /** Whether a provider is a subscription login (native) or a Multi-Pass alias of one. */
 export function subscriptionKind(provider: string): SubscriptionKind | undefined {
-  if (SUBSCRIPTION_PROVIDERS.includes(provider)) return "native";
+  if (SUBSCRIPTION_PROVIDERS.includes(provider) || isClaudeCodeProvider(provider)) return "native";
   if (SUBSCRIPTION_ALIAS.test(provider)) return "alias";
   return undefined;
 }

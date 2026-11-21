@@ -35,7 +35,7 @@ import { createBashToolDefinition, estimateTokens, SessionManager } from "@earen
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 
 import type { RoutingRegistry } from "../src/cache-optimizer.ts";
-import { ENV_SCOPE, LEVEL_ENTRY, LEVEL_KEY, ROUTING_REGISTRY_KEY, SCOPE_ENTRY, SLOT_KEY, VIRTUAL_IDS } from "../src/constants.ts";
+import { ENV_PERSONAL_ONLY, ENV_SCOPE, LEVEL_ENTRY, LEVEL_KEY, ROUTING_REGISTRY_KEY, SCOPE_ENTRY, SLOT_KEY, VIRTUAL_IDS } from "../src/constants.ts";
 import { runCost } from "../src/cost.ts";
 import type { Rates, Workload } from "../src/cost.ts";
 import type { Owner, Slot } from "../src/owners.ts";
@@ -1193,7 +1193,7 @@ test("L4 no classifier call on local, for a steer, or without a classifier; PI_S
     assert.equal(answered(pi), "local-a/m");
     assert.equal(
       notice(pi, /tag was removed/),
-      "pi-smart-router: the HIGH tag was removed and has no effect, because only smart-router/auto routes by level, and the selection is smart-router/local.",
+      "pi-smart-router: the HIGH tag was removed and has no effect, because the selection smart-router/local does not route by level under this roster.",
     );
     assert.deepEqual(world.jev.calls, []);
     assert.deepEqual(called(world.counts()), { "local-a": 2 });
@@ -2531,4 +2531,63 @@ test("C18 at any other level, here high, nothing changes: every request carries 
     "adaptive-reasoning.ts:335-345: a level other than medium is never lowered, and the table reaches no higher than high",
   );
   assert.equal(pi.ui.status(LEVEL_KEY), "medium high → gpt-6.1-terra", "the footer shows the selected level");
+});
+
+test("local tiers and shared work fallbacks route in Pi's runtime without leaking to another tier", TIMEOUT, async (t) => {
+  const roster = rosterV2();
+  const workLow = roster.roles.find((role) => role.name === "work-low");
+  assert.ok(workLow !== undefined && roster.scopes.work !== undefined && roster.local !== undefined);
+  workLow.models = [];
+  Object.assign(workLow, { disabled: true });
+  Object.assign(roster.scopes.work.levels.low, { fallback: ["local"] });
+  roster.roles.push({ name: "local-medium", models: ["local-b/m"] });
+  roster.local.providers.push("local-b");
+  Object.assign(roster.local, { levels: { low: "local", medium: "local-medium", high: null, super: null } });
+  const world = levelsWorld(t, { roster, fleet: [...levelsFleet(), { provider: "local-b", baseUrl: "http://localhost:0", contextWindow: 100_000, maxTokens: 32_000 }] });
+  const pi = await world.start({ select: "smart-router/local" });
+  await pi.prompt("Use local medium #medium");
+  assert.equal(answered(pi), "local-b/m");
+  await pi.prompt("Use local high #high");
+  assert.match(pi.lastAssistant()?.errorMessage ?? "", /local HIGH tier has no models.*Nothing was sent/);
+  assert.deepEqual(called(world.counts()), { "local-b": 1 }, "the refused tier sent nothing");
+  assert.deepEqual(world.jev.calls, [], "local routing never asks the cloud classifier");
+  await pi.command("scope work");
+  await pi.session.setModel(pi.model("smart-router/auto"));
+  await pi.prompt("Use work low #low");
+  assert.equal(answered(pi), "local-a/m");
+  assert.deepEqual(called(world.counts()), { "local-a": 1, "local-b": 1 });
+});
+
+test("a personal-only process refuses restored work on both virtual models and sends no classifier request", TIMEOUT, async (t) => {
+  const world = levelsWorld(t);
+  const manager = history(world, "smart-router/auto", []);
+  manager.appendCustomEntry(SCOPE_ENTRY, { v: 1, scope: "work", by: "command", at: Date.now() });
+  process.env[ENV_SCOPE] = "personal-only";
+  const pi = await world.start({ sessionManager: manager });
+  delete process.env[ENV_SCOPE];
+  await pi.prompt("Work request #low");
+  assert.match(pi.lastAssistant()?.errorMessage ?? "", /work scope.*disabled.*Nothing was sent/i);
+  await pi.session.setModel(pi.model("smart-router/local"));
+  await pi.prompt("Work request locally #low");
+  assert.match(pi.lastAssistant()?.errorMessage ?? "", /work scope.*disabled.*Nothing was sent/i);
+  assert.deepEqual(called(world.counts()), {});
+  assert.deepEqual(world.jev.calls, []);
+});
+
+test("personal-only and work latches present together refuse both models without Jev", TIMEOUT, async (t) => {
+  const world = levelsWorld(t);
+  process.env[ENV_SCOPE] = "work";
+  process.env[ENV_PERSONAL_ONLY] = "1";
+  const pi = await world.start({ select: "smart-router/auto" });
+  delete process.env[ENV_SCOPE];
+  delete process.env[ENV_PERSONAL_ONLY];
+  await pi.command("scope");
+  assert.equal(notice(pi, /^pi-smart-router: scope/), "pi-smart-router: scope work (latch).");
+  await pi.prompt("Work request #low");
+  assert.match(pi.lastAssistant()?.errorMessage ?? "", /work scope.*disabled.*Nothing was sent/i);
+  await pi.session.setModel(pi.model("smart-router/local"));
+  await pi.prompt("Work request locally #low");
+  assert.match(pi.lastAssistant()?.errorMessage ?? "", /work scope.*disabled.*Nothing was sent/i);
+  assert.deepEqual(called(world.counts()), {});
+  assert.deepEqual(world.jev.calls, []);
 });

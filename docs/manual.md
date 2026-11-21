@@ -38,21 +38,21 @@ answered, and Pi's footer shows it.
   decision model, which the router asks through Pi, weighed together with upstream's heuristics.
   Among the models good enough for that level, the run goes to the one the coming work costs least
   on, counting what each has in its prompt cache, and a session leaves its model only when that
-  saves more than a margin. In a work session `smart-router/auto` routes only to the work Codex
-  account, apart from Jev's request; a model picked by hand and extensions with models of their
-  own are outside it ([What work scope does not cover](#what-work-scope-does-not-cover)). A scope
-  may declare a fallback chain: models that take a run, in a fixed order, when its level's own
-  models cannot. See [Levels](#levels), [A fallback chain](#a-fallback-chain), [Jev](#jev) and
-  [Scope](#scope-personal-or-work).
+  saves more than a margin. In a work session `smart-router/auto` may use work-bound Codex or
+  Claude Code, or a local model explicitly named as a level's fallback, apart from Jev's request;
+  a model picked by hand and extensions with models of their own are outside it
+  ([What work scope does not cover](#what-work-scope-does-not-cover)). A level may declare local
+  fallback roles, and a scope may declare a fallback chain. See [Levels](#levels),
+  [A fallback chain](#a-fallback-chain), [Jev](#jev) and [Scope](#scope-personal-or-work).
 - **Easy to change, cheap to get wrong.** Which model serves which level, the fallback chain, the
   local set and the texts Jev reads are each one edit in one place, a running session picks the
   edit up at its next prompt, and `/smart-router check` or `node src/check-cli.ts` reads the result
   back before anything is sent. See [Changing the routing](#changing-the-routing).
-- **`smart-router/local`** routes only to the roster's local role, and never falls back to anything
-  else. If no local model can take the request, it is refused. It does so in personal scope, in
-  work scope and in a session whose scope cannot be read alike: selecting it is the request for
-  local routing. The local-only pin of earlier versions is gone; see
-  [Routing locally](#routing-locally).
+- **`smart-router/local`** routes only to the roster's local roles and never to cloud. With local
+  tiers it uses offline heuristics or a tag to select a tier; an empty tier refuses, as does a new
+  run with no planned tier. Without local tiers it uses the one local role in order. This works in
+  either scope, and when the scope cannot be read. The local-only pin of earlier versions is gone;
+  see [Routing locally](#routing-locally).
 - **A model picked by hand always stays selected.** The router routes only while the selection is
   `smart-router/auto` or `smart-router/local`. A model you choose with `/model` or by cycling is
   sent as it is, in work scope too: the router does not switch it back, refuse
@@ -246,7 +246,9 @@ free of base URLs.
 A provider id does not identify an account: Multi-Pass aliases are positional, a native login is
 whichever account was signed in, and Claude Code manages its login outside Pi. Every subscription
 provider in the roster needs a binding. Native providers are `openai-codex`, `anthropic`,
-`github-copilot` and `claude-code`; Multi-Pass aliases such as `openai-codex-2` also need bindings.
+`github-copilot`, `claude-code`, and independently configured numbered Claude Code providers such as
+`claude-code-2`; each needs its own native binding. Multi-Pass aliases such as `openai-codex-2`
+also need bindings; numbered Claude Code providers are not Multi-Pass aliases.
 
 - **A Multi-Pass alias** is bound with `{ "multiPassLabel": "<label>" }`. The router reads the label
   Multi-Pass stores for that alias in `<agentDir>/multi-pass.json`, which holds no credentials, and
@@ -474,10 +476,11 @@ How the chain works:
   session behaves exactly as before: its levels' own work-account models, a step up, or a refusal.
 - **Validation keeps each scope's account rules.** No role of a chain is a level's role, in either
   scope, and no role is in two chains. A personal chain takes no model of a work-bound provider. A
-  work chain takes only work-bound Codex models: no OpenRouter, local or personal-account model can
-  be named there. A model still sits in exactly one role, so a chain cannot repeat a level's model.
-- **The local role may end a chain.** That is the one way `smart-router/auto` reaches the local
-  models. `smart-router/local` never uses a chain: it routes to the local role alone, as before.
+  work chain takes only work-bound Codex or Claude Code models, not OpenRouter, local or a personal
+  account. A model still sits in exactly one role, so a chain cannot repeat a level's model.
+- **A level may also name one local fallback role.** Its models come after the level's own models
+  and before the scope's chain. The same local role may serve levels of both scopes. Each model must pass
+  the configured provider and LAN-host checks even when `smart-router/auto` reaches it.
 - **It says so.** A run planned onto a chain model shows a notice, "no LOW model can take this
   run, so it goes to the fallback openrouter (z-ai/glm-5.3-flash)"; a run under way that moves
   onto one says "gpt-6-astra can no longer take this run, so it goes on with the fallback
@@ -491,8 +494,8 @@ How the chain works:
 > conversation so far, not only the new message, goes to that role's vendor: here to OpenRouter and
 > the provider behind the model, under their retention terms, and then to the LAN models on Hera
 > and Nyx. Delete the `fallback` line, or the roles you do not want, to be refused or stepped up
-> instead. A work scope's chain can only name the work account, so work conversations cannot reach
-> a personal account, OpenRouter or a LAN model through one.
+> instead. A work scope's shared chain names only work-bound Codex or Claude Code, but an explicit
+> per-level local fallback can send the whole work conversation to that LAN endpoint.
 
 Three things to know:
 
@@ -516,8 +519,10 @@ Three things to know:
 | `version` | yes | Exactly `2`. |
 | `$comment`, `exclude`, `roles`, `accounts`, `local`, `stickyIdleMinutes`, `cooldownMinutes`, `unreachableMinutes` | as in version 1 | As in [version 1](#fields), with the rules below. There is no `routing`: the levels replace it, and a scope's `fallback` replaces `routing.fallback`. |
 | `scopes` | yes | `personal`, `work` or both. `smart-router/auto` refuses a session in a scope the roster does not have. |
-| `scopes.<scope>.levels` | yes | `low`, `medium`, `high` and `super`, each `{ "role": "<role>", "describe": "<text>" }`: the role the level's runs go to, and the description Jev reads, a non-empty text of at most 2000 characters. `"describeFile": "<name>"` in place of `describe` takes the text from a prompt file ([Jev's prompts](#jevs-prompts)); a level gives exactly one of the two. No role serves two levels, in one scope or across both, the local role serves none, and a scope's level roles rank up the ladder from low to super. |
-| `scopes.<scope>.fallback` | no | Role names, in the order to try them after any level's own models ([A fallback chain](#a-fallback-chain)): not empty, none twice, none a level's role in either scope, none in both scopes' chains. The local role may be one. A personal chain takes no work-bound model; a work chain takes only work-bound Codex models. Without the field, the scope has no fallback. |
+| `scopes.<scope>.levels` | yes | `low`, `medium`, `high` and `super`, each with `role` and either `describe` or `describeFile`. No role serves two scope levels; the levels rank up the ladder. An optional `fallback` is a one-element array naming a local role, whose models follow the level's own and precede the scope-wide chain. The same local role may serve both scopes. |
+| `scopes.<scope>.fallback` | no | Role names to try after every level's own models and its local fallbacks. A scope-wide chain is nonempty, has no duplicate or level role and belongs to only one scope. Personal chains take no work-bound model; work chains take only work-bound Codex or Claude Code models. |
+| `local.levels` | no | All four tiers, each a local role name or `null` to refuse that tier. `local.role` must be one of the enabled tier roles and remains the default for operations that do not use a planned prompt. Local routing uses offline heuristics or a tag and never asks Jev. |
+| `roles[].disabled` | no | Set to `true` with an empty `models` array to leave a role explicitly disabled, for example while no work account is verified. An empty role without this flag remains invalid. |
 | `scopes.work.directories` | no | Absolute paths whose sessions are in work scope ([Scope](#scope-personal-or-work)), written plainly: no trailing `/`, no empty, `.` or `..` segment, and not `/` itself. |
 | `accounts.<provider>.scope` | no | `"personal"`, the default, or `"work"`. |
 | `classifier` | no | Jev's settings; without them, Jev is never asked. `model`, an exact ref, default `openrouter/typesafe/jev-1.14`; `timeoutMs`, 100 to 1000, default 1000; and `context`: `messages`, 0 to 20, default 6; `messageChars`, 200 to 8000, default 1500; `totalChars`, 1000 to 32000, default 12000. `closeCall`, which earlier versions used, is still accepted from 0 to 0.5 and ignored, and the checker says so: `demand.closeCall` decides a close call. The model names a Jev version, so that tuned demand settings keep their meaning; moving to a newer Jev is a roster edit. `instructions`, the question Jev is asked, as a text of at most 4000 characters, or `instructionsFile`, the name of a prompt file that holds it; not both, and with neither the built-in question is asked ([Jev's prompts](#jevs-prompts)). |
@@ -533,16 +538,17 @@ Three things to know:
   Multi-Pass alias it must still match the label Multi-Pass stores. Each binding serves only its
   own scope's sessions: a personal session refuses a work binding, and a work session refuses a
   personal one.
-- **Levels, chains and accounts.** Validation refuses a model of a work-bound provider in a personal
-  level or a personal fallback chain, and anything but a work-bound Codex model in a work level or a
-  work chain: no OpenRouter, local or personal-account model.
+- **Levels, chains and accounts.** Validation refuses a work-bound provider in a personal level or
+  chain. Work levels and scope-wide chains take only work-bound Codex or Claude Code. A level's
+  separate local fallback can serve either scope, but each candidate must pass the LAN policy.
 - **The built-in `openai-codex-3/*` exclusion** holds in personal scope only. A work-scope session
   lifts it for a model of a work level or a work chain whose provider is bound as work. The roster's own exclusions
   are never lifted.
 - **The classifier's model** must match no exclusion, built-in or the roster's own, and none is
   lifted for it, because Jev reads text from both scopes. So a roster with a classifier must not
-  exclude `openrouter/*`. It needs no such exclusion: work levels hold only work-bound Codex models.
-  An exclusion binds the router's routes only: a model picked by hand is sent as it is.
+  exclude `openrouter/*`. A work level itself takes only work-bound Codex or Claude Code, although
+  a per-level local fallback may also be named. An exclusion binds the router's routes only: a model
+  picked by hand is sent as it is.
 
 ## Changing the routing
 
@@ -552,9 +558,9 @@ the check, and the next prompt of every running session uses it: no restart, no 
 | To change | Edit |
 |---|---|
 | The model a level uses | The `models` of that level's role in `roles`. `scopes.<scope>.levels.<level>.role` names the role; the first model listed is the one used, the rest are tried after it. |
-| What takes over when a level's model cannot | `scopes.<scope>.fallback`: the roles, in order. Each role's own `models` order is the order inside it. |
-| The local set, for `smart-router/local` | The `models` of the local role, in order. A new server also needs its provider in `local.providers` and its host in `local.hosts`. |
-| A work session's models | The `work-*` roles, which take only the work Codex account. |
+| What takes over when a level's model cannot | A level's `fallback` for local roles, then `scopes.<scope>.fallback` for a scope-wide chain. Each role's own `models` order is the order inside it. |
+| The local set, for `smart-router/local` | The local role's `models`, or the roles named by `local.levels`. A new server also needs its provider in `local.providers` and host in `local.hosts`. |
+| A work session's models | The `work-*` roles, which take work-bound Codex or Claude Code; a level may also name a local fallback. |
 | What a level means to Jev | That level's `describe`, or the file its `describeFile` names. |
 | How Jev judges a message | `classifier.instructions`, or the file `classifier.instructionsFile` names. |
 | How much Jev counts against the heuristics | `demand.jevWeight` (4) and `demand.heuristicsWeight` (1). |
@@ -1544,8 +1550,8 @@ allow is refused by the model that was asked, and the selection stays where it w
 
 | Selection | Session | Its requests |
 |---|---|---|
-| `smart-router/auto` | work scope | Go only to the work-bound Codex account. Refused when the roster serves no work scope, or the scope cannot be read. |
-| `smart-router/local` | either scope, or a scope that cannot be read | Go only to the local role, and never to a cloud model. Refused only when no local model can take the request. |
+| `smart-router/auto` | work scope | Use a work-bound Codex or Claude Code model, or an explicitly configured per-level local fallback. Refuse when the roster serves no work scope, or the scope cannot be read. |
+| `smart-router/local` | either scope, or a scope that cannot be read | Use only local roles, never a cloud model. With local tiers, a disabled or unplanned tier refuses. |
 
 John's decision of 2026-11-16, "Let smart-router/local route in work scope": selecting
 `smart-router/local` is itself the request for local routing, so it routes in a work session too.
@@ -1601,6 +1607,14 @@ account bindings. The first rule that applies decides it:
    symlinked spelling of a work directory is not under it.
 4. Otherwise **personal**.
 
+`PI_SMART_ROUTER_PERSONAL_ONLY=1` is a separate process-lifetime restriction; the alternative
+`PI_SMART_ROUTER_SCOPE=personal-only` has the same effect. It does not rewrite a session's scope:
+the router refuses both virtual models when the scope is work or cannot be read, asks no Jev, and
+refuses `/smart-router scope work` without recording an entry. If both restrictions are present,
+the work latch makes the session work and the
+personal-only restriction refuses it. **A model picked by hand and other extensions are not blocked:**
+this is a boundary on the router, not a guarantee that Pi itself cannot send work content.
+
 A fork or `/new` carries the scope that the latch, an entry or the work directories gave into the
 session it creates, which records it as an entry of its own, with a notice. The personal default is
 not carried, so the new session decides its own. A scope that cannot be read is carried as work
@@ -1609,18 +1623,17 @@ scope, the scope the router routes that session in.
 **It fails closed.** A malformed `smart-router.scope` entry, a custom message of that type, or a
 session whose entries cannot be read has an unreadable scope: `smart-router/auto` refuses until
 `/smart-router scope work` or `/smart-router scope personal` records a scope again.
-`smart-router/local` routes to the local role's models all the same: its requests carry no
-account, so there is nothing for the scope to decide. Such a request resolves in work scope, the
-narrower one, and records no scope.
+Normally `smart-router/local` can still route to its local roles, resolving in work scope. Under a
+personal-only restriction it refuses an unreadable scope too.
 
 **Where each scope's requests go.** Scope governs the router's own two models, and nothing else.
 `smart-router/auto` never sends a personal session to a work-bound account, and sends a work
-session only to a work-bound Codex account. A version 1 roster serves no work scope: `smart-router/auto` refuses a
-work session, and the check every pick passes refuses it again. A latched process whose roster has
-no work scope refuses every request on `smart-router/auto`, and `/smart-router status` says why.
-`smart-router/local` serves both scopes, and a scope that cannot be read, since it carries no
-account: a work session on it goes to the local role's models, under a roster that serves no work
-scope too, and never to a cloud model. In either scope a model picked by hand
+session only to work-bound Codex or Claude Code, or to explicitly configured per-level local fallbacks.
+A version 1 roster serves no work scope: `smart-router/auto` refuses a work session, and the check
+on every pick refuses it again. A latched process whose roster has no work scope refuses every request
+on `smart-router/auto`, and `/smart-router status` says why. Normally `smart-router/local` serves both
+scopes and an unreadable scope, using only local roles. A personal-only restriction refuses work or
+unreadable scope on both models. In either scope a model picked by hand
 is sent as it is, a work-account model in a personal session included
 ([A model picked by hand](#a-model-picked-by-hand)).
 
@@ -1672,14 +1685,13 @@ elsewhere, the latch included:
 
 ## Routing locally
 
-To route a session locally, select the local model: `/model smart-router/local`. It routes only to
-the roster's local role, in the role's order and inside the local section's providers and hosts,
-in either scope and in a session whose scope cannot be read, and never falls back to a cloud model:
-when no local model can take a request, the request is refused with "Nothing was sent". Like work
-scope, it governs only the requests the router routes. A model picked by hand afterwards is sent as
-it is, and `/smart-router status` lists what else can send data off the machine. For strictly
-private work, keep using a dedicated session on a local model with pi-warden off
-(`NIX_MANAGED_PI_WARDEN=off`).
+To route a session locally, select `/model smart-router/local`. It uses only the roster's local
+roles, inside the configured providers and LAN hosts, in either scope and when scope cannot be
+read. With `local.levels`, offline demand or a tag selects a tier. A null tier or an unplanned new
+run is refused with "Nothing was sent"; it does not step down or ask Jev. Without `local.levels`,
+the legacy local role is tried in order. A model picked by hand afterwards is sent as it is, and
+`/smart-router status` lists what else can send data off the machine. For strictly private work,
+keep using a dedicated session on a local model with pi-warden off (`NIX_MANAGED_PI_WARDEN=off`).
 
 Earlier versions also had a local-only pin: `/smart-router local on|off|status`, a
 `smart-router.pin` session entry and the `PI_SMART_ROUTER_LOCAL_ONLY` environment variable, which
@@ -1697,9 +1709,9 @@ kept both of the router's models on local models. John's decision of 2026-11-18 
 ## Records and training
 
 A run that still holds a level when it settles leaves one `smart-router.level` entry in its session,
-however it ended. A message that arrives on `smart-router/local`, on a physical model or under a
-version 1 roster gets no level, and a run without a level leaves no entry; nor does a run without a
-prompt, which takes its level from the last prompts but plans none of its own.
+however it ended. A message on a physical model, under a version 1 roster, or on legacy
+`smart-router/local` without local tiers gets no level; a run without a level leaves no entry. A run
+without a prompt plans none of its own.
 
 The router can drop a level before its run settles, and a run can record a level that another
 message planned. These can happen when messages overlap, as when several wait for Jev together or a

@@ -9,7 +9,7 @@
 // file has nowhere to hold a key, token, header, base URL or environment.
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 
-import { isWorkCodex, subscriptionKind } from "./accounts.ts";
+import { isClaudeCodeProvider, isWorkCodex, subscriptionKind } from "./accounts.ts";
 import {
   ALL_LEVELS,
   BUILTIN_EXCLUDES,
@@ -35,7 +35,7 @@ import type { Level } from "./constants.ts";
 import { agentFile, isRecord, message, own } from "./files.ts";
 import type { AgentFile, FileSystem, Parsed } from "./files.ts";
 import type { JevSettings } from "./jev.ts";
-import { canonicalHost, isLocalHost } from "./local.ts";
+import { canonicalHost, isLocalHost, localRoles } from "./local.ts";
 import { DEFAULT_DEMAND, DEFAULT_EFFORT, DEFAULT_SWITCHING, isReasoningLevel, REASONING_LEVELS, SIGNALS } from "./settings.ts";
 import type { DemandSettings, EffortSettings, SurvivalTable, SwitchingSettings } from "./settings.ts";
 import { isTier, TIERS } from "./tiers.ts";
@@ -80,6 +80,8 @@ export interface TierEntry {
   readonly role: string;
   readonly describe: string;
   readonly describeFile?: string;
+  /** Local roles tried after this level's own models, before the scope chain. */
+  readonly fallback?: readonly string[];
 }
 
 export interface ScopeSection {
@@ -103,6 +105,8 @@ export type ScopedBinding = AccountBinding & { readonly scope: Scope };
  */
 export interface LocalSection {
   readonly role: string;
+  /** Optional local tier roles. Null means that tier refuses. */
+  readonly levels?: Readonly<Record<Tier, string | null>>;
   readonly providers: readonly string[];
   /** Base-URL host names, canonical, each passing the built-in local-host rule. */
   readonly hosts: readonly string[];
@@ -224,23 +228,21 @@ export function levelRoles(section: ScopeSection | undefined): string[] {
   return section === undefined ? [] : TIERS.map((tier) => section.levels[tier].role);
 }
 
-/** The roles smart-router/auto reaches in a scope: its level roles, low to super, then its fallback chain. */
+/** The roles smart-router/auto reaches in a scope, including each level's local fallback. */
 function scopeRoles(section: ScopeSection | undefined): string[] {
-  return [...levelRoles(section), ...(section?.fallback ?? [])];
+  if (section === undefined) return [];
+  return [...levelRoles(section), ...TIERS.flatMap((tier) => section.levels[tier].fallback ?? []), ...(section.fallback ?? [])];
 }
 
-/**
- * The roles a pick goes on to after `roleName`, in a session's scope: the scope's whole fallback
- * chain after one of its level roles, the rest of the chain after one of the chain's roles, and
- * nothing after any other role, in a scope without a chain or under version 1 (whose one-hop
- * routing.fallback is pickInRole's). The chain only ever moves forward: no role leads back to a
- * level. The helper knows no session, so its callers apply it only to smart-router/auto.
- */
+
+/** Roles after a level's own role: its local fallbacks, then the scope-wide chain. */
 export function fallbackAfter(roster: Roster, scope: Scope, roleName: string): readonly string[] {
   const section = scopeSection(roster, scope);
-  const chain = section?.fallback;
-  if (section === undefined || chain === undefined) return [];
-  if (levelRoles(section).includes(roleName)) return chain;
+  if (section === undefined) return [];
+  const tier = TIERS.find((name) => section.levels[name].role === roleName);
+  if (tier !== undefined) return [...(section.levels[tier].fallback ?? []), ...(section.fallback ?? [])];
+  const chain = section.fallback ?? [];
+  if (TIERS.some((name) => section.levels[name].fallback?.includes(roleName) === true)) return chain;
   const at = chain.indexOf(roleName);
   return at < 0 ? [] : chain.slice(at + 1);
 }
@@ -446,18 +448,20 @@ interface ParsedRoles {
 }
 
 /** The roles: unique names, exact refs that each sit in one role and match none of `patterns`, and their thinking. */
-function parseRoles(root: Record<string, unknown>, patterns: readonly string[]): ParsedRoles {
+function parseRoles(root: Record<string, unknown>, patterns: readonly string[], allowDisabled = false): ParsedRoles {
   const names = new Set<string>();
   const holders = new Map<string, string>();
   const refs: RoleRef[] = [];
   const roles = array(own(root, "roles"), "roles", true).map((item, index): Role => {
     const path = `roles[${index}]`;
-    const entry = object(item, path, ROLE_KEYS);
+    const entry = object(item, path, allowDisabled ? [...ROLE_KEYS, "disabled"] : ROLE_KEYS);
+    const disabled = own(entry, "disabled");
+    if (disabled !== undefined && disabled !== true) fail(`${path}.disabled`, "must be true when present");
     const name = text(own(entry, "name"), `${path}.name`);
     if (!ROLE_NAME.test(name)) fail(`${path}.name`, `"${name}" must match ${ROLE_NAME.source}`);
     if (names.has(name)) fail(`${path}.name`, `role "${name}" is defined twice`);
     names.add(name);
-    const models = array(own(entry, "models"), `${path}.models`, true).map((model, position) => {
+    const models = array(own(entry, "models"), `${path}.models`, disabled !== true).map((model, position) => {
       const where = `${path}.models[${position}]`;
       const { ref, provider } = exactRef(model, where);
       const holder = holders.get(ref);
@@ -468,6 +472,7 @@ function parseRoles(root: Record<string, unknown>, patterns: readonly string[]):
       refs.push({ where, ref, provider, role: name });
       return ref;
     });
+    if (disabled === true && models.length > 0) fail(`${path}.models`, "must be empty when the role is disabled");
     const given = own(entry, "thinking");
     const thinking = given === undefined ? "selected" : given;
     if (thinking !== "selected" && (typeof thinking !== "string" || !LEVELS.includes(thinking))) {
@@ -492,7 +497,7 @@ function bindingLabel(
   const path = `accounts.${provider}`;
   const kind = subscriptionKind(provider);
   if (kind === undefined) {
-    fail(path, `${provider} is not a subscription provider: openai-codex, anthropic, github-copilot, claude-code, or a Multi-Pass alias`);
+    fail(path, `${provider} is not a subscription provider: openai-codex, anthropic, github-copilot, claude-code, a numbered Claude Code instance, or a Multi-Pass alias`);
   }
   const binding = object(item, path, keys);
   if (kind === "alias" && own(binding, "native") !== undefined) fail(path, 'a Multi-Pass alias is bound with "multiPassLabel", not "native"');
@@ -511,17 +516,32 @@ function requireBindings(refs: readonly RoleRef[], accounts: ReadonlyMap<string,
 }
 
 /** The local section: its role, providers that cover that role's models, and local hosts. `checkRole` is a further rule for the role, checked first. */
-function parseLocal(root: Record<string, unknown>, parsed: ParsedRoles, checkRole?: (role: string) => void): LocalSection | undefined {
+function parseLocal(root: Record<string, unknown>, parsed: ParsedRoles, checkRole?: (role: string, where: string) => void, allowLevels = false): LocalSection | undefined {
   if (own(root, "local") === undefined) return undefined;
-  const section = object(own(root, "local"), "local", LOCAL_KEYS);
+  const section = object(own(root, "local"), "local", allowLevels ? [...LOCAL_KEYS, "levels"] : LOCAL_KEYS);
   const role = parsed.roleName(own(section, "role"), "local.role");
-  checkRole?.(role);
+  checkRole?.(role, "local.role");
+  let levels: Readonly<Record<Tier, string | null>> | undefined;
+  if (own(section, "levels") !== undefined) {
+    const given = object(own(section, "levels"), "local.levels", TIERS);
+    const readTier = (tier: Tier): string | null => {
+      const where = `local.levels.${tier}`;
+      const value = required(own(given, tier), where);
+      if (value === null) return null;
+      const name = parsed.roleName(value, where);
+      checkRole?.(name, where);
+      return name;
+    };
+    levels = { low: readTier("low"), medium: readTier("medium"), high: readTier("high"), super: readTier("super") };
+    if (!Object.values(levels).includes(role)) fail("local.role", "must be one of local.levels' enabled roles");
+  }
   const providers = uniqueTexts(own(section, "providers"), "local.providers", true, (provider, where) => {
     if (!PROVIDER_ID.test(provider)) fail(where, `"${provider}" is not a provider id`);
   });
+  const allRoles = localRoles({ role, providers, hosts: [], ...(levels === undefined ? {} : { levels }) });
   for (const { ref, provider, role: holder } of parsed.refs) {
-    if (holder === role && !providers.includes(provider)) {
-      fail("local.providers", `must include ${provider}, the provider of "${ref}" in the local role "${role}"`);
+    if (allRoles.includes(holder) && !providers.includes(provider)) {
+      fail("local.providers", `must include ${provider}, the provider of "${ref}" in the local role "${holder}"`);
     }
   }
   const hosts = uniqueTexts(own(section, "hosts"), "local.hosts", true, (host, where) => {
@@ -532,7 +552,7 @@ function parseLocal(root: Record<string, unknown>, parsed: ParsedRoles, checkRol
       fail(where, `"${host}" is not a local host: use localhost, a loopback, private, link-local or unique-local address, or a .lan, .local or .home.arpa name`);
     }
   });
-  return { role, providers, hosts };
+  return { role, providers, hosts, ...(levels === undefined ? {} : { levels }) };
 }
 
 function validate(value: unknown): Roster {
@@ -597,7 +617,7 @@ function validate(value: unknown): Roster {
 
 const V2_TOP_KEYS = ["version", "exclude", "roles", "scopes", "accounts", "classifier", "demand", "switching", "adaptiveReasoning", "local", "stickyIdleMinutes", "cooldownMinutes", "unreachableMinutes"];
 const SCOPE_KEYS: Readonly<Record<Scope, readonly string[]>> = { personal: ["levels", "fallback"], work: ["levels", "directories", "fallback"] };
-const LEVEL_KEYS = ["role", "describe", "describeFile"];
+const LEVEL_KEYS = ["role", "describe", "describeFile", "fallback"];
 const SCOPED_BINDING_KEYS = ["multiPassLabel", "native", "scope"];
 const CLASSIFIER_KEYS = ["model", "timeoutMs", "closeCall", "context", "instructions", "instructionsFile"];
 const CONTEXT_KEYS = ["messages", "messageChars", "totalChars"];
@@ -795,7 +815,7 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
   const exclude = [...new Set([...BUILTIN_EXCLUDES, ...rosterExcludes])];
   // Only the built-in work alias waits until the levels show the refs a work level lifts it for.
   // The roster's own exclusions apply in full, so one that names the alias stays in force.
-  const parsed = parseRoles(root, [...new Set([...BUILTIN_EXCLUDES.filter((pattern) => pattern !== WORK_ALIAS_EXCLUDE), ...rosterExcludes])]);
+  const parsed = parseRoles(root, [...new Set([...BUILTIN_EXCLUDES.filter((pattern) => pattern !== WORK_ALIAS_EXCLUDE), ...rosterExcludes])], true);
   const { roles, refs, roleName } = parsed;
 
   const accounts = new Map<string, ScopedBinding>();
@@ -842,9 +862,10 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
       const describe = describeFile === undefined || own(entry, "describe") !== undefined ? text(own(entry, "describe"), `${where}.describe`) : "";
       if ([...describe].length > DESCRIBE_MAX_CHARS) fail(`${where}.describe`, `must be at most ${DESCRIBE_MAX_CHARS} characters`);
       if (describeFile !== undefined && own(entry, "describe") !== undefined) fail(where, 'give "describe" or "describeFile", not both');
+      const fallback = own(entry, "fallback") === undefined ? undefined : uniqueTexts(own(entry, "fallback"), `${where}.fallback`, true);
       levelOf.set(role, { scope, tier });
       below = { tier, role };
-      return { role, describe, ...(describeFile === undefined ? {} : { describeFile }) };
+      return { role, describe, ...(describeFile === undefined ? {} : { describeFile }), ...(fallback === undefined ? {} : { fallback }) };
     };
     const levels = { low: parseLevel("low"), medium: parseLevel("medium"), high: parseLevel("high"), super: parseLevel("super") };
     const given = own(section, "directories");
@@ -854,8 +875,8 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
     scopes[scope] = { levels, directories, ...(chain === undefined ? {} : { fallback: chain }) };
   }
 
-  // A fallback chain names roles that are no level's, in either scope: a level's role in a chain
-  // would give its models two places in one order, and a level of its own to hold.
+
+  // A scope-wide fallback chain names roles that are no level's, in either scope.
   const chainOf = new Map<string, Scope>();
   for (const scope of SCOPES) {
     for (const [index, name] of (scopes[scope]?.fallback ?? []).entries()) {
@@ -870,8 +891,8 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
     }
   }
 
-  // A pick from a chain passes the same account rules as a pick from a level: a personal session
-  // never reaches a work-bound account, and a work session reaches only the work Codex account.
+  // Personal level and chain roles never reach work bindings. Work level and chain roles take only
+  // work-bound Codex or Claude Code; local tier fallbacks are checked against the LAN at runtime.
   for (const { where, ref, provider, role } of refs) {
     const level = levelOf.get(role);
     const chain = chainOf.get(role);
@@ -879,7 +900,9 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
     if (scope === undefined) continue;
     const place = level !== undefined ? levelName(level) : `the ${scope} scope's fallback`;
     if (scope === "personal" && boundToWork(accounts, provider)) fail(where, `"${ref}" is in ${place}, but ${provider} is work-bound`);
-    if (scope === "work" && !isWorkCodex(accounts, provider)) fail(where, `"${ref}" is in ${place}, which takes only work-bound Codex models`);
+    if (scope === "work" && !isWorkCodex(accounts, provider) && !(isClaudeCodeProvider(provider) && boundToWork(accounts, provider))) {
+      fail(where, `"${ref}" is in ${place}, which takes only work-bound Codex or Claude Code models`);
+    }
   }
 
   for (const { where, ref } of refs) {
@@ -887,12 +910,27 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
     if (pattern !== undefined) fail(where, `"${ref}" is excluded by ${pattern}`);
   }
 
-  // The local role is no level's: smart-router/auto reaches it only at the end of a chain that names it.
-  const local = parseLocal(root, parsed, (role) => {
+  // Local roles may be shared as per-level fallbacks, but never as a scope's own level.
+  const local = parseLocal(root, parsed, (role, where) => {
     const level = levelOf.get(role);
-    if (level !== undefined) fail("local.role", `"${role}" is already the role of ${levelName(level)}`);
-  });
-
+    if (level !== undefined) fail(where, `"${role}" is already the role of ${levelName(level)}`);
+  }, true);
+  const sharedLocal = new Set(localRoles(local));
+  for (const scope of SCOPES) {
+    const section = scopes[scope];
+    if (section === undefined) continue;
+    for (const tier of TIERS) {
+      if ((section.levels[tier].fallback?.length ?? 0) > 1) {
+        fail(`scopes.${scope}.levels.${tier}.fallback`, "may name only one local role");
+      }
+      for (const [index, name] of (section.levels[tier].fallback ?? []).entries()) {
+        const where = `scopes.${scope}.levels.${tier}.fallback[${index}]`;
+        const role = roleName(name, where);
+        if (!sharedLocal.has(role)) fail(where, `"${role}" is not a local role`);
+        if (section.fallback?.includes(role)) fail(where, `"${role}" is also in the scope's fallback`);
+      }
+    }
+  }
   const classifier = own(root, "classifier") === undefined ? undefined : classifierSettings(own(root, "classifier"), exclude);
   const demand = demandSettings(own(root, "demand"));
   const switching = switchingSettings(own(root, "switching"));
