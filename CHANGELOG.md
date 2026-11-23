@@ -42,6 +42,16 @@ fork's releases on that base. Releases are signed tags; nothing is published to 
 
 ### Fixed
 
+- A run under way keeps its level when the session's scope changes. `/smart-router scope work`
+  given during a personal SUPER run left the run with no model it could stay on, and its next
+  request fell to the default role, MEDIUM, while the footer still said `super` and the run's level
+  record said personal scope with a work MEDIUM model. Such a run now takes the level it had, in
+  the scope it is in, by the climb a tagged run makes: that level's own models, its fallback chain,
+  then a level above, never one below. When none can take it the request is refused with "Nothing
+  was sent". The footer names the model the run is on, `/smart-router status` and the level record
+  the scope and that model, and `/smart-router history` marks the move `run:level`. What
+  pi-cache-optimizer is told agrees, and a retry's refusal of filtered content stands (John,
+  2026-11-23).
 - `smart-router/local` with per-tier local roles no longer refuses a run that starts without a plan
   with "no local tier was planned for this run". A run an extension starts (a mail notice, a goal
   continuation, a loop), and a prompt's run whose plan could not be matched to it, now take the

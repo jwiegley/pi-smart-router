@@ -16,7 +16,7 @@ import { TIERS } from "../src/tiers.ts";
 import type { Tier } from "../src/tiers.ts";
 import { CHATGPT, FakeCatalog, HERA_LAN, model, NOW, OPENROUTER } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
-import { agentDir, assistant, FakeRuntime, request, resetSlot, routed, start } from "./support/pi.ts";
+import { agentDir, assistant, failure, FakeRuntime, footerOf, previous, request, resetSlot, routed, start } from "./support/pi.ts";
 import type { Loaded, LoadOptions } from "./support/pi.ts";
 
 beforeEach(resetSlot);
@@ -835,5 +835,135 @@ describe("the safeguards hold under any order and on the scope models", () => {
     assert.throws(() => assertSafe("personal", rc("personal", "work"), work as never), /is routed in work scope, which smart-router\/personal never routes in/);
     assert.throws(() => assertSafe("work", rc("work", "personal"), personal as never), /is routed in personal scope, which smart-router\/work never routes in/);
     assert.throws(() => assertSafe("personal", rc("personal", "personal"), work as never), /smart-router\/personal:/);
+  });
+});
+
+describe("a run under way keeps its level when the session's scope changes", () => {
+  const levelRecords = (loaded: Loaded): Json[] => loaded.session.entries.filter((entry) => entry.customType === "smart-router.level").map((entry) => entry.data as Json);
+
+  /** A SUPER run in personal scope, its first answer in, then /smart-router scope work while it runs. */
+  async function superThenWork(t: TestContext, roster?: Json): Promise<{ loaded: Loaded; first: string; signal: AbortSignal }> {
+    const loaded = await open(t, roster === undefined ? {} : { roster });
+    await loaded.host.emit("input", { text: "plan the research #super", source: "interactive" });
+    await loaded.host.emit("before_agent_start", { messageType: "user", prompt: "plan the research" });
+    const signal = loaded.session.startRun();
+    const first = routed(loaded.runtime.route("auto", request("user", { signal })));
+    assert.equal(first, `${CODEX}/super`);
+    await loaded.host.emit("message_end", { message: assistant(first) });
+    await say(loaded, "scope work");
+    assert.equal(selection(loaded), "smart-router/work");
+    return { loaded, first, signal };
+  }
+
+  test("personal SUPER, then /smart-router scope work: the run's continuations go to work SUPER, never to MEDIUM", async (t) => {
+    const { loaded, first, signal } = await superThenWork(t);
+    const next = routed(loaded.runtime.route("work", request("continuation", { signal, previous: previous(loaded.runtime, first) })));
+    assert.equal(next, `${WORK_CODEX}/super`);
+    // The run stays there: the next continuation sticks to the work model like any other.
+    await loaded.host.emit("message_end", { message: assistant(next) });
+    assert.equal(routed(loaded.runtime.route("work", request("continuation", { signal, previous: previous(loaded.runtime, next) }))), next);
+    const history = (await say(loaded, "history")).message;
+    assert.match(history, /run:level/);
+  });
+
+  test("the footer and the run's level record name the level, the scope and the model the run ended on", async (t) => {
+    const { loaded, first, signal } = await superThenWork(t);
+    const next = routed(loaded.runtime.route("work", request("continuation", { signal, previous: previous(loaded.runtime, first) })));
+    assert.match(footerOf(loaded) ?? "", /^super .*→ super$/, `the footer: ${footerOf(loaded)}`);
+    assert.match((await say(loaded, "status")).message, /^Scope: work \(entry\)$/m);
+    await loaded.host.emit("message_end", { message: assistant(next) });
+    await settle(loaded);
+    const record = levelRecords(loaded).at(-1);
+    assert.ok(record !== undefined, "the run wrote its level record");
+    assert.equal(record.scope, "work");
+    assert.equal(record.tier, "super");
+    assert.equal(record.need, "super");
+    assert.equal(record.ref, next);
+  });
+
+  test("with no work SUPER model the continuation is refused: nothing is sent, and no lower level takes it", async (t) => {
+    const roster = config((v) => {
+      v.roles.find((role: Json) => role.name === "work-super").models = [`${WORK_CODEX}/absent`];
+    });
+    const { loaded, first, signal } = await superThenWork(t, roster);
+    refuses(() => loaded.runtime.route("work", request("continuation", { signal, previous: previous(loaded.runtime, first) })), /smart-router\/work/);
+    // The refusal changed nothing: the same request is refused again, and MEDIUM is there to be taken.
+    refuses(() => loaded.runtime.route("work", request("continuation", { signal, previous: previous(loaded.runtime, first) })), /smart-router\/work/);
+    await settle(loaded);
+    assert.equal(await run(loaded, "work", "medium"), `${WORK_CODEX}/medium`);
+  });
+
+  test("a retry of content the personal model refused is still refused after the move: it reaches no work model", async (t) => {
+    const { loaded, first, signal } = await superThenWork(t);
+    const failed = failure(loaded.runtime, first, "403 Forbidden: content_filter: the request was flagged by moderation");
+    refuses(() => loaded.runtime.route("work", request("retry", { signal, failed, previous: previous(loaded.runtime, first) })), /refused content is never sent to another model/);
+  });
+
+  test("what the cache optimizer is told after the move is the model the run's next request takes", async (t) => {
+    const { loaded, first, signal } = await superThenWork(t);
+    const told = loaded.router?.activeRoute("work");
+    const next = routed(loaded.runtime.route("work", request("continuation", { signal, previous: previous(loaded.runtime, first) })));
+    assert.equal(`${told?.provider}/${told?.modelId}`, next);
+    assert.equal(next, `${WORK_CODEX}/super`);
+  });
+
+  test("a moved run whose level has no work model climbs, and its record says it stepped up, with no cost from the scope it left", async (t) => {
+    const roster = config((v) => {
+      v.roles.find((role: Json) => role.name === "work-high").models = [`${WORK_CODEX}/absent`];
+    });
+    const loaded = await open(t, { roster });
+    // Untagged: the personal plan is priced where the session has figures, and may carry a cost.
+    const prompt = "review the design of the migration and its risks in depth";
+    await loaded.host.emit("input", { text: `${prompt} #high`, source: "interactive" });
+    await loaded.host.emit("before_agent_start", { messageType: "user", prompt });
+    const signal = loaded.session.startRun();
+    const first = routed(loaded.runtime.route("auto", request("user", { signal })));
+    assert.equal(first, `${CODEX}/high`);
+    await loaded.host.emit("message_end", { message: assistant(first) });
+    await say(loaded, "scope work");
+    const next = routed(loaded.runtime.route("work", request("continuation", { signal, previous: previous(loaded.runtime, first) })));
+    assert.equal(next, `${WORK_CODEX}/super`);
+    await loaded.host.emit("message_end", { message: assistant(next) });
+    await settle(loaded);
+    const record = levelRecords(loaded).at(-1);
+    assert.ok(record !== undefined);
+    assert.deepEqual([record.scope, record.need, record.tier, record.steppedUp, record.ref], ["work", "high", "super", true, next]);
+    assert.equal(record.cost, undefined);
+    assert.doesNotMatch(JSON.stringify(record), new RegExp(`${CODEX}/|${CLAUDE}/|openrouter/`));
+  });
+
+  test("no request of the moved run reaches a personal model, whatever it names as previous", async (t) => {
+    const { loaded, first, signal } = await superThenWork(t);
+    for (const prior of [first, `${CLAUDE}/super`, `openrouter/vendor/super`]) {
+      const ref = routed(loaded.runtime.route("work", request("continuation", { signal, previous: previous(loaded.runtime, prior) })));
+      assert.ok(ref.startsWith(`${WORK_CODEX}/`) || ref.startsWith(`${WORK_CLAUDE}/`), `${prior} → ${ref}`);
+      assert.equal(ref, `${WORK_CODEX}/super`);
+    }
+    // A retry of the moved run's first work request stays in work scope at SUPER too.
+    const retried = routed(loaded.runtime.route("work", request("retry", { signal, previous: previous(loaded.runtime, first) })));
+    assert.equal(retried, `${WORK_CODEX}/super`);
+  });
+
+  test("a work run cannot be moved back: the session stays in work scope and the run on its work model", async (t) => {
+    const loaded = await open(t, { setup: workEntry });
+    await loaded.host.emit("input", { text: "review it #high", source: "interactive" });
+    await loaded.host.emit("before_agent_start", { messageType: "user", prompt: "review it" });
+    const signal = loaded.session.startRun();
+    const first = routed(loaded.runtime.route("auto", request("user", { signal })));
+    assert.equal(first, `${WORK_CODEX}/high`);
+    await loaded.host.emit("message_end", { message: assistant(first) });
+    assert.equal((await say(loaded, "scope personal")).message, "pi-smart-router: the session stays in work scope.");
+    assert.equal(routed(loaded.runtime.route("auto", request("continuation", { signal, previous: previous(loaded.runtime, first) }))), first);
+  });
+
+  test("a run that stays in its scope is not moved: a change of router model alone keeps its model", async (t) => {
+    const loaded = await open(t);
+    await loaded.host.emit("input", { text: "plan it #super", source: "interactive" });
+    await loaded.host.emit("before_agent_start", { messageType: "user", prompt: "plan it" });
+    const signal = loaded.session.startRun();
+    const first = routed(loaded.runtime.route("auto", request("user", { signal })));
+    await loaded.host.emit("message_end", { message: assistant(first) });
+    assert.equal(routed(loaded.runtime.route("personal", request("continuation", { signal, previous: previous(loaded.runtime, first) }))), first);
+    assert.doesNotMatch((await say(loaded, "history")).message, /run:level/);
   });
 });

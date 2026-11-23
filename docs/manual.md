@@ -1690,6 +1690,17 @@ router's own models is selected, so the command and the model always name the sa
 picked by hand is never replaced. `/smart-router scope local` selects `smart-router/local` and
 records no scope: the session's own scope, personal or work, stays as it is.
 
+A run that is under way when the scope changes keeps its level. After `/smart-router scope work`
+in a personal run, none of the run's models may be used any more, so its next request takes the
+level the run had, in work scope: that level's own models, its fallback chain, then a level above,
+never one below, and never a personal model. When nothing at that level can take it the request is
+refused with "Nothing was sent" instead of going on at a lower level. The footer then names the
+work model beside the run's level, the status and the run's level record name work scope and that
+model, without the cost figures of the scope it left, and `/smart-router history` marks the request
+`run:level`. A retry keeps its own rule: content the personal model refused is not sent to a work
+model either. A run without a level (a session that has planned nothing) goes to the scope's
+default role, as before.
+
 ### Work scope and the selection
 
 Work scope has no hold on the selection. Until 1.3.0-jw.2 a work guard switched any selection but

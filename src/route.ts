@@ -47,7 +47,7 @@ import type { SessionDepth } from "./demand.ts";
 import { routesLevels, VIRTUAL_API } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { chooseModel, effortFor, eligibleRole, escalationTarget, NO_LOCAL_SECTION, noScopeSection, pickInRole } from "./decide.ts";
-import type { Choice, CompactionFigures, CostFigures, CostTerms, Decision, LastResponder, LevelInput, Plan, PlanLevel } from "./decide.ts";
+import type { Choice, Chosen, CompactionFigures, CostFigures, CostTerms, Decision, LastResponder, LevelInput, Plan, PlanLevel } from "./decide.ts";
 import { turnTypeOf } from "./effort.ts";
 import type { SentEffort } from "./effort.ts";
 import { invariant, noBoundedHistory, unroutable } from "./errors.ts";
@@ -59,7 +59,7 @@ import type { NeedRun } from "./records.ts";
 import { clock, coolFrom, failureKind, holdFrom, inLocalRole, refOf, resolveCandidate } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
 import { autoRoles, excludedBy, excludesFor, isWorkBound, roleOf, scopeSection } from "./roster.ts";
-import type { ScopeSection } from "./roster.ts";
+import type { Scope, ScopeSection } from "./roster.ts";
 import { stuck } from "./stuck.ts";
 import { higherTier, tierAbove, TIERS } from "./tiers.ts";
 import type { Tier } from "./tiers.ts";
@@ -312,7 +312,10 @@ export function predict(rc: ResolveContext, record: SessionRecord, figures: Cost
       : rc.localOnly
         ? chooseLocalForNeed(rc, record)
         : undefined;
-  return chosen?.decision ?? stick(rc, undefined, record);
+  if (chosen !== undefined) return chosen.decision;
+  // A run under way that can stay on none of its models: the level routeOwned will keep (keepLevel).
+  const stuck = stick(rc, undefined, record);
+  return (section === undefined ? undefined : keepLevel(rc, record, section, undefined, stuck, compaction)?.decision) ?? stuck;
 }
 
 function retry(rc: ResolveContext, request: ModelRouteRequest, record: SessionRecord): Decision {
@@ -479,6 +482,46 @@ function escalation(input: RouteInput, section: ScopeSection): Leveled | undefin
   return { tier: target.tier, decision: { ok: true, choice: { ...target.decision.choice, code: "escalate" } } };
 }
 
+/**
+ * A run under way that can stay on none of its models keeps its level. When the session's scope or
+ * its selected router model changes during a run (/smart-router scope work in a personal run), the
+ * run's model, its previous one and the last responder all belong to the scope it left, so stick
+ * finds nothing and falls to the default role, which under a version 2 roster is MEDIUM. A SUPER
+ * run for planning or research then went on at MEDIUM without a word (John, 2026-11-23). Here it
+ * takes the level it had, in the scope it is now in, by the climb a tagged run makes: that level's
+ * own models, its fallback chain, then a level above, never one below. When none of those can take
+ * it the request is refused, as a prompt for that level would be. Undefined for any other
+ * request, and for a run that has no level (a version 1 run, a session that planned nothing).
+ */
+function keepLevel(rc: ResolveContext, record: SessionRecord, section: ScopeSection, request: Pick<ModelRouteRequest, "reason" | "previous"> | undefined, decision: Decision, compaction: CompactionFigures): Chosen | undefined {
+  if (record.runPick === undefined || record.runTier === undefined) return undefined;
+  // Only the fall to the default role is replaced. A retry's own answer stands, its refusal above
+  // all: content a model refused is never sent to another model, in another scope either.
+  if (decision.ok ? decision.choice.code !== "stick:default" : request?.reason === "retry") return undefined;
+  // stick's bases: while one of them is a model of this scope the run stays where it is, or in that role.
+  const run = record.runPick.id === rc.virtualId ? record.runPick.ref : undefined;
+  const previous = request === undefined ? undefined : previousRef(request as ModelRouteRequest);
+  if ([previous, run, record.last?.ref].some((ref) => ref !== undefined && eligibleRole(rc, ref) !== undefined)) return undefined;
+  return chooseModel({ rc, section, need: record.runTier, code: "run:level", last: record.last, promptTokens: 0, compaction, figures: undefined, priced: false });
+}
+
+/** Rewrite the run's pending level and terms for the scope the run is now in; nothing when they already name it. */
+function rescope(record: SessionRecord, scope: Scope, moved: Chosen | undefined): void {
+  const relevel = (level: PlanLevel): PlanLevel => {
+    const { cost: _cost, fallback: _fallback, ...kept } = level;
+    return { ...kept, scope, tier: moved?.tier ?? record.runTier ?? level.tier, steppedUp: moved?.steppedUp ?? false, returnedToFirst: false };
+  };
+  const pending = record.pendingLevel;
+  if (pending !== undefined && pending.started && pending.level.scope !== scope) record.pendingLevel = { ...pending, level: relevel(pending.level) };
+  const terms = record.runTerms;
+  if (terms?.kind === "plan" && terms.level.scope !== scope) record.runTerms = { kind: "plan", level: relevel(terms.level) };
+  else if (terms?.kind === "need" && terms.run.scope !== scope) {
+    const { cost: _cost, ...run } = terms.run;
+    record.runTerms = { kind: "need", run: { ...run, scope }, tier: moved?.tier ?? record.runTier ?? terms.tier };
+    record.needRun = record.runTerms.run;
+  }
+}
+
 /** The planned model if it still resolves, else the planned role, then its fallback. */
 function fromPlan(rc: ResolveContext, plan: Plan): Decision {
   const tiers = rc.localOnly ? rc.roster.local?.levels : undefined;
@@ -597,6 +640,8 @@ export function routeOwned(input: RouteInput): ModelRoute {
   else if (unplanned !== undefined) decision = unplanned.decision;
   else if (escalated !== undefined) decision = escalated.decision;
   else decision = stick(rc, previousRef(request), record);
+  const moved = plan === undefined && unplanned === undefined && escalated === undefined && section !== undefined ? keepLevel(rc, record, section, request, decision, input.compaction) : undefined;
+  if (moved !== undefined) decision = moved.decision;
   const choice = settle(input, decision);
   // A planned run's prompt: its need and the level whose model took it go in the ledger, and the
   // need is the session's until the next planned run. A run without a prompt counts as a prompt
@@ -633,6 +678,12 @@ export function routeOwned(input: RouteInput): ModelRoute {
     record.runTier = escalated.tier;
     record.escalated = true;
   }
+  if (moved !== undefined) record.runTier = moved.tier;
+  // What is shown and recorded of a run names the scope it is in. A run that goes on in another
+  // scope than the one that planned it (moved above, or moved up by escalation after the scope
+  // changed) keeps its need and what decided it; the cost the other scope's models were compared
+  // at and the marks of that scope's pick no longer describe it.
+  rescope(record, rc.scope, moved);
   record.runPick = { id, ref: choice.ref, role: choice.role };
   remember(record, {
     at: rc.now,
