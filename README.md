@@ -4,8 +4,9 @@
 
 This repository is [jwiegley/pi-smart-router](https://github.com/jwiegley/pi-smart-router), John
 Wiegley's fork of [beettlle/pi-smart-router](https://github.com/beettlle/pi-smart-router). It is a
-rewrite for the virtual models of Pi 1.5: two models, `smart-router/auto` and `smart-router/local`,
-that send each request to a physical model chosen from a roster you keep on each host.
+rewrite for the virtual models of Pi 1.5: four models, `smart-router/auto`, `smart-router/personal`,
+`smart-router/work` and `smart-router/local`, that send each request to a physical model chosen
+from a roster you keep on each host.
 
 Everything from [Upstream's README](#upstreams-readme) on is upstream's README at v1.4.0
 (`54bee53d`), unchanged. It describes upstream's package, and most of it does not describe this

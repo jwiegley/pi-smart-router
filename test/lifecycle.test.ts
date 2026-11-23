@@ -17,6 +17,8 @@ const HANDLERS = [
   "session_start",
   "input",
   "before_agent_start",
+  // A selection of smart-router/work or smart-router/personal sets or asks about the session's scope.
+  "model_select",
   "turn_start",
   "message_end",
   "agent_settled",
@@ -29,15 +31,18 @@ const HANDLERS = [
 ];
 /**
  * Events whose handler could change what a selection sends. The router registers none: a model
- * picked by hand is sent as it is. Nor does it answer a selection: model_select only showed the
- * removed local-only pin's status item.
+ * picked by hand is sent as it is. Its model_select handler answers only a selection of
+ * smart-router/work or smart-router/personal, and changes no selection.
  */
-const NEVER_HANDLED = ["before_provider_request", "cache_warming_decision", "tool_call", "model_select"];
+const NEVER_HANDLED = ["before_provider_request", "cache_warming_decision", "tool_call"];
+/** The router's own models, in the order the factory registers them. */
+const OWN = ["auto", "local", "personal", "work"] as const;
+const ALL_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 beforeEach(resetSlot);
 afterEach(resetSlot);
 
-test("the default export is the factory, and it registers both models with every thinking level", () => {
+test("the default export is the factory, and it registers its four models with every thinking level", () => {
   assert.equal(typeof smartRouter, "function");
   const session = new FakeSession(new FakeRuntime());
   const host = new FakeHost(session);
@@ -45,13 +50,15 @@ test("the default export is the factory, and it registers both models with every
   assert.deepEqual(
     host.definitions.map((definition) => [definition.provider, definition.id, definition.name, definition.thinkingLevels]),
     [
-      ["smart-router", "auto", "Smart Router (auto)", ["off", "minimal", "low", "medium", "high", "xhigh", "max"]],
-      ["smart-router", "local", "Smart Router (local models)", ["off", "minimal", "low", "medium", "high", "xhigh", "max"]],
+      ["smart-router", "auto", "Smart Router (auto)", ALL_LEVELS],
+      ["smart-router", "local", "Smart Router (local models)", ALL_LEVELS],
+      ["smart-router", "personal", "Smart Router (personal scope)", ALL_LEVELS],
+      ["smart-router", "work", "Smart Router (work scope)", ALL_LEVELS],
     ],
   );
 });
 
-test("both models are registered first, and every handler is wired once, after the router is built", (t) => {
+test("the models are registered first, and every handler is wired once, after the router is built", (t) => {
   const dir = agentDir(t);
   const host = new FakeHost(new FakeSession(new FakeRuntime()));
   const order: string[] = [];
@@ -67,9 +74,9 @@ test("both models are registered first, and every handler is wired once, after t
     return router;
   });
   assert.ok(built, "the router was built");
-  assert.deepEqual(order, ["registerVirtualModel:auto", "registerVirtualModel:local", "build"]);
+  assert.deepEqual(order, [...OWN.map((id) => `registerVirtualModel:${id}`), "build"]);
   assert.deepEqual(
-    host.calls.slice(2),
+    host.calls.slice(OWN.length),
     [...HANDLERS.map((event) => `on:${event}`), "registerCommand:smart-router"],
     "every handler once, with session_compact and session_tree, after which the ledger forgets every cache",
   );
@@ -97,7 +104,7 @@ test("the factory does no I/O: the files are first read at session_start", async
   assert.ok(asked.length > 0);
 });
 
-test("a builder that throws leaves both models refusing with the load error, and only the notice handler", async (t) => {
+test("a builder that throws leaves every model refusing with the load error, and only the notice handler", async (t) => {
   const loaded = load({
     dir: agentDir(t),
     build: () => {
@@ -105,9 +112,9 @@ test("a builder that throws leaves both models refusing with the load error, and
     },
   });
   assert.equal(loaded.router, undefined);
-  assert.deepEqual(loaded.host.calls, ["registerVirtualModel:auto", "registerVirtualModel:local", "on:session_start"], "no handler or command of a router that failed to build");
+  assert.deepEqual(loaded.host.calls, [...OWN.map((id) => `registerVirtualModel:${id}`), "on:session_start"], "no handler or command of a router that failed to build");
   loaded.session.select("auto");
-  for (const id of ["auto", "local"] as const) {
+  for (const id of OWN) {
     let message = "";
     assert.throws(
       () => loaded.runtime.route(id, request("direct")),
@@ -121,7 +128,7 @@ test("a builder that throws leaves both models refusing with the load error, and
   }
   await loaded.host.emit("session_start", { reason: "startup" });
   assert.deepEqual(loaded.session.notices, [
-    { type: "error", message: "pi-smart-router failed to load: boom. smart-router/auto and smart-router/local refuse every request until it loads." },
+    { type: "error", message: "pi-smart-router failed to load: boom. Every smart-router model refuses every request until it loads." },
   ]);
   loaded.session.hasUI = false;
   await loaded.host.emit("session_start", { reason: "startup" });
@@ -169,13 +176,13 @@ test("the factory works through nix-config's staging proxy, which returns nothin
   }) as ExtensionAPI;
   install(api, (pi, options) => createRouter(pi, { ...options, agentDir: () => dir }));
   assert.deepEqual(host.calls, [], "everything was staged");
-  assert.equal(staged.length, 2 + HANDLERS.length + 1, "both models, every handler (session_compact and session_tree, after which the ledger forgets every cache, included) and the command");
+  assert.equal(staged.length, OWN.length + HANDLERS.length + 1, "the four models, every handler (session_compact and session_tree, after which the ledger forgets every cache, included) and the command");
   live = true;
   for (const register of staged) register();
   host.bind();
   session.select("auto");
   await host.emit("session_start", { reason: "startup" });
-  assert.equal(host.definitions.length, 4, "session_start registered again through the live proxy");
+  assert.equal(host.definitions.length, 2 * OWN.length, "session_start registered again through the live proxy");
   await host.emit("input", { text: "plan the migration", source: "interactive" });
   const signal = session.startRun();
   assert.equal(routed(runtime.route("auto", request("user", { signal }))), ASTRA);
@@ -233,10 +240,13 @@ describe("a session_start step that fails leaves the others to run", () => {
   const breakRegistry = (): void => {
     (globalThis as Record<symbol, unknown>)[Symbol.for(ROUTING_REGISTRY_KEY)] = { version: 1, registerRouter: throwing("broken registry"), getRouter: () => undefined };
   };
-  const ROSTER_LIMITS = { auto: { contextWindow: 128_000, maxTokens: 32_000 }, local: { contextWindow: 262_144, maxTokens: 81_920 } };
+  const NONE = { contextWindow: 128_000, maxTokens: 16_384 };
+  // A version 1 roster serves only personal scope, so smart-router/work declares the defaults.
+  const ROSTER_LIMITS = { auto: { contextWindow: 128_000, maxTokens: 32_000 }, local: { contextWindow: 262_144, maxTokens: 81_920 }, personal: { contextWindow: 128_000, maxTokens: 32_000 }, work: NONE };
   /** Hera's version 2 roster, under which a resumed session's level is seeded after the last responder. */
   const HERA_V2 = fixture("roster-hera-v2.json");
-  const V2_LIMITS = { auto: { contextWindow: 128_000, maxTokens: 32_000 }, local: { contextWindow: 262_144, maxTokens: 81_920 } };
+  // Each scope's model declares what auto would for that scope alone.
+  const V2_LIMITS = { auto: { contextWindow: 128_000, maxTokens: 32_000 }, local: { contextWindow: 262_144, maxTokens: 81_920 }, personal: { contextWindow: 128_000, maxTokens: 32_000 }, work: { contextWindow: 272_000, maxTokens: 128_000 } };
   /** The level record a session at HIGH left, which session_start reads after the seed. */
   const heldHigh = (session: Loaded["session"]): void => session.appendCustom(LEVEL_ENTRY, { v: 1, at: NOW - 60_000, scope: "personal", source: "tag", tier: "high", asked: "high", tag: "high", ref: SOL });
   const conflict = "Virtual model smart-router/auto conflicts with a registered model";
@@ -354,9 +364,9 @@ describe("a session_start step that fails leaves the others to run", () => {
         assert.ok(messages.includes(`pi-smart-router: the session_start handler failed: ${row.failure}`), `the failed step is reported: ${JSON.stringify(messages)}`);
       }
       const limits = row.roster === HERA_V2 ? V2_LIMITS : ROSTER_LIMITS;
-      assert.deepEqual(loaded.router?.limits(), row.rosterRead ? limits : { auto: DEFAULT_LIMITS, local: DEFAULT_LIMITS }, row.rosterRead ? "the roster was read" : "no roster could be read");
-      assert.equal(loaded.runtime.registrations - registrations, row.registersAgain ? 2 : 0, row.registersAgain ? "both models were registered again" : "registering again failed");
-      for (const id of ["auto", "local"] as const) assert.ok(loaded.runtime.find("smart-router", id) !== undefined, `smart-router/${id} is registered`);
+      assert.deepEqual(loaded.router?.limits(), row.rosterRead ? limits : { auto: DEFAULT_LIMITS, local: DEFAULT_LIMITS, personal: DEFAULT_LIMITS, work: DEFAULT_LIMITS }, row.rosterRead ? "the roster was read" : "no roster could be read");
+      assert.equal(loaded.runtime.registrations - registrations, row.registersAgain ? OWN.length : 0, row.registersAgain ? "every model was registered again" : "registering again failed");
+      for (const id of OWN) assert.ok(loaded.runtime.find("smart-router", id) !== undefined, `smart-router/${id} is registered`);
       if (row.registersAgain) {
         assert.equal(loaded.runtime.find("smart-router", "local")?.contextWindow, (row.rosterRead ? limits : { local: DEFAULT_LIMITS }).local.contextWindow, "with the limits the roster gave");
       }

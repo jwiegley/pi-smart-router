@@ -214,8 +214,9 @@ describe("/smart-router local", () => {
     await loaded.host.command("smart-router", "nonsense");
     const usage = loaded.session.notices.at(-1)?.message ?? "";
     assert.match(usage, /^Usage: \/smart-router /, "the usage");
-    assert.doesNotMatch(usage, /local/, "the usage names no local subcommand");
-    assert.doesNotMatch(loaded.host.commands.get("smart-router")?.description ?? "", /local/, "neither does the description");
+    // local is a scope now, of /smart-router scope and of /smart-router prefer, and no subcommand of its own.
+    assert.doesNotMatch(usage, /(?:^|\| )local\b/, "the usage names no local subcommand");
+    assert.doesNotMatch(loaded.host.commands.get("smart-router")?.description ?? "", /(?:^|, |: )local\b/, "neither does the description");
   });
 });
 

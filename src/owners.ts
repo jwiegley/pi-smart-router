@@ -39,7 +39,7 @@ export interface OwnerRouter {
   routeOwned(id: VirtualId, request: ModelRouteRequest, ctx: ExtensionContext): ModelRoute;
   /** Route a `direct` request, or a loop request of a session without its own instance. */
   routeOther(id: VirtualId, request: ModelRouteRequest, ctx: ExtensionContext): ModelRoute;
-  /** Re-register both models when a registration no live owner made displaced this one's. */
+  /** Re-register the models when a registration no live owner made displaced this one's. */
   heal(ctx: ExtensionContext): boolean;
   /** What route() will pick next for this owner's session, for pi-cache-optimizer; never throws. */
   activeRoute(id: VirtualId): ActiveRoute | undefined;

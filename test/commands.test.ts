@@ -16,7 +16,8 @@ import { agentDir, assistant, FakeRuntime, load, request, resetSlot, routed, sta
 import type { FakeSession, Loaded, LoadOptions } from "./support/pi.ts";
 
 const QWEN = "openrouter/qwen/qwen-9-max";
-const USAGE = "Usage: /smart-router [status] | history [n] | scope [work|personal|status] | was low|medium|high|super | check | reload";
+const USAGE =
+  "Usage: /smart-router [status] | history [n] | scope [work|personal|local|status] | prefer [personal|work|local] [low|medium|high|super] PROVIDER... | prefer reset | tiers | was low|medium|high|super | check | reload";
 const HERA_V2 = fixture("roster-hera-v2.json");
 const LUNA = "openai-codex-2/gpt-6-luna";
 const TERRA = "openai-codex-2/gpt-6.1-terra";
@@ -46,7 +47,7 @@ const COMMANDS = [
 ] as unknown as SlashCommandInfo[];
 const TOOLS = ["read", "bash", "web_fetch", "batch_web_fetch", "web_search", "subagent", "agent_browser", "subagent"].map((name) => ({ name })) as unknown as ToolInfo[];
 const EGRESS =
-  "Besides the models smart-router/auto and smart-router/local route to, these can send data off this machine: a model picked by hand with /model, which is sent as it is; /warden (pi-warden's judge sends redacted context to its backend while it is enabled); /subs (Multi-Pass can move the session to another subscription); the tools agent_browser, batch_web_fetch, subagent, web_fetch, web_search; Pi's own /share, /export and /bug.";
+  "Besides the models the smart-router models route to, these can send data off this machine: a model picked by hand with /model, which is sent as it is; /warden (pi-warden's judge sends redacted context to its backend while it is enabled); /subs (Multi-Pass can move the session to another subscription); the tools agent_browser, batch_web_fetch, subagent, web_fetch, web_search; Pi's own /share, /export and /bug.";
 /** EGRESS with Hera's version 2 classifier behind the model picked by hand, as a version 2 session's status lists it. */
 const EGRESS_JEV = EGRESS.replace(
   "which is sent as it is; ",
@@ -286,8 +287,8 @@ describe("reload", () => {
     utimesSync(path, new Date(), new Date(Date.now() + 5_000));
     const { message, type } = await answer(loaded, "reload");
     assert.equal(type, "info");
-    assert.match(message, /and registered both models again with their new limits\.$/);
-    assert.equal(loaded.host.definitions.length, definitions + 2);
+    assert.match(message, /and registered the models again with their new limits\.$/);
+    assert.equal(loaded.host.definitions.length, definitions + 4);
     assert.deepEqual(loaded.router?.limits().auto, { contextWindow: 64_000, maxTokens: 8_000 });
     writeFileSync(path, "{ nope");
     const broken = await answer(loaded, "reload");
@@ -300,7 +301,7 @@ describe("reload", () => {
     for (const args of ["bogus", "status now", "reload now", "scope team", "scope work now", "scope Work", "was", "was trivial", "was h", "was high now"]) {
       assert.deepEqual(await answer(loaded, args), { type: "warning", message: USAGE }, args);
     }
-    assert.equal(loaded.host.commands.get("smart-router")?.description, "Smart Router: status, history [n], scope [work|personal|status], was low|medium|high|super, check, reload");
+    assert.equal(loaded.host.commands.get("smart-router")?.description, "Smart Router: status, history [n], scope [work|personal|local|status], prefer [scope] [tier] PROVIDER...|reset, tiers, was low|medium|high|super, check, reload");
   });
 });
 
@@ -395,7 +396,9 @@ describe("history under a version 2 roster", () => {
 });
 
 describe("scope", () => {
-  const LOCAL_IN_WORK = "In work scope smart-router/local routes to the local models, so its next requests go to them, not to the work account.";
+  /** What scope work and scope personal add when one of the router's own models was selected: they select the scope's own. */
+  const NOW_WORK = "The selection is now smart-router/work.";
+  const NOW_PERSONAL = "The selection is now smart-router/personal.";
   const MOVE = "Move this session to personal scope?\nIts earlier turns are work content, and the next requests would send them to personal accounts.";
   const KEEP_WORK = "Keep this session in work scope";
   const TO_PERSONAL = "Move it to personal scope (earlier turns are work content)";
@@ -404,7 +407,7 @@ describe("scope", () => {
   test("work records an entry; status, the default subcommand, reads the scope as routing does", async (t) => {
     const loaded = await heraV2(t);
     assert.deepEqual(await answer(loaded, "scope"), { type: "info", message: "pi-smart-router: scope personal (default)." });
-    assert.deepEqual(await answer(loaded, "scope work"), { type: "info", message: "pi-smart-router: scope work (entry)." });
+    assert.deepEqual(await answer(loaded, "scope work"), { type: "info", message: `pi-smart-router: scope work (entry).\n${NOW_WORK}` });
     assert.deepEqual(await answer(loaded, "scope status"), { type: "info", message: "pi-smart-router: scope work (entry)." });
     assert.deepEqual(entriesOf(loaded, SCOPE_ENTRY), [{ v: 1, scope: "work", by: "command", at: NOW }]);
   });
@@ -414,7 +417,7 @@ describe("scope", () => {
     assert.deepEqual(await answer(loaded, "scope work"), {
       type: "warning",
       message:
-        "pi-smart-router: scope work (entry).\nIt is in work scope, which a version 1 roster does not serve, so smart-router/auto refuses its requests: give the roster a work scope (version 2), or run /smart-router scope personal.",
+        "pi-smart-router: scope work (entry).\nThe selection is now smart-router/work.\nIt is in work scope, which a version 1 roster does not serve, so smart-router/auto and smart-router/work refuse its requests: give the roster a work scope (version 2), or run /smart-router scope personal.",
     });
     resetSlot();
     await withScope("work", async () => {
@@ -422,15 +425,15 @@ describe("scope", () => {
       assert.deepEqual(await answer(latched, "scope work"), {
         type: "warning",
         message:
-          "pi-smart-router: scope work (latch).\nIt is in work scope, which a version 1 roster does not serve, so smart-router/auto refuses its requests: give the roster a work scope (version 2).",
+          "pi-smart-router: scope work (latch).\nThe selection is now smart-router/work.\nIt is in work scope, which a version 1 roster does not serve, so smart-router/auto and smart-router/work refuse its requests: give the roster a work scope (version 2).",
       });
     });
   });
 
-  test("work, given again after the selection moved, records the entry and says what the selection now does: smart-router/local routes locally there, and a model picked by hand is sent as it is", async (t) => {
+  test("work, given again after the selection moved, records the entry and says what the selection now does: smart-router/local gives way to smart-router/work, and a model picked by hand is sent as it is", async (t) => {
     const loaded = await heraV2(t, { select: "local" });
-    assert.deepEqual(await answer(loaded, "scope work"), { type: "info", message: `pi-smart-router: scope work (entry).\nThe selection stays smart-router/local. ${LOCAL_IN_WORK}` });
-    assert.equal(`${loaded.session.model?.provider}/${loaded.session.model?.id}`, "smart-router/local");
+    assert.deepEqual(await answer(loaded, "scope work"), { type: "info", message: `pi-smart-router: scope work (entry).\n${NOW_WORK}` });
+    assert.equal(`${loaded.session.model?.provider}/${loaded.session.model?.id}`, "smart-router/work");
     await loaded.host.choose(KIMI);
     assert.deepEqual(await answer(loaded, "scope work"), {
       type: "info",
@@ -454,33 +457,33 @@ describe("scope", () => {
     }
   });
 
-  test("work leaves smart-router/local selected, and says that it routes to the local models", async (t) => {
+  test("work moves a session off smart-router/local onto smart-router/work, and says so", async (t) => {
     const loaded = await heraV2(t, { select: "local" });
     assert.deepEqual(await answer(loaded, "scope work"), {
       type: "info",
       message:
-        `pi-smart-router: scope work (entry).\nThe selection stays smart-router/local. ${LOCAL_IN_WORK}`,
+        `pi-smart-router: scope work (entry).\n${NOW_WORK}`,
     });
-    assert.deepEqual([`${loaded.session.model?.provider}/${loaded.session.model?.id}`, loaded.host.selections.length], ["smart-router/local", 0]);
-    // Under a roster that serves no work scope it says the same of smart-router/local, and warns that smart-router/auto refuses.
+    assert.deepEqual([`${loaded.session.model?.provider}/${loaded.session.model?.id}`, loaded.host.selections.length], ["smart-router/work", 1]);
+    // Under a roster that serves no work scope it selects the same, and warns that smart-router/auto and smart-router/work refuse.
     resetSlot();
     const v1 = await hera(t);
     await v1.host.choose("smart-router/local");
     assert.deepEqual(await answer(v1, "scope work"), {
       type: "warning",
       message:
-        `pi-smart-router: scope work (entry).\nThe selection stays smart-router/local. ${LOCAL_IN_WORK}\nIt is in work scope, which a version 1 roster does not serve, so smart-router/auto refuses its requests: give the roster a work scope (version 2), or run /smart-router scope personal.`,
+        `pi-smart-router: scope work (entry).\n${NOW_WORK}\nIt is in work scope, which a version 1 roster does not serve, so smart-router/auto and smart-router/work refuse its requests: give the roster a work scope (version 2), or run /smart-router scope personal.`,
     });
   });
 
   test("work on smart-router/local with a roster that serves no work scope, or did not load, says that smart-router/auto refuses, and the way out: the roster, and outside the latch /smart-router scope personal", async (t) => {
-    const UNSERVED_V1 = "It is in work scope, which a version 1 roster does not serve, so smart-router/auto refuses its requests: give the roster a work scope (version 2)";
-    const stays = `The selection stays smart-router/local. ${LOCAL_IN_WORK}`;
+    const UNSERVED_V1 = "It is in work scope, which a version 1 roster does not serve, so smart-router/auto and smart-router/work refuse its requests: give the roster a work scope (version 2)";
+    const stays = NOW_WORK;
     const selection = (loaded: Loaded): string => `${loaded.session.model?.provider}/${loaded.session.model?.id}`;
     await withScope("work", async () => {
       const latched = await start({ dir: agentDir(t), id: "latched", select: "local", now: () => NOW });
       assert.deepEqual(await answer(latched, "scope work"), { type: "warning", message: `pi-smart-router: scope work (latch).\n${stays}\n${UNSERVED_V1}.` }, "latched");
-      assert.equal(selection(latched), "smart-router/local", "latched: the selection stays");
+      assert.equal(selection(latched), "smart-router/work", "latched: the scope's own model is selected");
     });
     resetSlot();
     const entry = await start({ dir: agentDir(t), id: "entry", select: "local", now: () => NOW, setup: workEntry });
@@ -494,7 +497,7 @@ describe("scope", () => {
       await answer(personalOnly, "scope work"),
       {
         type: "warning",
-        message: `pi-smart-router: scope work (entry).\n${stays}\nIt is in work scope, which the roster does not serve, so smart-router/auto refuses its requests: give the roster a work scope, or run /smart-router scope personal.`,
+        message: `pi-smart-router: scope work (entry).\n${stays}\nIt is in work scope, which the roster does not serve, so smart-router/auto and smart-router/work refuse its requests: give the roster a work scope, or run /smart-router scope personal.`,
       },
       "a version 2 roster without a work scope",
     );
@@ -507,22 +510,28 @@ describe("scope", () => {
       await answer(broken, "scope work"),
       {
         type: "warning",
-        message: `pi-smart-router: scope work (entry).\n${stays}\nIt is in work scope, but the roster did not load, so smart-router/auto refuses its requests until it is fixed; see /smart-router status.`,
+        message: `pi-smart-router: scope work (entry).\n${stays}\nIt is in work scope, but the roster did not load, so smart-router/auto and smart-router/work refuse its requests until it is fixed; see /smart-router status.`,
       },
       "a roster that did not load",
     );
-    assert.equal(selection(broken), "smart-router/local", "the selection stays");
+    assert.equal(selection(broken), "smart-router/work", "the scope's own model is selected");
   });
 
-  test("personal leaves the selection as it is, a model picked by hand and either of the router's", async (t) => {
-    for (const ref of [KIMI, "smart-router/local", "smart-router/auto"]) {
+  test("personal leaves a model picked by hand selected, and moves any of the router's own onto smart-router/personal", async (t) => {
+    for (const ref of [KIMI, "smart-router/local", "smart-router/auto", "smart-router/work"]) {
       resetSlot();
       const loaded = await heraV2(t, { setup: workEntry });
       if (ref !== "smart-router/auto") await loaded.host.choose(ref);
       const selections = loaded.host.selections.length;
       loaded.session.dialogKeys = ["down", "enter"];
-      assert.deepEqual(await answer(loaded, "scope personal"), { type: "warning", message: "pi-smart-router: scope personal (entry)." });
-      assert.deepEqual([`${loaded.session.model?.provider}/${loaded.session.model?.id}`, loaded.host.selections.length], [ref, selections], ref);
+      const own = ref !== KIMI;
+      assert.deepEqual(await answer(loaded, "scope personal"), { type: "warning", message: `pi-smart-router: scope personal (entry).${own ? `\n${NOW_PERSONAL}` : ""}` }, ref);
+      assert.deepEqual(
+        [`${loaded.session.model?.provider}/${loaded.session.model?.id}`, loaded.host.selections.length],
+        own ? ["smart-router/personal", selections + 1] : [ref, selections],
+        ref,
+      );
+      assert.equal(loaded.session.dialogs.length, 1, `${ref}: the move is asked once, by the command, and the selection that follows asks nothing`);
     }
   });
 
@@ -554,7 +563,7 @@ describe("scope", () => {
     }
     assert.equal(entriesOf(loaded, SCOPE_ENTRY).length, 1, "nothing was written");
     loaded.session.dialogKeys = ["down", "enter"];
-    assert.deepEqual(await answer(loaded, "scope personal"), { type: "warning", message: "pi-smart-router: scope personal (entry)." });
+    assert.deepEqual(await answer(loaded, "scope personal"), { type: "warning", message: `pi-smart-router: scope personal (entry).\n${NOW_PERSONAL}` });
     assert.deepEqual(entriesOf(loaded, SCOPE_ENTRY).at(-1), { v: 1, scope: "personal", by: "command", at: NOW });
     // From personal there is nothing to confirm.
     const dialogs = loaded.session.dialogs.length;
@@ -570,7 +579,7 @@ describe("scope", () => {
       assert.deepEqual(await answer(loaded, "scope personal"), STAYS, String(reply));
     }
     ui.select = async () => TO_PERSONAL;
-    assert.deepEqual(await answer(loaded, "scope personal"), { type: "warning", message: "pi-smart-router: scope personal (entry)." });
+    assert.deepEqual(await answer(loaded, "scope personal"), { type: "warning", message: `pi-smart-router: scope personal (entry).\n${NOW_PERSONAL}` });
   });
 
   test("personal from the work scope the work directories give asks too, before its entry is recorded and after", async (t) => {
@@ -600,7 +609,7 @@ describe("scope", () => {
       assert.deepEqual([loaded.session.dialogs, entriesOf(loaded, SCOPE_ENTRY)], [[], []]);
       assert.deepEqual(await answer(loaded, "scope"), { type: "info", message: "pi-smart-router: scope work (latch)." });
       // Work is recorded all the same, so the session stays in work scope wherever it is resumed.
-      assert.deepEqual(await answer(loaded, "scope work"), { type: "info", message: "pi-smart-router: scope work (latch)." });
+      assert.deepEqual(await answer(loaded, "scope work"), { type: "info", message: `pi-smart-router: scope work (latch).\n${NOW_WORK}` });
       assert.deepEqual(entriesOf(loaded, SCOPE_ENTRY), [{ v: 1, scope: "work", by: "command", at: NOW }]);
     });
   });
@@ -615,7 +624,7 @@ describe("scope", () => {
     assert.deepEqual([headless.session.dialogs, entriesOf(headless, SCOPE_ENTRY).length], [[], 1]);
     const malformed = await heraV2(t, { id: "malformed", setup: (session) => session.appendCustom(SCOPE_ENTRY, { v: 9 }) });
     malformed.session.dialogKeys = ["down", "enter"];
-    assert.deepEqual(await answer(malformed, "scope personal"), { type: "warning", message: "pi-smart-router: scope personal (entry)." });
+    assert.deepEqual(await answer(malformed, "scope personal"), { type: "warning", message: `pi-smart-router: scope personal (entry).\n${NOW_PERSONAL}` });
     assert.equal(malformed.session.dialogs.length, 1);
   });
 });
@@ -665,7 +674,7 @@ describe("was", () => {
     await inFlight("y #high", "y");
     now = NOW + 70_000;
     // The correction names the run's scope, whatever the session's is by then.
-    assert.equal((await answer(loaded, "scope work")).message, "pi-smart-router: scope work (entry).");
+    assert.equal((await answer(loaded, "scope work")).message, "pi-smart-router: scope work (entry).\nThe selection is now smart-router/work.");
     assert.deepEqual(await answer(loaded, "was super"), { type: "info", message: "pi-smart-router: recorded that the last run should have been SUPER." });
     await settles(SOL);
     assert.deepEqual(

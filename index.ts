@@ -1,7 +1,7 @@
-// pi-smart-router: the Pi virtual models smart-router/auto and smart-router/local, routed by a
-// per-host roster.
+// pi-smart-router: the Pi virtual models smart-router/auto, smart-router/personal,
+// smart-router/work and smart-router/local, routed by a per-host roster.
 //
-// The factory registers both models first, synchronously, and never throws: Pi discards whatever
+// The factory registers the models first, synchronously, and never throws: Pi discards whatever
 // a throwing factory registered, and a session restored onto a model that is not registered falls
 // back to a physical one. Until the router is built, and for good if building it fails, both
 // models refuse every request. The router's handlers are wired only after it is built, so a

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test, { afterEach, beforeEach, describe } from "node:test";
 
-import { ENV_SCOPE, SCOPE_ENTRY, SLOT_KEY } from "../src/constants.ts";
+import { ENV_SCOPE, SCOPE_ENTRY, SLOT_KEY, VIRTUAL_IDS } from "../src/constants.ts";
 import { scopeUnserved, stale } from "../src/errors.ts";
 import {
   isLive,
@@ -223,7 +223,7 @@ describe("the dispatch", () => {
     const registrations = runtime.registrations;
     assert.equal(routed(runtime.route("auto", request("direct", { previous: previous(runtime, KIMI) }))), KIMI);
     assert.equal(parent.router?.record("parent")?.history.at(-1)?.code, "direct:previous");
-    assert.equal(runtime.registrations, registrations + 2, "the parent registered both models again");
+    assert.equal(runtime.registrations, registrations + VIRTUAL_IDS.length, "the parent registered its models again");
     const counter = countDispatch(parent);
     runtime.route("auto", request("direct"));
     assert.equal(counter.count, 1, "the parent's own route is registered again");
@@ -271,7 +271,7 @@ describe("the dispatch", () => {
     );
     second.session.dispose();
     await first.host.emit("turn_start", { turnIndex: 1, timestamp: NOW });
-    assert.equal(runtime.registrations, registrations + 2);
+    assert.equal(runtime.registrations, registrations + VIRTUAL_IDS.length);
   });
 
   test("turn_start, compaction, tree navigation and idle prompts each heal a displaced registration", async (t) => {
@@ -288,9 +288,9 @@ describe("the dispatch", () => {
       load({ dir, runtime, id: "nested" }).session.dispose();
       const registrations = runtime.registrations;
       await owner.host.emit(event, payload);
-      assert.equal(runtime.registrations, registrations + 2, event);
+      assert.equal(runtime.registrations, registrations + VIRTUAL_IDS.length, event);
       await owner.host.emit(event, payload);
-      assert.equal(runtime.registrations, registrations + 2, `${event}: healed once`);
+      assert.equal(runtime.registrations, registrations + VIRTUAL_IDS.length, `${event}: healed once`);
     }
   });
 

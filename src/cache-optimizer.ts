@@ -22,7 +22,7 @@
 // first to unregister would remove the others'. The registry has the shape pi-cache-optimizer
 // validates and reuses (pi-cache-optimizer 2.8.7, index.ts:1183-1223), so either side may create
 // it first.
-import { PROVIDER, ROUTING_REGISTRY_KEY } from "./constants.ts";
+import { isVirtualId, PROVIDER, ROUTING_REGISTRY_KEY } from "./constants.ts";
 import { isRecord } from "./files.ts";
 import { isLiveOwner } from "./owners.ts";
 import type { Owner, Slot } from "./owners.ts";
@@ -105,7 +105,7 @@ export function createAdapter(slot: Slot): RouterAdapter {
     resolveActiveRoute(virtualModelId, hint) {
       try {
         const hash = hint?.sessionIdHash;
-        if (typeof hash !== "string" || hash === "" || (virtualModelId !== "auto" && virtualModelId !== "local")) return undefined;
+        if (typeof hash !== "string" || hash === "" || !isVirtualId(virtualModelId)) return undefined;
         let owner: Owner | undefined;
         for (const candidate of [...slot.owners]) {
           if (candidate.hash === hash && isLiveOwner(slot, candidate)) owner = candidate;

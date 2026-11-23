@@ -20,8 +20,8 @@ beettlle/pi-smart-router to the virtual models of Pi 1.5. `CLAUDE.md` is a link 
   `test/scan.test.ts` holds `index.ts` and `src/` to that, comments included. Its one request off
   the machine is the classifier's, made by Pi: `ctx.modelRegistry.findOfType` and
   `ctx.modelRegistry.classify` with `{ timeoutMs, maxRetries: 0 }`, once per prompt on
-  `smart-router/auto` when a version 2 roster has a classifier, and never on
-  `smart-router/local`, for a steer or follow-up, or without a classifier. The message and the
+  `smart-router/auto`, `smart-router/personal` or `smart-router/work` when a version 2 roster has a
+  classifier, and never on `smart-router/local`, for a steer or follow-up, or without a classifier. The message and the
   earlier messages it sends go through redaction first (`src/redact.ts`).
 - Runtime code keeps no prompt text: a plan is bound to its message by a keyed digest, and no entry
   the router writes holds text or a digest.
@@ -36,6 +36,11 @@ beettlle/pi-smart-router to the virtual models of Pi 1.5. `CLAUDE.md` is a link 
   reads only the roster, Multi-Pass's subscription labels and the prompt files the roster names in
   `smart-router/`, all under Pi's agent directory and all through `src/files.ts`, and compares
   `ctx.cwd` with the roster's work directories as text.
+- The session's scope decides which accounts a request may reach, never the selection and never a
+  provider order. `smart-router/personal` and `smart-router/work` refuse a session of the other
+  scope (`refusalFor` in `src/router.ts`), `assertSafe` checks the scope again on every pick, and
+  an order is a view that only reorders a role's own models (`src/order.ts`): it is kept in the
+  session's record in memory, and is written to no entry and no file.
 - A prompt file is guidance for Jev and nothing else reads it. The request's shape, the four level
   names, what counts as an answer and the scope are fixed in code: no roster text or
   prompt file may reach them (`test/prompts.test.ts`, "a hostile prompt").

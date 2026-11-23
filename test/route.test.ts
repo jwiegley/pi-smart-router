@@ -311,7 +311,7 @@ describe("refusals", () => {
   test("a missing, invalid or unsafe roster refuses, and an edit leaves no last-known-good copy", async (t) => {
     const missing = await start({ dir: agentDir(t, { roster: null }) });
     refuses(() => missing.runtime.route("auto", request("direct")), /smart-router\.json does not exist/);
-    assert.match(missing.session.notices[0]?.message ?? "", /does not exist\. smart-router\/auto and smart-router\/local refuse every request/);
+    assert.match(missing.session.notices[0]?.message ?? "", /does not exist\. Every smart-router model refuses every request/);
     resetSlot();
     const invalid = await start({ dir: agentDir(t, { roster: "{ nope" }) });
     refuses(() => invalid.runtime.route("auto", request("direct")), /is invalid \(JSON syntax error/);
@@ -345,7 +345,7 @@ describe("refusals", () => {
     await loaded.host.emit("session_start", { reason: "startup" });
     assert.equal(
       loaded.session.notices[0]?.message,
-      "pi-smart-router: this Pi has no bounded session history (getLatestCustomEntry and getRecentActiveEntries), so smart-router/auto and smart-router/local refuse every request. Run jwiegley/pi 1.5.0 or later.",
+      "pi-smart-router: this Pi has no bounded session history (getLatestCustomEntry and getRecentActiveEntries), so every smart-router model refuses every request. Run jwiegley/pi 1.5.0 or later.",
       "the notice says both models refuse, and nothing of a pin",
     );
     // The router's own models refuse there; a model picked by hand is left selected and sent as it is.
@@ -366,17 +366,22 @@ describe("refusals", () => {
 });
 
 describe("session state", () => {
-  test("session_start registers both models again with limits from the roster", async (t) => {
+  test("session_start registers the models again with limits from the roster", async (t) => {
     const loaded = await start({ dir: agentDir(t) });
     const limits = loaded.host.definitions.map((definition) => [definition.id, definition.contextWindow, definition.maxTokens]);
     assert.deepEqual(limits, [
       ["auto", 128_000, 16_384],
       ["local", 128_000, 16_384],
+      ["personal", 128_000, 16_384],
+      ["work", 128_000, 16_384],
       ["auto", 128_000, 32_000],
       ["local", 262_144, 81_920],
+      // A version 1 roster serves personal scope alone: its model declares auto's limits, work's the defaults.
+      ["personal", 128_000, 32_000],
+      ["work", 128_000, 16_384],
     ]);
     assert.equal(loaded.runtime.find("smart-router", "local")?.contextWindow, 262_144);
-    assert.deepEqual(loaded.router?.limits(), { auto: { contextWindow: 128_000, maxTokens: 32_000 }, local: { contextWindow: 262_144, maxTokens: 81_920 } });
+    assert.deepEqual(loaded.router?.limits(), { auto: { contextWindow: 128_000, maxTokens: 32_000 }, local: { contextWindow: 262_144, maxTokens: 81_920 }, personal: { contextWindow: 128_000, maxTokens: 32_000 }, work: { contextWindow: 128_000, maxTokens: 16_384 } });
   });
 
   test("the limits skip roles with no available model and fall back to the defaults", async (t) => {
@@ -384,7 +389,7 @@ describe("session state", () => {
     catalog.unavailable.add(DEEPSEEK);
     catalog.remove(GLM);
     const loaded = await start({ dir: agentDir(t), runtime: new FakeRuntime(catalog) });
-    assert.deepEqual(loaded.router?.limits(), { auto: { contextWindow: 200_000, maxTokens: 32_000 }, local: { contextWindow: 128_000, maxTokens: 16_384 } });
+    assert.deepEqual(loaded.router?.limits(), { auto: { contextWindow: 200_000, maxTokens: 32_000 }, local: { contextWindow: 128_000, maxTokens: 16_384 }, personal: { contextWindow: 200_000, maxTokens: 32_000 }, work: { contextWindow: 128_000, maxTokens: 16_384 } });
   });
 
   test("session_start seeds the last responder from a bounded read of the branch", async (t) => {

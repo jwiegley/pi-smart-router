@@ -9,6 +9,27 @@ fork's releases on that base. Releases are signed tags; nothing is published to 
 
 ### Added
 
+- **A provider order.** `/smart-router prefer PROVIDER...` puts those providers' models first in
+  every tier of the session's scope, so `/smart-router prefer claude` and `/smart-router prefer
+  codex` switch a session between the two. A tier keeps exactly the models the roster gives it;
+  only their order changes. It takes a scope (`personal`, `work`, `local`) and a tier, and `reset`
+  returns to the roster's order. The order is the session's alone: the router keeps it in memory
+  and writes no file and no entry, so a new session starts from the roster as written. An order
+  may name only providers the scope's tiers already hold, so it brings no account into a scope.
+  John asked for this on 2026-11-23, in place of an order chosen from measured quota.
+- `providerOrder` in a version 2 roster gives each of the three scopes a default order. A roster
+  without it routes as before.
+- `/smart-router tiers` lists each scope, its tiers and each tier's own models, local fallback and
+  fallback chain, in the order the session tries them. `/smart-router status` and `/smart-router
+  check` show the order in effect and whose it is.
+- **`smart-router/personal` and `smart-router/work`** route by level as `smart-router/auto` does,
+  each in its one scope. Selecting `smart-router/work` records work scope, as `/smart-router scope
+  work` does. Selecting `smart-router/personal` by hand in a work session asks what
+  `/smart-router scope personal` asks; declined, the session stays a work session and the model
+  refuses with "Nothing was sent". The session's scope decides which accounts a request may
+  reach, never the selection, and every pick checks it again.
+- `/smart-router scope local` selects `smart-router/local` and records no scope.
+
 - Version 2 rosters can declare ordered local roles for each tier and share those roles as fallback
   candidates in personal and work scopes. `smart-router/local` classifies offline, and refuses a
   prompt whose tier is explicitly empty instead of routing down. Every local candidate still passes the provider and
@@ -31,6 +52,13 @@ fork's releases on that base. Releases are signed tags; nothing is published to 
 
 ### Changed
 
+- **`/smart-router scope work` and `scope personal` select that scope's model** when one of the
+  router's own models is selected, so the command and the model name the same scope. Until now no
+  command moved the selection. A model picked by hand still stays selected.
+- Notices that named "smart-router/auto and smart-router/local" now say "every smart-router
+  model", and `/smart-router reload` says "registered the models again".
+- The router handles `model_select`, to record or ask about the scope of `smart-router/work` and
+  `smart-router/personal`. It changes and blocks no selection there.
 - **The footer is one short item**, `super high → gpt-6.2-astra`: the level the run needs, the
   thinking effort its latest request carried, and the model that request went to. John asked for
   this on 2026-11-19: "Just the model tier, the thinking level, and which model it's actually

@@ -187,7 +187,7 @@ describe("checking a roster's text", () => {
       ok: false,
       lines: [
         'INVALID: roles[3].models[1]: "omlx-hera/GLM-5.3-Flash-oQ4e-mtp" is already in role "local"',
-        "Both smart-router/auto and smart-router/local refuse every request while the roster is invalid.",
+        "Every smart-router model refuses every request while the roster is invalid.",
       ],
     });
     assert.match(checkRoster("{ nope").lines[0] ?? "", /^INVALID: JSON syntax error: /);
@@ -245,7 +245,7 @@ describe("checking a roster file", () => {
     assert.deepEqual(run(good), [0, [good, "OK: a valid version 2 roster.", "", ...JOHN_ROUTING]]);
     assert.deepEqual(run(bad), [
       1,
-      [bad, 'INVALID: scopes.personal.fallback[1]: "cloud" is not a role', "Both smart-router/auto and smart-router/local refuse every request while the roster is invalid."],
+      [bad, 'INVALID: scopes.personal.fallback[1]: "cloud" is not a role', "Every smart-router model refuses every request while the roster is invalid."],
     ]);
     // A roster another user owns, as in the Nix store: unsafe as the router reads it, and checked
     // only when the caller says so, which the report then states.
@@ -331,7 +331,7 @@ describe("/smart-router check", () => {
     assert.equal(bad.type, "warning");
     assert.match(
       bad.message,
-      /: invalid \(roles\[3\]\.models\[1\]: "omlx-hera\/GLM-5\.3-Flash-oQ4e-mtp" is already in role "local"\), checked at \d\d:\d\d\nBoth smart-router\/auto and smart-router\/local refuse every request until it is fixed\. Nothing was changed\.$/,
+      /: invalid \(roles\[3\]\.models\[1\]: "omlx-hera\/GLM-5\.3-Flash-oQ4e-mtp" is already in role "local"\), checked at \d\d:\d\d\nEvery smart-router model refuses every request until it is fixed\. Nothing was changed\.$/,
     );
     assert.equal(loaded.session.entries.length, entries, "check records nothing");
     assert.equal(runtime.classifyCalls.length, 0, "check asks no classifier");

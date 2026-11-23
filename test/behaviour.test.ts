@@ -640,7 +640,7 @@ test("24a. a roster that names openai-codex-3 is invalid, and both models refuse
   roster.roles.push({ name: "work", models: ["openai-codex-3/gpt-6.1-sol"] });
   const world = new World(t, { roster });
   const pi = await world.start({ select: "smart-router/auto" });
-  assert.equal(pi.ui.saw(/is excluded by openai-codex-3\/\*.*refuse every request until it is fixed/).length, 1);
+  assert.equal(pi.ui.saw(/is excluded by openai-codex-3\/\*.*refuses every request until it is fixed/).length, 1);
   await pi.prompt(PROMPTS.complex);
   assert.match(pi.lastAssistant()?.errorMessage ?? "", /^smart-router\/auto: the roster \S+ is invalid \(roles\[5\]\.models\[0\]: "openai-codex-3\/gpt-6\.1-sol" is excluded by openai-codex-3\/\*\)\. Nothing was sent\./);
   assert.deepEqual(called(world.counts()), {});
@@ -1291,7 +1291,7 @@ test("L5 scope: the latch, the entry carried into /new and a fork, resume, direc
     await pi.prompt(PROMPTS.plain);
     assert.equal(answered(pi), PERSONAL.medium, "a default scope is not carried");
     await pi.command("scope work");
-    assert.equal(notice(pi, /^pi-smart-router: scope/), "pi-smart-router: scope work (entry).");
+    assert.equal(notice(pi, /^pi-smart-router: scope/), "pi-smart-router: scope work (entry).\nThe selection is now smart-router/work.");
     await pi.prompt(PROMPTS.plain);
     assert.equal(answered(pi), WORK.medium, "personal to work takes effect at once");
     // The session's last selection is an OpenRouter model, as after a /model there.
@@ -1361,7 +1361,7 @@ test("L5 scope: the latch, the entry carried into /new and a fork, resume, direc
     const plain = pi.session.sessionFile;
     await pi.runtime.newSession();
     await pi.command("scope personal");
-    assert.equal(notice(pi, /^pi-smart-router: scope/), "pi-smart-router: scope personal (entry).");
+    assert.equal(notice(pi, /^pi-smart-router: scope/), "pi-smart-router: scope personal (entry).\nThe selection is now smart-router/personal.");
     await pi.prompt(PROMPTS.plain);
     const kept = pi.session.sessionFile;
     assert.ok(plain !== undefined && kept !== undefined);
@@ -1401,7 +1401,7 @@ test("L5 scope: the latch, the entry carried into /new and a fork, resume, direc
     // The second answer moves it.
     pi.ui.answers.push("Move it to personal scope (earlier turns are work content)");
     await pi.command("scope personal");
-    assert.equal(notice(pi, /^pi-smart-router: scope/), "pi-smart-router: scope personal (entry).");
+    assert.equal(notice(pi, /^pi-smart-router: scope/), "pi-smart-router: scope personal (entry).\nThe selection is now smart-router/personal.");
     await pi.prompt(PROMPTS.plain);
     assert.equal(answered(pi), PERSONAL.medium);
     assert.deepEqual(scopeEntries(pi), [
@@ -1642,7 +1642,7 @@ test("L9 a version 1 roster keeps its history and status text byte-identical, bu
       // John, 2026-11-18: thinking effort exactly as upstream, under a version 1 roster too. The
       // worker's model does not reason, so upstream's rule leaves the selected level (AR:280-286).
       "Thinking sent on the latest request: medium (as selected)",
-      "Besides the models smart-router/auto and smart-router/local route to, these can send data off this machine: a model picked by hand with /model, which is sent as it is; Pi's own /share, /export and /bug.",
+      "Besides the models the smart-router models route to, these can send data off this machine: a model picked by hand with /model, which is sent as it is; Pi's own /share, /export and /bug.",
     ].join("\n"),
   );
   // A version 1 run has no level: no record, no scope entry, a footer that names only the effort
@@ -1727,6 +1727,9 @@ test("1. under a version 2 roster, both models declare limits from every level o
   const expected = [
     ["auto", 100_000, 32_000],
     ["local", 20_000, 4_000],
+    // Each scope's own model declares what auto would for that scope alone.
+    ["personal", 200_000, 32_000],
+    ["work", 100_000, 64_000],
   ];
   const pi = await world.start({ persisted: true, select: "smart-router/auto" });
   assert.deepEqual(declared(pi), expected, "in a personal session");
@@ -1736,7 +1739,7 @@ test("1. under a version 2 roster, both models declare limits from every level o
   assert.equal(notice(pi, /^pi-smart-router: scope/), "pi-smart-router: scope work (entry).");
   assert.deepEqual(declared(pi), expected, "in a work session, by a fresh load of the router");
   await pi.command("reload");
-  assert.doesNotMatch(notice(pi, /^pi-smart-router: reloaded/), /registered both models again/, "and reading the roster again changes nothing");
+  assert.doesNotMatch(notice(pi, /^pi-smart-router: reloaded/), /registered the models again/, "and reading the roster again changes nothing");
 });
 
 // ─── Demand and cost switching, in Pi's runtime ──────────────────────────────
@@ -2590,4 +2593,108 @@ test("personal-only and work latches present together refuse both models without
   assert.match(pi.lastAssistant()?.errorMessage ?? "", /work scope.*disabled.*Nothing was sent/i);
   assert.deepEqual(called(world.counts()), {});
   assert.deepEqual(world.jev.calls, []);
+});
+
+// ─── The provider order and the scope models, in Pi's runtime ────────────────
+
+test("/smart-router prefer reorders a session's tiers, keeps their models, and a new session starts from the roster", TIMEOUT, async (t) => {
+  const world = levelsWorld(t);
+  const pi = await world.start({ persisted: true, select: "smart-router/auto" });
+  await pi.prompt("Review the design #high");
+  assert.equal(answered(pi), PERSONAL.high, "as the roster is written");
+  await pi.command("prefer openrouter");
+  assert.match(
+    notice(pi, /now tries/),
+    /^pi-smart-router: the personal scope now tries openrouter first\. This session only: the roster file is unchanged, and a new session starts from it\./,
+  );
+  await pi.prompt("Review the design #high");
+  assert.equal(answered(pi), "openrouter/z-ai/glm-5.3");
+  await pi.prompt("Plan the research #super");
+  assert.equal(answered(pi), KIMI_REF);
+  await pi.prompt("Rename the file #low");
+  assert.equal(answered(pi), PERSONAL.low, "a tier without the provider keeps the model it has");
+  await pi.command("status");
+  const status = notice(pi, /^pi-smart-router status/);
+  assert.match(status, /^Provider order \(personal\): openrouter \(this session, by \/smart-router prefer\)$/m);
+  assert.match(status, /Levels \(personal\): LOW → openai-codex-2\/gpt-6-luna ok; MEDIUM → openrouter\/deepseek\/deepseek-v4\.1-flash-1017 ok, openai-codex-2\/gpt-6\.1-terra ok; HIGH → openrouter\/z-ai\/glm-5\.3 ok, openai-codex-2\/gpt-6\.1-sol ok/);
+  assert.deepEqual(scopeEntries(pi), [], "the order is no entry of the session");
+  await pi.command("prefer codex-2");
+  await pi.prompt("Review the design #high");
+  assert.equal(answered(pi), PERSONAL.high, "and back");
+  await pi.command("prefer openrouter");
+  await pi.runtime.newSession();
+  await pi.prompt("Review the design #high");
+  assert.equal(answered(pi), PERSONAL.high, "a new session starts from the roster as written");
+  await pi.command("prefer openai-codex-3");
+  assert.match(notice(pi, /names none of them/), /the personal scope has models of openai-codex-2, openrouter, and "openai-codex-3" names none of them.*Nothing was changed\.$/);
+});
+
+test("smart-router/personal, smart-router/work and /smart-router scope: the model and the command name one scope, and work content never moves unasked", TIMEOUT, async (t) => {
+  const world = levelsWorld(t);
+  const pi = await world.start({ select: "smart-router/auto" });
+  const available = pi.session.modelRuntime.getAvailableSnapshot().map((model) => `${model.provider}/${model.id}`);
+  for (const id of VIRTUAL_IDS) assert.ok(available.includes(`smart-router/${id}`), `smart-router/${id} is listed: ${available.join(", ")}`);
+  assert.equal(pi.model("smart-router/personal").name, "Smart Router (personal scope)");
+  assert.equal(pi.model("smart-router/work").name, "Smart Router (work scope)");
+
+  // smart-router/personal routes the personal tiers of a personal session.
+  await pi.session.setModel(pi.model("smart-router/personal"));
+  assert.equal(pi.ui.dialogs.length, 0, "a personal session is asked nothing");
+  await pi.prompt("Review the design #high");
+  assert.equal(answered(pi), PERSONAL.high);
+
+  // Selecting smart-router/work makes the session a work session, and says so.
+  await pi.session.setModel(pi.model("smart-router/work"));
+  assert.deepEqual(scopeEntries(pi), [["work", "command"]]);
+  assert.match(notice(pi, /because smart-router\/work is selected/), /^pi-smart-router: this session is in work scope because smart-router\/work is selected\./);
+  await pi.prompt("Review the design #high");
+  assert.equal(answered(pi), WORK.high);
+  await pi.command("status");
+  let status = notice(pi, /^pi-smart-router status/);
+  assert.match(status, /^Selection: smart-router\/work, thinking /m);
+  assert.match(status, /^Scope: work \(entry\)$/m);
+
+  // smart-router/auto follows the session's scope, as before.
+  await pi.session.setModel(pi.model("smart-router/auto"));
+  await pi.prompt("Review the design #high");
+  assert.equal(answered(pi), WORK.high);
+
+  // Selecting smart-router/personal asks first. Declined, the session stays work and the model refuses.
+  const calls = called(world.counts());
+  pi.ui.answers.push("Keep this session in work scope");
+  await pi.session.setModel(pi.model("smart-router/personal"));
+  assert.equal(pi.ui.dialogs.length, 1);
+  assert.match(pi.ui.dialogs[0]?.title ?? "", /^Move this session to personal scope\?/);
+  assert.equal(pi.selection(), "smart-router/personal", "the selection stays where it was put");
+  await pi.prompt("Review the design #high");
+  assert.match(
+    pi.lastAssistant()?.errorMessage ?? "",
+    /^smart-router\/personal: this session is in work scope, and smart-router\/personal routes only a session in personal scope\. Nothing was sent\. Run \/smart-router scope personal, which asks first/,
+  );
+  assert.deepEqual(called(world.counts()), calls, "nothing was sent to any provider");
+  assert.deepEqual(scopeEntries(pi), [["work", "command"]]);
+
+  // The command moves it, after the same question, and selects nothing new: the model is already the scope's.
+  pi.ui.answers.push("Move it to personal scope (earlier turns are work content)");
+  await pi.command("scope personal");
+  assert.equal(notice(pi, /^pi-smart-router: scope/), "pi-smart-router: scope personal (entry).");
+  await pi.prompt("Review the design #high");
+  assert.equal(answered(pi), PERSONAL.high);
+
+  // scope work and scope local select their models; the session's own scope is kept under local.
+  await pi.command("scope work");
+  assert.equal(notice(pi, /^pi-smart-router: scope/), "pi-smart-router: scope work (entry).\nThe selection is now smart-router/work.");
+  assert.equal(pi.selection(), "smart-router/work");
+  await pi.prompt("Review the design #high");
+  assert.equal(answered(pi), WORK.high);
+  await pi.command("scope local");
+  assert.equal(pi.selection(), "smart-router/local");
+  assert.match(notice(pi, /routes only to the local models/), /The selection is now smart-router\/local\. This session now routes only to the local models\. The session's own scope stays work \(entry\)\.$/);
+  await pi.prompt("Hello there");
+  assert.equal(answered(pi), "local-a/m");
+  await pi.command("status");
+  status = notice(pi, /^pi-smart-router status/);
+  assert.match(status, /^Selection: smart-router\/local, thinking /m);
+  assert.match(status, /^Scope: work \(entry\)$/m);
+  assert.deepEqual(scopeEntries(pi), [["work", "command"], ["personal", "command"], ["work", "command"]]);
 });

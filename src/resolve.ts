@@ -28,7 +28,7 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 
 import { checkAccount, subscriptionKind } from "./accounts.ts";
 import type { Labels } from "./accounts.ts";
-import { PROVIDER, VIRTUAL_API } from "./constants.ts";
+import { PROVIDER, routesLevels, VIRTUAL_API } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import type { Loaded } from "./files.ts";
 import { checkLocal, localRoles, policyFromRoster } from "./local.ts";
@@ -120,7 +120,7 @@ export function resolveCandidate(ref: string, rc: ResolveContext): Resolution {
     const { reason, detail } = describeHold({ until: held });
     return refuse(reason, detail);
   }
-  if (rc.virtualId === "auto") {
+  if (routesLevels(rc.virtualId)) {
     const role = roleOf(rc.roster, ref);
     if (role === undefined || !autoRoles(rc.roster, rc.scope).has(role.name)) {
       const why =

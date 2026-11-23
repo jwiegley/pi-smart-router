@@ -1,13 +1,28 @@
 // Names, limits and fixed policy shared by the router's modules.
 
-/** The router's provider id and its two virtual models. */
+/**
+ * The router's provider id and its virtual models. auto, personal and work route by level in a
+ * scope: auto in the scope the session's context gives it, personal and work each in its own.
+ * local routes only to the local roles.
+ */
 export const PROVIDER = "smart-router";
-export const VIRTUAL_IDS = ["auto", "local"] as const;
+export const VIRTUAL_IDS = ["auto", "local", "personal", "work"] as const;
 export type VirtualId = (typeof VIRTUAL_IDS)[number];
 export const NAMES: Readonly<Record<VirtualId, string>> = {
   auto: "Smart Router (auto)",
   local: "Smart Router (local models)",
+  personal: "Smart Router (personal scope)",
+  work: "Smart Router (work scope)",
 };
+
+export function isVirtualId(value: unknown): value is VirtualId {
+  return typeof value === "string" && (VIRTUAL_IDS as readonly string[]).includes(value);
+}
+
+/** Whether a virtual model routes by level in a scope, as smart-router/auto does: every one but local. */
+export function routesLevels(id: VirtualId): boolean {
+  return id !== "local";
+}
 
 /**
  * The API id Pi gives virtual catalog entries (VIRTUAL_MODEL_API, which the package index does not
@@ -19,7 +34,7 @@ export const VIRTUAL_API = "pi-virtual";
 export const ALL_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type Level = (typeof ALL_LEVELS)[number];
 
-/** The limits both models declare until session_start recomputes them from the roster. */
+/** The limits every model declares until session_start recomputes them from the roster. */
 export const DEFAULT_CONTEXT_WINDOW = 128_000;
 export const DEFAULT_MAX_TOKENS = 16_384;
 

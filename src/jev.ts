@@ -3,6 +3,7 @@
 import type { ClassifierApi, ClassifierContext, ClassifierModel, ClassifierResult } from "@earendil-works/pi-ai";
 
 import { capText } from "./classify.ts";
+import { routesLevels } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { isRecord } from "./files.ts";
 import { DEFAULT_INSTRUCTIONS } from "./prompts.ts";
@@ -170,7 +171,7 @@ export interface JevAsk {
  */
 export function jevAsk(gate: JevGate): JevAsk | undefined {
   const { roster, scope, history } = gate;
-  if (!gate.idle || gate.selection !== "auto" || history === undefined || gate.resend) return undefined;
+  if (!gate.idle || gate.selection === undefined || !routesLevels(gate.selection) || history === undefined || gate.resend) return undefined;
   if (roster?.version !== 2 || roster.classifier === undefined || scope.kind !== "ok") return undefined;
   const section = scopeSection(roster, scope.scope);
   return section === undefined ? undefined : { settings: roster.classifier, section, history };

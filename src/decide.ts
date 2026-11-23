@@ -37,7 +37,7 @@ import { calculateContextTokens, DEFAULT_COMPACTION_SETTINGS, estimateTokens } f
 
 import { classify, riskyTrigger } from "./classify.ts";
 import type { RiskyTrigger, Signal } from "./classify.ts";
-import { PROVIDER } from "./constants.ts";
+import { PROVIDER, routesLevels } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { chooseByCost, positive, ratesOf } from "./cost.ts";
 import type { Candidate, Priced, Rates, Workload } from "./cost.ts";
@@ -126,7 +126,7 @@ function fallbackRoles(rc: ResolveContext, roleName: string): readonly string[] 
     const target = rc.roster.routing.fallback.get(roleName);
     return target === undefined ? [] : [target];
   }
-  return rc.virtualId === "auto" ? fallbackAfter(rc.roster, rc.scope, roleName) : [];
+  return routesLevels(rc.virtualId) ? fallbackAfter(rc.roster, rc.scope, roleName) : [];
 }
 
 /**
@@ -261,7 +261,7 @@ export function eligibleRole(rc: ResolveContext, ref: string): string | undefine
   const role = roleOf(rc.roster, ref)?.name;
   if (role === undefined) return undefined;
   if (rc.localOnly) return localRoles(rc.roster.local).includes(role) ? role : undefined;
-  if (rc.virtualId === "auto" && !autoRoles(rc.roster, rc.scope).has(role)) return undefined;
+  if (routesLevels(rc.virtualId) && !autoRoles(rc.roster, rc.scope).has(role)) return undefined;
   return role;
 }
 
@@ -337,7 +337,7 @@ export interface CostFigures {
  * have no levels, so no request of theirs is on it.
  */
 export function isFrontier(rc: ResolveContext, role: string): boolean {
-  if (rc.virtualId !== "auto" || rc.localOnly) return false;
+  if (!routesLevels(rc.virtualId) || rc.localOnly) return false;
   return scopeSection(rc.roster, rc.scope)?.levels.super.role === role;
 }
 

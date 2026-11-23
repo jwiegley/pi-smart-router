@@ -1,7 +1,8 @@
 # pi-smart-router (jwiegley fork): the manual
 
-Two Pi virtual models, `smart-router/auto` and `smart-router/local`, that send each request to a
-physical model chosen from a roster you keep on each host.
+Four Pi virtual models, `smart-router/auto`, `smart-router/personal`, `smart-router/work` and
+`smart-router/local`, that send each request to a physical model chosen from a roster you keep on
+each host.
 
 This is the manual of the fork. The repository's [README](../README.md) is upstream's, with one
 section on how the fork differs.
@@ -44,6 +45,15 @@ answered, and Pi's footer shows it.
   ([What work scope does not cover](#what-work-scope-does-not-cover)). A level may declare local
   fallback roles, and a scope may declare a fallback chain. See [Levels](#levels),
   [A fallback chain](#a-fallback-chain), [Jev](#jev) and [Scope](#scope-personal-or-work).
+- **`smart-router/personal` and `smart-router/work`** route by level as `smart-router/auto` does,
+  each in its one scope. `smart-router/auto` takes the scope from the session; these two name it.
+  Selecting `smart-router/work` makes the session a work session. Selecting `smart-router/personal`
+  in a work session asks before it moves the session, and refuses its requests if you decline. See
+  [The scope's own models](#the-scopes-own-models).
+- **A provider order.** `/smart-router prefer claude` puts Claude's models first in every tier of
+  the session's scope, and `/smart-router prefer codex` puts Codex's back. A tier keeps exactly the
+  models the roster gives it; only their order changes, for that session alone. The roster can
+  give a default order in `providerOrder`. See [The provider order](#the-provider-order).
 - **Easy to change, cheap to get wrong.** Which model serves which level, the fallback chain, the
   local set and the texts Jev reads are each one edit in one place, a running session picks the
   edit up at its next prompt, and `/smart-router check` or `node src/check-cli.ts` reads the result
@@ -56,7 +66,7 @@ answered, and Pi's footer shows it.
   unreadable scope. The local-only pin of earlier versions is gone;
   see [Routing locally](#routing-locally).
 - **A model picked by hand always stays selected.** The router routes only while the selection is
-  `smart-router/auto` or `smart-router/local`. A model you choose with `/model` or by cycling is
+  one of its own four models. A model you choose with `/model` or by cycling is
   sent as it is, in work scope too: the router does not switch it back, refuse
   its prompts, cancel its compactions or touch its requests. See
   [A model picked by hand](#a-model-picked-by-hand).
@@ -65,8 +75,8 @@ answered, and Pi's footer shows it.
 
 The router opens no network connection of its own and sets no timer. When a version 2 roster
 has a classifier, it asks Pi's model registry for one classifier request per prompt on
-smart-router/auto, with a per-attempt timeout and no retries. It never does so on
-smart-router/local, for a steer or follow-up, or without a classifier.
+smart-router/auto, smart-router/personal or smart-router/work, with a per-attempt timeout and no
+retries. It never does so on smart-router/local, for a steer or follow-up, or without a classifier.
 
 It also starts no process, writes no file of its own and keeps no prompt text; its session entries
 (the scope's and the level records) are written by Pi, into the session. It reads
@@ -524,6 +534,7 @@ Three things to know:
 | `scopes.<scope>.levels` | yes | `low`, `medium`, `high` and `super`, each with `role` and either `describe` or `describeFile`. No role serves two scope levels; the levels rank up the ladder. An optional `fallback` is a one-element array naming a local role, whose models follow the level's own and precede the scope-wide chain. The same local role may serve both scopes. |
 | `scopes.<scope>.fallback` | no | Role names to try after every level's own models and its local fallbacks. A scope-wide chain is nonempty, has no duplicate or level role and belongs to only one scope. Personal chains take no work-bound model; work chains take only work-bound Codex or Claude Code models. |
 | `local.levels` | no | All four tiers, each a local role name or `null` to refuse that tier. `local.role` must be one of the enabled tier roles and remains the default for operations that do not use a planned prompt. Local routing uses offline heuristics or a tag and never asks Jev. |
+| `providerOrder` | no | `personal`, `work` and `local`, each optional and each a nonempty list of provider ids without duplicates. In every role of that scope, the listed providers' models come first, in the listed order ([The provider order](#the-provider-order)). A list may name only providers of the models it governs. Without the field, every role is tried in the order its `models` are written. |
 | `roles[].disabled` | no | Set to `true` with an empty `models` array to leave a role explicitly disabled, for example while no work account is verified. An empty role without this flag remains invalid. |
 | `scopes.work.directories` | no | Absolute paths whose sessions are in work scope ([Scope](#scope-personal-or-work)), written plainly: no trailing `/`, no empty, `.` or `..` segment, and not `/` itself. |
 | `accounts.<provider>.scope` | no | `"personal"`, the default, or `"work"`. |
@@ -560,6 +571,7 @@ the check, and the next prompt of every running session uses it: no restart, no 
 | To change | Edit |
 |---|---|
 | The model a level uses | The `models` of that level's role in `roles`. `scopes.<scope>.levels.<level>.role` names the role; the first model listed is the one used, the rest are tried after it. |
+| Which provider every level tries first | `providerOrder.<scope>`, for every session; or `/smart-router prefer`, for the session you are in ([The provider order](#the-provider-order)). |
 | What takes over when a level's model cannot | A level's `fallback` for local roles, then `scopes.<scope>.fallback` for a scope-wide chain. Each role's own `models` order is the order inside it. |
 | The local set, for `smart-router/local` | The local role's `models`, or the roles named by `local.levels`. A new server also needs its provider in `local.providers` and host in `local.hosts`. |
 | A work session's models | The `work-*` roles, which take work-bound Codex or Claude Code; a level may also name a local fallback. |
@@ -1532,8 +1544,8 @@ it the entry names, stays in the text that Jev reads, and the list is not comple
 
 John's decision of 2026-11-16: a manual choice always wins. A model selected with `/model` or by
 cycling, or restored with a session, stays selected and is sent as it is, in personal scope and in
-work scope. The router routes only while the selection is `smart-router/auto` or
-`smart-router/local`.
+work scope. The router routes only while the selection is one of its own models:
+`smart-router/auto`, `smart-router/personal`, `smart-router/work` or `smart-router/local`.
 
 Each row below is asserted by the tests under "the router's handlers", "a model picked by hand in
 work scope" and "a restored selection" in `test/selection.test.ts`, on Hera's rosters. Scenarios 6
@@ -1587,10 +1599,9 @@ has been removed. Each of these is a test in `test/commands.test.ts`:
 - `/smart-router scope work` with Kimi selected answers "pi-smart-router: scope work (entry)." and
   "The selection stays openrouter/moonshotai/kimi-k3.1-pro. A model picked by hand is sent as it is,
   in work scope too."
-- `/smart-router scope work` with `smart-router/local` selected answers "The selection stays
-  smart-router/local. In work scope smart-router/local routes to the local models, so its next
-  requests go to them, not to the work account."
-- `/smart-router scope personal` changes no selection.
+- `/smart-router scope work` with one of the router's own models selected selects
+  `smart-router/work`, and answers "The selection is now smart-router/work."
+- `/smart-router scope personal` leaves a model picked by hand selected too.
 
 ## Scope: personal or work
 
@@ -1601,10 +1612,11 @@ account bindings. The first rule that applies decides it:
    scope. It is read each time the router loads; once seen, it holds for the life of the process,
    even if the variable is removed later. nix-config's shared-work profile is to set it.
 2. **The session's entry.** `/smart-router scope work` and `/smart-router scope personal` record a
-   `smart-router.scope` entry in the session, and resume keeps it.
-   - Personal to work takes effect at once, for the routes of the router's own models. The selection
-     stays as it is, and the answer says what it will do: a model picked by hand is sent as it is,
-     and `smart-router/local` routes to the local models.
+   `smart-router.scope` entry in the session, and resume keeps it. Selecting `smart-router/work`
+   records the same work entry.
+   - Personal to work takes effect at once, for the routes of the router's own models. A model
+     picked by hand stays selected and is sent as it is, and the answer says so. One of the
+     router's own models gives way to `smart-router/work`.
    - Work to personal asks first and says that the earlier turns are work content; Enter keeps
      work scope. It is refused under the latch, and in modes without dialogs.
 3. **The roster's work directories**, on every read. A session without an entry whose working
@@ -1637,9 +1649,11 @@ session whose entries cannot be read has an unreadable scope: `smart-router/auto
 Normally `smart-router/local` can still route to its local roles, resolving in work scope. Under a
 personal-only restriction it refuses an unreadable scope too.
 
-**Where each scope's requests go.** Scope governs the router's own two models, and nothing else.
-`smart-router/auto` never sends a personal session to a work-bound account, and sends a work
-session only to work-bound Codex or Claude Code, or to explicitly configured per-level local fallbacks.
+**Where each scope's requests go.** Scope governs the router's own models, and nothing else.
+`smart-router/auto` and `smart-router/personal` never send a personal session to a work-bound
+account. `smart-router/auto` and `smart-router/work` send a work session only to work-bound Codex
+or Claude Code, or to explicitly configured per-level local fallbacks. No provider order changes
+either rule.
 A version 1 roster serves no work scope: `smart-router/auto` refuses a work session, and the check
 on every pick refuses it again. A latched process whose roster has no work scope refuses every request
 on `smart-router/auto`, and `/smart-router status` says why. Normally `smart-router/local` serves both
@@ -1647,6 +1661,34 @@ scopes and an unreadable scope, using only local roles. A personal-only restrict
 unreadable scope on both models. In either scope a model picked by hand
 is sent as it is, a work-account model in a personal session included
 ([A model picked by hand](#a-model-picked-by-hand)).
+
+### The scope's own models
+
+`smart-router/personal` and `smart-router/work` route by level exactly as `smart-router/auto` does,
+with Jev, tags, the cost rule and the fallback chain, each in its one scope. The session's scope
+decides which accounts its content may reach. The selection never does.
+
+| You select | In a personal session | In a work session |
+|---|---|---|
+| `smart-router/auto` | Routes the personal levels. | Routes the work levels. |
+| `smart-router/personal` | Routes the personal levels. | Asks "Move this session to personal scope?", the question `/smart-router scope personal` asks. Declined, the session stays a work session and the model refuses every request with "Nothing was sent". |
+| `smart-router/work` | Records work scope, with a notice, and routes the work levels. The session stays a work session whatever you select later. | Routes the work levels. |
+| `smart-router/local` | Routes the local roles. | Routes the local roles. |
+
+- **The question is asked only when you select the model by hand**, with `/model`. A selection Pi
+  restores with a session, or reaches by cycling, asks nothing: `smart-router/personal` refuses the
+  work session until you run `/smart-router scope personal` or select another model.
+- **Under `PI_SMART_ROUTER_SCOPE=work`** no session can leave work scope, so
+  `smart-router/personal` refuses and asks nothing.
+- **On a personal-only host** `smart-router/work` refuses and records nothing, as
+  `/smart-router scope work` does there.
+- **A scope the roster does not serve** is refused as on `smart-router/auto`: a version 1 roster
+  serves only personal scope, so `smart-router/work` refuses under it.
+
+`/smart-router scope work`, `personal` and `local` select that scope's model whenever one of the
+router's own models is selected, so the command and the model always name the same scope. A model
+picked by hand is never replaced. `/smart-router scope local` selects `smart-router/local` and
+records no scope: the session's own scope, personal or work, stays as it is.
 
 ### Work scope and the selection
 
@@ -1656,8 +1698,8 @@ that something kept switching away. John's decision of 2026-11-16 removed it: a 
 hand stays selected in a work session and is sent as it is.
 
 - **A failed reload moves no session.** While the roster fails to load, the scope reads the work
-  directories of the last valid roster loaded in the process, which the process slot keeps. Both
-  of the router's models refuse until the roster loads; a model picked by hand is sent as it is.
+  directories of the last valid roster loaded in the process, which the process slot keeps. Every
+  one of the router's models refuses until the roster loads; a model picked by hand is sent as it is.
 - **Leaving work scope** is `/smart-router scope personal`, which asks first and which the latch
   refuses.
 
@@ -1694,9 +1736,56 @@ elsewhere, the latch included:
   `smart-router/local` sends only to the local models; with no roster loaded, both refuse every
   request.
 
+## The provider order
+
+A tier's role lists its models in the order they are tried: on John's hosts a Codex model, then a
+Claude model, then an OpenRouter model. The provider order changes which provider comes first
+without changing the models.
+
+```text
+/smart-router prefer claude
+```
+
+In every tier of the session's scope, Claude's model is now tried first, and the others follow in
+the order the roster gives them. `/smart-router prefer codex` puts Codex first again.
+
+| Command | Does |
+|---|---|
+| `/smart-router prefer PROVIDER...` | Puts those providers first, in that order, in every tier of the scope. |
+| `/smart-router prefer TIER PROVIDER...` | The same for one tier: `low`, `medium`, `high` or `super`. |
+| `/smart-router prefer SCOPE ...` | Names the scope: `personal`, `work` or `local`. Without it, the scope is the session's, or `local` while `smart-router/local` is selected. |
+| `/smart-router prefer reset` | Returns every scope to the roster's order. `prefer SCOPE reset` and `prefer TIER reset` return one scope or one tier. |
+| `/smart-router prefer SCOPE` | Shows that scope's tiers. |
+| `/smart-router tiers` | Shows every scope the roster has, its tiers, and each tier's models in the order this session tries them. |
+
+- **A provider is named by its id or by any part of it** that fits one provider only: `claude`
+  names `claude-code`, and `codex` names `openai-codex`. A word that fits two is refused.
+- **An order names only providers the scope's tiers already hold.** `prefer` cannot bring a
+  provider into a scope: a personal session cannot name a work-bound account, and a work session
+  cannot name a personal one. Every pick still passes the account, scope and local-host checks.
+- **The order is the session's alone.** The router keeps it in memory. It writes no file and no
+  session entry, so a new, resumed or forked session starts from the roster as written.
+- **An order for every tier replaces the single tiers' orders** of that scope.
+- **The local roles have an order of their own**, wherever they are used: on `smart-router/local`
+  and as a level's local fallback. The personal and work orders never reorder them.
+- **A provider with no model in a tier** leaves that tier as it is.
+
+To make an order the default on a host, write it in the roster:
+
+```json
+"providerOrder": {
+  "personal": ["claude-code", "openai-codex"],
+  "local": ["omlx-hera"]
+}
+```
+
+`/smart-router check` reads the roster back in that order, and `/smart-router status` says whose
+order is in effect: the roster's, or the session's.
+
 ## Routing locally
 
-To route a session locally, select `/model smart-router/local`. It uses only the roster's local
+To route a session locally, select `/model smart-router/local`, or run `/smart-router scope local`,
+which selects it. It uses only the roster's local
 roles, inside the configured providers and LAN hosts. Normally it works in either scope or an
 unreadable scope; a personal-only restriction refuses work and unreadable scope. With `local.levels`,
 offline demand or a tag selects a tier. A prompt whose tier is null is refused with "Nothing was
@@ -1712,7 +1801,8 @@ kept both of the router's models on local models. John's decision of 2026-11-18 
 `smart-router/local` already routes locally. A second decision of the same day left no trace of it:
 
 - **`/smart-router local`** is an unknown subcommand: whatever follows, it answers with the usage,
-  as any unknown subcommand does, and records and selects nothing.
+  as any unknown subcommand does, and records and selects nothing. `/smart-router scope local` is
+  the command that selects `smart-router/local`.
 - **`PI_SMART_ROUTER_LOCAL_ONLY` is ignored.** Nothing reads it and nothing is shown for it. It
   selects and routes nothing.
 - **An old pin entry is ignored.** The router does not look for one, and nothing is shown for it.
@@ -1818,10 +1908,12 @@ next answer. A replay can therefore raise the deep-session floor where the route
 |---|---|
 | `/smart-router` or `/smart-router status` | The roster's path and state; the selection and its thinking level; the session's scope and what set it, under a version 2 roster or whenever `smart-router/auto` refuses the scope; every role's models on this host with `ok` or the reason they cannot route, and catalog prices; the accounts cooling and the local models held as unreachable; account bindings, checked in the session's scope, and auth sources; a version 1 roster's routing table and fallbacks, or a version 2 roster's levels and fallback chain in each scope, its classifier and the source of each of Jev's prompts; the last decision, and whether it went to a fallback chain's model; the terms of the run that decision belongs to, kept from that run's choice however many requests it has made: a planned run's demand with every guard that applied, or a run without a prompt's need and level, and each candidate's expected cost, or why the cost was unknown; none for a tagged run or while a model picked by hand is selected ([The footer and status](#the-footer-and-status)); the thinking effort the latest request carried and why ([Thinking effort](#thinking-effort)); what can still leave the machine, a model picked by hand first and then the classifier when `smart-router/auto` may ask it; and a warning for any fallback that would move a run onto Codex's API from another one. |
 | `/smart-router history [n]` | The last `n` routing decisions (10 by default, at most 50), with reason codes, and on a version 2 run's first request its level's words: its scope, the level it needs, the model that took it, what decided the level and what the cost rule compared. Model ids and codes only, never prompt text. |
-| `/smart-router scope [work\|personal\|status]` | The session's scope and what set it: `latch`, `entry`, `directory` or `default`. `work` records work scope at once; `personal` asks first in work scope, and is refused under `PI_SMART_ROUTER_SCOPE=work`. Neither changes the selection. |
+| `/smart-router scope [work\|personal\|local\|status]` | The session's scope and what set it: `latch`, `entry`, `directory` or `default`. `work` records work scope at once; `personal` asks first in work scope, and is refused under `PI_SMART_ROUTER_SCOPE=work`; `local` selects `smart-router/local` and records no scope. Each selects its scope's model when one of the router's own models is selected, and leaves a model picked by hand selected ([The scope's own models](#the-scopes-own-models)). |
+| `/smart-router prefer [personal\|work\|local] [low\|medium\|high\|super] PROVIDER...` | Put those providers' models first in every tier of a scope, or in one tier, for this session; `reset` in place of the providers returns to the roster's order ([The provider order](#the-provider-order)). It writes no file and no entry. |
+| `/smart-router tiers` | Each scope the roster has, its tiers, and each tier's own models, local fallback and fallback chain, in the order this session tries them. It reads the roster alone; `status` adds what each model can do on this host. |
 | `/smart-router was low\|medium\|high\|super` | Record that the run in flight, when it holds a level, or else the run of the latest record, should have gone to that level. Nothing is sent again. |
 | `/smart-router check` | Read the roster and its prompt files again and read them back: what each selection and scope routes to, in order, the demand and switching settings, where each of Jev's prompts comes from, and the settings accepted and ignored; or the first error, with its place. It selects, records and sends nothing. [Checking a roster](#checking-a-roster). |
-| `/smart-router reload` | Read the roster, its prompt files and Multi-Pass's labels again now, and register both models again if their limits changed. |
+| `/smart-router reload` | Read the roster, its prompt files and Multi-Pass's labels again now, and register the models again if their limits changed. |
 
 ## Interactions with other extensions
 

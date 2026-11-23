@@ -14,6 +14,7 @@ import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 
 import { PROVIDER, VIRTUAL_API } from "./constants.ts";
+import { routesLevels } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import type { Attempt } from "./decide.ts";
 import type { Scope } from "./roster.ts";
@@ -65,7 +66,7 @@ export function firstLine(error: unknown): string {
  */
 function chooseModel(id: VirtualId, work: boolean): string {
   if (!work) return "choose a model with /model";
-  return id === "auto" ? "choose a work Codex model with /model" : "choose smart-router/auto or a work Codex model with /model";
+  return routesLevels(id) ? "choose a work Codex model with /model" : "choose smart-router/auto or a work Codex model with /model";
 }
 
 /** The way out as a sentence of its own. */
@@ -77,7 +78,7 @@ export function loadFailed(id: VirtualId, reason: string): RouterError {
 }
 
 export function loadFailedNotice(reason: string): string {
-  return `pi-smart-router failed to load: ${reason}. smart-router/auto and smart-router/local refuse every request until it loads.`;
+  return `pi-smart-router failed to load: ${reason}. Every smart-router model refuses every request until it loads.`;
 }
 
 /** A roster that did not load, as the file module reports it. */
@@ -105,7 +106,7 @@ export function rosterRefusal(id: VirtualId, problem: RosterProblem, work = fals
 }
 
 export function rosterNotice(problem: RosterProblem): string {
-  return `pi-smart-router: ${rosterCause(problem)}. smart-router/auto and smart-router/local refuse every request until it is fixed.`;
+  return `pi-smart-router: ${rosterCause(problem)}. Every smart-router model refuses every request until it is fixed.`;
 }
 
 /** Shown at session start when a prompt file the roster names cannot be used: `problem` names the file, the cause and what follows. */
@@ -163,7 +164,7 @@ export function noBoundedHistory(id: VirtualId): RouterError {
 }
 
 export function historyNotice(): string {
-  return `pi-smart-router: ${NO_HISTORY}, so smart-router/auto and smart-router/local refuse every request. Run jwiegley/pi 1.5.0 or later.`;
+  return `pi-smart-router: ${NO_HISTORY}, so every smart-router model refuses every request. Run jwiegley/pi 1.5.0 or later.`;
 }
 
 /**
@@ -174,6 +175,31 @@ export function historyNotice(): string {
  */
 export function scopeUnreadable(id: VirtualId, reason: string, work = false): RouterError {
   return refusal(id, `this session's scope cannot be read (${reason})`, `Record it again with /smart-router scope work or /smart-router scope personal, or ${chooseModel(id, work)}.`);
+}
+
+/**
+ * smart-router/personal and smart-router/work each route one scope, and refuse a session of the
+ * other: the session's scope decides which accounts its content may reach, never the selection.
+ * `latched`: whether the process pins every session to work scope, so that none can be moved.
+ */
+export function scopeMismatch(id: "personal" | "work", scope: Scope, latched: boolean): RouterError {
+  const way =
+    id === "work"
+      ? "Run /smart-router scope work, or choose smart-router/personal or smart-router/auto with /model."
+      : latched
+        ? "Choose smart-router/work, smart-router/auto or a work Codex model with /model."
+        : "Run /smart-router scope personal, which asks first, or choose smart-router/work, smart-router/auto or a work Codex model with /model.";
+  return refusal(id, `this session is in ${scope} scope, and smart-router/${id} routes only a session in ${id} scope`, way);
+}
+
+/** Shown when selecting smart-router/work put a session in work scope. */
+export function scopeSelectedNotice(): string {
+  return "pi-smart-router: this session is in work scope because smart-router/work is selected. It stays in work scope whatever is selected later; /smart-router scope personal moves it back, and asks first.";
+}
+
+/** Shown when the work scope that smart-router/work gives a session could not be recorded in it. */
+export function scopeSelectFailedNotice(reason: string): string {
+  return `pi-smart-router: smart-router/work is selected, but work scope could not be recorded in this session (${reason}), so smart-router/work refuses its requests. Run /smart-router scope work.`;
 }
 
 /** A roster that does not serve a scope, as the texts name it: by its version, when that is 1. */

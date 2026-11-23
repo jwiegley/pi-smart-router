@@ -4,7 +4,9 @@
 //
 // It judges the roster's text, with the parser the router routes by (parseRoster), and the prompt
 // files the roster names, with the checks the router makes of them (src/prompts.ts); the orders it
-// prints are the ones routing uses (candidatesOf). It knows no catalog, so it cannot say
+// prints are the ones routing uses (candidatesOf), each role's models in the roster's provider
+// order where it gives one (src/order.ts). A session's own order, from /smart-router prefer, is no
+// part of the roster: /smart-router tiers and status show that. It knows no catalog, so it cannot say
 // whether a model exists, is reachable or has credentials on a host: /smart-router status does.
 // Nothing here sends anything, and nothing here imports Pi.
 import { dirname } from "node:path";
@@ -12,6 +14,7 @@ import { dirname } from "node:path";
 import { ROSTER_MAX_BYTES } from "./constants.ts";
 import { readUserFile } from "./files.ts";
 import type { ReadOptions } from "./files.ts";
+import { ORDER_SCOPES, orderedRoster } from "./order.ts";
 import { promptLines, promptProblem, promptReader, promptUses } from "./prompts.ts";
 import type { PromptReader, PromptUse } from "./prompts.ts";
 import { parseRoster, SCOPES, unreachableMinutesOf } from "./roster.ts";
@@ -197,9 +200,28 @@ const ignoredLines = (roster: Roster): string[] =>
  * What a valid roster routes to, for each selection and scope, in the order it tries, and where
  * Jev's prompts come from. `uses`: a version 2 roster's prompts as they are in effect.
  */
-export function describeRouting(roster: Roster, uses: readonly PromptUse[] = []): string[] {
+/** The roster's provider order, scope by scope, when it gives one. */
+function orderLines(roster: Roster): string[] {
+  if (roster.version !== 2 || roster.providerOrder === undefined) return [];
+  const given = roster.providerOrder;
+  const lines = ORDER_SCOPES.flatMap((scope) => {
+    const providers = given[scope];
+    return providers === undefined ? [] : [`  ${scope}: ${providers.join(", then ")}`];
+  });
+  if (lines.length === 0) return [];
+  return [
+    "Provider order, applied above: in each role of a scope, these providers' models come first, in this order, and the role's other models keep their places after them. /smart-router prefer replaces it for one session.",
+    ...lines,
+    "",
+  ];
+}
+
+export function describeRouting(given: Roster, uses: readonly PromptUse[] = []): string[] {
+  // Read back in the order routing uses: the roster's own provider order applied.
+  const roster = orderedRoster(given);
   return [
     ...(roster.version === 2 ? describeV2(roster) : describeV1(roster)),
+    ...orderLines(roster),
     ...(roster.version === 2 ? [...demandLines(roster), ...switchingLines(roster)] : []),
     ...effortLines(roster),
     "",
@@ -221,7 +243,7 @@ export function describeRouting(roster: Roster, uses: readonly PromptUse[] = [])
  */
 export function checkRoster(text: string, read?: PromptReader): CheckReport {
   const parsed = parseRoster(text);
-  if (!parsed.ok) return { ok: false, lines: [`INVALID: ${parsed.error}`, "Both smart-router/auto and smart-router/local refuse every request while the roster is invalid."] };
+  if (!parsed.ok) return { ok: false, lines: [`INVALID: ${parsed.error}`, "Every smart-router model refuses every request while the roster is invalid."] };
   const uses = parsed.value.version === 2 ? promptUses(parsed.value, read) : [];
   const problem = promptProblem(uses);
   const routing = describeRouting(parsed.value, uses);

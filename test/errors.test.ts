@@ -193,9 +193,9 @@ describe("in work scope", () => {
 });
 
 describe("notices and helpers", () => {
-  test("notices name both models", () => {
+  test("notices name every model of the router", () => {
     for (const notice of [loadFailedNotice("boom"), rosterNotice({ kind: "missing", path: "/agent/smart-router.json", error: "" }), historyNotice()]) {
-      assert.match(notice, /smart-router\/auto and smart-router\/local refuse every request/);
+      assert.match(notice, /every smart-router model refuses every request/i);
     }
   });
 

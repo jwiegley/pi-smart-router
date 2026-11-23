@@ -151,6 +151,12 @@ export interface RosterV2 {
   readonly switching: SwitchingSettings;
   /** Upstream's adaptive reasoning knobs: on by default, with no floor and no ceiling (src/effort.ts). */
   readonly adaptiveReasoning: EffortSettings;
+  /**
+   * Which providers' models come first in each tier of a scope, when the roster says: personal and
+   * work for their level and chain roles, local for the local roles. A role keeps its models; only
+   * their order follows this (src/order.ts). A session can replace it with /smart-router prefer.
+   */
+  readonly providerOrder?: Readonly<Partial<Record<"personal" | "work" | "local", readonly string[]>>>;
 }
 
 export type Roster = RosterV1 | RosterV2;
@@ -615,7 +621,9 @@ function validate(value: unknown): Roster {
 
 // ─── Version 2 ───────────────────────────────────────────────────────────────
 
-const V2_TOP_KEYS = ["version", "exclude", "roles", "scopes", "accounts", "classifier", "demand", "switching", "adaptiveReasoning", "local", "stickyIdleMinutes", "cooldownMinutes", "unreachableMinutes"];
+const V2_TOP_KEYS = ["version", "exclude", "roles", "scopes", "accounts", "classifier", "demand", "switching", "adaptiveReasoning", "local", "providerOrder", "stickyIdleMinutes", "cooldownMinutes", "unreachableMinutes"];
+/** The scopes a provider order is given for: the two session scopes, and the local roles. */
+const ORDER_KEYS = ["personal", "work", "local"] as const;
 const SCOPE_KEYS: Readonly<Record<Scope, readonly string[]>> = { personal: ["levels", "fallback"], work: ["levels", "directories", "fallback"] };
 const LEVEL_KEYS = ["role", "describe", "describeFile", "fallback"];
 const SCOPED_BINDING_KEYS = ["multiPassLabel", "native", "scope"];
@@ -936,6 +944,26 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
   const switching = switchingSettings(own(root, "switching"));
   const adaptiveReasoning = effortSettings(own(root, "adaptiveReasoning"));
 
+  // A provider order names only providers of the models it governs: a scope's level and chain
+  // roles, or the local roles, which are the local order's wherever a level names them.
+  let providerOrder: Partial<Record<(typeof ORDER_KEYS)[number], readonly string[]>> | undefined;
+  if (own(root, "providerOrder") !== undefined) {
+    const given = object(own(root, "providerOrder"), "providerOrder", ORDER_KEYS);
+    providerOrder = {};
+    for (const key of ORDER_KEYS) {
+      if (own(given, key) === undefined) continue;
+      const path = `providerOrder.${key}`;
+      const section = key === "local" ? undefined : scopes[key];
+      if (key === "local" ? local === undefined : section === undefined) fail(path, key === "local" ? "the roster has no local section" : `the roster has no ${key} scope`);
+      const governed = key === "local"
+        ? sharedLocal
+        : new Set([...TIERS.map((tier) => section!.levels[tier].role), ...(section!.fallback ?? [])].filter((role) => !sharedLocal.has(role)));
+      const providers = new Set(refs.filter(({ role }) => governed.has(role)).map(({ provider }) => provider));
+      providerOrder[key] = uniqueTexts(own(given, key), path, true, (provider, where) => {
+        if (!providers.has(provider)) fail(where, `"${provider}" is the provider of no model in ${key === "local" ? "a local role" : `the ${key} scope's roles`}`);
+      });
+    }
+  }
   return {
     version: 2,
     exclude,
@@ -950,6 +978,7 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
     demand,
     switching,
     adaptiveReasoning,
+    ...(providerOrder === undefined ? {} : { providerOrder }),
   };
 }
 

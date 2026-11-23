@@ -1,11 +1,12 @@
 // One instance of the router: the session whose extension runtime loaded it, the files it reads
 // (the roster, Multi-Pass's labels and the prompt files the roster names), its per-session records
 // (each with the ledger its session's answers feed, which prices a planned run) and cooldowns, the
-// limits both models declare, the session's scope with its handoffs and work directories, the
-// refusals of its own two models for a scope their policy does not serve, a message's tag and Jev's
+// limits its models declare, the session's scope with its handoffs and work directories, the
+// refusals of its own models for a scope their policy does not serve, a message's tag and Jev's
 // request, each planned run's level record, the footer item (a run's level, effort and model), the
-// /smart-router command, what it tells pi-cache-optimizer, and the handlers wire() registers. No
-// handler changes or blocks what is selected (src/selection.ts).
+// provider order /smart-router prefer gives a session, the /smart-router command, what it tells
+// pi-cache-optimizer, and the handlers wire() registers. No handler changes or blocks what is
+// selected (src/selection.ts).
 //
 // createRouter only builds closures. It makes no pi.on, registration or command call, so a throw
 // while it is built leaves only the two refusing models index.ts registered, and wire() makes
@@ -31,9 +32,9 @@ import type {
 import { labelsFile, needsLabels } from "./accounts.ts";
 import { registerAdapter, unregisterAdapter } from "./cache-optimizer.ts";
 import type { ActiveRoute } from "./cache-optimizer.ts";
-import { smartRouterCommand } from "./commands.ts";
+import { selectPersonal, smartRouterCommand } from "./commands.ts";
 import type { CommandHost, Files } from "./commands.ts";
-import { ALL_LEVELS, COMMAND, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, LEVEL_ENTRY, LEVEL_KEY, PROVIDER, SCOPE_ENTRY, VIRTUAL_API, VIRTUAL_IDS } from "./constants.ts";
+import { ALL_LEVELS, COMMAND, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, isVirtualId, LEVEL_ENTRY, LEVEL_KEY, PROVIDER, routesLevels, SCOPE_ENTRY, VIRTUAL_API, VIRTUAL_IDS } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { compactionFor, eligibleRole, pickInRole, planUserTurn } from "./decide.ts";
 import type { CostFigures, Decision, LastResponder, LevelInput, Plan } from "./decide.ts";
@@ -56,6 +57,9 @@ import {
   rosterRefusal,
   scopeCarriedNotice,
   scopeCarryFailedNotice,
+  scopeMismatch,
+  scopeSelectedNotice,
+  scopeSelectFailedNotice,
   scopeUnreadable,
   scopeUnserved,
   stale,
@@ -72,6 +76,8 @@ import type { JevAsk, JevOutcome } from "./jev.ts";
 import { answerOf, forgetBranch, forgetCaches, noteAnswer, noteRunEnd, seedAnswer, usable } from "./ledger.ts";
 import type { Ledger } from "./ledger.ts";
 import { localRoles, policyFromRoster } from "./local.ts";
+import { orderedRoster } from "./order.ts";
+import type { SessionOrder } from "./order.ts";
 import { healDisplaced, isLive, isLiveOwner, join, leave, leaveScopeHandoff, ownerBySignal, personalOnlyLatched, rememberedRoster, rememberRoster, scopeLatched, sessionHash, takeScopeHandoff } from "./owners.ts";
 import type { Owner, OwnerRouter, RosterMemory, Slot } from "./owners.ts";
 import { promptProblem, promptStore, promptUses, scopePrompts } from "./prompts.ts";
@@ -128,6 +134,14 @@ function depthOf(record: SessionRecord, sessionManager: unknown): SessionDepth {
 export interface Session extends SessionRecord {
   /** Whether this instance has tried to record the scope the work directories gave the session. It tries once. */
   directoryTried: boolean;
+  /** Whether this instance has tried to record the work scope that selecting smart-router/work gives. It tries once for each selection. */
+  workTried: boolean;
+  /**
+   * The provider order /smart-router prefer gave this session, in place of the roster's. It is kept
+   * here and nowhere else: no entry and no file holds it, so a new, resumed or forked session
+   * starts from the roster as written.
+   */
+  order: SessionOrder | undefined;
   /** The token of the latest input that planned: an input that waited for Jev plans only if no newer input has planned since. */
   plannedToken: number;
   /** Whether the footer shows an item this instance set: only then does a run without a level clear it at its start. */
@@ -148,17 +162,17 @@ export interface Session extends SessionRecord {
 }
 
 export interface Router extends OwnerRouter {
-  /** Every route call of both models lands here, whichever instance registered the route. */
+  /** Every route call of the router's models lands here, whichever instance registered the route. */
   dispatch(id: VirtualId, request: ModelRouteRequest, ctx: ExtensionContext): ModelRoute;
   /** Register every handler and the command, once. */
   wire(pi: ExtensionAPI): void;
   /** A session's records, for status and history. */
   record(sessionId: string): Readonly<Session> | undefined;
-  /** The limits both models were last registered with. */
+  /** The limits the models were last registered with. */
   limits(): Readonly<Record<VirtualId, Limits>>;
 }
 
-const BOTH_DEFAULT: Readonly<Record<VirtualId, Limits>> = Object.freeze({ auto: DEFAULT_LIMITS, local: DEFAULT_LIMITS });
+const ALL_DEFAULT: Readonly<Record<VirtualId, Limits>> = Object.freeze({ auto: DEFAULT_LIMITS, local: DEFAULT_LIMITS, personal: DEFAULT_LIMITS, work: DEFAULT_LIMITS });
 const HANDLED: InputEventResult = Object.freeze({ action: "handled" });
 /** How many messages whose runs have not started a session remembers (Session.remembered). */
 const REMEMBERED = 64;
@@ -166,7 +180,7 @@ const REMEMBERED = 64;
 const SEED_ENTRIES = 16;
 
 const virtualIdOf = (model: Model<Api> | undefined): VirtualId | undefined =>
-  model?.provider === PROVIDER && (model.id === "auto" || model.id === "local") ? model.id : undefined;
+  model?.provider === PROVIDER && isVirtualId(model.id) ? model.id : undefined;
 
 const THINKING_LEVELS: ReadonlySet<string> = new Set(ALL_LEVELS);
 const isThinkingLevel = (value: unknown): value is ModelThinkingLevel => typeof value === "string" && THINKING_LEVELS.has(value);
@@ -263,7 +277,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   const holds = new Holds();
   const records = new Map<string, Session>();
   const reported = new Set<string>();
-  let limits = BOTH_DEFAULT;
+  let limits = ALL_DEFAULT;
   let self: Owner | undefined;
   /** The latest valid roster this instance loaded, whose work directories and bindings the slot keeps. */
   let lastLoaded: Roster | undefined;
@@ -284,6 +298,8 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       record = {
         ...newRecord(),
         directoryTried: false,
+        workTried: false,
+        order: undefined,
         plannedToken: 0,
         footerShown: false,
         answered: undefined,
@@ -351,10 +367,26 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     return scope.kind === "ok" ? scope.scope : "work";
   };
 
-  /** A resolver context in the session's scope, or in `scope`, which only /smart-router status names. */
-  const contextFor = (ctx: ExtensionContext, value: Roster, id: VirtualId, scope: Scope = resolvedScope(ctx)): ResolveContext =>
+  /** The provider order /smart-router prefer gave a context's session, if any; none for a stale context. */
+  const orderOf = (ctx: ExtensionContext): SessionOrder | undefined => {
+    try {
+      return records.get(ctx.sessionManager.getSessionId())?.order;
+    } catch {
+      return undefined;
+    }
+  };
+
+  /**
+   * A resolver context in the session's scope, or in `scope`, which only /smart-router status and
+   * the limits name. smart-router/personal and smart-router/work resolve in their own scope,
+   * whatever the session's is: refusalFor refuses them a session of the other scope before any
+   * route, and assertSafe checks the scope again on every pick. The roster is read through the
+   * provider order in effect for the session (src/order.ts), so every pick, retry and check of the
+   * request sees one order.
+   */
+  const contextFor = (ctx: ExtensionContext, value: Roster, id: VirtualId, scope: Scope = id === "personal" || id === "work" ? id : resolvedScope(ctx)): ResolveContext =>
     resolveContext({
-      roster: value,
+      roster: orderedRoster(value, orderOf(ctx)),
       catalog: ctx.modelRegistry,
       labels: needsLabels(value) ? labels.current() : undefined,
       cooldowns,
@@ -395,28 +427,33 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   };
 
   /**
-   * Why smart-router/auto refuses this session's scope, if it does: a scope that cannot be read, a
+   * Why a model that routes by level refuses this session's scope, if it does: a scope that cannot
+   * be read, a session of the other scope on smart-router/personal or smart-router/work, a
    * work-scope session under a version 1 roster, and a scope a version 2 roster has no section for.
    * Its way out is worded for a work session (chooseModel in src/errors.ts): a work or unreadable
    * scope.
    */
-  const scopeRefusal = (value: Roster, ctx: ExtensionContext): RouterError | undefined => {
+  const scopeRefusal = (id: VirtualId, value: Roster, ctx: ExtensionContext): RouterError | undefined => {
     const scope = scopeOf(ctx);
-    if (scope.kind === "unreadable") return scopeUnreadable("auto", scope.reason, true);
+    if (scope.kind === "unreadable") return scopeUnreadable(id, scope.reason, true);
+    // The session's scope decides, never the selection: a work session stays on work accounts.
+    if ((id === "personal" || id === "work") && scope.scope !== id) return scopeMismatch(id, scope.scope, scope.source === "latch");
     if (servesScope(value, scope.scope)) return undefined;
     // Outside the latch, /smart-router scope personal can move the session.
-    return scopeUnserved("auto", scope.scope, value.version, scope.scope === "work", scope.source !== "latch");
+    return scopeUnserved(id, scope.scope, value.version, scope.scope === "work", scope.source !== "latch");
   };
 
-  /** A personal-only process refuses work or unreadable scope on both models, before classification. */
+  /** A personal-only process refuses work or unreadable scope on every model, before classification. */
   const refusalFor = (id: VirtualId, value: Roster, ctx: ExtensionContext): RouterError | undefined => {
     if (personalOnlyLatched(slot)) {
       const scope = scopeOf(ctx);
       if (scope.kind !== "ok" || scope.scope !== "personal") {
         return refusal(id, "work scope is disabled for the router or this session's scope cannot be verified on this personal-only host", "Use a verified personal-scope session; hand-selected models and other extensions are not blocked.");
       }
+      // The way out of a scope mismatch is /smart-router scope work, which this host refuses.
+      if (id === "work") return refusal(id, "work scope is disabled for the router on this personal-only host", "Choose smart-router/personal or smart-router/auto with /model.");
     }
-    return id === "auto" ? scopeRefusal(value, ctx) : undefined;
+    return routesLevels(id) ? scopeRefusal(id, value, ctx) : undefined;
   };
 
   /** Pi's settings, for the compaction figures a route prices with; Pi's defaults (compactionFor) when they cannot be read. */
@@ -450,17 +487,21 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   // process's, not the registering session's: under a version 2 roster, auto reaches every level
   // role of both scopes, each resolved in its own scope, and the local role is resolved in each. A
   // version 1 roster serves only personal scope, and resolves the same in either.
+  // smart-router/personal and smart-router/work declare what auto would for their one scope. The
+  // candidates are read in the provider order of the session that computes them, so /smart-router
+  // prefer computes them again (commandHost.setOrder).
   const computeLimits = (ctx: ExtensionContext, value: Roster): Record<VirtualId, Limits> => {
     const scopes: readonly Scope[] = value.version === 2 ? SCOPES : ["personal"];
-    const picks = (id: VirtualId, roles: (scope: Scope) => Iterable<string>): Decision[] =>
-      scopes.flatMap((scope) => {
+    const picks = (id: VirtualId, roles: (scope: Scope) => Iterable<string>, among: readonly Scope[] = scopes): Decision[] =>
+      among.flatMap((scope) => {
         const rc = contextFor(ctx, value, id, scope);
         return [...roles(scope)].map((role) => pickInRole(rc, role, { fallback: false, code: "limits" }));
       });
     const auto = smallest(picks("auto", (scope) => autoRoles(value, scope)));
     const roles = localRoles(value.local);
     const local = roles.length === 0 ? DEFAULT_LIMITS : smallest(picks("local", () => roles));
-    return { auto, local };
+    const scoped = (scope: Scope): Limits => (scopes.includes(scope) ? smallest(picks(scope, (name) => autoRoles(value, name), [scope])) : DEFAULT_LIMITS);
+    return { auto, local, personal: scoped("personal"), work: scoped("work") };
   };
 
   // Pi's catalog keeps the object a registration produced until the next registration, so the
@@ -473,7 +514,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     }
   };
 
-  /** Whether a registration that neither this owner nor a live sibling made holds either model. */
+  /** Whether a registration that neither this owner nor a live sibling made holds any of the models. */
   const displaced = (ctx: ExtensionContext): boolean =>
     VIRTUAL_IDS.some((id) => {
       const current = ctx.modelRegistry.find(PROVIDER, id);
@@ -634,6 +675,24 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     recordScope(ctx, scopeEntry("work", "directory", now()), directoryNotice(work.cwd, directory), (reason) => directoryFailedNotice(work.cwd, directory, reason));
   };
 
+  /**
+   * smart-router/work is the work scope's model: a session that selects it is a work session from
+   * then on, as after /smart-router scope work, and the scope is recorded so that it holds whatever
+   * is selected later. It is tried once for each selection, at the selection, at session start and
+   * at the next idle input, and never on a personal-only host, where the model refuses instead.
+   * The other direction is never taken here: smart-router/personal in a work session asks first
+   * (selectPersonal), and refuses until the session is moved.
+   */
+  const alignWork = (ctx: ExtensionContext, id: VirtualId | undefined = virtualIdOf(ctx.model)): void => {
+    if (id !== "work" || personalOnlyLatched(slot)) return;
+    const scope = scopeOf(ctx);
+    if (scope.kind === "ok" && scope.scope === "work") return;
+    const record = recordOf(ctx.sessionManager.getSessionId());
+    if (record.workTried) return;
+    record.workTried = true;
+    recordScope(ctx, scopeEntry("work", "command", now()), scopeSelectedNotice(), scopeSelectFailedNotice);
+  };
+
   // The restored selection is left as it is. The scope a fork or /new carries is recorded first,
   // and the scope the work directories give is recorded as soon as the roster is read. Each step
   // reports its own failure and lets the rest run.
@@ -648,9 +707,10 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     step(() => registerAdapter(slot));
     const state = step(refreshFiles);
     step(() => recordDirectory(ctx));
+    step(() => alignWork(ctx));
     if (state !== undefined) {
       step(() => {
-        limits = state.kind === "ok" ? computeLimits(ctx, state.value) : BOTH_DEFAULT;
+        limits = state.kind === "ok" ? computeLimits(ctx, state.value) : ALL_DEFAULT;
       });
     }
     step(() => registerModels(ctx));
@@ -809,7 +869,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   const demandWindow = (ctx: ExtensionContext, id: VirtualId | undefined, value: Roster | undefined, scope: ScopeState): Window | undefined => {
     const history = boundedHistory(ctx.sessionManager);
     if (!ctx.isIdle() || value?.version !== 2 || history === undefined) return undefined;
-    if (id === "auto") {
+    if (id !== undefined && routesLevels(id)) {
       if (scope.kind !== "ok" || scopeSection(value, scope.scope) === undefined) return undefined;
     } else if (id !== "local" || value.local?.levels === undefined) return undefined;
     const limit = Math.max(4 * (value.classifier?.context.messages ?? 0), HEURISTIC_MESSAGES);
@@ -847,15 +907,16 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     record.inputsSinceRun += 1;
     const state = refreshFiles();
     guarded("input", ctx, () => recordDirectory(ctx));
+    guarded("input", ctx, () => alignWork(ctx));
     const id = virtualIdOf(ctx.model);
     const value = state.kind === "ok" ? state.value : undefined;
     if (tier !== undefined) {
       const why: TagIgnored | undefined =
-        id !== "auto" && !(id === "local" && value?.version === 2 && value.local?.levels !== undefined)
+        (id === undefined || !routesLevels(id)) && !(id === "local" && value?.version === 2 && value.local?.levels !== undefined)
           ? { selection: describeModel(ctx.model) }
           : value?.version === 1
             ? "version"
-            : id === "auto" && value !== undefined && scopeRefusal(value, ctx) !== undefined
+            : id !== undefined && routesLevels(id) && value !== undefined && scopeRefusal(id, value, ctx) !== undefined
               ? "scope"
               : undefined;
       if (why !== undefined) notify(ctx, tagIgnoredNotice(tier, why), "warning");
@@ -1076,6 +1137,18 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       return { ...filesNow(state), limitsChanged };
     },
     scopeOf,
+    order: orderOf,
+    setOrder: (ctx, next) => {
+      recordOf(ctx.sessionManager.getSessionId()).order = next;
+      const state = loaded(roster.current());
+      if (state.kind !== "ok") return false;
+      // The first candidates may have changed, and with them the limits the models declare.
+      const computed = computeLimits(ctx, state.value);
+      if (sameLimits(computed, limits)) return false;
+      limits = computed;
+      registerModels(ctx);
+      return true;
+    },
     personalOnly: () => personalOnlyLatched(slot),
     session: (ctx) => records.get(ctx.sessionManager.getSessionId()),
     resolver: contextFor,
@@ -1093,7 +1166,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       // Each request of the owner's loop shows the level its run needs, a planned run's or a
       // run:need choice's, when it has one; the effort the request carries; and the model it goes to.
       // So the footer follows a run that moves: up for being stuck, or onto another model on a retry.
-      const need = id === "auto" ? (record.pendingLevel?.level.need ?? record.needRun?.need) : undefined;
+      const need = routesLevels(id) ? (record.pendingLevel?.level.need ?? record.needRun?.need) : undefined;
       showFooter(ctx, record, record.effort === undefined ? undefined : footerText({ tier: need, effort: record.effort.level, model: route.model.id }));
       const movedUp = !escalated && record.escalated;
       // A stuck run that moves up says so, where it happens, once: the level and the model it reached,
@@ -1102,7 +1175,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       const to = record.runTier;
       if (movedUp && from !== undefined && to !== undefined) notify(ctx, escalationNotice(from, to, route.model.id), "info");
       // A run under way that moves from its model onto the scope's chain says so, where it happens.
-      if (!movedUp && id === "auto" && !input.rc.localOnly && before !== undefined && after !== undefined && before.ref !== after.ref) {
+      if (!movedUp && routesLevels(id) && !input.rc.localOnly && before !== undefined && after !== undefined && before.ref !== after.ref) {
         const { scope } = input.rc;
         if (!inChain(scope, before.ref) && inChain(scope, after.ref)) {
           notify(ctx, fallbackMoveNotice(parseRef(before.ref)?.id ?? before.ref, after.role, route.model.id), "info");
@@ -1184,6 +1257,22 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         // Every run starts here, so a run without an input (a custom message's, a goal-x
         // continuation's) records the work directories' scope too.
         guarded("before_agent_start", ctx, () => recordDirectory(ctx));
+      });
+      // A selection of smart-router/work makes the session a work session; one of
+      // smart-router/personal, made by hand in a work session, asks whether to leave work scope.
+      // Neither changes or blocks the selection itself.
+      target.on("model_select", async (event, ctx) => {
+        try {
+          const id = virtualIdOf(event.model);
+          recordOf(ctx.sessionManager.getSessionId()).workTried = false;
+          if (id === "work") alignWork(ctx, id);
+          else if (id === "personal" && event.source === "set") {
+            const answer = await selectPersonal(commandHost, ctx);
+            if (answer !== undefined) notify(ctx, answer.text, answer.type);
+          }
+        } catch (error) {
+          report("model_select", ctx, error);
+        }
       });
       // Whatever is selected, a run's turn starts as it is: the router only heals its registration.
       target.on("turn_start", (_event, ctx) => guarded("turn_start", ctx, () => void heal(ctx)));

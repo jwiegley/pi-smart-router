@@ -44,7 +44,7 @@ import { isClaudeCodeProvider, isWorkCodex, subscriptionKind } from "./accounts.
 import type { Classification } from "./classify.ts";
 import { isDeepSession } from "./demand.ts";
 import type { SessionDepth } from "./demand.ts";
-import { VIRTUAL_API } from "./constants.ts";
+import { routesLevels, VIRTUAL_API } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { chooseModel, effortFor, eligibleRole, escalationTarget, NO_LOCAL_SECTION, noScopeSection, pickInRole } from "./decide.ts";
 import type { Choice, CompactionFigures, CostFigures, CostTerms, Decision, LastResponder, LevelInput, Plan, PlanLevel } from "./decide.ts";
@@ -398,7 +398,7 @@ function takePlan(record: SessionRecord, id: VirtualId, rc: ResolveContext): Pla
  * serves. Undefined on smart-router/local, under a version 1 roster, and in a scope without one.
  */
 function levelSection(rc: ResolveContext): ScopeSection | undefined {
-  if (rc.virtualId !== "auto" || rc.localOnly || rc.roster.version !== 2) return undefined;
+  if (!routesLevels(rc.virtualId) || rc.localOnly || rc.roster.version !== 2) return undefined;
   return scopeSection(rc.roster, rc.scope);
 }
 
@@ -535,9 +535,11 @@ export function assertSafe(id: VirtualId, rc: ResolveContext, choice: Choice): v
           ? "is not the catalog entry of that name"
           : outside !== undefined
             ? outside
+            : (id === "personal" || id === "work") && rc.scope !== id
+              ? `is routed in ${rc.scope} scope, which smart-router/${id} never routes in`
             : roleOf(roster, choice.ref)?.name !== choice.role
               ? `is not in the role ${choice.role}`
-              : rc.virtualId === "auto" && !autoRoles(roster, rc.scope).has(choice.role)
+              : routesLevels(rc.virtualId) && !autoRoles(roster, rc.scope).has(choice.role)
                 ? "is in a role smart-router/auto never routes to"
                 : rc.localOnly && !localRoles(roster.local).includes(choice.role)
                   ? "is not in a local role"
