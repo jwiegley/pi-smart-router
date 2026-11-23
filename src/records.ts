@@ -280,7 +280,9 @@ export function decisionLines(level: PlanLevel): string[] {
 export function needRunLines(run: NeedRun, tier: Tier): string[] {
   const { prompts } = run;
   const from =
-    prompts === undefined ? "the level the session last needed" : prompts === 1 ? "the level of the last prompt" : `the highest of the last ${prompts} prompts`;
+    run.localRole === true
+      ? "the tier of the roster's local role (no level the session needed has local models, or it has planned nothing)"
+      : prompts === undefined ? "the level the session last needed" : prompts === 1 ? "the level of the last prompt" : `the highest of the last ${prompts} prompts`;
   const why = run.floor === true ? `${from}, raised to the deep-session floor` : from;
   return [`  Need ${tierLabel(run.need)} → ${tierLabel(tier)}: a run without a prompt, at ${why}.`, ...costLines(run.cost)];
 }
@@ -341,5 +343,10 @@ export interface NeedRun {
   readonly prompts?: number;
   /** The deep-session floor raised the level the run took (from the last prompts or the session's need) to `need`. */
   readonly floor?: true;
+  /**
+   * smart-router/local with per-tier roles only: no level the session is known to have needed has
+   * local models, or it has planned nothing, so the run took the tier of the roster's local role.
+   */
+  readonly localRole?: true;
   readonly cost?: CostTerms;
 }

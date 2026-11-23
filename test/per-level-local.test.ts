@@ -185,11 +185,135 @@ test("a local tier disabled after planning refuses before sending", async (t) =>
   assert.throws(() => runtime.route("local", request("user", { signal })), /local HIGH tier has no models.*Nothing was sent/);
 });
 
-test("an unplanned local-tier request refuses instead of silently choosing LOW", async (t) => {
-  const runtime = new FakeRuntime(new FakeCatalog([model(LOCAL_LOW, { baseUrl: "https://nyx.lan/v1" }), model(LOCAL_MEDIUM, { baseUrl: HERA_LAN })]));
+const twoLocal = () => new FakeRuntime(new FakeCatalog([model(LOCAL_LOW, { baseUrl: "https://nyx.lan/v1" }), model(LOCAL_MEDIUM, { baseUrl: HERA_LAN })]));
+
+test("a run without a prompt on tiered local takes the tier the session last needed", async (t) => {
+  const runtime = twoLocal();
+  const loaded = await start({ dir: agentDir(t, { roster: JSON.stringify(config()) }), runtime, select: "local" });
+  await loaded.host.emit("input", { text: "test #medium", source: "interactive" });
+  await loaded.host.emit("before_agent_start", { messageType: "user", prompt: "test" });
+  const first = loaded.session.startRun();
+  assert.equal(routed(runtime.route("local", request("user", { signal: first }))), LOCAL_MEDIUM);
+  await loaded.host.emit("message_end", { message: assistant(LOCAL_MEDIUM) });
+  await loaded.host.emit("agent_settled", { aborted: false });
+  loaded.session.endRun();
+  // An extension's message (a mail doorbell, a goal continuation) starts a run with no input.
+  await loaded.host.emit("before_agent_start", { messageType: "custom", message: "you have mail" });
+  const second = loaded.session.startRun();
+  assert.equal(routed(runtime.route("local", request("user", { signal: second }))), LOCAL_MEDIUM);
+  await loaded.host.command("smart-router", "status");
+  assert.match(loaded.session.notices.at(-1)?.message ?? "", /Need MEDIUM → MEDIUM: a run without a prompt, at the level of the last prompt\./);
+});
+
+test("a run without a prompt on tiered local, in a session that never planned, takes the local role", async (t) => {
+  const runtime = twoLocal();
+  const loaded = await start({ dir: agentDir(t, { roster: JSON.stringify(config()) }), runtime, select: "local" });
+  await loaded.host.emit("before_agent_start", { messageType: "custom", message: "you have mail" });
+  const signal = loaded.session.startRun();
+  assert.equal(routed(runtime.route("local", request("user", { signal }))), LOCAL_LOW);
+  await loaded.host.command("smart-router", "status");
+  assert.match(loaded.session.notices.at(-1)?.message ?? "", /Need LOW → LOW: a run without a prompt, at the tier of the roster's local role/);
+});
+
+test("a custom run that takes a tagged prompt's place drops the tag, says so, and still routes", async (t) => {
+  const runtime = twoLocal();
   const loaded = await start({ dir: agentDir(t, { roster: JSON.stringify(config()) }), runtime, select: "local" });
   await loaded.host.emit("input", { text: "test #high", source: "interactive" });
   await loaded.host.emit("before_agent_start", { messageType: "custom", message: "unplanned" });
   const signal = loaded.session.startRun();
-  assert.throws(() => runtime.route("local", request("user", { signal })), /no local tier.*Nothing was sent/);
+  assert.equal(routed(runtime.route("local", request("user", { signal }))), LOCAL_LOW);
+  assert.ok(loaded.session.notices.some((note) => note.type === "warning"));
+});
+
+test("a session whose last need has no local models falls back to the local role for a run without a prompt", async (t) => {
+  const value = config();
+  value.local.levels.high = "local-medium";
+  const dir = agentDir(t, { roster: JSON.stringify(value) });
+  const runtime = twoLocal();
+  const loaded = await start({ dir, runtime, select: "local" });
+  await loaded.host.emit("input", { text: "test #high", source: "interactive" });
+  await loaded.host.emit("before_agent_start", { messageType: "user", prompt: "test" });
+  const first = loaded.session.startRun();
+  assert.equal(routed(runtime.route("local", request("user", { signal: first }))), LOCAL_MEDIUM);
+  await loaded.host.emit("message_end", { message: assistant(LOCAL_MEDIUM) });
+  await loaded.host.emit("agent_settled", { aborted: false });
+  loaded.session.endRun();
+  value.local.levels.high = null;
+  write(dir, "smart-router.json", JSON.stringify(value));
+  await loaded.host.command("smart-router", "reload");
+  await loaded.host.emit("before_agent_start", { messageType: "custom", message: "you have mail" });
+  const second = loaded.session.startRun();
+  assert.equal(routed(runtime.route("local", request("user", { signal: second }))), LOCAL_LOW);
+});
+
+test("a typed prompt after a run without a prompt is planned and routed on tiered local", async (t) => {
+  const runtime = twoLocal();
+  const loaded = await start({ dir: agentDir(t, { roster: JSON.stringify(config()) }), runtime, select: "local" });
+  const prompt = "test";
+  await loaded.host.emit("input", { text: "test #medium", source: "interactive" });
+  await loaded.host.emit("before_agent_start", { messageType: "user", prompt });
+  const first = loaded.session.startRun();
+  const tier = routed(runtime.route("local", request("user", { signal: first })));
+  await loaded.host.emit("message_end", { message: assistant(tier) });
+  await loaded.host.emit("agent_settled", { aborted: false });
+  loaded.session.endRun();
+  await loaded.host.emit("before_agent_start", { messageType: "custom", message: "you have mail" });
+  const second = loaded.session.startRun();
+  assert.equal(routed(runtime.route("local", request("user", { signal: second }))), tier);
+  await loaded.host.emit("message_end", { message: assistant(tier) });
+  await loaded.host.emit("agent_settled", { aborted: false });
+  loaded.session.endRun();
+  // A typed prompt after it is planned for itself: its own tag's tier, not the session's level.
+  await loaded.host.emit("input", { text: "test #low", source: "interactive" });
+  await loaded.host.emit("before_agent_start", { messageType: "user", prompt });
+  const third = loaded.session.startRun();
+  assert.equal(tier, LOCAL_MEDIUM);
+  assert.equal(routed(runtime.route("local", request("user", { signal: third }))), LOCAL_LOW);
+});
+
+test("a typed prompt whose plan was dropped still routes on tiered local, at the session's last need", async (t) => {
+  // An extension's input that never gets a prompt's run leaves the input count at one, so a later
+  // prompt whose run text differs from what was typed loses its plan (ownsRun). 1.4.0-jw.5 then
+  // refused it with "no local tier was planned"; it now takes the run:need tier.
+  const runtime = twoLocal();
+  const loaded = await start({ dir: agentDir(t, { roster: JSON.stringify(config()) }), runtime, select: "local" });
+  await loaded.host.emit("input", { text: "test #medium", source: "interactive" });
+  await loaded.host.emit("before_agent_start", { messageType: "user", prompt: "test" });
+  const first = loaded.session.startRun();
+  assert.equal(routed(runtime.route("local", request("user", { signal: first }))), LOCAL_MEDIUM);
+  await loaded.host.emit("message_end", { message: assistant(LOCAL_MEDIUM) });
+  await loaded.host.emit("agent_settled", { aborted: false });
+  loaded.session.endRun();
+  await loaded.host.emit("input", { text: "you have mail", source: "extension" });
+  await loaded.host.emit("before_agent_start", { messageType: "custom", message: "mail" });
+  const second = loaded.session.startRun();
+  assert.equal(routed(runtime.route("local", request("user", { signal: second }))), LOCAL_MEDIUM);
+  await loaded.host.emit("message_end", { message: assistant(LOCAL_MEDIUM) });
+  await loaded.host.emit("agent_settled", { aborted: false });
+  loaded.session.endRun();
+  await loaded.host.emit("input", { text: "test #low", source: "interactive" });
+  await loaded.host.emit("before_agent_start", { messageType: "user", prompt: "test (expanded)" });
+  const third = loaded.session.startRun();
+  assert.equal(routed(runtime.route("local", request("user", { signal: third }))), LOCAL_MEDIUM);
+});
+
+test("the prediction for the next run on tiered local is what a run without a prompt takes", async (t) => {
+  const runtime = twoLocal();
+  const loaded = await start({ dir: agentDir(t, { roster: JSON.stringify(config()) }), runtime, select: "local" });
+  for (const [tag, ref] of [["medium", LOCAL_MEDIUM], ["low", LOCAL_LOW]] as const) {
+    await loaded.host.emit("input", { text: `test #${tag}`, source: "interactive" });
+    await loaded.host.emit("before_agent_start", { messageType: "user", prompt: "test" });
+    const signal = loaded.session.startRun();
+    assert.equal(routed(runtime.route("local", request("user", { signal }))), ref);
+    await loaded.host.emit("message_end", { message: assistant(ref) });
+    await loaded.host.emit("agent_settled", { aborted: false });
+    loaded.session.endRun();
+  }
+  // The highest of the last prompts is MEDIUM, though LOW answered last.
+  const predicted = loaded.router?.activeRoute("local");
+  await loaded.host.emit("before_agent_start", { messageType: "custom", message: "you have mail" });
+  const signal = loaded.session.startRun();
+  const took = routed(runtime.route("local", request("user", { signal })));
+  assert.equal(took, LOCAL_MEDIUM);
+  assert.equal(`${predicted?.provider}/${predicted?.modelId}`, took);
 });

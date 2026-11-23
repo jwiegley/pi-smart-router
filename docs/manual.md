@@ -49,8 +49,9 @@ answered, and Pi's footer shows it.
   edit up at its next prompt, and `/smart-router check` or `node src/check-cli.ts` reads the result
   back before anything is sent. See [Changing the routing](#changing-the-routing).
 - **`smart-router/local`** routes only to the roster's local roles and never to cloud. With local
-  tiers it uses offline heuristics or a tag to select a tier; an empty tier refuses, as does a new
-  run with no planned tier. Without local tiers it uses the one local role in order. Normally it
+  tiers it uses offline heuristics or a tag to select a tier, and a prompt whose tier is empty is
+  refused. A run that starts without a plan takes the session's level
+  ([Runs without a prompt](#runs-without-a-prompt)). Without local tiers it uses the one local role in order. Normally it
   works in either scope or an unreadable scope; a personal-only restriction refuses work and
   unreadable scope. The local-only pin of earlier versions is gone;
   see [Routing locally](#routing-locally).
@@ -1102,9 +1103,17 @@ to the floor where the floor raised it, as a prompt's run does: `medium low → 
 `/smart-router status` says where the level came from
 ([The footer and status](#the-footer-and-status)).
 
-All of this is `smart-router/auto` under a version 2 roster. Under version 1, on
-`smart-router/local`, and in a session that has planned no run yet, a run without a prompt stays
-on the model the session used last, as it always did.
+On `smart-router/local` with per-tier local roles the same runs take the same level, from the last
+three planned prompts or else the session's last need, whichever of the two in that order has local
+models, and go to that tier's local role. Where neither has, or the session has planned nothing
+yet, the run takes the tier of the roster's `local.role`, and `/smart-router status` says so. Nothing is priced and the deep-session floor does not apply. Such a run is
+never refused for having no plan: an extension's message, such as a mail notice or a goal
+continuation, starts one whenever it arrives.
+
+Apart from that paragraph, all of this is `smart-router/auto` under a version 2 roster. Under
+version 1, on `smart-router/local` without per-tier roles, and on `smart-router/auto` in a session
+that has planned no run yet, a run without a prompt stays on the model the session used last, as it
+always did.
 
 ### A stuck run
 
@@ -1690,8 +1699,9 @@ elsewhere, the latch included:
 To route a session locally, select `/model smart-router/local`. It uses only the roster's local
 roles, inside the configured providers and LAN hosts. Normally it works in either scope or an
 unreadable scope; a personal-only restriction refuses work and unreadable scope. With `local.levels`,
-offline demand or a tag selects a tier. A null tier or an unplanned new
-run is refused with "Nothing was sent"; it does not step down or ask Jev. Without `local.levels`,
+offline demand or a tag selects a tier. A prompt whose tier is null is refused with "Nothing was
+sent"; it does not step down or ask Jev. A run without a plan takes the session's level
+([Runs without a prompt](#runs-without-a-prompt)). Without `local.levels`,
 the legacy local role is tried in order. A model picked by hand afterwards is sent as it is, and
 `/smart-router status` lists what else can send data off the machine. For strictly private work,
 keep using a dedicated session on a local model with pi-warden off (`NIX_MANAGED_PI_WARDEN=off`).

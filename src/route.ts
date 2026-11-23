@@ -61,7 +61,7 @@ import type { ResolveContext } from "./resolve.ts";
 import { autoRoles, excludedBy, excludesFor, isWorkBound, roleOf, scopeSection } from "./roster.ts";
 import type { ScopeSection } from "./roster.ts";
 import { stuck } from "./stuck.ts";
-import { higherTier, tierAbove } from "./tiers.ts";
+import { higherTier, tierAbove, TIERS } from "./tiers.ts";
 import type { Tier } from "./tiers.ts";
 
 /** The model the owner loop's last route picked in the current run. */
@@ -299,13 +299,19 @@ function stick(rc: ResolveContext, previous: string | undefined, record: Session
  * What the owner loop's next request without a previous model would pick now, as routeOwned would
  * pick it: with no run pick, on smart-router/auto under a version 2 roster, a session that has a
  * need takes the run:need choice (chooseForNeed), priced with `figures` and `compaction` and floored
- * by `depth`; else the run's pick, else the last responder, its role or that role's fallback, else
+ * by `depth`, and on smart-router/local with per-tier roles the tier chooseLocalForNeed gives; else the run's pick, else the last responder, its role or that role's fallback, else
  * the default role. No side effects: nothing of the record or its ledger changes. The
  * pi-cache-optimizer adapter reports it.
  */
 export function predict(rc: ResolveContext, record: SessionRecord, figures: CostFigures | undefined, compaction: CompactionFigures, depth: SessionDepth): Decision {
   const section = levelSection(rc);
-  const chosen = section === undefined || record.runPick !== undefined ? undefined : chooseForNeed(rc, record, section, figures, compaction, depth);
+  const chosen = record.runPick !== undefined
+    ? undefined
+    : section !== undefined
+      ? chooseForNeed(rc, record, section, figures, compaction, depth)
+      : rc.localOnly
+        ? chooseLocalForNeed(rc, record)
+        : undefined;
   return chosen?.decision ?? stick(rc, undefined, record);
 }
 
@@ -433,6 +439,29 @@ function chooseForNeed(rc: ResolveContext, record: SessionRecord, section: Scope
 }
 
 /**
+ * The same run on smart-router/local with per-tier local roles: it takes the tier of the branch's
+ * last three planned prompts, or the one its session last needed, as chooseForNeed does, whichever
+ * of the two in that order has local models; where neither has, or the session never planned a
+ * run, the tier of the roster's local role, which the roster requires to be an enabled tier's. Nothing is priced, and the
+ * deep-session floor is not applied: a local run costs nothing, and the floor's tier may be one the
+ * roster leaves without local models. Refusing instead (as 1.4.0-jw.5 first did) stopped every run
+ * an extension starts, such as a mail doorbell's or a goal continuation's.
+ */
+function chooseLocalForNeed(rc: ResolveContext, record: SessionRecord): (NeedChoice & { readonly localRole: boolean }) | undefined {
+  const local = rc.roster.local;
+  const tiers = local?.levels;
+  if (local === undefined || tiers === undefined) return undefined;
+  const enabled = (tier: Tier | undefined): tier is Tier => tier !== undefined && typeof tiers[tier] === "string";
+  const recent = recentNeed(record.ledger);
+  const known = enabled(recent?.need) ? recent?.need : enabled(record.need) ? record.need : undefined;
+  const need = known ?? TIERS.find((tier) => tiers[tier] === local.role);
+  const role = need === undefined ? undefined : tiers[need];
+  if (need === undefined || typeof role !== "string") return undefined;
+  const prompts = recent !== undefined && known === recent.need ? recent.prompts : undefined;
+  return { tier: need, decision: pickInRole(rc, role, { fallback: false, code: "run:need" }), need, prompts, floor: false, localRole: known === undefined };
+}
+
+/**
  * A stuck run's move up: on a continuation of a run whose level is below SUPER and not its tag's,
  * that has not moved up yet, when its last three tool calls failed (src/stuck.ts), the level
  * directly above the run's, to that level's own model, unpriced (escalationTarget). Never a
@@ -553,10 +582,15 @@ export function routeOwned(input: RouteInput): ModelRoute {
   let plan: Plan | undefined;
   if (request.reason === "user") plan = takePlan(record, id, rc);
   const section = levelSection(rc);
-  const unplanned = section === undefined || plan !== undefined || request.reason === "retry" ? undefined : starts ? chooseForNeed(rc, record, section, input.figures, input.compaction, input.depth) : undefined;
+  const unplanned = plan !== undefined || request.reason === "retry" || !starts
+    ? undefined
+    : section !== undefined
+      ? chooseForNeed(rc, record, section, input.figures, input.compaction, input.depth)
+      : rc.localOnly
+        ? chooseLocalForNeed(rc, record)
+        : undefined;
   const escalated = section === undefined || plan !== undefined || unplanned !== undefined ? undefined : escalation(input, section);
   if (plan !== undefined) decision = fromPlan(rc, plan);
-  else if (rc.localOnly && rc.roster.local?.levels !== undefined && starts) decision = { ok: false, attempts: [], problem: "no local tier was planned for this run; send the prompt again" };
   else if (request.reason === "retry") decision = retry(rc, request, record);
   else if (unplanned !== undefined) decision = unplanned.decision;
   else if (escalated !== undefined) decision = escalated.decision;
@@ -585,6 +619,7 @@ export function routeOwned(input: RouteInput): ModelRoute {
       need: unplanned.need,
       ...(unplanned.prompts === undefined ? {} : { prompts: unplanned.prompts }),
       ...(unplanned.floor ? { floor: true as const } : {}),
+      ...("localRole" in unplanned && unplanned.localRole ? { localRole: true as const } : {}),
       ...(unplanned.cost === undefined ? {} : { cost: unplanned.cost }),
     };
     record.runTerms = { kind: "need", run: record.needRun, tier: unplanned.tier };

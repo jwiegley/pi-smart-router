@@ -392,7 +392,7 @@ function classifierOf(roster: Loaded<Roster>): string | undefined {
  * that run's choice (runTerms): a planned run's demand and cost, or a run without a prompt's need,
  * level and cost, however many requests the run has made. None when the latest entry is a direct
  * or foreign request, which belongs to no run of the owner's loop; none for a run whose first
- * request chose no level (a version 1 run, smart-router/local's); and none while a model picked by
+ * request chose no level (a version 1 run, smart-router/local's without per-tier roles); and none while a model picked by
  * hand is selected, which is sent as it is, by no run's choice.
  */
 function termsLines(session: SessionView | undefined, selection: ExtensionContext["model"]): string[] {

@@ -10,14 +10,24 @@ fork's releases on that base. Releases are signed tags; nothing is published to 
 ### Added
 
 - Version 2 rosters can declare ordered local roles for each tier and share those roles as fallback
-  candidates in personal and work scopes. `smart-router/local` classifies offline, and refuses an
-  explicitly empty tier instead of routing down. Every local candidate still passes the provider and
+  candidates in personal and work scopes. `smart-router/local` classifies offline, and refuses a
+  prompt whose tier is explicitly empty instead of routing down. Every local candidate still passes the provider and
   LAN-host checks.
 - Claude Code and its numbered native provider instances require explicit account bindings; work
   scope can use only work-bound instances. The router cannot independently verify a native login.
 - `PI_SMART_ROUTER_PERSONAL_ONLY=1` restricts the router to a readable personal scope and refuses
   work or unreadable scope before routing or Jev. Hand-selected models and other extensions remain
   outside that restriction. An inherited work latch is preserved and refused, not reinterpreted.
+
+### Fixed
+
+- `smart-router/local` with per-tier local roles no longer refuses a run that starts without a plan
+  with "no local tier was planned for this run". A run an extension starts (a mail notice, a goal
+  continuation, a loop), and a prompt's run whose plan could not be matched to it, now take the
+  level of the last three planned prompts or the session's last need, whichever has local models,
+  at that tier's local role, and the tier of `local.role` where neither has or the session has
+  planned nothing; `/smart-router status` and the cache optimizer's prediction say the same. The
+  refusal stopped every such run in a session on the local model (John, 2026-11-22).
 
 ### Changed
 
