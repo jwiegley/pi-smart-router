@@ -1,7 +1,7 @@
 {
   "name": "pi-smart-router",
-  "version": "1.4.0-jw.5",
-  "description": "Pi virtual models smart-router/auto and smart-router/local, routed by a per-host roster",
+  "version": "1.4.0-jw.6",
+  "description": "Pi virtual models for automatic, local, personal, and work routing from a per-host roster",
   "private": true,
   "license": "MIT",
   "type": "module",

@@ -7,6 +7,12 @@ fork's releases on that base. Releases are signed tags; nothing is published to 
 
 ## [Unreleased]
 
+## [1.4.0-jw.6] - 2026-11-23
+
+Session-level provider ordering, scoped models, and tiered local routing. No roster migration is
+required. To try another provider first without changing the roster, use `/smart-router prefer`;
+`/smart-router tiers` shows the effective order.
+
 ### Added
 
 - **A provider order.** `/smart-router prefer PROVIDER...` puts those providers' models first in
@@ -884,6 +890,7 @@ directories, its ONNX models and its SQLite database are not read, and can be de
 - Tests run offline in an isolated root with a network and process tripwire, and the behaviour
   suite runs only in a sandbox.
 
+[1.4.0-jw.6]: https://github.com/jwiegley/pi-smart-router/compare/v1.4.0-jw.5...v1.4.0-jw.6
 [1.4.0-jw.3]: https://github.com/jwiegley/pi-smart-router/compare/v1.4.0-jw.2...v1.4.0-jw.3
 [1.4.0-jw.2]: https://github.com/jwiegley/pi-smart-router/compare/v1.4.0-jw.1...v1.4.0-jw.2
 [1.4.0-jw.1]: https://github.com/jwiegley/pi-smart-router/compare/v1.3.0-jw.3...v1.4.0-jw.1
