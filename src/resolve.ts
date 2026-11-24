@@ -115,9 +115,9 @@ export function resolveCandidate(ref: string, rc: ResolveContext): Resolution {
     }
   }
   // A hold is no cooldown: it applies to local-role models too.
-  const held = rc.holds?.until(ref, rc.now);
+  const held = rc.holds?.get(ref, rc.now);
   if (held !== undefined) {
-    const { reason, detail } = describeHold({ until: held });
+    const { reason, detail } = describeHold(held);
     return refuse(reason, detail);
   }
   if (routesLevels(rc.virtualId)) {
@@ -298,50 +298,94 @@ export function coolFrom(message: FailedResponse, roster: Roster, cooldowns: Coo
 
 // ─── Holds ───────────────────────────────────────────────────────────────────
 
-/** A model held because its server could not be reached, until when. */
+/** A model held, until when: its server could not be reached, or (`failing`) its requests kept failing. */
 export interface Hold {
   readonly until: number;
+  readonly failing?: true;
 }
+
+/** Upstream v1.5.0's repeated-failure policy (DEFAULT_MODEL_FAILURE_CONFIG, gateway-dispatch.ts): three in a row, thirty seconds. */
+export const FAILURE_THRESHOLD = 3;
+export const FAILURE_HOLD_MS = 30_000;
 
 /**
  * Held refs, each with the failed response that held it, so one response holds once. A hold is a
  * preference, never a refusal: a held model is passed over while another candidate can take the
  * request, and is tried again when none can (pickInRole). An answer from it lifts its hold.
+ *
+ * Also the count of each model's consecutive failures that are its own and not a limit's (fail):
+ * at FAILURE_THRESHOLD the model is held for FAILURE_HOLD_MS, as upstream's repeated-failure
+ * breaker does, and a failure the request caused is taken back (forgive).
  */
 export class Holds {
   readonly #entries = new Map<string, Hold & { readonly stamp: number }>();
+  readonly #failures = new Map<string, { count: number; stamp: number }>();
 
   hold(ref: string, stamp: number, now: number, minutes: number): void {
     if (this.#entries.get(ref)?.stamp === stamp) return;
     this.#entries.set(ref, { until: now + minutes * 60_000, stamp });
   }
 
-  /** When `ref` stops being held, or undefined when it is not held at `now`. */
-  until(ref: string, now: number): number | undefined {
-    const entry = this.#entries.get(ref);
-    return entry !== undefined && entry.until > now ? entry.until : undefined;
+  /** Count one failed response of `ref`, once; the third in a row holds it. Returns whether it is now held for failing. */
+  fail(ref: string, stamp: number, now: number): boolean {
+    const entry = this.#failures.get(ref) ?? { count: 0, stamp: Number.NaN };
+    if (entry.stamp === stamp) return false;
+    entry.count += 1;
+    entry.stamp = stamp;
+    this.#failures.set(ref, entry);
+    if (entry.count < FAILURE_THRESHOLD) return false;
+    this.#failures.delete(ref);
+    // A hold that already lasts longer, for a server that cannot be reached, stands.
+    if ((this.#entries.get(ref)?.until ?? 0) >= now + FAILURE_HOLD_MS) return false;
+    this.#entries.set(ref, { until: now + FAILURE_HOLD_MS, stamp, failing: true });
+    return true;
   }
 
-  /** Lift the hold on a model: it has answered. */
+  /** Take back one counted failure of `ref`, and a hold it caused: the request was at fault, not the model. */
+  forgive(ref: string): void {
+    const entry = this.#failures.get(ref);
+    if (entry !== undefined && entry.count > 1) entry.count -= 1;
+    else this.#failures.delete(ref);
+    if (this.#entries.get(ref)?.failing === true) this.#entries.delete(ref);
+  }
+
+  /** When `ref` stops being held, or undefined when it is not held at `now`. */
+  until(ref: string, now: number): number | undefined {
+    return this.get(ref, now)?.until;
+  }
+
+  /** The hold on `ref` at `now`, if any. */
+  get(ref: string, now: number): Hold | undefined {
+    const entry = this.#entries.get(ref);
+    return entry !== undefined && entry.until > now ? { until: entry.until, ...(entry.failing === true ? { failing: true as const } : {}) } : undefined;
+  }
+
+  /** Lift the hold on a model and forget its failures: it has answered. */
   release(ref: string): void {
     this.#entries.delete(ref);
+    this.#failures.delete(ref);
   }
 
   /** Every ref held at `now`, in the order they were first held. */
   active(now: number): Array<Hold & { readonly ref: string }> {
-    return [...this.#entries].filter(([, entry]) => entry.until > now).map(([ref, entry]) => ({ ref, until: entry.until }));
+    return [...this.#entries]
+      .filter(([, entry]) => entry.until > now)
+      .map(([ref, entry]) => ({ ref, until: entry.until, ...(entry.failing === true ? { failing: true as const } : {}) }));
   }
 }
 
-/** The reason code of a candidate passed over for its hold; pickInRole tells a hold from every other reason by it. */
+/** The reason codes of a candidate passed over for its hold; pickInRole tells a hold from every other reason by them (isHeldReason). */
 export const HELD_REASON = "unreachable-until-";
+export const FAILING_REASON = "failing-until-";
+export const isHeldReason = (reason: string): boolean => reason.startsWith(HELD_REASON) || reason.startsWith(FAILING_REASON);
 
 /** A hold as status and refusals word it: the reason code, and the reason in words. */
 export function describeHold(hold: Hold): { readonly reason: string; readonly detail: string } {
   const at = clock(hold.until);
-  return { reason: `${HELD_REASON}${at}`, detail: `passed over until ${at}, since its server could not be reached` };
+  return hold.failing === true
+    ? { reason: `${FAILING_REASON}${at}`, detail: `passed over until ${at}, since its last ${FAILURE_THRESHOLD} requests failed` }
+    : { reason: `${HELD_REASON}${at}`, detail: `passed over until ${at}, since its server could not be reached` };
 }
-
 /**
  * What an error text says when a connection to the model's server could not be made at all: it was
  * refused or reset, the name did not resolve, there was no route to the host or network, the

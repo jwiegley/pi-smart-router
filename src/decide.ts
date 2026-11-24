@@ -50,7 +50,7 @@ import type { JevOutcome } from "./jev.ts";
 import { localRoles } from "./local.ts";
 import { againChance, effortOf, horizonFor, runShape, usable } from "./ledger.ts";
 import type { Ledger } from "./ledger.ts";
-import { HELD_REASON, resolveCandidate } from "./resolve.ts";
+import { isHeldReason, resolveCandidate } from "./resolve.ts";
 import type { Resolution, ResolveContext } from "./resolve.ts";
 import { autoRoles, candidatesOf, effortSettingsOf, fallbackAfter, fixedLevel, roleLevel, roleOf, scopeSection } from "./roster.ts";
 import type { RosterV2, Scope, ScopeSection } from "./roster.ts";
@@ -141,7 +141,7 @@ function fallbackRoles(rc: ResolveContext, roleName: string): readonly string[] 
 export function pickInRole(rc: ResolveContext, roleName: string, options: PickOptions): Decision {
   const first = pickWithHolds(rc, roleName, options);
   if (first.ok || options.strictHolds === true || rc.holds === undefined) return first;
-  const heldBack = first.attempts.some((attempt) => attempt.candidates.some((candidate) => candidate.reason.startsWith(HELD_REASON)));
+  const heldBack = first.attempts.some((attempt) => attempt.candidates.some((candidate) => isHeldReason(candidate.reason)));
   return heldBack ? pickWithHolds({ ...rc, holds: undefined }, roleName, { ...options, after: undefined }) : first;
 }
 

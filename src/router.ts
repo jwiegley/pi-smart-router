@@ -75,7 +75,7 @@ import { askJev, buildContext, jevAsk, recentMessages } from "./jev.ts";
 import type { JevAsk, JevOutcome } from "./jev.ts";
 import { answerOf, forgetBranch, forgetCaches, noteAnswer, noteRunEnd, seedAnswer, usable } from "./ledger.ts";
 import type { Ledger } from "./ledger.ts";
-import { recoveryChoice, recoveryStatus } from "./recovery.ts";
+import { recoveryChoice, recoveryStatus, REQUEST_SIZED } from "./recovery.ts";
 import type { Recovery, RecoveryRequest } from "./recovery.ts";
 import { localRoles, policyFromRoster } from "./local.ts";
 import { isDegenerateOutput } from "./output-quality.ts";
@@ -1057,14 +1057,23 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       const status = recoveryStatus(message.errorMessage);
       const requestCaused = status !== undefined && status >= 400 && status < 500 && status !== 429;
       // The same 4xx from a distinct alternate points to the request, not to either model (upstream
-      // SP-322): the alternate is not cooled for it.
+      // SP-322): the alternate is neither cooled nor counted, and the earlier models' counts are taken back.
       const same = recovered?.ref === ref && virtualIdOf(ctx.model) === recovered.id && requestCaused ? recovered.previous.filter((attempt) => attempt.status === status) : [];
-      if (same.length > 0) return;
+      if (same.length > 0) {
+        for (const attempt of same) holds.forgive(attempt.ref);
+        return;
+      }
       const state = roster.current();
       if (state.kind === "ok") {
         const cooled = coolFrom(message, state.value, cooldowns, now());
         // A failure Pi does not retry holds its model too, so that the next run skips it.
         const held = holdFrom(message, ctx.modelRegistry.find(message.provider, message.model), state.value, holds, now());
+        // A model's own failure, neither a limit's nor a refusal of the content nor one about the
+        // conversation's size, and not a server that could not be reached, which has its own,
+        // longer hold: the third in a row passes the model over for a while (Holds.fail).
+        if (held === undefined && status !== undefined && status >= 400 && status <= 599 && status !== 429 && failureKind(message.errorMessage) === "other" && !REQUEST_SIZED.test(message.errorMessage ?? "")) {
+          holds.fail(ref, message.timestamp, now());
+        }
         const session = records.get(sessionId);
         const kind = held !== undefined ? "unreachable" : cooled !== undefined && coolsAccount(message.provider, message.errorMessage) ? "limit" : undefined;
         // Pi retries some of these errors, and its retry is routed to the next candidate. The rest
