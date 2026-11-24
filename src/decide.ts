@@ -590,8 +590,9 @@ export function planUserTurn(p: PlanInput): Plan {
     const local = rc.roster.local;
     if (rc.roster.version === 2 && local?.levels !== undefined) {
       const { signal, reason } = classify(p.text);
-      // A local request never uses an external classifier, including a prior resend's opinion.
-      const input = { ...p, level: p.level?.tag === undefined ? {} : { tag: p.level.tag } };
+      // A local request uses an external classifier only where the roster says so, and otherwise
+      // none, a prior resend's opinion included.
+      const input = rc.roster.classifier?.local === true ? p : { ...p, level: p.level?.tag === undefined ? {} : { tag: p.level.tag } };
       const needed = needOf(input, rc.roster, signal);
       const role = local.levels[needed.need] ?? undefined;
       const level: PlanLevel = { ...needed, scope: rc.scope, tier: needed.need, steppedUp: false, returnedToFirst: false };

@@ -10,7 +10,7 @@ import { DEFAULT_INSTRUCTIONS } from "./prompts.ts";
 import { redact } from "./redact.ts";
 import type { BoundedHistory } from "./route.ts";
 import { parseRef, scopeSection } from "./roster.ts";
-import type { Roster, ScopeSection } from "./roster.ts";
+import type { Roster, Scope, ScopeSection } from "./roster.ts";
 import type { ScopeState } from "./scope.ts";
 import { isTier, TIERS, type Tier } from "./tiers.ts";
 
@@ -24,7 +24,15 @@ export interface JevContextCaps {
   readonly totalChars: number;
 }
 export interface JevSettings {
+  /** The model asked in a scope that `models` does not name. */
   readonly model: string;
+  /**
+   * The model asked in each scope the roster names one for: the same judge on that scope's own
+   * account (`openrouter-p/…` for work), so a session's text reaches only its scope's account.
+   */
+  readonly models?: Readonly<Partial<Record<Scope, string>>>;
+  /** Ask Jev on smart-router/local too, where the roster's local section has tiers. Off unless the roster says `true`. */
+  readonly local?: boolean;
   readonly timeoutMs: number;
   readonly context: JevContextCaps;
   /** The roster's own question for Jev, inline. Without it and without a file, the built-in one is asked. */
@@ -328,18 +336,27 @@ export interface JevAsk {
   readonly history: BoundedHistory;
 }
 
+/** The model Jev is asked through in a scope: that scope's own, else the shared one. */
+export function jevModel(settings: JevSettings, scope: Scope): string {
+  return settings.models?.[scope] ?? settings.model;
+}
+
 /**
- * Whether Jev is asked about a message, and with what. Never for a steer or a follow-up, off
- * smart-router/auto, without the bounded readers, for an extension's resend of the latest message,
+ * Whether Jev is asked about a message, and with what. Never for a steer or a follow-up, off the
+ * router's models, without the bounded readers, for an extension's resend of the latest message,
  * without a version 2 roster's classifier, or in a scope that cannot be read or that the roster
- * does not serve. Pure: the router reads every condition first.
+ * does not serve. On smart-router/local only when the roster's classifier says `local` and its
+ * local section has tiers. The settings it gives name the session's scope's model. Pure: the
+ * router reads every condition first.
  */
 export function jevAsk(gate: JevGate): JevAsk | undefined {
   const { roster, scope, history } = gate;
-  if (!gate.idle || gate.selection === undefined || !routesLevels(gate.selection) || history === undefined || gate.resend) return undefined;
+  if (!gate.idle || gate.selection === undefined || history === undefined || gate.resend) return undefined;
   if (roster?.version !== 2 || roster.classifier === undefined || scope.kind !== "ok") return undefined;
+  if (!routesLevels(gate.selection) && !(roster.classifier.local === true && roster.local?.levels !== undefined)) return undefined;
   const section = scopeSection(roster, scope.scope);
-  return section === undefined ? undefined : { settings: roster.classifier, section, history };
+  if (section === undefined) return undefined;
+  return { settings: { ...roster.classifier, model: jevModel(roster.classifier, scope.scope) }, section, history };
 }
 
 /** The part of Pi's ModelRegistry that askJev uses; tests pass a fake. */

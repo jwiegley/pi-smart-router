@@ -735,6 +735,53 @@ describe("the classifier", () => {
     }
   });
 
+  test("each scope may have its own model, on that scope's account and never the other's", () => {
+    const bound = (edit: (r: Json) => void): string =>
+      edited((r) => {
+        r.accounts["openrouter-j"] = { scope: "personal" };
+        r.accounts["openrouter-p"] = { scope: "work" };
+        edit(r);
+      });
+    const both = { personal: "openrouter-j/typesafe/jev-1.14", work: "openrouter-p/typesafe/jev-1.14" };
+    assert.deepEqual(valid(bound((r) => void (r.classifier = { models: both }))).classifier?.models, both);
+    invalid(
+      bound((r) => void (r.classifier = { models: { personal: both.work, work: both.work } })),
+      'classifier.models.personal: "openrouter-p/typesafe/jev-1.14" is on openrouter-p, which the roster binds to the work scope',
+    );
+    invalid(
+      bound((r) => void (r.classifier = { model: both.work })),
+      'classifier.model: "openrouter-p/typesafe/jev-1.14" is on openrouter-p, which the roster binds to the work scope, and it would be asked in the personal scope: give classifier.models.personal',
+    );
+    // A shared model on one scope's account is fine once the other scope has its own.
+    assert.equal(valid(bound((r) => void (r.classifier = { model: both.work, models: { personal: both.personal } }))).classifier?.model, both.work);
+    invalid(bound((r) => void (r.classifier = { models: { personal: "jev" } })), 'classifier.models.personal: "jev" is not an exact provider/id ref');
+    invalid(bound((r) => void (r.classifier = { models: { local: both.personal } })), "classifier.models.local: unknown key");
+    invalid(
+      bound((r) => {
+        delete r.scopes.work;
+        r.roles = r.roles.filter((role: Json) => !String(role.name).startsWith("work-"));
+        delete r.accounts["openai-codex-3"];
+        delete r.accounts["claude-code-2"];
+        delete r.accounts["openrouter-p"];
+        r.classifier = { models: { work: "openrouter/typesafe/jev-1.14" } };
+      }),
+      "classifier.models.work: the roster has no work scope",
+    );
+  });
+
+  test("local asks Jev on smart-router/local, and needs the local tiers", () => {
+    invalid(edited((r) => void (r.classifier.local = "yes")), "classifier.local: must be true or false");
+    invalid(edited((r) => void (r.classifier.local = true)), "classifier.local: needs local.levels: Jev chooses among the local tiers");
+    const tiered = valid(
+      edited((r) => {
+        r.local.levels = { low: r.local.role, medium: r.local.role, high: null, super: null };
+        r.classifier.local = true;
+      }),
+    );
+    assert.equal(tiered.classifier?.local, true);
+    assert.equal(valid(edited((r) => void (r.classifier.local = false))).classifier?.local, undefined);
+  });
+
   test("its model is an exact provider/id ref", () => {
     for (const model of ["jev", "openrouter/", "openrouter/*", "open router/jev", "/jev"]) {
       invalid(

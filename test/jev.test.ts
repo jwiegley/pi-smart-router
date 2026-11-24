@@ -239,6 +239,39 @@ describe("jevAsk", () => {
     assert.deepEqual(jevAsk({ ...asked, scope: work }), { settings: roster.classifier, section: roster.scopes.work, history });
   });
 
+  test("asks through the session's scope's own model, and the shared one in a scope that has none", () => {
+    const work: ScopeState = { kind: "ok", scope: "work", source: "entry" };
+    const each = edited("roster-hera-v2.json", (json) => {
+      json.accounts = { ...(json.accounts as object), "openrouter-j": { scope: "personal" }, "openrouter-p": { scope: "work" } };
+      json.classifier = { models: { personal: "openrouter-j/typesafe/jev-1.14", work: "openrouter-p/typesafe/jev-1.14" } };
+    });
+    assert.equal(jevAsk({ ...asked, roster: each })?.settings.model, "openrouter-j/typesafe/jev-1.14");
+    assert.equal(jevAsk({ ...asked, roster: each, scope: work })?.settings.model, "openrouter-p/typesafe/jev-1.14");
+    const one = edited("roster-hera-v2.json", (json) => {
+      json.accounts = { ...(json.accounts as object), "openrouter-p": { scope: "work" } };
+      json.classifier = { model: "openrouter/typesafe/jev-1.14", models: { work: "openrouter-p/typesafe/jev-1.14" } };
+    });
+    assert.equal(jevAsk({ ...asked, roster: one })?.settings.model, "openrouter/typesafe/jev-1.14");
+    assert.equal(jevAsk({ ...asked, roster: one, scope: work })?.settings.model, "openrouter-p/typesafe/jev-1.14");
+  });
+
+  test("asks on smart-router/local only where the classifier says so and the local section has tiers", () => {
+    const tiered = (local: boolean): Roster =>
+      edited("roster-hera-v2.json", (json) => {
+        const roles = json.roles as Array<{ name: string }>;
+        const localRole = (json.local as { role: string }).role;
+        json.local = { ...(json.local as object), levels: { low: localRole, medium: localRole, high: null, super: null } };
+        json.classifier = { ...(json.classifier as object), ...(local ? { local: true } : {}) };
+        assert.ok(roles.some((role) => role.name === localRole));
+      });
+    assert.equal(jevAsk({ ...asked, roster: tiered(false), selection: "local" }), undefined);
+    const on = tiered(true);
+    assert.equal(on.version, 2);
+    assert.deepEqual(jevAsk({ ...asked, roster: on, selection: "local" }), { settings: on.classifier, section: on.scopes.personal, history });
+    // The session's scope still names the account: a work session's local routing asks the work model.
+    assert.equal(jevAsk({ ...asked, roster: on, selection: "local", scope: { kind: "unreadable", reason: "x" } }), undefined);
+  });
+
   test("never asks for a steer or a follow-up, which a run already under way receives", () => {
     assert.equal(jevAsk({ ...asked, idle: false }), undefined);
   });

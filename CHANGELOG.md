@@ -13,6 +13,10 @@ fork's releases on that base. Releases are signed tags; nothing is published to 
   its `models.json`: `openai-codex-j`, `openrouter-p`). A version 2 roster binds any such provider
   by its id, with `scope` alone and no label, and a keyed provider can be bound too. The scope
   rules read the binding, never the provider's name.
+- **`classifier.models`**: a model for Jev in each scope, so a work session's text is classified
+  through a work account and a personal session's through a personal one.
+- **`classifier.local`**: asks Jev on `smart-router/local`, through the model of the session's
+  scope. Off unless the roster says `true`; it needs `local.levels`.
 
 ### Changed
 

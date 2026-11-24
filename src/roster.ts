@@ -645,7 +645,7 @@ const ORDER_KEYS = ["personal", "work", "local"] as const;
 const SCOPE_KEYS: Readonly<Record<Scope, readonly string[]>> = { personal: ["levels", "fallback"], work: ["levels", "directories", "fallback"] };
 const LEVEL_KEYS = ["role", "describe", "describeFile", "fallback"];
 const SCOPED_BINDING_KEYS = ["multiPassLabel", "native", "scope"];
-const CLASSIFIER_KEYS = ["model", "timeoutMs", "closeCall", "context", "instructions", "instructionsFile", "typedJudgment"];
+const CLASSIFIER_KEYS = ["model", "models", "local", "timeoutMs", "closeCall", "context", "instructions", "instructionsFile", "typedJudgment"];
 const CONTEXT_KEYS = ["messages", "messageChars", "totalChars"];
 
 interface LevelName {
@@ -688,11 +688,43 @@ function fraction(value: unknown, path: string, range: Range): number {
  * both scopes, so its model, written or the default, must match none of the roster's exclusions,
  * and none is lifted for it.
  */
-function classifierSettings(value: unknown, exclude: readonly string[]): JevSettings {
+function classifierSettings(value: unknown, exclude: readonly string[], accounts: ReadonlyMap<string, ScopedBinding>, scopes: Readonly<Partial<Record<Scope, ScopeSection>>>): JevSettings {
   const section = object(value, "classifier", CLASSIFIER_KEYS);
-  const model = own(section, "model") === undefined ? CLASSIFIER_MODEL : exactRef(own(section, "model"), "classifier.model").ref;
-  const pattern = excludedBy(exclude, model);
-  if (pattern !== undefined) fail("classifier.model", `"${model}" is excluded by ${pattern}`);
+  const checked = (given: unknown, where: string): { readonly ref: string; readonly provider: string } => {
+    const parsed = exactRef(given, where);
+    const pattern = excludedBy(exclude, parsed.ref);
+    if (pattern !== undefined) fail(where, `"${parsed.ref}" is excluded by ${pattern}`);
+    return parsed;
+  };
+  const shared = own(section, "model") === undefined ? undefined : checked(own(section, "model"), "classifier.model");
+  // Each scope's own model: the same judge on that scope's account, never on the other scope's.
+  const given = own(section, "models") === undefined ? {} : object(own(section, "models"), "classifier.models", SCOPES);
+  const models: Partial<Record<Scope, string>> = {};
+  for (const scope of SCOPES) {
+    if (own(given, scope) === undefined) continue;
+    const where = `classifier.models.${scope}`;
+    if (scopes[scope] === undefined) fail(where, `the roster has no ${scope} scope`);
+    const { ref, provider } = checked(own(given, scope), where);
+    const bound = accounts.get(provider)?.scope;
+    if (bound !== undefined && bound !== scope) fail(where, `"${ref}" is on ${provider}, which the roster binds to the ${bound} scope`);
+    models[scope] = ref;
+  }
+  // The shared model answers every scope that has none of its own, so it is on no one scope's account.
+  const uncovered = SCOPES.filter((scope) => scopes[scope] !== undefined && models[scope] === undefined);
+  const model = shared?.ref ?? CLASSIFIER_MODEL;
+  if (shared === undefined && uncovered.length > 0) {
+    const pattern = excludedBy(exclude, model);
+    if (pattern !== undefined) fail("classifier.model", `"${model}" is excluded by ${pattern}`);
+  }
+  const sharedBound = accounts.get(shared?.provider ?? "")?.scope;
+  if (sharedBound !== undefined) {
+    const other = uncovered.find((scope) => scope !== sharedBound);
+    if (other !== undefined) {
+      fail("classifier.model", `"${model}" is on ${shared?.provider}, which the roster binds to the ${sharedBound} scope, and it would be asked in the ${other} scope: give classifier.models.${other}`);
+    }
+  }
+  const local = own(section, "local");
+  if (local !== undefined && typeof local !== "boolean") fail("classifier.local", "must be true or false");
   const timeoutMs = count(own(section, "timeoutMs"), "classifier.timeoutMs", CLASSIFIER_TIMEOUT_MS, "milliseconds");
   // Accepted within its old range and ignored (classifierIgnored): the demand's closeCall decides a close call.
   fraction(own(section, "closeCall"), "classifier.closeCall", CLASSIFIER_CLOSE_CALL);
@@ -716,6 +748,8 @@ function classifierSettings(value: unknown, exclude: readonly string[]): JevSett
     ...(instructions === undefined ? {} : { instructions }),
     ...(instructionsFile === undefined ? {} : { instructionsFile }),
     ...(typedJudgment === true ? { typedJudgment: true } : {}),
+    ...(Object.keys(models).length === 0 ? {} : { models }),
+    ...(local === true ? { local: true } : {}),
   };
 }
 
@@ -966,7 +1000,8 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
       }
     }
   }
-  const classifier = own(root, "classifier") === undefined ? undefined : classifierSettings(own(root, "classifier"), exclude);
+  const classifier = own(root, "classifier") === undefined ? undefined : classifierSettings(own(root, "classifier"), exclude, accounts, scopes);
+  if (classifier?.local === true && local?.levels === undefined) fail("classifier.local", "needs local.levels: Jev chooses among the local tiers");
   const demand = demandSettings(own(root, "demand"));
   const switching = switchingSettings(own(root, "switching"));
   const adaptiveReasoning = effortSettings(own(root, "adaptiveReasoning"));

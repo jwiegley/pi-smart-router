@@ -45,7 +45,9 @@ function localLines(roster: Roster): string[] {
   if (local === undefined) return ["smart-router/local, in any scope:", "  refused: the roster has no local section"];
   if (local.levels !== undefined) {
     return [
-      "smart-router/local, in any scope: offline demand and tags pick a tier; only its local models are tried:",
+      roster.version === 2 && roster.classifier?.local === true
+        ? "smart-router/local, in any scope: a tag, else the demand from Jev (asked through the session's scope's model) and the heuristics, pick a tier; only its local models are tried:"
+        : "smart-router/local, in any scope: offline demand and tags pick a tier; only its local models are tried:",
       ...TIERS.map((tier) => {
         const role = local.levels?.[tier];
         return `  ${tierLabel(tier).padEnd(6)} ${role === null || role === undefined ? "refused: no models" : `${modelsOf(roster, role).join(", then ")}  (role ${role}${thinkingOf(roster, role)})`}`;
@@ -80,7 +82,7 @@ function describeV2(roster: RosterV2): string[] {
       lines.push(`smart-router/auto in ${scope} scope: refused, since the roster has no ${scope} scope`, "");
       continue;
     }
-    const decides = roster.classifier === undefined ? "the demand the heuristics give" : `the demand from Jev (${roster.classifier.model}) and the heuristics`;
+    const decides = roster.classifier === undefined ? "the demand the heuristics give" : `the demand from Jev (${roster.classifier.models?.[scope] ?? roster.classifier.model}) and the heuristics`;
     lines.push(`smart-router/auto in ${scope} scope: a tag, else ${decides}, pick the level; each level tries its own models in order:`);
     for (const tier of TIERS) {
       const level = section.levels[tier];

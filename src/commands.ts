@@ -43,6 +43,7 @@ import type { ResolveContext } from "./resolve.ts";
 import { boundedHistory, HISTORY_LIMIT } from "./route.ts";
 import type { HistoryEntry, PendingLevel, RunTerms } from "./route.ts";
 import { autoRoles, parseRef, scopeSection, SCOPES, servesScope } from "./roster.ts";
+import type { JevSettings } from "./jev.ts";
 import type { Roster, RosterV1, RosterV2, Scope } from "./roster.ts";
 import { scopeEntry } from "./scope.ts";
 import type { ScopeState } from "./scope.ts";
@@ -136,13 +137,15 @@ function attempt<T>(read: () => T, fallback: T): T {
 /**
  * What can send data off this machine besides the models the router's own models route to
  * (design §5.2, §5.3): first a model picked by hand, which the router does not route, then the
- * classifier smart-router/auto asks about each message, then other extensions' commands and tools,
- * and Pi's own commands.
+ * classifier smart-router/auto asks about each message (and smart-router/local, `onLocal`, where
+ * the roster says so), then other extensions' commands and tools, and Pi's own commands.
  */
-export function egress(pi: Pick<ExtensionAPI, "getAllTools" | "getCommands">, classifier?: string): string {
+export function egress(pi: Pick<ExtensionAPI, "getAllTools" | "getCommands">, classifier?: string, onLocal = false): string {
   const commands = new Set(attempt(() => pi.getCommands(), []).filter((command) => command.source === "extension").map((command) => command.name));
   const parts = ["a model picked by hand with /model, which is sent as it is"];
-  if (classifier !== undefined) parts.push(`the classifier ${classifier} (smart-router/auto sends it each message and the recent conversation, redacted)`);
+  if (classifier !== undefined) {
+    parts.push(`the classifier ${classifier} (smart-router/auto${onLocal ? " and smart-router/local send" : " sends"} it each message and the recent conversation, redacted)`);
+  }
   parts.push(...EGRESS_COMMANDS.filter(([name]) => commands.has(name)).map(([name, what]) => `/${name} (${what})`));
   const tools = [...new Set(attempt(() => pi.getAllTools(), []).map((tool) => tool.name).filter((name) => EGRESS_TOOL.test(name)))].sort();
   if (tools.length > 0) parts.push(`the tools ${tools.join(", ")}`);
@@ -393,7 +396,7 @@ function classifierLine(roster: RosterV2): string {
   const settings = roster.classifier;
   return settings === undefined
     ? "Classifier: none, so the heuristics alone weigh every prompt's demand"
-    : `Classifier: ${settings.model}, ${settings.timeoutMs} ms`;
+    : `Classifier: ${jevModels(settings).join(", ")}, ${settings.timeoutMs} ms${settings.local === true ? "; asked on smart-router/local too" : ""}`;
 }
 
 /**
@@ -413,7 +416,14 @@ function promptStatus(host: CommandHost, roster: RosterV2): string[] {
 
 /** The classifier smart-router/auto can ask about a message: a version 2 roster's. */
 function classifierOf(roster: Loaded<Roster>): string | undefined {
-  return roster.kind === "ok" && roster.value.version === 2 ? roster.value.classifier?.model : undefined;
+  const settings = roster.kind === "ok" && roster.value.version === 2 ? roster.value.classifier : undefined;
+  return settings === undefined ? undefined : jevModels(settings).join(", ");
+}
+
+/** The models Jev is asked through: each scope's own, named with its scope, and the shared one where a scope has none. */
+function jevModels(settings: JevSettings): string[] {
+  const own = SCOPES.flatMap((scope) => (settings.models?.[scope] === undefined ? [] : [`${settings.models[scope]} in ${scope} scope`]));
+  return own.length === SCOPES.length ? own : own.length === 0 ? [settings.model] : [...own, `${settings.model} otherwise`];
 }
 
 /**
@@ -463,7 +473,7 @@ export function statusText(host: CommandHost, ctx: ExtensionContext): string {
   if (session?.effort !== undefined && ownModel(ctx.model) !== undefined) lines.push(`Thinking sent on the latest request: ${session.effort.level} (${effortWords(session.effort)})`);
   const onFallback = roster.kind === "ok" && roster.value.version === 2 ? onFallbackLine(roster.value, last) : undefined;
   if (onFallback !== undefined) lines.push(onFallback);
-  lines.push(egress(host.pi, classifierOf(roster)));
+  lines.push(egress(host.pi, classifierOf(roster), roster.kind === "ok" && roster.value.version === 2 && roster.value.classifier?.local === true));
   return lines.join("\n");
 }
 

@@ -185,6 +185,45 @@ test("a local tier disabled after planning refuses before sending", async (t) =>
   assert.throws(() => runtime.route("local", request("user", { signal })), /local HIGH tier has no models.*Nothing was sent/);
 });
 
+test("with classifier.local, an untagged prompt on tiered local is routed by Jev, asked through the session's scope's model", async (t) => {
+  const JEV_J = "openrouter-j/typesafe/jev-1.14";
+  const JEV_P = "openrouter-p/typesafe/jev-1.14";
+  const value = config();
+  value.accounts["openrouter-j"] = { scope: "personal" };
+  value.accounts["openrouter-p"] = { scope: "work" };
+  value.classifier = { models: { personal: JEV_J, work: JEV_P }, local: true };
+  const answerFor = (tier: "low" | "medium") => ({
+    api: "typesafe-system-one" as const,
+    provider: "openrouter",
+    model: "typesafe/jev-1.14",
+    answers: { level: { type: "choice" as const, choice: tier, probabilities: { low: 0.05, medium: 0.05, high: 0.05, super: 0.05, [tier]: 0.85 }, confidence: 0.85 } },
+    stopReason: "stop" as const,
+    timestamp: NOW,
+  });
+  for (const [scope, jev] of [["personal", JEV_J], ["work", JEV_P]] as const) {
+    const runtime = new FakeRuntime(new FakeCatalog([model(LOCAL_LOW, { baseUrl: "https://nyx.lan/v1" }), model(LOCAL_MEDIUM, { baseUrl: HERA_LAN })]));
+    for (const ref of [JEV_J, JEV_P]) runtime.classifiers.set(ref, classifierModel(ref));
+    const loaded = await start({ dir: agentDir(t, { roster: JSON.stringify(value) }), runtime, select: "local" });
+    if (scope === "work") await loaded.host.command("smart-router", "scope work");
+    await loaded.host.command("smart-router", "scope local");
+    runtime.answer = async () => answerFor("medium");
+    await loaded.host.emit("input", { text: "What is the capital of France?", source: "interactive" });
+    assert.deepEqual(runtime.classifyCalls.map((call) => `${call.model.provider}/${call.model.id}`), [jev], `${scope}: Jev is asked once, on the scope's own account`);
+    const signal = loaded.session.startRun();
+    assert.equal(routed(runtime.route("local", request("user", { signal }))), LOCAL_MEDIUM, `${scope}: Jev's MEDIUM takes the local MEDIUM tier`);
+    await loaded.host.emit("message_end", { message: assistant(LOCAL_MEDIUM) });
+    await loaded.host.emit("agent_settled", { aborted: false });
+    loaded.session.endRun();
+    // A tag still decides alone, and a tier the local section refuses is still refused.
+    runtime.answer = async () => answerFor("low");
+    await loaded.host.emit("input", { text: "test #high", source: "interactive" });
+    const tagged = loaded.session.startRun();
+    assert.throws(() => runtime.route("local", request("user", { signal: tagged })), /local HIGH tier has no models.*Nothing was sent/);
+    loaded.session.endRun();
+    resetSlot();
+  }
+});
+
 const twoLocal = () => new FakeRuntime(new FakeCatalog([model(LOCAL_LOW, { baseUrl: "https://nyx.lan/v1" }), model(LOCAL_MEDIUM, { baseUrl: HERA_LAN })]));
 
 test("a run without a prompt on tiered local takes the tier the session last needed", async (t) => {

@@ -539,7 +539,7 @@ Three things to know:
 | `scopes` | yes | `personal`, `work` or both. `smart-router/auto` refuses a session in a scope the roster does not have. |
 | `scopes.<scope>.levels` | yes | `low`, `medium`, `high` and `super`, each with `role` and either `describe` or `describeFile`. No role serves two scope levels; the levels rank up the ladder. An optional `fallback` is a one-element array naming a local role, whose models follow the level's own and precede the scope-wide chain. The same local role may serve both scopes. |
 | `scopes.<scope>.fallback` | no | Role names to try after every level's own models and its local fallbacks. A scope-wide chain is nonempty, has no duplicate or level role and belongs to only one scope. Personal chains take no work-bound model; work chains take only models of work-bound accounts. |
-| `local.levels` | no | All four tiers, each a local role name or `null` to refuse that tier. `local.role` must be one of the enabled tier roles and remains the default for operations that do not use a planned prompt. Local routing uses offline heuristics or a tag and never asks Jev. |
+| `local.levels` | no | All four tiers, each a local role name or `null` to refuse that tier. `local.role` must be one of the enabled tier roles and remains the default for operations that do not use a planned prompt. Local routing uses offline heuristics or a tag, and asks Jev only where `classifier.local` is `true`. |
 | `providerOrder` | no | `personal`, `work` and `local`, each optional and each a nonempty list of provider ids without duplicates. In every role of that scope, the listed providers' models come first, in the listed order ([The provider order](#the-provider-order)). A list may name only providers of the models it governs. Without the field, every role is tried in the order its `models` are written. |
 | `roles[].disabled` | no | Set to `true` with an empty `models` array to leave a role explicitly disabled, for example while no work account is verified. An empty role without this flag remains invalid. |
 | `scopes.work.directories` | no | Absolute paths whose sessions are in work scope ([Scope](#scope-personal-or-work)), written plainly: no trailing `/`, no empty, `.` or `..` segment, and not `/` itself. |
@@ -566,10 +566,16 @@ Three things to know:
   lifts it for a model of a work level or a work chain whose provider is bound as work. The roster's own exclusions
   are never lifted.
 - **The classifier's model** must match no exclusion, built-in or the roster's own, and none is
-  lifted for it, because Jev reads text from both scopes. So a roster with a classifier must not
-  exclude `openrouter/*`. A work level itself takes only models of work-bound accounts, although
-  a per-level local fallback may also be named. An exclusion binds the router's routes only: a model
-  picked by hand is sent as it is.
+  lifted for it. So a roster with a classifier must not exclude its provider. `classifier.models`
+  gives a scope its own model: `{ "personal": "openrouter-j/typesafe/jev-1.14", "work":
+  "openrouter-p/typesafe/jev-1.14" }` asks the same judge through each scope's own account, so a
+  session's text reaches only its scope's account. A model on an account bound to one scope is
+  refused for the other, and `classifier.model`, which answers every scope without a model of its
+  own, is refused when it is on one scope's account and would be asked in the other.
+  `classifier.local: true` asks Jev on `smart-router/local` too, through the model of the session's
+  scope; it needs `local.levels`. A work level itself takes only models of work-bound accounts,
+  although a per-level local fallback may also be named. An exclusion binds the router's routes
+  only: a model picked by hand is sent as it is.
 
 ## Changing the routing
 
@@ -1845,8 +1851,9 @@ To route a session locally, select `/model smart-router/local`, or run `/smart-r
 which selects it. It uses only the roster's local
 roles, inside the configured providers and LAN hosts. Normally it works in either scope or an
 unreadable scope; a personal-only restriction refuses work and unreadable scope. With `local.levels`,
-offline demand or a tag selects a tier. A prompt whose tier is null is refused with "Nothing was
-sent"; it does not step down or ask Jev. A run without a plan takes the session's level
+offline demand or a tag selects a tier, and with `classifier.local` Jev's answer joins the demand,
+asked through the model of the session's scope. A prompt whose tier is null is refused with
+"Nothing was sent"; it does not step down. A run without a plan takes the session's level
 ([Runs without a prompt](#runs-without-a-prompt)). Without `local.levels`,
 the legacy local role is tried in order. A model picked by hand afterwards is sent as it is, and
 `/smart-router status` lists what else can send data off the machine. For strictly private work,
