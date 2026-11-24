@@ -178,6 +178,12 @@ export interface SessionRecord {
   pendingLevel: PendingLevel | undefined;
   /** What an extension's resend of the same text (pi-idle-check) plans with again. */
   lastInput: LastInput | undefined;
+  /**
+   * The run moved to a model of another provider on a retry or a recovery, and no tool result's
+   * request has followed yet: that request chooses the run's model again, once (recheck). Cleared
+   * there and when the agent settles.
+   */
+  handoff: boolean;
   /** The thinking effort the owner loop's latest request carried, and why: levels and names, never text. */
   effort: SentEffort | undefined;
 }
@@ -198,6 +204,7 @@ export function newRecord(): SessionRecord {
     history: [],
     pendingLevel: undefined,
     lastInput: undefined,
+    handoff: false,
     effort: undefined,
   };
 }
@@ -527,6 +534,26 @@ function liftFromSmall(input: RouteInput, section: ScopeSection, decision: Decis
   return chosen.decision.ok && chosen.decision.choice.role !== small ? chosen : undefined;
 }
 
+const providerOf = (ref: string): string => ref.slice(0, ref.indexOf("/"));
+
+/**
+ * Upstream v1.5.0's re-check after a cross-provider handoff (SP-324, cross-provider-handoff.ts):
+ * the first tool result's request after the run moved to another provider is routed afresh, once,
+ * rather than kept on the model the handoff reached. Here that is the run's level chosen again as
+ * a prompt for it would be: its own model when that can take the run and the cost rule does not
+ * say otherwise, else the chain, where the run usually stays, since what made it move still
+ * holds. A tagged run chooses within its tag's level, unpriced, as its plan did. A move up for
+ * being stuck is no handoff, as upstream's loop escalation is none. Only where levels route.
+ */
+function recheck(input: RouteInput, section: ScopeSection): Chosen | undefined {
+  const { request, rc, record } = input;
+  if (!record.handoff || request.reason !== "continuation" || turnTypeOf(request.messages) !== "tool_result") return undefined;
+  record.handoff = false;
+  if (record.runPick?.id !== rc.virtualId || record.runTier === undefined) return undefined;
+  const chosen = chooseModel({ rc, section, need: record.runTier, code: "handoff", last: record.last, promptTokens: 0, compaction: input.compaction, figures: input.figures, priced: !record.runTagged });
+  return chosen.decision.ok ? chosen : undefined;
+}
+
 /** Rewrite the run's pending level and terms for the scope the run is now in; nothing when they already name it. */
 function rescope(record: SessionRecord, scope: Scope, moved: Chosen | undefined): void {
   const relevel = (level: PlanLevel): PlanLevel => {
@@ -662,6 +689,11 @@ export function routeOwned(input: RouteInput): ModelRoute {
   else if (unplanned !== undefined) decision = unplanned.decision;
   else if (escalated !== undefined) decision = escalated.decision;
   else decision = stick(rc, previousRef(request), record);
+  // The first tool result's request consumes the handoff whatever else decides that request, as
+  // upstream's tracker does; its choice stands only where nothing else chose.
+  const again = section === undefined ? undefined : recheck(input, section);
+  const rechecked = plan === undefined && unplanned === undefined && escalated === undefined ? again : undefined;
+  if (rechecked !== undefined) decision = rechecked.decision;
   const moved = plan === undefined && unplanned === undefined && escalated === undefined && section !== undefined ? keepLevel(rc, record, section, request, decision, input.compaction) : undefined;
   if (moved !== undefined) decision = moved.decision;
   // The request's turn type is its last message's, as upstream's host derives it. A typed task
@@ -707,6 +739,10 @@ export function routeOwned(input: RouteInput): ModelRoute {
   }
   if (moved !== undefined) record.runTier = moved.tier;
   if (lifted !== undefined) record.runTier = lifted.tier;
+  if (rechecked !== undefined) record.runTier = rechecked.tier;
+  // A retry that leaves its provider is a handoff: the model it reaches has none of the
+  // conversation cached, so the first tool result's request chooses again (recheck).
+  if (request.reason === "retry" && record.runPick !== undefined && providerOf(record.runPick.ref) !== choice.model.provider) record.handoff = true;
   // What is shown and recorded of a run names the scope it is in. A run that goes on in another
   // scope than the one that planned it (moved above, or moved up by escalation after the scope
   // changed) keeps its need and what decided it; the cost the other scope's models were compared

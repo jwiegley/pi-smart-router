@@ -1046,6 +1046,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       if (routesLevels(recovered.id) && scope !== undefined && left !== undefined && !inChain(scope, left) && inChain(scope, ref)) {
         notify(ctx, fallbackMoveNotice(parseRef(left)?.id ?? left, recovered.role, message.model), "info");
       }
+      if (left !== undefined && parseRef(left)?.provider !== message.provider) pending.handoff = true;
       pending.runPick = { id: recovered.id, ref, role: recovered.role };
       pending.effort = recovered.effort;
       pending.history.push({ at: now(), virtual: recovered.id, reason: "retry", signal: undefined, trigger: undefined, role: recovered.role, ref, code: "recovery", foreign: false, continuesRun: true });
@@ -1128,6 +1129,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     record.answered = undefined;
     record.recoveryScope = undefined;
     record.recoveryPick = undefined;
+    record.handoff = false;
     record.runTier = undefined;
     record.runTagged = false;
     record.escalated = false;

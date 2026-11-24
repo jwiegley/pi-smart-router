@@ -418,3 +418,46 @@ describe("the deep-session floor on each request: the LOW level's models are the
     assert.equal(routed(loaded.runtime.route("auto", request("continuation", { signal, previous: previous(loaded.runtime, LUNA), messages: [user("go on")] }))), LUNA);
   });
 });
+
+describe("after a move to another provider, the first tool result's request chooses the run's model again, once", () => {
+  const toolResult = { role: "toolResult" as const, toolCallId: "c", toolName: "bash", content: [{ type: "text" as const, text: "ok" }], isError: false, timestamp: NOW };
+  const next = (loaded: Loaded, signal: AbortSignal, ref: string) => routed(loaded.runtime.route("auto", request("continuation", { signal, previous: previous(loaded.runtime, ref), messages: [toolResult] })));
+
+  async function movedToChain(t: TestContext): Promise<Session & { readonly signal: AbortSignal }> {
+    const state = await session(t);
+    const { loaded } = state;
+    const signal = await prompt(loaded, "rename foo to bar #low");
+    assert.equal(routed(loaded.runtime.route("auto", request("user", { signal }))), LUNA);
+    // Pi retries this failure itself, and the retry moves to the chain: another provider.
+    const failed = { model: loaded.runtime.physical(LUNA), message: assistant(LUNA, { stopReason: "error", errorMessage: "403 forbidden", content: [], timestamp: NOW + ++stamps }) };
+    assert.equal(routed(loaded.runtime.route("auto", request("retry", { signal, failed }))), OR_GLM);
+    await loaded.host.emit("message_end", { message: assistant(OR_GLM, { stopReason: "toolUse" }) });
+    return Object.assign(state, { signal });
+  }
+
+  test("while what made it move still holds, the run stays where it is", async (t) => {
+    const { loaded, signal } = await movedToChain(t);
+    assert.equal(next(loaded, signal, OR_GLM), OR_GLM);
+    assert.equal(loaded.router?.record(SID)?.handoff, false, "the handoff is consumed");
+  });
+
+  test("when the level's own model can take the run again, it goes back, and only that one request asks", async (t) => {
+    const state = await movedToChain(t);
+    const { loaded, signal } = state;
+    state.clock = NOW + 24 * 60 * MINUTE;
+    assert.equal(next(loaded, signal, OR_GLM), LUNA);
+    assert.equal(lastCode(loaded), "handoff");
+    await loaded.host.emit("message_end", { message: assistant(LUNA, { stopReason: "toolUse" }) });
+    assert.equal(next(loaded, signal, LUNA), LUNA);
+    assert.equal(lastCode(loaded), "stick:previous");
+  });
+
+  test("a request that is no tool result's keeps the handoff for the one that is", async (t) => {
+    const state = await movedToChain(t);
+    const { loaded, signal } = state;
+    state.clock = NOW + 24 * 60 * MINUTE;
+    const steer = { role: "user" as const, content: "and the tests", timestamp: NOW };
+    assert.equal(routed(loaded.runtime.route("auto", request("user", { signal, previous: previous(loaded.runtime, OR_GLM), messages: [steer] }))), OR_GLM);
+    assert.equal(next(loaded, signal, OR_GLM), LUNA);
+  });
+});
