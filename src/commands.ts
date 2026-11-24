@@ -46,7 +46,7 @@ import { autoRoles, parseRef, scopeSection, SCOPES, servesScope } from "./roster
 import type { JevSettings } from "./jev.ts";
 import type { Roster, RosterV1, RosterV2, Scope } from "./roster.ts";
 import { scopeEntry } from "./scope.ts";
-import type { ScopeState } from "./scope.ts";
+import type { ScopeSource, ScopeState } from "./scope.ts";
 import { describeModel, ownModel } from "./selection.ts";
 import { isTier, tierLabel, TIERS } from "./tiers.ts";
 import type { Tier } from "./tiers.ts";
@@ -74,7 +74,7 @@ export interface CommandHost {
   refresh(): Files;
   /** Read both files again now, and register the models again when their declared limits changed. */
   reload(ctx: ExtensionContext): Files & { readonly limitsChanged: boolean };
-  /** The session's scope, as routing reads it: the latch, the session's entry, then the work directories. */
+  /** The session's scope, as routing reads it: the latch, the session's entry, the work directories, then the host's default. */
   scopeOf(ctx: ExtensionContext): ScopeState;
   /** The provider order /smart-router prefer gave the session, if any. */
   order(ctx: ExtensionContext): SessionOrder | undefined;
@@ -111,11 +111,21 @@ const SESSION_ONLY = "This session only: the roster file is unchanged, and a new
 /**
  * What /smart-router scope personal asks a session in work scope, and its two answers. Pi's
  * selector starts on the first answer, so Enter keeps work scope. Pi's own confirm dialog is a
- * selector over Yes and No that starts on Yes, so it is not used here.
+ * selector over Yes and No that starts on Yes, so it is not used here. A session the host's default
+ * puts in work scope may have no turns yet, so the question says "any earlier turns".
  */
-const MOVE_QUESTION = "Move this session to personal scope?\nIts earlier turns are work content, and the next requests would send them to personal accounts.";
+const MOVE_QUESTION = "Move this session to personal scope?\nAny earlier turns are work content, and the next requests would send them to personal accounts.";
 const KEEP_WORK = "Keep this session in work scope";
-const TO_PERSONAL = "Move it to personal scope (earlier turns are work content)";
+const TO_PERSONAL = "Move it to personal scope (any earlier turns are work content)";
+
+/** What gave a session its scope, as status, tiers and the scope command name it. */
+const SOURCE_WORDS: Readonly<Record<ScopeSource, string>> = {
+  latch: "latch",
+  entry: "entry",
+  directory: "directory",
+  default: "default",
+  "roster-default": "roster-default: this host's defaultScope in the roster",
+};
 
 /** Extension commands that can send data off the machine, found by name. */
 const EGRESS_COMMANDS: ReadonlyArray<readonly [string, string]> = [
@@ -291,7 +301,7 @@ function codexWarnings(host: CommandHost, ctx: ExtensionContext, roster: RosterV
  */
 function scopeLine(roster: Roster, scope: ScopeState): string | undefined {
   if (scope.kind === "unreadable") return `Scope: unreadable (${scope.reason}), so smart-router/auto refuses every request ${UNTIL_RECORDED}.`;
-  const named = `Scope: ${scope.scope} (${scope.source})`;
+  const named = `Scope: ${scope.scope} (${SOURCE_WORDS[scope.source]})`;
   if (!servesScope(roster, scope.scope)) return `${named}, which ${rosterNamed(roster.version)} does not serve, so smart-router/auto refuses every request.`;
   return roster.version === 2 ? named : undefined;
 }
@@ -510,7 +520,7 @@ export function tiersText(host: CommandHost, ctx: ExtensionContext, only?: Order
   const modelsOf = (name: string): readonly string[] => view.roles.find((role) => role.name === name)?.models ?? [];
   const listed = (names: readonly string[]): string => names.flatMap((name) => modelsOf(name).map((ref) => `${ref} (role ${name})`)).join(", then ");
   const scope = host.scopeOf(ctx);
-  const lines = [`pi-smart-router tiers: this session is in ${scope.kind === "ok" ? `${scope.scope} scope (${scope.source})` : "a scope that cannot be read"}, on ${describeModel(ctx.model)}.`];
+  const lines = [`pi-smart-router tiers: this session is in ${scope.kind === "ok" ? `${scope.scope} scope (${SOURCE_WORDS[scope.source]})` : "a scope that cannot be read"}, on ${describeModel(ctx.model)}.`];
   const order = orderLines(view, session);
   lines.push(...(order.length === 0 ? ["Provider order: as the roster lists each role, in every scope."] : order));
   for (const name of ORDER_SCOPES) {
@@ -618,11 +628,17 @@ export function historyText(host: CommandHost, ctx: ExtensionContext, count: num
 const info = (text: string): Answer => ({ text, type: "info" });
 const warning = (text: string): Answer => ({ text, type: "warning" });
 
-/** The session's scope, as /smart-router scope answers it. */
+/**
+ * The session's scope, as /smart-router scope answers it. A session with no entry while the host's
+ * default is unknown, which only a roster that does not load leaves, is held in work scope until
+ * the roster loads or a scope is recorded.
+ */
 function scopeAnswer(scope: ScopeState): Answer {
-  return scope.kind === "ok"
-    ? info(`pi-smart-router: scope ${scope.scope} (${scope.source}).`)
-    : warning(`pi-smart-router: this session's scope cannot be read (${scope.reason}), so smart-router/auto refuses it ${UNTIL_RECORDED}.`);
+  if (scope.kind === "ok") return info(`pi-smart-router: scope ${scope.scope} (${SOURCE_WORDS[scope.source]}).`);
+  if (scope.fromDefault === true) {
+    return warning(`pi-smart-router: this session has no scope entry, and ${scope.reason}. It is held in work scope until the roster loads or /smart-router scope work or /smart-router scope personal records one.`);
+  }
+  return warning(`pi-smart-router: this session's scope cannot be read (${scope.reason}), so smart-router/auto refuses it ${UNTIL_RECORDED}.`);
 }
 
 /**
@@ -652,8 +668,9 @@ async function scopeWork(host: CommandHost, ctx: ExtensionContext, roster: Loade
 }
 
 /**
- * Work to personal asks first, and says that the earlier turns are work content;
- * a scope that cannot be read counts as work, as routing treats it. Under the latch it is refused.
+ * Work to personal asks first, and says that any earlier turns are work content, whatever put the
+ * session in work scope, the host's default included; a scope that cannot be read counts as work,
+ * as routing treats it. Under the latch it is refused.
  * `moved`: whether the session is in personal scope afterwards by this call's entry.
  */
 async function toPersonal(host: CommandHost, ctx: ExtensionContext, asked: string): Promise<{ readonly moved: boolean; readonly answer: Answer }> {
@@ -702,14 +719,14 @@ export async function selectPersonal(host: CommandHost, ctx: ExtensionContext): 
  */
 async function scopeLocal(host: CommandHost, ctx: ExtensionContext): Promise<Answer> {
   const scope = host.scopeOf(ctx);
-  const kept = scope.kind === "ok" ? `The session's own scope stays ${scope.scope} (${scope.source}).` : "The session's own scope still cannot be read.";
+  const kept = scope.kind === "ok" ? `The session's own scope stays ${scope.scope} (${SOURCE_WORDS[scope.source]}).` : "The session's own scope still cannot be read.";
   if (ownModel(ctx.model) === "local") return info(`pi-smart-router: smart-router/local is already selected, so this session routes only to the local models. ${kept}`);
   const selection = await select(host, ctx, "local");
   const text = `pi-smart-router: ${selection.line} ${selection.warned ? "" : "This session now routes only to the local models. "}${kept}`;
   return selection.warned ? warning(text) : info(text);
 }
 
-/** The scope subcommands, which read the roster as it is now: its work directories decide a session without an entry. */
+/** The scope subcommands, which read the roster as it is now: its work directories, then its default, decide a session without an entry. */
 async function scopeCommand(host: CommandHost, ctx: ExtensionContext, option: string | undefined): Promise<Answer | undefined> {
   if (option !== undefined && option !== "status" && option !== "work" && option !== "personal" && option !== "local") return undefined;
   const { roster } = host.refresh();

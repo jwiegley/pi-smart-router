@@ -42,6 +42,9 @@ const EFFORT = [
   "  No floor and no ceiling. A role that fixes its thinking keeps it. A change of effort costs that model's cache.",
 ];
 
+/** What the checker says of a roster that sets no defaultScope and has a personal scope. */
+const BUILT_IN_DEFAULT = "Default scope: personal (built in: the roster sets no defaultScope): a session with no scope entry, under no work directory, is in personal scope.";
+
 /** What the checker says of John's roster of 2026-11-17, after its first line. */
 const JOHN_ROUTING = [
   "smart-router/auto in personal scope: a tag, else the demand from Jev (openrouter/typesafe/jev-1.14) and the heuristics, pick the level; each level tries its own models in order:",
@@ -63,6 +66,8 @@ const JOHN_ROUTING = [
   "  SUPER  openai-codex-3/gpt-6-astra  (role work-super)",
   "  no fallback: a level with no available model passes its run up to the next level; with none above, the run is refused",
   "  sessions under these directories are in work scope: /Users/johnw/src/positron",
+  "",
+  BUILT_IN_DEFAULT,
   "",
   ...DEMAND_AND_SWITCHING,
   ...EFFORT,
@@ -101,7 +106,7 @@ describe("checking a roster's text", () => {
   test("a version 2 roster without a chain or a classifier, for one scope, says what the other scope does", () => {
     const report = checkRoster(fixture("roster-work.json"));
     assert.equal(report.ok, true);
-    assert.deepEqual(report.lines.slice(0, 11), [
+    assert.deepEqual(report.lines.slice(0, 13), [
       "OK: a valid version 2 roster.",
       "",
       "smart-router/auto in personal scope: refused, since the roster has no personal scope",
@@ -113,10 +118,51 @@ describe("checking a roster's text", () => {
       "  SUPER  openai-codex/gpt-6-astra  (role work-super)",
       "  no fallback: a level with no available model passes its run up to the next level; with none above, the run is refused",
       "",
+      // A work-only roster without defaultScope is valid, as it was before the key: the built-in
+      // default is a scope it does not serve, and the checker says what that costs.
+      "Default scope: personal (built in: the roster sets no defaultScope): a session with no scope entry, under no work directory, is in personal scope, which the roster does not serve, so smart-router/auto refuses it.",
+      "",
     ]);
-    assert.deepEqual(report.lines.slice(11, 17), DEMAND_AND_SWITCHING, "the defaults are read back for a roster that gives neither section");
-    assert.deepEqual(report.lines.slice(17, 19), EFFORT, "upstream's defaults are read back for a roster that gives no adaptiveReasoning section");
-    assert.deepEqual(report.lines.slice(19, 22), ["", "smart-router/local, in any scope:", "  refused: the roster has no local section"]);
+    assert.deepEqual(report.lines.slice(13, 19), DEMAND_AND_SWITCHING, "the defaults are read back for a roster that gives neither section");
+    assert.deepEqual(report.lines.slice(19, 21), EFFORT, "upstream's defaults are read back for a roster that gives no adaptiveReasoning section");
+    assert.deepEqual(report.lines.slice(21, 24), ["", "smart-router/local, in any scope:", "  refused: the roster has no local section"]);
+  });
+
+  test("the host's default scope reads back in plain words: built in, or the roster's", () => {
+    const defaults = (roster: string): string[] => checkRoster(roster).lines.filter((line) => line.startsWith("Default scope:"));
+    assert.deepEqual(defaults(JOHN), [BUILT_IN_DEFAULT]);
+    for (const scope of ["work", "personal"] as const) {
+      const given = JSON.parse(JOHN);
+      given.defaultScope = scope;
+      const report = checkRoster(JSON.stringify(given));
+      assert.equal(report.ok, true, report.lines[0]);
+      assert.deepEqual(defaults(JSON.stringify(given)), [
+        `Default scope: ${scope} (the roster's defaultScope): a session with no scope entry, under no work directory, is in ${scope} scope. Nothing records it, so a change of defaultScope moves such a session at the next roster load.`,
+      ]);
+      // Only that line differs from the read-back of the roster without the key.
+      assert.deepEqual(report.lines.filter((line) => !line.startsWith("Default scope:")), checkRoster(JOHN).lines.filter((line) => !line.startsWith("Default scope:")));
+    }
+    // A version 1 roster serves personal scope alone, and says nothing of a default.
+    assert.deepEqual(defaults(fixture("roster-hera.json")), []);
+  });
+
+  test("a default scope the roster has no section for is an error: every session it decides would be refused", () => {
+    const work = JSON.parse(fixture("roster-work.json"));
+    work.defaultScope = "personal";
+    assert.deepEqual(checkRoster(JSON.stringify(work)), {
+      ok: false,
+      lines: ["INVALID: defaultScope: the roster has no personal scope, so every session it puts there would be refused", "Every smart-router model refuses every request while the roster is invalid."],
+    });
+    work.defaultScope = "work";
+    assert.equal(checkRoster(JSON.stringify(work)).ok, true, "a work-only roster may default to work");
+    const personal = JSON.parse(JOHN);
+    delete personal.scopes.work;
+    personal.roles = personal.roles.filter((role: { name: string }) => !role.name.startsWith("work-"));
+    delete personal.accounts["openai-codex-3"];
+    personal.defaultScope = "work";
+    assert.deepEqual(checkRoster(JSON.stringify(personal)).lines[0], "INVALID: defaultScope: the roster has no work scope, so every session it puts there would be refused");
+    personal.defaultScope = "personal";
+    assert.equal(checkRoster(JSON.stringify(personal)).ok, true);
   });
 
   test("a level with several models of its own lists them in order", () => {

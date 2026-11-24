@@ -1393,15 +1393,15 @@ test("L5 scope: the latch, the entry carried into /new and a fork, resume, direc
     assert.equal(answered(pi), PERSONAL.medium);
   });
 
-  await t.test("work to personal asks first, says the earlier turns are work content, and moves only on that answer", async (t) => {
+  await t.test("work to personal asks first, says any earlier turns are work content, and moves only on that answer", async (t) => {
     const world = levelsWorld(t);
     const pi = await world.start({ select: "smart-router/auto" });
     await pi.command("scope work");
     await pi.prompt(PROMPTS.plain);
     assert.equal(answered(pi), WORK.medium);
     const question = {
-      title: "Move this session to personal scope?\nIts earlier turns are work content, and the next requests would send them to personal accounts.",
-      options: ["Keep this session in work scope", "Move it to personal scope (earlier turns are work content)"],
+      title: "Move this session to personal scope?\nAny earlier turns are work content, and the next requests would send them to personal accounts.",
+      options: ["Keep this session in work scope", "Move it to personal scope (any earlier turns are work content)"],
     };
     // Escape, and the first answer, keep work scope.
     pi.ui.answers.push(undefined, "Keep this session in work scope");
@@ -1412,7 +1412,7 @@ test("L5 scope: the latch, the entry carried into /new and a fork, resume, direc
     await pi.prompt(PROMPTS.plain);
     assert.equal(answered(pi), WORK.medium);
     // The second answer moves it.
-    pi.ui.answers.push("Move it to personal scope (earlier turns are work content)");
+    pi.ui.answers.push("Move it to personal scope (any earlier turns are work content)");
     await pi.command("scope personal");
     assert.equal(notice(pi, /^pi-smart-router: scope/), "pi-smart-router: scope personal (entry).\nThe selection is now smart-router/personal.");
     await pi.prompt(PROMPTS.plain);
@@ -2688,7 +2688,7 @@ test("smart-router/personal, smart-router/work and /smart-router scope: the mode
   assert.deepEqual(scopeEntries(pi), [["work", "command"]]);
 
   // The command moves it, after the same question, and selects nothing new: the model is already the scope's.
-  pi.ui.answers.push("Move it to personal scope (earlier turns are work content)");
+  pi.ui.answers.push("Move it to personal scope (any earlier turns are work content)");
   await pi.command("scope personal");
   assert.equal(notice(pi, /^pi-smart-router: scope/), "pi-smart-router: scope personal (entry).");
   await pi.prompt("Review the design #high");

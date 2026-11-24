@@ -137,7 +137,8 @@ The roster is one JSON file per host, at `<agentDir>/smart-router.json`, which i
 - **Failure is closed.** A missing, invalid or unsafe roster makes every model refuse until it is
   fixed, with one notice per session start. There is no last-known-good copy, so a typo cannot keep
   routing to a model you just removed. Only the scope keeps something of the last valid roster: its
-  work directories, so that a broken edit cannot move a work session to personal scope.
+  work directories and its default scope, so that a broken edit cannot move a work session to
+  personal scope.
 - **Check before you rely on it.** `/smart-router check` in a session, or
   `node src/check-cli.ts <roster.json>` anywhere, reads the roster back: what each selection and
   scope routes to, in order, or the first error and its place. See
@@ -547,6 +548,7 @@ Three things to know:
 | `providerOrder` | no | `personal`, `work` and `local`, each optional and each a nonempty list of provider ids without duplicates. In every role of that scope, the listed providers' models come first, in the listed order ([The provider order](#the-provider-order)). A list may name only providers of the models it governs. Without the field, every role is tried in the order its `models` are written. |
 | `roles[].disabled` | no | Set to `true` with an empty `models` array to leave a role explicitly disabled, for example while no work account is verified. An empty role without this flag remains invalid. |
 | `scopes.work.directories` | no | Absolute paths whose sessions are in work scope ([Scope](#scope-personal-or-work)), written plainly: no trailing `/`, no empty, `.` or `..` segment, and not `/` itself. |
+| `defaultScope` | no | `"personal"` or `"work"`: the scope of a session on this host that has no scope entry, is under no work directory and is outside the latch ([Scope](#scope-personal-or-work), rule 4). Without it, personal. It must name a scope the roster has a section for; a version 1 roster refuses the key. Each host's roster sets its own. |
 | `accounts.<provider>.scope` | no | `"personal"`, the default, or `"work"`. A provider that is neither a native subscription login nor a Multi-Pass alias is bound by its id, with `scope` alone ([Account bindings](#account-bindings)). |
 | `classifier` | no | Jev's settings; without them, Jev is never asked. `model`, an exact ref, default `openrouter/typesafe/jev-1.14`; `timeoutMs`, 100 to 1000, default 1000; and `context`: `messages`, 0 to 20, default 6; `messageChars`, 200 to 8000, default 1500; `totalChars`, 1000 to 32000, default 12000. `closeCall`, which earlier versions used, is still accepted from 0 to 0.5 and ignored, and the checker says so: `demand.closeCall` decides a close call. The model names a Jev version, so that tuned demand settings keep their meaning; moving to a newer Jev is a roster edit. `instructions`, the question Jev is asked, as a text of at most 4000 characters, or `instructionsFile`, the name of a prompt file that holds it; not both, and with neither the built-in question is asked ([Jev's prompts](#jevs-prompts)). `typedJudgment`, `true` or `false`, default `false`: also ask upstream's six typed questions ([The level a prompt needs](#the-level-a-prompt-needs)). |
 | `demand` | no | How a prompt's demand is weighed ([The level a prompt needs](#the-level-a-prompt-needs)). `jevWeight` and `heuristicsWeight`, each 0 to 100, defaults 4 and 1, not both 0; `minConfidence`, 0 to 1, default 0.6; `closeCall`, 0 to 0.5, default 0.1; `cuts`, three numbers that ascend, each above 0 and below 3, default `[0.75, 1.5, 2.25]`; `deepSessionFloor`, `low`, `medium`, `high` or `super`, default `medium`; and `weights`, any of the twelve heuristic signals, each 0 to 100 and not all 0, by default upstream's weights with `requirement_low` and `cluster_signal` at 0. Every field is optional, and a field left out keeps its default. |
@@ -706,11 +708,15 @@ node /path/to/pi-smart-router/src/check-cli.ts ~/.config/pi/agent/smart-router.j
 
 or `/smart-router check` in a session. Both use the router's own parser. A valid roster is read
 back in plain language: for `smart-router/auto` in each scope, each level's models, the fallback
-chain in order; under version 2, how the demand is weighed and when a session moves; for
-`smart-router/local`, the local models in order; where each of Jev's prompts comes from; the
-account bindings; and each setting it accepts and ignores, with the reason. An invalid one gives
-the first error with its place, such as
-`INVALID: roles[3].models[1]: "omlx-hera/GLM-5.3-Flash-oQ4e-mtp" is already in role "local"`.
+chain in order; under version 2, the host's default scope, with a warning when it is the built-in
+personal one and the roster has no personal scope, how the demand is weighed and when a session
+moves; for `smart-router/local`, the local models in order; where each of Jev's prompts comes
+from; the account bindings; and each setting it accepts and ignores, with the reason. An invalid
+one gives the first error with its place, such as
+`INVALID: roles[3].models[1]: "omlx-hera/GLM-5.3-Flash-oQ4e-mtp" is already in role "local"`. A
+`defaultScope` the roster has no section for is such an error, since every session it decided would
+be refused: `INVALID: defaultScope: the roster has no work scope, so every session it puts there
+would be refused`.
 
 - **The standalone checker needs no Pi, no session and no credentials,** and sends nothing. It
   reads the file it is given, with the owner and mode checks the router applies, and that roster's
@@ -1697,8 +1703,9 @@ account bindings. The first rule that applies decides it:
    - Personal to work takes effect at once, for the routes of the router's own models. A model
      picked by hand stays selected and is sent as it is, and the answer says so. One of the
      router's own models gives way to `smart-router/work`.
-   - Work to personal asks first and says that the earlier turns are work content; Enter keeps
-     work scope. It is refused under the latch, and in modes without dialogs.
+   - Work to personal asks first and says that any earlier turns are work content; Enter keeps
+     work scope. It is refused under the latch, and in modes without dialogs. This holds whatever
+     put the session in work scope, the host's default included.
 3. **The roster's work directories**, on every read. A session without an entry whose working
    directory lies under one is in work scope, whether it is new, resumed or running, so a roster
    edit that lists a running session's directory moves it at the next roster load (the next idle
@@ -1708,7 +1715,13 @@ account bindings. The first rule that applies decides it:
    says later. The working directory is Pi's `ctx.cwd`, compared as text on whole path segments:
    `/x/work` holds `/x/work` and `/x/work/a`, but not `/x/workshop`. Nothing is resolved, so a
    symlinked spelling of a work directory is not under it.
-4. Otherwise **personal**.
+4. Otherwise **the host's default**: the roster's `defaultScope`, which `/smart-router status`
+   and `scope` name `roster-default`, or, for a roster without it, personal, named `default`.
+   Each host has its own roster, so one host can default to work and the others to personal.
+   Unlike rule 3, this rule records nothing: no entry is written at a session's start, at its
+   prompts or after its runs, so a roster edit that changes the default moves every session it
+   decides at the next roster load, in either direction and without asking. A session that should
+   stay where it is needs an entry: `/smart-router scope work` or `personal`.
 
 `PI_SMART_ROUTER_PERSONAL_ONLY=1` is a separate process-lifetime restriction; the alternative
 `PI_SMART_ROUTER_SCOPE=personal-only` has the same effect. It does not rewrite a session's scope:
@@ -1719,13 +1732,20 @@ personal-only restriction refuses it. **A model picked by hand and other extensi
 this is a boundary on the router, not a guarantee that Pi itself cannot send work content.
 
 A fork or `/new` carries the scope that the latch, an entry or the work directories gave into the
-session it creates, which records it as an entry of its own, with a notice. The personal default is
-not carried, so the new session decides its own. A scope that cannot be read is carried as work
-scope, the scope the router routes that session in.
+session it creates, which records it as an entry of its own, with a notice. The host's default,
+the roster's or personal, is not carried: the new session reads the same default for itself. A
+scope that cannot be read is carried as work scope, the scope the router routes that session in,
+unless only an unknown default made it unreadable (below).
 
 **It fails closed.** A malformed `smart-router.scope` entry, a custom message of that type, or a
 session whose entries cannot be read has an unreadable scope: `smart-router/auto` refuses until
-`/smart-router scope work` or `/smart-router scope personal` records a scope again.
+`/smart-router scope work` or `/smart-router scope personal` records a scope again. So does a
+session that rule 4 would decide while the host's default is unknown: the roster does not load, and
+no valid roster loaded earlier in the process, or only one an earlier version of the router kept
+without a default, says which default the host has. Such a session is never taken for personal:
+`/smart-router scope` says the default is unknown and that the session is held in work scope
+until the roster loads or a scope is recorded, and leaving it for personal asks, as from work
+scope. Every one of the router's models refuses while the roster fails to load in any case.
 Normally `smart-router/local` can still route to its local roles, resolving in work scope. Under a
 personal-only restriction it refuses an unreadable scope too.
 
@@ -1789,10 +1809,13 @@ that something kept switching away. John's decision of 2026-11-16 removed it: a 
 hand stays selected in a work session and is sent as it is.
 
 - **A failed reload moves no session.** While the roster fails to load, the scope reads the work
-  directories of the last valid roster loaded in the process, which the process slot keeps. Every
-  one of the router's models refuses until the roster loads; a model picked by hand is sent as it is.
+  directories and the default of the last valid roster loaded in the process, which the process
+  slot keeps. Every one of the router's models refuses until the roster loads; a model picked by
+  hand is sent as it is.
 - **Leaving work scope** is `/smart-router scope personal`, which asks first and which the latch
-  refuses.
+  refuses, in a session the host's default put there too. A roster edit that changes the default
+  from work to personal is the one way out that asks nothing: it moves the sessions the default
+  decides, which hold no entry.
 
 ### What work scope does not cover
 
@@ -1807,8 +1830,9 @@ elsewhere, the latch included:
   while enabled), a goal-x auditor configured with its own model, and pi-btw.
 - **Workflow tiers and subagent agents with explicit models**, whether or not the child loads the
   router: an explicit model is sent as it is. A child that loads the router is in work scope by
-  the latch and the work directories as any session is, so its `smart-router/auto` goes to the
-  work account, but it starts in personal scope when only its parent's entry set work scope.
+  the latch, the work directories and the host's default as any session is, so its
+  `smart-router/auto` goes to the work account, but it starts in the host's default scope when
+  only its parent's entry set work scope.
 - **Tools** that send data themselves: web fetch and web search tools, which send URLs and queries;
   browser tools; and whatever the bash tool can read and send.
 - **Pi's own `/share`, `/export` and `/bug`**, which run before any extension hook, and extension
@@ -1820,8 +1844,8 @@ elsewhere, the latch included:
 - A scope set by an entry reaches what goes through its session: the default goal-x auditor routes
   in it, and a fork made from the command line (`pi --fork`) copies
   the entry with the rest of the session. pi-subagents children start with no entries, so it does
-  not reach them. Run work in a work directory or in a latched process, which reach a child that
-  loads the router as they reach any session.
+  not reach them. Run work in a work directory, in a latched process or on a host whose roster
+  defaults to work, which reach a child that loads the router as they reach any session.
 - **Rollout order.** Write the version 2 work roster before setting `PI_SMART_ROUTER_SCOPE=work`: in
   a latched process with a version 1 roster, `smart-router/auto` sends nothing, and
   `smart-router/local` sends only to the local models; with no roster loaded, both refuse every
@@ -2000,7 +2024,7 @@ next answer. A replay can therefore raise the deep-session floor where the route
 |---|---|
 | `/smart-router` or `/smart-router status` | The roster's path and state; the selection and its thinking level; the session's scope and what set it, under a version 2 roster or whenever `smart-router/auto` refuses the scope; every role's models on this host with `ok` or the reason they cannot route, and catalog prices; the accounts cooling and the local models held as unreachable; account bindings, checked in the session's scope, and auth sources; a version 1 roster's routing table and fallbacks, or a version 2 roster's levels and fallback chain in each scope, its classifier and the source of each of Jev's prompts; the last decision, and whether it went to a fallback chain's model; the terms of the run that decision belongs to, kept from that run's choice however many requests it has made: a planned run's demand with every guard that applied, or a run without a prompt's need and level, and each candidate's expected cost, or why the cost was unknown; none for a tagged run or while a model picked by hand is selected ([The footer and status](#the-footer-and-status)); the thinking effort the latest request carried and why ([Thinking effort](#thinking-effort)); what can still leave the machine, a model picked by hand first and then the classifier when `smart-router/auto` may ask it; and a warning for any fallback that would move a run onto Codex's API from another one. |
 | `/smart-router history [n]` | The last `n` routing decisions (10 by default, at most 50), with reason codes, and on a version 2 run's first request its level's words: its scope, the level it needs, the model that took it, what decided the level and what the cost rule compared. Model ids and codes only, never prompt text. |
-| `/smart-router scope [work\|personal\|local\|status]` | The session's scope and what set it: `latch`, `entry`, `directory` or `default`. `work` records work scope at once; `personal` asks first in work scope, and is refused under `PI_SMART_ROUTER_SCOPE=work`; `local` selects `smart-router/local` and records no scope. Each selects its scope's model when one of the router's own models is selected, and leaves a model picked by hand selected ([The scope's own models](#the-scopes-own-models)). |
+| `/smart-router scope [work\|personal\|local\|status]` | The session's scope and what set it: `latch`, `entry`, `directory`, `roster-default` (the roster's `defaultScope`) or `default` (personal, for a roster without one). `work` records work scope at once; `personal` asks first in work scope, and is refused under `PI_SMART_ROUTER_SCOPE=work`; `local` selects `smart-router/local` and records no scope. Each selects its scope's model when one of the router's own models is selected, and leaves a model picked by hand selected ([The scope's own models](#the-scopes-own-models)). |
 | `/smart-router prefer [personal\|work\|local] [low\|medium\|high\|super] PROVIDER...` | Put those providers' models first in every tier of a scope, or in one tier, for this session; `reset` in place of the providers returns to the roster's order ([The provider order](#the-provider-order)). It writes no file and no entry. |
 | `/smart-router tiers` | Each scope the roster has, its tiers, and each tier's own models, local fallback and fallback chain, in the order this session tries them. It reads the roster alone; `status` adds what each model can do on this host. |
 | `/smart-router was low\|medium\|high\|super` | Record that the run in flight, when it holds a level, or else the run of the latest record, should have gone to that level. Nothing is sent again. |
@@ -2026,7 +2050,8 @@ next answer. A replay can therefore raise the deep-session floor where the route
   registered for children, as nix-config's integration is meant to do; otherwise a child on
   `smart-router/*` fails with "model not found". Give children explicit models where that
   registration is absent. Children start with no entries, so a scope that only an entry set does not
-  reach them; the latch and the work directories do, in a child that loads the router.
+  reach them; the latch, the work directories and the host's default do, in a child that loads the
+  router.
 - **Multi-Pass**: its subscription-pool failover keys on the selected provider, so routed requests
   lose it; a role's next candidates and version 1's `routing.fallback` replace it. In a project
   whose `.pi/multi-pass.json` sets `allowedSubs`, list `smart-router` there, or Multi-Pass switches

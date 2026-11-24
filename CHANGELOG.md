@@ -17,6 +17,14 @@ fork's releases on that base. Releases are signed tags; nothing is published to 
   through a work account and a personal session's through a personal one.
 - **`classifier.local`**: asks Jev on `smart-router/local`, through the model of the session's
   scope. Off unless the roster says `true`; it needs `local.levels`.
+- **`defaultScope`**: a version 2 roster's default scope for its host, `"personal"` or `"work"`.
+  A session with no scope entry, under no work directory and outside the latch, is in that scope,
+  which status and `/smart-router scope` name `roster-default`; without the key it is personal, as
+  before. The default records nothing, so a roster that changes it moves such a session at the next
+  roster load; leaving work scope still asks first. A default the roster has no section for is an
+  error, and the checker reads the default back. While the roster fails to load, the last valid
+  roster's default holds; when no roster the process loaded says it, a session it would decide is
+  held in work scope as unreadable, never personal. A version 1 roster refuses the key.
 
 ### Changed
 
@@ -30,6 +38,8 @@ fork's releases on that base. Releases are signed tags; nothing is published to 
 - **A tagged prompt whose level is unavailable is refused**, where it used to be passed up to the
   next level. Its tag names the level; its chain is still tried first, and it still passes up for
   size with compaction disabled. An untagged run steps up as before.
+- **Leaving work scope asks of "any earlier turns"**, where it said "its earlier turns": a session
+  the host's default puts in work scope may have none yet.
 
 ### Fixed
 

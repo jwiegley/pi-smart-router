@@ -102,7 +102,21 @@ function describeV2(roster: RosterV2): string[] {
     if (scope === "work" && section.directories.length > 0) lines.push(`  sessions under these directories are in work scope: ${section.directories.join(", ")}`);
     lines.push("");
   }
-  return lines;
+  return [...lines, ...defaultLines(roster)];
+}
+
+/**
+ * The host's default scope: where a session with no scope entry, under no work directory, is
+ * (src/scope.ts, rule 4). The parser refuses a defaultScope the roster has no section for, so only
+ * the built-in personal default of a roster without a personal scope can be one that refuses.
+ */
+function defaultLines(roster: RosterV2): string[] {
+  const given = roster.defaultScope;
+  const scope = given ?? "personal";
+  const whose = given === undefined ? "built in: the roster sets no defaultScope" : "the roster's defaultScope";
+  const refused = roster.scopes[scope] === undefined ? ", which the roster does not serve, so smart-router/auto refuses it" : "";
+  const moves = given === undefined ? "" : " Nothing records it, so a change of defaultScope moves such a session at the next roster load.";
+  return [`Default scope: ${scope} (${whose}): a session with no scope entry, under no work directory, is in ${scope} scope${refused}.${moves}`, ""];
 }
 
 function describeV1(roster: RosterV1): string[] {

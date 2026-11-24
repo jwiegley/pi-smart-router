@@ -399,9 +399,9 @@ describe("scope", () => {
   /** What scope work and scope personal add when one of the router's own models was selected: they select the scope's own. */
   const NOW_WORK = "The selection is now smart-router/work.";
   const NOW_PERSONAL = "The selection is now smart-router/personal.";
-  const MOVE = "Move this session to personal scope?\nIts earlier turns are work content, and the next requests would send them to personal accounts.";
+  const MOVE = "Move this session to personal scope?\nAny earlier turns are work content, and the next requests would send them to personal accounts.";
   const KEEP_WORK = "Keep this session in work scope";
-  const TO_PERSONAL = "Move it to personal scope (earlier turns are work content)";
+  const TO_PERSONAL = "Move it to personal scope (any earlier turns are work content)";
   const STAYS = { type: "info", message: "pi-smart-router: the session stays in work scope." };
 
   test("work records an entry; status, the default subcommand, reads the scope as routing does", async (t) => {

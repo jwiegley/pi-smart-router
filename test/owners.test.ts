@@ -141,11 +141,19 @@ describe("the last valid roster", () => {
     const slot = processSlot();
     assert.equal("lastRoster" in slot, false, "nothing is kept until a roster loads");
     assert.equal(rememberedRoster(slot), undefined);
-    rememberRoster(slot, { directories: ["/x/work"] });
-    assert.deepEqual(rememberedRoster(slot), { directories: ["/x/work"] });
-    // A memory an earlier load of this module kept, with the account bindings the work guard read, still gives its directories, and nothing else.
+    rememberRoster(slot, { directories: ["/x/work"], defaultScope: null });
+    assert.deepEqual(rememberedRoster(slot), { directories: ["/x/work"], defaultScope: null });
+    rememberRoster(slot, { directories: [], defaultScope: "work" });
+    assert.deepEqual(rememberedRoster(slot), { directories: [], defaultScope: "work" });
+    // A memory an earlier load of this module kept, with the account bindings the work guard read, still gives its directories, and nothing else:
+    // it kept no default, so the default is unknown (undefined), never personal.
     slot.lastRoster = { directories: ["/x/work"], accounts: new Map([["openai-codex-3", { kind: "multi-pass", label: "Positron work", scope: "work" }]]) };
-    assert.deepEqual(rememberedRoster(slot), { directories: ["/x/work"] });
+    assert.deepEqual(rememberedRoster(slot), { directories: ["/x/work"], defaultScope: undefined });
+    // A default of another shape, as a later version might keep, is unknown too.
+    for (const other of ["team", "Work", 1, { scope: "work" }]) {
+      slot.lastRoster = { directories: ["/x/work"], defaultScope: other };
+      assert.deepEqual(rememberedRoster(slot), { directories: ["/x/work"], defaultScope: undefined }, JSON.stringify(other));
+    }
     const others: Array<[string, unknown]> = [
       ["not an object", "x"],
       ["no directories", {}],

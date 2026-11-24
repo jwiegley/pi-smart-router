@@ -15,7 +15,7 @@
 //   4. otherwise the router refuses with its own non-retryable error.
 //
 // The slot holds only process-wide state: the owners, the catalog objects their registrations
-// produced, the environment latches, scope handoffs, what the last valid roster said of work scope,
+// produced, the environment latches, scope handoffs, what the last valid roster said of the scope,
 // and the pi-cache-optimizer adapter's registration. Per-session records live in each router
 // instance. Every load of this module, /reload included, shares the slot, so it holds plain data
 // and is checked by shape, never by class identity. The scope's fields came later: they are
@@ -31,6 +31,7 @@ import { SLOT_KEY } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { isRecord } from "./files.ts";
 import type { LocalPolicy } from "./local.ts";
+import { isScope } from "./roster.ts";
 import type { Scope } from "./roster.ts";
 import type { Recovery, RecoveryRequest } from "./recovery.ts";
 
@@ -83,7 +84,7 @@ export interface Slot {
   readonly handoffs: Map<string, unknown>;
   /** Scopes handed to the session a fork or /new creates, keyed by its session file; made on first use. */
   scopeHandoffs?: Map<string, unknown>;
-  /** What the last valid roster loaded in the process said of work scope (RosterMemory); made at the first valid load, and checked by shape when read. */
+  /** What the last valid roster loaded in the process said of the scope (RosterMemory): its work directories and default; made at the first valid load, and checked by shape when read. */
   lastRoster?: unknown;
   /** The pi-cache-optimizer adapter and its registration, while any owner is live. */
   adapter: { readonly adapter: object; readonly unregister: () => void } | undefined;
@@ -167,6 +168,19 @@ export function takeScopeHandoff(slot: Slot, file: string): Scope | undefined {
 export interface RosterMemory {
   /** The work scope's directories; none for a roster without a work scope. */
   readonly directories: readonly string[];
+  /** The roster's defaultScope; null for a roster that sets none, whose default is personal. */
+  readonly defaultScope: Scope | null;
+}
+
+/**
+ * RosterMemory as read back from the slot. `defaultScope` is undefined, unknown, when the load that
+ * kept the memory kept no default of this shape: an earlier version of the router, which knew no
+ * defaultScope, or a later one that keeps another. Such a memory says nothing of the host's
+ * default, so the scope treats it as unknown and fails closed (src/scope.ts), never as personal.
+ */
+export interface RememberedRoster {
+  readonly directories: readonly string[];
+  readonly defaultScope: Scope | null | undefined;
 }
 
 /** Keep what the scope reads of a roster that loaded. */
@@ -176,15 +190,15 @@ export function rememberRoster(slot: Slot, memory: RosterMemory): void {
 
 /**
  * What the slot keeps of the last valid roster loaded in the process; undefined before any, or when
- * another load of this module kept another shape. Whatever else such a load kept beside the
- * directories is not read.
+ * another load of this module kept directories of another shape. Whatever else such a load kept
+ * beside the directories and the default is not read.
  */
-export function rememberedRoster(slot: Slot): RosterMemory | undefined {
+export function rememberedRoster(slot: Slot): RememberedRoster | undefined {
   const memory = slot.lastRoster;
   if (!isRecord(memory)) return undefined;
-  const { directories } = memory;
+  const { directories, defaultScope } = memory;
   if (!Array.isArray(directories) || !directories.every((directory) => typeof directory === "string")) return undefined;
-  return { directories };
+  return { directories, defaultScope: defaultScope === null || isScope(defaultScope) ? defaultScope : undefined };
 }
 
 export function sessionHash(sessionId: string): string {

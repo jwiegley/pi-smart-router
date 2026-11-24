@@ -10,20 +10,27 @@
 //      lies under one of them, so a roster load that lists a running session's directory moves
 //      that session at once. While the roster fails to load, the router passes the directories of
 //      the last valid roster loaded in the process (src/router.ts);
-//   4. otherwise personal, the default.
+//   4. otherwise the host's default: the roster's defaultScope as it is now, source
+//      "roster-default", or personal, source "default", for a roster that sets none. While the
+//      roster fails to load, the router passes the last valid roster's default; when no roster the
+//      process loaded says which default this host has, the scope is unreadable (below).
 //
 // The first time rule 3 decides a session's scope, at session start or at its next idle input, the
 // router records it as a work entry, so that rule 2 keeps it whatever the roster says later
-// (src/router.ts).
+// (src/router.ts). Rule 4 records nothing, so a roster whose default changes moves every session
+// it decides at the next roster load.
 //
 // The read fails closed. A malformed entry, a custom_message of the type, or a session whose
 // entries cannot be read has an unreadable scope: routing resolves in work scope, the narrower one,
 // and smart-router/auto refuses until a scope is recorded again. smart-router/local, whose requests
-// carry no account, routes to the local role all the same.
+// carry no account, routes to the local role all the same. A session that rule 4 would decide while
+// the host's default is unknown is unreadable too, until the roster loads or a scope is recorded.
 //
 // A fork or /new carries a scope that an entry, the latch or the work directories set, and an
 // unreadable one as work: at session_shutdown the old session leaves it in the slot under the new
 // session's file (src/owners.ts), and the new session's session_start records it as a carried entry.
+// What rule 4 gives is not carried, an unknown default included: the new session reads the same
+// host's default for itself.
 import { SCOPE_ENTRY } from "./constants.ts";
 import { firstLine } from "./errors.ts";
 import { isRecord, own } from "./files.ts";
@@ -40,9 +47,23 @@ export interface ScopeEntryData {
   readonly at: number;
 }
 
+/** Which rule gave a readable scope: "default" is the built-in personal, "roster-default" the roster's defaultScope. */
+export type ScopeSource = "latch" | "entry" | "directory" | "default" | "roster-default";
+
 export type ScopeState =
-  | { readonly kind: "ok"; readonly scope: Scope; readonly source: "latch" | "entry" | "directory" | "default" }
-  | { readonly kind: "unreadable"; readonly reason: string };
+  | { readonly kind: "ok"; readonly scope: Scope; readonly source: ScopeSource }
+  /** `fromDefault`: rule 4 decided the session while the host's default is unknown. */
+  | { readonly kind: "unreadable"; readonly reason: string; readonly fromDefault?: true };
+
+/**
+ * What rule 4 reads of the roster: the built-in personal default of a roster that sets no
+ * defaultScope, the scope a roster sets, or, when no roster loaded in the process says which,
+ * an unknown default and why.
+ */
+export type HostDefault =
+  | { readonly kind: "built-in" }
+  | { readonly kind: "roster"; readonly scope: Scope }
+  | { readonly kind: "unknown"; readonly reason: string };
 
 /** Where a session works: its working directory, and the work directories of the roster as it is now. */
 export interface WorkDirectories {
@@ -54,6 +75,28 @@ const KEYS: ReadonlySet<string> = new Set(["v", "scope", "by", "at"]);
 const LATCHED: ScopeState = Object.freeze({ kind: "ok", scope: "work", source: "latch" });
 const BY_DIRECTORY: ScopeState = Object.freeze({ kind: "ok", scope: "work", source: "directory" });
 const DEFAULT: ScopeState = Object.freeze({ kind: "ok", scope: "personal", source: "default" });
+/** A roster that sets no defaultScope: rule 4 gives personal, as before the key existed. */
+export const BUILT_IN_DEFAULT: HostDefault = Object.freeze({ kind: "built-in" });
+
+/** What rule 4 gives a session with no entry outside the work directories. */
+function byDefault(host: HostDefault): ScopeState {
+  switch (host.kind) {
+    case "built-in":
+      return DEFAULT;
+    case "roster":
+      return { kind: "ok", scope: host.scope, source: "roster-default" };
+    case "unknown":
+      return { kind: "unreadable", reason: host.reason, fromDefault: true };
+  }
+}
+
+/**
+ * Whether rule 4 gave this scope, readable or not: such a scope is the host's, not the session's,
+ * so nothing carries it into a fork or /new and nothing records it.
+ */
+export function fromHostDefault(state: ScopeState): boolean {
+  return state.kind === "ok" ? state.source === "default" || state.source === "roster-default" : state.fromDefault === true;
+}
 
 const isRecorder = (value: unknown): value is ScopeEntryData["by"] => value === "command" || value === "directory" || value === "carried";
 
@@ -71,10 +114,11 @@ export function parseScopeEntry(entry: unknown): ScopeEntryData | undefined {
 
 /**
  * A session's scope, by the four rules above. `work` is undefined when the roster lists no work
- * directories. Never throws: a session whose scope entries cannot be read has an unreadable scope,
- * which the work directories do not override.
+ * directories; `host` is rule 4's default, the built-in personal one unless the caller passes the
+ * roster's. Never throws: a session whose scope entries cannot be read has an unreadable scope,
+ * which neither the work directories nor the default override.
  */
-export function readScope(sessionManager: unknown, latched: boolean, work: WorkDirectories | undefined): ScopeState {
+export function readScope(sessionManager: unknown, latched: boolean, work: WorkDirectories | undefined, host: HostDefault = BUILT_IN_DEFAULT): ScopeState {
   if (latched) return LATCHED;
   const view = boundedHistory(sessionManager);
   if (view === undefined) return { kind: "unreadable", reason: "this Pi has no bounded session history" };
@@ -84,7 +128,7 @@ export function readScope(sessionManager: unknown, latched: boolean, work: WorkD
   } catch (error) {
     return { kind: "unreadable", reason: `reading its ${SCOPE_ENTRY} entries failed: ${firstLine(error)}` };
   }
-  if (entry === undefined || entry === null) return work !== undefined && underDirectory(work.cwd, work.directories) ? BY_DIRECTORY : DEFAULT;
+  if (entry === undefined || entry === null) return work !== undefined && underDirectory(work.cwd, work.directories) ? BY_DIRECTORY : byDefault(host);
   const data = parseScopeEntry(entry);
   if (data === undefined) return { kind: "unreadable", reason: `the latest ${SCOPE_ENTRY} entry is not one the router wrote` };
   return { kind: "ok", scope: data.scope, source: "entry" };

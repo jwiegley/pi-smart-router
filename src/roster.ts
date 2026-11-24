@@ -159,6 +159,12 @@ export interface RosterV2 {
    * their order follows this (src/order.ts). A session can replace it with /smart-router prefer.
    */
   readonly providerOrder?: Readonly<Partial<Record<"personal" | "work" | "local", readonly string[]>>>;
+  /**
+   * The scope of a session on this host that has no scope entry and is under no work directory
+   * (src/scope.ts, rule 4); absent, personal, as before the key existed. A scope the roster has a
+   * section for: every session it decides would otherwise be refused.
+   */
+  readonly defaultScope?: Scope;
 }
 
 export type Roster = RosterV1 | RosterV2;
@@ -639,7 +645,7 @@ function validate(value: unknown): Roster {
 
 // ─── Version 2 ───────────────────────────────────────────────────────────────
 
-const V2_TOP_KEYS = ["version", "exclude", "roles", "scopes", "accounts", "classifier", "demand", "switching", "adaptiveReasoning", "local", "providerOrder", "stickyIdleMinutes", "cooldownMinutes", "unreachableMinutes"];
+const V2_TOP_KEYS = ["version", "exclude", "roles", "scopes", "defaultScope", "accounts", "classifier", "demand", "switching", "adaptiveReasoning", "local", "providerOrder", "stickyIdleMinutes", "cooldownMinutes", "unreachableMinutes"];
 /** The scopes a provider order is given for: the two session scopes, and the local roles. */
 const ORDER_KEYS = ["personal", "work", "local"] as const;
 const SCOPE_KEYS: Readonly<Record<Scope, readonly string[]>> = { personal: ["levels", "fallback"], work: ["levels", "directories", "fallback"] };
@@ -868,7 +874,8 @@ function effortSettings(value: unknown): EffortSettings {
  * Version 2, checked in this order: the keys, the exclusions, the roles, the accounts and their
  * scopes, the scopes and their levels, each scope's fallback chain, each level's and each chain's
  * accounts, the work alias's exclusion, the local
- * section, the classifier, the demand, switching and adaptiveReasoning sections and the minutes. The checks it shares with version 1 are version 1's
+ * section, the classifier, the demand, switching and adaptiveReasoning sections, the default scope,
+ * the provider order and the minutes. The checks it shares with version 1 are version 1's
  * helpers, so they keep version 1's messages.
  */
 function validateV2(value: Record<string, unknown>): RosterV2 {
@@ -1006,6 +1013,16 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
   const switching = switchingSettings(own(root, "switching"));
   const adaptiveReasoning = effortSettings(own(root, "adaptiveReasoning"));
 
+  // The host's default scope is one the roster serves: a default without a section would put every
+  // session without an entry or a work directory in a scope smart-router/auto refuses.
+  let defaultScope: Scope | undefined;
+  const givenDefault = own(root, "defaultScope");
+  if (givenDefault !== undefined) {
+    if (!isScope(givenDefault)) fail("defaultScope", 'must be "personal" or "work"');
+    if (scopes[givenDefault] === undefined) fail("defaultScope", `the roster has no ${givenDefault} scope, so every session it puts there would be refused`);
+    defaultScope = givenDefault;
+  }
+
   // A provider order names only providers of the models it governs: a scope's level and chain
   // roles, or the local roles, which are the local order's wherever a level names them.
   let providerOrder: Partial<Record<(typeof ORDER_KEYS)[number], readonly string[]>> | undefined;
@@ -1041,6 +1058,7 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
     switching,
     adaptiveReasoning,
     ...(providerOrder === undefined ? {} : { providerOrder }),
+    ...(defaultScope === undefined ? {} : { defaultScope }),
   };
 }
 

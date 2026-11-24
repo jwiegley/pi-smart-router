@@ -563,8 +563,8 @@ describe("smart-router/personal and smart-router/work", () => {
     const loaded = await open(t, { setup: workEntry });
     await loaded.host.choose("smart-router/personal");
     assert.equal(loaded.session.dialogs.length, 1);
-    assert.match(loaded.session.dialogs[0]?.title ?? "", /^Move this session to personal scope\?\nIts earlier turns are work content/);
-    assert.deepEqual(loaded.session.dialogs[0]?.options, ["Keep this session in work scope", "Move it to personal scope (earlier turns are work content)"]);
+    assert.match(loaded.session.dialogs[0]?.title ?? "", /^Move this session to personal scope\?\nAny earlier turns are work content/);
+    assert.deepEqual(loaded.session.dialogs[0]?.options, ["Keep this session in work scope", "Move it to personal scope (any earlier turns are work content)"]);
     assert.deepEqual(loaded.session.notices.at(-1), {
       type: "warning",
       message:

@@ -1,7 +1,7 @@
 // One instance of the router: the session whose extension runtime loaded it, the files it reads
 // (the roster, Multi-Pass's labels and the prompt files the roster names), its per-session records
 // (each with the ledger its session's answers feed, which prices a planned run) and cooldowns, the
-// limits its models declare, the session's scope with its handoffs and work directories, the
+// limits its models declare, the session's scope with its handoffs, work directories and default, the
 // refusals of its own models for a scope their policy does not serve, a message's tag and Jev's
 // request, each planned run's level record, the footer item (a run's level, effort and model), the
 // provider order /smart-router prefer gives a session, the /smart-router command, what it tells
@@ -83,7 +83,7 @@ import { isDegenerateOutput } from "./output-quality.ts";
 import { orderedRoster } from "./order.ts";
 import type { SessionOrder } from "./order.ts";
 import { healDisplaced, isLive, isLiveOwner, join, leave, leaveScopeHandoff, ownerBySignal, personalOnlyLatched, rememberedRoster, rememberRoster, scopeLatched, sessionHash, takeScopeHandoff } from "./owners.ts";
-import type { Owner, OwnerRouter, RosterMemory, Slot } from "./owners.ts";
+import type { Owner, OwnerRouter, RememberedRoster, RosterMemory, Slot } from "./owners.ts";
 import { promptProblem, promptStore, promptUses, scopePrompts } from "./prompts.ts";
 import { footerText, levelRecord, readLevelRecord } from "./records.ts";
 import { clock, coolFrom, Cooldowns, coolsAccount, failureKind, hasOutput, holdFrom, Holds, resolveContext } from "./resolve.ts";
@@ -92,8 +92,8 @@ import { activeEntries, afterFailure, boundedHistory, HISTORY_LIMIT, newRecord, 
 import type { BoundedHistory, Failover, LastInput, RouteInput, SessionRecord } from "./route.ts";
 import { autoRoles, parseRef, roleOf, rosterFile, SCOPES, scopeSection, servesScope } from "./roster.ts";
 import type { Roster, RosterV2, Scope } from "./roster.ts";
-import { readScope, scopeEntry, workDirectoryOf } from "./scope.ts";
-import type { ScopeEntryData, ScopeState, WorkDirectories } from "./scope.ts";
+import { BUILT_IN_DEFAULT, fromHostDefault, readScope, scopeEntry, workDirectoryOf } from "./scope.ts";
+import type { HostDefault, ScopeEntryData, ScopeState, WorkDirectories } from "./scope.ts";
 import { describeModel } from "./selection.ts";
 import { parseTag } from "./tags.ts";
 import type { Tagged } from "./tags.ts";
@@ -281,8 +281,15 @@ type Window = readonly unknown[] | typeof UNREAD;
 const sameLimits = (a: Readonly<Record<VirtualId, Limits>>, b: Readonly<Record<VirtualId, Limits>>): boolean =>
   VIRTUAL_IDS.every((id) => a[id].contextWindow === b[id].contextWindow && a[id].maxTokens === b[id].maxTokens);
 
-/** What the scope reads of a valid roster: its work directories. */
-const memoryOf = (value: Roster): RosterMemory => ({ directories: scopeSection(value, "work")?.directories ?? [] });
+/** What the scope reads of a valid roster: its work directories and its default scope. */
+const memoryOf = (value: Roster): RosterMemory => ({
+  directories: scopeSection(value, "work")?.directories ?? [],
+  defaultScope: value.version === 2 ? (value.defaultScope ?? null) : null,
+});
+
+/** Why the host's default scope is unknown: the roster does not load, and nothing the slot keeps says it. */
+const NO_ROSTER_DEFAULT = "the host's default scope is unknown: the roster does not load, and no valid roster loaded earlier in this process says it";
+const OLD_MEMORY_DEFAULT = "the host's default scope is unknown: the roster does not load, and the last valid one was loaded by another version of the router, which kept no default scope";
 
 export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   const { slot, now } = options;
@@ -297,7 +304,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   const reported = new Set<string>();
   let limits = ALL_DEFAULT;
   let self: Owner | undefined;
-  /** The latest valid roster this instance loaded, whose work directories and bindings the slot keeps. */
+  /** The latest valid roster this instance loaded, whose work directories and default scope the slot keeps. */
   let lastLoaded: Roster | undefined;
   /** How many idle inputs this instance has seen: each one's token. */
   let inputs = 0;
@@ -345,11 +352,12 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   };
 
   /**
-   * What the scope reads of the roster: its work directories as it is now, else, while it fails to
-   * load, those of the last valid roster loaded in the process (the slot keeps them), else none.
-   * Never throws: an agent directory that cannot be found counts as a roster that fails to load.
+   * What the scope reads of the roster: its work directories and default as it is now, else, while
+   * it fails to load, those of the last valid roster loaded in the process (the slot keeps them),
+   * else none. Never throws: an agent directory that cannot be found counts as a roster that fails
+   * to load.
    */
-  const rosterFacts = (): RosterMemory | undefined => {
+  const rosterFacts = (): RememberedRoster | undefined => {
     try {
       const state = loaded(roster.current());
       if (state.kind === "ok") return memoryOf(state.value);
@@ -375,10 +383,23 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   };
 
   /**
-   * A session's scope, read fail closed: the latch, the session's entry, then the work directories
-   * that rosterFacts gives. A context whose session cannot be read has an unreadable scope.
+   * The host's default scope, rule 4 of src/scope.ts, as rosterFacts gives it. With no roster known
+   * to the process, or only a memory another version kept without a default, it is unknown, and a
+   * session it would decide has an unreadable scope: never personal by assumption.
    */
-  const scopeOf = (ctx: ExtensionContext): ScopeState => readScope(managerOf(ctx), scopeLatched(slot), workOf(ctx));
+  const hostDefault = (): HostDefault => {
+    const facts = rosterFacts();
+    if (facts === undefined) return { kind: "unknown", reason: NO_ROSTER_DEFAULT };
+    if (facts.defaultScope === undefined) return { kind: "unknown", reason: OLD_MEMORY_DEFAULT };
+    return facts.defaultScope === null ? BUILT_IN_DEFAULT : { kind: "roster", scope: facts.defaultScope };
+  };
+
+  /**
+   * A session's scope, read fail closed: the latch, the session's entry, then the work directories
+   * that rosterFacts gives, then the host's default. A context whose session cannot be read has an
+   * unreadable scope.
+   */
+  const scopeOf = (ctx: ExtensionContext): ScopeState => readScope(managerOf(ctx), scopeLatched(slot), workOf(ctx), hostDefault());
 
   /**
    * The scope a session resolves in. A scope that cannot be read resolves in work scope, the
@@ -422,7 +443,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     });
 
   /**
-   * Every roster load passes here, so the slot keeps what the latest valid one says of work scope
+   * Every roster load passes here, so the slot keeps what the latest valid one says of the scope
    * (rosterFacts). Reading again a roster this instance already holds is no new load, so it leaves
    * in the slot a roster another instance loaded since.
    */
@@ -1161,16 +1182,17 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   };
 
   /**
-   * A fork or /new carries the scope the latch, an entry or the work directories set. A default
-   * scope is not carried, so the new session decides its own. An unreadable one is carried as work,
-   * the scope routing holds that session in.
+   * A fork or /new carries the scope the latch, an entry or the work directories set. The host's
+   * default, built-in, the roster's or unknown, is not carried: the new session reads the same
+   * host's default for itself, and nothing is recorded because of it. Any other unreadable scope is
+   * carried as work, the scope routing holds that session in.
    */
   const leaveScope = (event: SessionShutdownEvent, ctx: ExtensionContext): void => {
     const { reason, targetSessionFile: target } = event;
     if ((reason !== "new" && reason !== "fork") || typeof target !== "string" || target === "") return;
     const scope = scopeOf(ctx);
-    if (scope.kind !== "ok") leaveScopeHandoff(slot, target, "work");
-    else if (scope.source !== "default") leaveScopeHandoff(slot, target, scope.scope);
+    if (fromHostDefault(scope)) return;
+    leaveScopeHandoff(slot, target, scope.kind === "ok" ? scope.scope : "work");
   };
 
   const shutdown = (event: SessionShutdownEvent, ctx: ExtensionContext): void => {

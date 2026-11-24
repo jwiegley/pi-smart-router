@@ -8,10 +8,10 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 
 import { ENV_SCOPE, LEVEL_ENTRY, LEVEL_KEY, SCOPE_ENTRY } from "../src/constants.ts";
 import { directoryFailedNotice, directoryNotice, scopeCarriedNotice, scopeCarryFailedNotice, scopeUnreadable, scopeUnserved } from "../src/errors.ts";
-import { processSlot, scopeLatched } from "../src/owners.ts";
+import { processSlot, rememberedRoster, scopeLatched } from "../src/owners.ts";
 import { createRouter } from "../src/router.ts";
-import { parseScopeEntry, readScope, scopeEntry, underDirectory, workDirectoryOf } from "../src/scope.ts";
-import type { ScopeEntryData, ScopeState, WorkDirectories } from "../src/scope.ts";
+import { BUILT_IN_DEFAULT, fromHostDefault, parseScopeEntry, readScope, scopeEntry, underDirectory, workDirectoryOf } from "../src/scope.ts";
+import type { HostDefault, ScopeEntryData, ScopeState, WorkDirectories } from "../src/scope.ts";
 import { CHATGPT, DEEPSEEK, FakeCatalog, GLM, heraModels, KIMI, model, NOW, SOL } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
 import { PIN_ENTRY } from "./support/legacy.ts";
@@ -929,5 +929,304 @@ describe("in work scope, a refusal names only the models that keep the conversat
       refusalOf(() => loaded.runtime.route("auto", request("direct"))),
       `smart-router/auto: no model can take this request (work-medium: ${WORK_TERRA}: not in the catalog). Nothing was sent. See /smart-router status, or choose a work Codex model with /model.`,
     );
+  });
+});
+
+describe("the host's default scope (rule 4)", () => {
+  const ROSTER_WORK: HostDefault = { kind: "roster", scope: "work" };
+  const ROSTER_PERSONAL: HostDefault = { kind: "roster", scope: "personal" };
+  const UNKNOWN: HostDefault = { kind: "unknown", reason: "the host's default scope is unknown: for this test" };
+  const OK_WORK_DEFAULT: ScopeState = { kind: "ok", scope: "work", source: "roster-default" };
+  const OK_PERSONAL_DEFAULT: ScopeState = { kind: "ok", scope: "personal", source: "roster-default" };
+  const UNKNOWN_STATE: ScopeState = { kind: "unreadable", reason: "the host's default scope is unknown: for this test", fromDefault: true };
+  /** The answer /smart-router scope gives a session whose default is the roster's work scope. */
+  const SCOPE_WORK_DEFAULT = "pi-smart-router: scope work (roster-default: this host's defaultScope in the roster).";
+
+  /** Hera's version 2 roster with this defaultScope, or none. */
+  const withDefault = (scope: "personal" | "work" | undefined, base: string = HERA_V2): string => {
+    const roster = JSON.parse(base);
+    if (scope === undefined) delete roster.defaultScope;
+    else roster.defaultScope = scope;
+    return JSON.stringify(roster);
+  };
+
+  /** Rewrite the roster with a later modification time, so the next load reads it. */
+  const rewrite = (dir: string, text: string): void => {
+    const path = join(dir, "smart-router.json");
+    writeFileSync(path, text);
+    utimesSync(path, new Date(), new Date(Date.now() + 5_000));
+  };
+
+  const scopeAnswer = async (loaded: Loaded): Promise<string | undefined> => {
+    await loaded.host.command("smart-router", "scope");
+    return loaded.session.notices.at(-1)?.message;
+  };
+
+  /** A whole run on smart-router/auto: its input, the run's start, its first request, its answer and its end. */
+  async function run(loaded: Loaded, text: string): Promise<string> {
+    await loaded.host.emit("input", { text, source: "interactive" });
+    await loaded.host.emit("before_agent_start", { prompt: text });
+    const signal = loaded.session.startRun();
+    const ref = routed(loaded.runtime.route("auto", request("user", { signal })));
+    await loaded.host.emit("message_end", { message: assistant(ref) });
+    await loaded.host.emit("agent_settled", { aborted: false });
+    loaded.session.endRun();
+    return ref;
+  }
+
+  describe("readScope", () => {
+    test("a session with no entry, under no work directory, takes the default: built in, the roster's, or unreadable when unknown", () => {
+      assert.deepEqual(readScope(holding(undefined), false, undefined), DEFAULT, "no default passed: the built-in personal one");
+      assert.deepEqual(readScope(holding(undefined), false, undefined, BUILT_IN_DEFAULT), DEFAULT);
+      assert.deepEqual(readScope(holding(null), false, OUTSIDE, ROSTER_WORK), OK_WORK_DEFAULT);
+      assert.deepEqual(readScope(holding(undefined), false, undefined, ROSTER_PERSONAL), OK_PERSONAL_DEFAULT, "a personal default the roster sets is the roster's");
+      assert.deepEqual(readScope(holding(undefined), false, OUTSIDE, UNKNOWN), UNKNOWN_STATE);
+    });
+
+    test("the latch, an entry and the work directories all win over it, and an unreadable entry stays the entry's", () => {
+      for (const host of [ROSTER_WORK, ROSTER_PERSONAL, UNKNOWN]) {
+        const label = JSON.stringify(host);
+        assert.deepEqual(readScope(holding(custom(scopeEntry("personal", "command", NOW))), true, undefined, host), OK_WORK_LATCH, label);
+        assert.deepEqual(readScope(holding(undefined), true, OUTSIDE, host), OK_WORK_LATCH, label);
+        assert.deepEqual(readScope(holding(custom(scopeEntry("personal", "command", NOW))), false, OUTSIDE, host), OK_PERSONAL_ENTRY, label);
+        assert.deepEqual(readScope(holding(custom(scopeEntry("work", "carried", NOW))), false, OUTSIDE, host), OK_WORK_ENTRY, label);
+        assert.deepEqual(readScope(holding(undefined), false, UNDER, host), OK_WORK_DIRECTORY, label);
+        assert.deepEqual(readScope(holding(custom({ v: 9 })), false, OUTSIDE, host), { kind: "unreadable", reason: "the latest smart-router.scope entry is not one the router wrote" }, label);
+      }
+    });
+
+    test("fromHostDefault marks what rule 4 gave, readable or not, and nothing else", () => {
+      assert.deepEqual(
+        [DEFAULT, OK_WORK_DEFAULT, OK_PERSONAL_DEFAULT, UNKNOWN_STATE, OK_WORK_LATCH, OK_WORK_ENTRY, OK_WORK_DIRECTORY, { kind: "unreadable", reason: "x" } as ScopeState].map(fromHostDefault),
+        [true, true, true, true, false, false, false, false],
+      );
+    });
+  });
+
+  test("without defaultScope, a session outside the work directories is personal by the built-in default, as before", async (t) => {
+    const loaded = await begin({ dir: agentDir(t, { roster: HERA_V2 }), cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) });
+    assert.equal(await scopeAnswer(loaded), "pi-smart-router: scope personal (default).");
+    assert.equal(routed(loaded.runtime.route("auto", request("direct"))), DEEPSEEK);
+  });
+
+  test("defaultScope work: a session with no entry is in work scope by the roster's default, routes there, and is told nothing", async (t) => {
+    const loaded = await begin({ dir: agentDir(t, { roster: withDefault("work") }), cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) });
+    assert.equal(await scopeAnswer(loaded), SCOPE_WORK_DEFAULT);
+    assert.deepEqual(readScope(loaded.session.ctx.sessionManager, false, undefined, ROSTER_WORK), OK_WORK_DEFAULT);
+    assert.equal(routed(loaded.runtime.route("auto", request("direct"))), WORK_TERRA);
+    assert.deepEqual(messages(loaded).slice(0, -1), [], "nothing is said at session start");
+  });
+
+  test("the default records nothing: not at session start, at an idle input, at a run's start or after a run, at any kind of start", async (t) => {
+    const dir = agentDir(t, { roster: withDefault("work") });
+    for (const reason of ["startup", "new", "fork", "reload", "resume"]) {
+      const loaded = await begin({ dir, id: reason, cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) }, reason);
+      assert.deepEqual(scopeEntries(loaded), [], `${reason}: session start`);
+      await loaded.host.emit("input", { text: "fix the build", source: "interactive" });
+      assert.deepEqual(scopeEntries(loaded), [], `${reason}: an idle input`);
+      assert.equal(await run(loaded, "and the tests"), WORK_TERRA, reason);
+      assert.deepEqual(scopeEntries(loaded), [], `${reason}: a run`);
+      // A run without an input, as a custom message's or goal-x's continuation, starts here too.
+      await loaded.host.emit("before_agent_start", { messageType: "custom" });
+      assert.deepEqual(scopeEntries(loaded), [], `${reason}: a run without an input`);
+      await loaded.host.emit("session_start", { reason: "reload" });
+      assert.deepEqual([scopeEntries(loaded), messages(loaded)], [[], []], `${reason}: nothing recorded and nothing said`);
+      assert.deepEqual(scopeOf(loaded), DEFAULT, `${reason}: without the roster's default, nothing in the session says work`);
+    }
+  });
+
+  test("the latch and an entry still win over the default", async (t) => {
+    const dir = agentDir(t, { roster: withDefault("work") });
+    const personal = await begin({ dir, id: "personal", cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()), setup: recorded("personal") });
+    assert.equal(await scopeAnswer(personal), "pi-smart-router: scope personal (entry).");
+    assert.equal(routed(personal.runtime.route("auto", request("direct"))), DEEPSEEK);
+    const personalHost = agentDir(t, { roster: withDefault("personal") });
+    const work = await begin({ dir: personalHost, id: "work", cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()), setup: recorded("work") });
+    assert.equal(await scopeAnswer(work), "pi-smart-router: scope work (entry).");
+    await withScope("work", async () => {
+      const latched = await begin({ dir: personalHost, id: "latched", cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) });
+      assert.equal(await scopeAnswer(latched), "pi-smart-router: scope work (latch).");
+      assert.equal(routed(latched.runtime.route("auto", request("direct"))), WORK_TERRA);
+      assert.deepEqual(scopeEntries(latched), []);
+    });
+  });
+
+  test("the work directories still win over the default and still record their entry, under either default", async (t) => {
+    for (const scope of ["personal", "work"] as const) {
+      const loaded = await begin({ dir: agentDir(t, { roster: withDefault(scope) }), cwd: APP, runtime: new FakeRuntime(workCatalog()) });
+      assert.deepEqual(scopeEntries(loaded), [{ v: 1, scope: "work", by: "directory", at: NOW }], scope);
+      assert.deepEqual(messages(loaded), [directoryNotice(APP, WORK_DIRECTORY)], scope);
+      assert.equal(await scopeAnswer(loaded), "pi-smart-router: scope work (entry).", scope);
+    }
+  });
+
+  test("a roster whose default changes moves a session with no entry at the next roster load, and still records nothing", async (t) => {
+    const dir = agentDir(t, { roster: HERA_V2 });
+    const loaded = await begin({ dir, cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) });
+    const pinned = await begin({ dir, id: "pinned", cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()), setup: recorded("personal") });
+    assert.equal(routed(loaded.runtime.route("auto", request("direct"))), DEEPSEEK);
+    rewrite(dir, withDefault("work"));
+    // The next idle input reads the edited roster; the route reads the roster as it is now.
+    await loaded.host.emit("input", { text: "fix the build", source: "interactive" });
+    assert.equal(routed(loaded.runtime.route("auto", request("direct"))), WORK_TERRA, "work scope after the load");
+    assert.equal(await scopeAnswer(loaded), SCOPE_WORK_DEFAULT);
+    assert.equal(routed(pinned.runtime.route("auto", request("direct"))), DEEPSEEK, "a session with an entry stays where its entry puts it");
+    // And back: no entry was recorded, so the default moves the session again, without asking.
+    rewrite(dir, HERA_V2);
+    await loaded.host.command("smart-router", "reload");
+    assert.equal(routed(loaded.runtime.route("auto", request("direct"))), DEEPSEEK);
+    assert.equal(await scopeAnswer(loaded), "pi-smart-router: scope personal (default).");
+    assert.deepEqual([scopeEntries(loaded), loaded.session.dialogs], [[], []]);
+  });
+
+  test("a fork or /new carries nothing for the default: the new session reads the same default for itself", async (t) => {
+    const dir = agentDir(t, { roster: withDefault("work") });
+    for (const reason of ["new", "fork"] as const) {
+      const parent = await begin({ dir, id: `p-${reason}`, file: `/sessions/p-${reason}.jsonl`, cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) });
+      await parent.host.emit("session_shutdown", { reason, targetSessionFile: `/sessions/p-${reason}-child.jsonl` });
+      assert.equal(processSlot().scopeHandoffs?.size ?? 0, 0, reason);
+      const child = await begin({ dir, id: `c-${reason}`, file: `/sessions/p-${reason}-child.jsonl`, cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) }, reason);
+      assert.deepEqual([scopeEntries(child), messages(child)], [[], []], reason);
+      assert.equal(await scopeAnswer(child), SCOPE_WORK_DEFAULT, reason);
+    }
+  });
+
+  describe("leaving work scope the default gives asks, as from any work scope", () => {
+    const MOVE = "Move this session to personal scope?\nAny earlier turns are work content, and the next requests would send them to personal accounts.";
+    const OPTIONS = ["Keep this session in work scope", "Move it to personal scope (any earlier turns are work content)"];
+
+    test("/smart-router scope personal asks, even in a session with no turns; Enter keeps work, and only the second answer moves it", async (t) => {
+      const loaded = await begin({ dir: agentDir(t, { roster: withDefault("work") }), cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) });
+      assert.deepEqual(loaded.session.entries.filter((entry) => entry.type === "message"), [], "a session with no turns");
+      await loaded.host.command("smart-router", "scope personal");
+      assert.deepEqual(loaded.session.dialogs, [{ title: MOVE, options: OPTIONS }]);
+      assert.equal(messages(loaded).at(-1), "pi-smart-router: the session stays in work scope.");
+      assert.deepEqual(scopeEntries(loaded), []);
+      loaded.session.dialogKeys = ["down", "enter"];
+      await loaded.host.command("smart-router", "scope personal");
+      assert.deepEqual(scopeEntries(loaded), [{ v: 1, scope: "personal", by: "command", at: NOW }]);
+      assert.equal(routed(loaded.runtime.route("auto", request("direct"))), DEEPSEEK);
+    });
+
+    test("without dialogs it is refused, by the command and by selecting smart-router/personal, and nothing is recorded", async (t) => {
+      const loaded = await begin({ dir: agentDir(t, { roster: withDefault("work") }), cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) });
+      loaded.session.hasUI = false;
+      await loaded.host.command("smart-router", "scope personal");
+      assert.equal(messages(loaded).at(-1), "pi-smart-router: /smart-router scope personal asks for confirmation, and this mode has no dialogs, so the session stays in work scope.");
+      // A mode without dialogs shows no notice either: the selection is refused at its first request.
+      const said = messages(loaded).length;
+      await loaded.host.choose("smart-router/personal");
+      assert.deepEqual([loaded.session.dialogs, scopeEntries(loaded), messages(loaded).length], [[], [], said]);
+      refuses(() => loaded.runtime.route("personal", request("direct")), scopeMismatchOf(loaded), "smart-router/personal refuses the work session");
+    });
+
+    test("selecting smart-router/personal by hand asks the same question", async (t) => {
+      const loaded = await begin({ dir: agentDir(t, { roster: withDefault("work") }), cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) });
+      await loaded.host.choose("smart-router/personal");
+      assert.deepEqual(loaded.session.dialogs, [{ title: MOVE, options: OPTIONS }]);
+      assert.deepEqual(scopeEntries(loaded), []);
+    });
+
+    /** The refusal smart-router/personal gives this session, as routing builds it. */
+    function scopeMismatchOf(loaded: Loaded): Error {
+      try {
+        loaded.runtime.route("personal", request("direct"));
+      } catch (error) {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /^smart-router\/personal: this session is in work scope/);
+        return error;
+      }
+      return assert.fail("smart-router/personal routed a work session");
+    }
+  });
+
+  test("/smart-router status, tiers and scope local name the roster's default as the scope's source", async (t) => {
+    const loaded = await begin({ dir: agentDir(t, { roster: withDefault("work") }), cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) });
+    await loaded.host.command("smart-router", "status");
+    assert.deepEqual(
+      (messages(loaded).at(-1) ?? "").split("\n").filter((line) => line.startsWith("Scope:")),
+      ["Scope: work (roster-default: this host's defaultScope in the roster)"],
+    );
+    await loaded.host.command("smart-router", "tiers");
+    assert.match(messages(loaded).at(-1) ?? "", /^pi-smart-router tiers: this session is in work scope \(roster-default: this host's defaultScope in the roster\), on smart-router\/auto\./);
+    await loaded.host.command("smart-router", "scope local");
+    assert.match(messages(loaded).at(-1) ?? "", /The session's own scope stays work \(roster-default: this host's defaultScope in the roster\)\.$/);
+    assert.deepEqual(scopeEntries(loaded), []);
+  });
+
+  describe("while the roster fails to load", () => {
+    /** The answer /smart-router scope gives a session with no entry while the host's default is unknown. */
+    const unknownAnswer = (why: string): string =>
+      `pi-smart-router: this session has no scope entry, and the host's default scope is unknown: ${why}. It is held in work scope until the roster loads or /smart-router scope work or /smart-router scope personal records one.`;
+    const NO_ROSTER = "the roster does not load, and no valid roster loaded earlier in this process says it";
+    const OLD_MEMORY = "the roster does not load, and the last valid one was loaded by another version of the router, which kept no default scope";
+
+    test("the last valid roster's default holds, in this instance and in one built later in the process, and the slot keeps it", async (t) => {
+      const dir = agentDir(t, { roster: withDefault("work") });
+      const loaded = await begin({ dir, cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) });
+      assert.deepEqual(rememberedRoster(processSlot()), { directories: [WORK_DIRECTORY], defaultScope: "work" });
+      writeFileSync(join(dir, "smart-router.json"), "{ nope");
+      await loaded.host.command("smart-router", "reload");
+      assert.equal(await scopeAnswer(loaded), SCOPE_WORK_DEFAULT, "still work by the last valid roster's default");
+      const rebuilt = await begin({ dir, id: "rebuilt", cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) });
+      assert.equal(await scopeAnswer(rebuilt), SCOPE_WORK_DEFAULT, "an instance that never saw a valid roster reads the process's memory");
+      assert.deepEqual([scopeEntries(loaded), scopeEntries(rebuilt)], [[], []]);
+      // A roster without the key is remembered as setting none: the built-in personal default.
+      rewrite(dir, HERA_V2);
+      await loaded.host.command("smart-router", "reload");
+      assert.deepEqual(rememberedRoster(processSlot()), { directories: [WORK_DIRECTORY], defaultScope: null });
+      writeFileSync(join(dir, "smart-router.json"), "{ nope");
+      await loaded.host.command("smart-router", "reload");
+      assert.equal(await scopeAnswer(loaded), "pi-smart-router: scope personal (default).");
+    });
+
+    test("a memory an earlier version kept, with no default, gives an unknown default: unreadable, held in work, never personal", async (t) => {
+      const dir = agentDir(t, { roster: "{ nope" });
+      // What an earlier load of the module kept: its directories alone.
+      processSlot().lastRoster = { directories: [WORK_DIRECTORY] };
+      const outside = await begin({ dir, id: "outside", file: "/sessions/outside.jsonl", cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) });
+      assert.deepEqual(scopeOf(outside), DEFAULT, "nothing in the session says a scope");
+      assert.equal(await scopeAnswer(outside), unknownAnswer(OLD_MEMORY));
+      // The memory's directories still count, and so does an entry.
+      const under = await begin({ dir, id: "under", cwd: APP, runtime: new FakeRuntime(workCatalog()) });
+      assert.deepEqual(scopeEntries(under), [{ v: 1, scope: "work", by: "directory", at: NOW }]);
+      const personal = await begin({ dir, id: "personal", cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()), setup: recorded("personal") });
+      assert.equal(await scopeAnswer(personal), "pi-smart-router: scope personal (entry).");
+      // A request is refused for the roster, in the words for a work session.
+      assert.throws(() => outside.runtime.route("auto", request("direct")), (error: unknown) => error instanceof Error && error.message.endsWith("Fix it and send the prompt again, or choose a work Codex model with /model."));
+      // Leaving the unknown default for personal asks, as from work scope.
+      await outside.host.command("smart-router", "scope personal");
+      assert.equal(outside.session.dialogs.length, 1);
+      assert.deepEqual(scopeEntries(outside), []);
+      // A fork carries nothing for it, so nothing is recorded because of the default.
+      await outside.host.emit("session_shutdown", { reason: "fork", targetSessionFile: "/sessions/outside-fork.jsonl" });
+      assert.equal(processSlot().scopeHandoffs?.size ?? 0, 0);
+    });
+
+    test("with no valid roster ever loaded in the process the default is unknown; once a roster without the key loads, it is personal again", async (t) => {
+      for (const roster of ["{ nope", null] as const) {
+        resetSlot();
+        const dir = agentDir(t, { roster });
+        const loaded = await begin({ dir, id: String(roster), cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) });
+        assert.equal(rememberedRoster(processSlot()), undefined, String(roster));
+        assert.equal(await scopeAnswer(loaded), unknownAnswer(NO_ROSTER), String(roster));
+        // Nothing can route while the roster fails to load, whatever the scope: every model refuses.
+        for (const id of ["auto", "personal", "work", "local"] as const) {
+          assert.throws(() => loaded.runtime.route(id, request("direct")), /Nothing was sent\./, `${String(roster)}: ${id}`);
+        }
+        assert.throws(() => loaded.runtime.route("auto", request("direct")), (error: unknown) => error instanceof Error && error.message.endsWith("or choose a work Codex model with /model."), "worded for a work session");
+        await loaded.host.command("smart-router", "scope personal");
+        assert.equal(loaded.session.dialogs.length, 1, `${String(roster)}: moving to personal asks`);
+        loaded.session.hasUI = false;
+        await loaded.host.command("smart-router", "scope personal");
+        assert.equal(messages(loaded).at(-1), "pi-smart-router: /smart-router scope personal asks for confirmation, and this mode has no dialogs, so the session stays in work scope.");
+        assert.deepEqual(scopeEntries(loaded), [], `${String(roster)}: nothing recorded`);
+        // The roster is fixed, without the key: the session is personal by the built-in default.
+        rewrite(dir, HERA_V2);
+        await loaded.host.emit("input", { text: "fix the build", source: "interactive" });
+        assert.equal(await scopeAnswer(loaded), "pi-smart-router: scope personal (default).", String(roster));
+        assert.equal(routed(loaded.runtime.route("auto", request("direct"))), DEEPSEEK, String(roster));
+      }
+    });
   });
 });

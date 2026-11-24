@@ -1091,3 +1091,34 @@ describe("the adaptiveReasoning section: upstream's adaptive_reasoning (src/doma
     assert.ok(!parsed.ok && parsed.error.startsWith("adaptiveReasoning: unknown key"), "adaptiveReasoning in version 1");
   });
 });
+
+describe("defaultScope: the host's default scope", () => {
+  test("absent, the roster has none, and sessions it would decide are personal as before", () => {
+    assert.equal("defaultScope" in valid(HERA), false);
+    assert.equal("defaultScope" in valid(WORK), false, "a work-only roster without it stays valid");
+  });
+
+  test("is personal or work, and only a scope the roster has a section for", () => {
+    assert.equal(valid(edited((r) => (r.defaultScope = "work"))).defaultScope, "work");
+    assert.equal(valid(edited((r) => (r.defaultScope = "personal"))).defaultScope, "personal");
+    assert.equal(valid(edited((r) => (r.defaultScope = "work"), WORK)).defaultScope, "work");
+    for (const bad of ["Work", "team", "", null, 1, ["work"], { scope: "work" }]) {
+      invalid(edited((r) => (r.defaultScope = bad)), 'defaultScope: must be "personal" or "work"');
+    }
+    invalid(edited((r) => (r.defaultScope = "personal"), WORK), "defaultScope: the roster has no personal scope, so every session it puts there would be refused");
+    const personalOnly = edited((r) => {
+      delete r.scopes.work;
+      r.roles = r.roles.filter((role: { name: string }) => !role.name.startsWith("work-"));
+      delete r.accounts["openai-codex-3"];
+      r.defaultScope = "work";
+    });
+    invalid(personalOnly, "defaultScope: the roster has no work scope, so every session it puts there would be refused");
+  });
+
+  test("version 1, which serves personal scope alone, refuses it as an unknown key, as it does the other version 2 keys", () => {
+    for (const scope of ["personal", "work"]) {
+      const parsed = parseRoster(JSON.stringify({ ...JSON.parse(fixture("roster-hera.json")), defaultScope: scope }));
+      assert.ok(!parsed.ok && parsed.error.startsWith("defaultScope: unknown key"), `${scope} in version 1`);
+    }
+  });
+});
