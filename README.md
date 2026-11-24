@@ -8,11 +8,11 @@ rewrite for the virtual models of Pi 1.5: four models, `smart-router/auto`, `sma
 `smart-router/work` and `smart-router/local`, that send each request to a physical model chosen
 from a roster you keep on each host.
 
-Everything from [Upstream's README](#upstreams-readme) on is upstream's README at v1.4.0
-(`54bee53d`), unchanged. It describes upstream's package, and most of it does not describe this
+Everything from [Upstream's README](#upstreams-readme) on is upstream's README at v1.5.0
+(`f22cbe9e`), unchanged. It describes upstream's package, and most of it does not describe this
 code; this section says what differs. [docs/manual.md](docs/manual.md) is the fork's manual, and
 [CHANGELOG.md](CHANGELOG.md) records its releases and what the port removed and why. A version of
-the fork is `<upstream base>-jw.<n>`, as in `1.4.0-jw.5`.
+the fork is `<upstream base>-jw.<n>`, as in `1.5.0-jw.1`.
 
 ### What the fork keeps of upstream
 
@@ -29,30 +29,35 @@ the fork is `<upstream base>-jw.<n>`, as in `1.4.0-jw.5`.
   `thinking` is never changed.
 - **The test for a stuck run**, from upstream's loop escalation: a run whose last three tool calls
   in a row failed moves up one level, once.
+- **From v1.5.0**, each fitted to the four levels ([docs/upstream-1.5.0.md](docs/upstream-1.5.0.md)
+  says how, and what was left out): the repetitive-output test; failover within a run, which
+  needs a Pi with the `recover` boundary; the pass-over of a model whose requests keep failing;
+  the deep-session floor on each request; the re-check after a move to another provider; and the
+  six typed questions, off unless the roster's `classifier.typedJudgment` asks for them.
 
 The files in `src/triage/` are upstream's, taken at v1.4.0 and changed only in their import
 specifiers (`tier-features.ts` also carries a header and reads its types from `types.ts`). The
-rest of upstream's code is replaced or removed. The fork is MIT, as upstream is, and adds the
-[LICENSE](LICENSE) file that upstream does not ship: Copyright (c) 2026 beettlle and contributors,
+other retained policies are ports, not upstream's pipeline. The fork is MIT, as upstream is, and adds
+[LICENSE](LICENSE), which upstream does not ship: Copyright (c) 2026 beettlle and contributors,
 and Copyright (c) 2026 John Wiegley for the port.
 
 ### What differs
 
 | | Upstream | This fork |
 |---|---|---|
-| How it joins Pi | A provider `smart-router` with one model, `auto`, and its own `streamSimple`, which runs the pipeline and delegates to another provider's streaming API | Two virtual models, `smart-router/auto` and `smart-router/local`, registered with Pi's `registerVirtualModel`. The router names a physical model, and Pi prepares and sends the request: credentials, retries, compaction and hooks are Pi's own |
-| What it routes among | A fleet taken from Pi's enabled or authenticated models, in three tiers | A roster: one JSON file per host, `<agentDir>/smart-router.json`, with named roles of exact `provider/id` models. It is validated strictly, and a missing or invalid roster makes both models refuse |
+| How it joins Pi | A provider `smart-router` with one model, `auto`, and its own `streamSimple`, which runs the pipeline and delegates to another provider's streaming API | Four virtual models, `smart-router/auto`, `smart-router/personal`, `smart-router/work` and `smart-router/local`, registered with Pi's `registerVirtualModel`. The router names a physical model, and Pi prepares and sends the request: credentials, retries, compaction and hooks are Pi's own |
+| What it routes among | A fleet taken from Pi's enabled or authenticated models, in three tiers | A roster: one JSON file per host, `<agentDir>/smart-router.json`, with named roles of exact `provider/id` models. It is validated strictly, and a missing or invalid roster makes every model refuse |
 | How a model is chosen | A pipeline of 12 stages with early exit, for each request | One decision for each run, when its prompt arrives. A version 2 roster has four levels, LOW, MEDIUM, HIGH and SUPER; a trailing tag such as `#high` sets the level, and otherwise the prompt's demand does. Among the models good enough for that level, the run goes to the one the coming work costs least on, counting each model's prompt cache. A version 1 roster routes by the keyword classifier alone |
-| The classifier model | Typed judgment: opt-in, six questions to a Jev-compatible judge, recorded and never deciding | Jev, when the roster names it: asked through Pi's model registry once per prompt, after redaction. Its answer is one term of the demand, weighed with the heuristics |
+| The classifier model | Typed judgment: opt-in, six questions to a Jev-compatible judge, feeding the tier hint, the turn type and the local gate | Jev, when the roster names it: asked through Pi's model registry once per prompt, after redaction. Its answer is one term of the demand, weighed with the heuristics |
 | Staying on a model | A session pin, with SAAR and cache break-even rules | No pin and no hold by time. A session leaves its model when a prompt needs a stronger one, or when another adequate model is cheaper by more than a margin |
 | When a model cannot take a request | A safe cloud default: the first healthy economical-cloud model | The next model of the role, then the fallback chain the roster declares, then a level up. Otherwise the request is refused with "Nothing was sent". Nothing falls back to a cloud model the roster does not name |
 | Local models | A hardware probe, and probes of LM Studio and Ollama | The roster's local section. `smart-router/local` routes only to the local role, and never to a cloud model |
 | Accounts | No account binding and no scopes | Every subscription account a role uses is bound in the roster. A session is in personal or work scope, and `smart-router/auto` sends a work session only to the work account |
-| A model picked with `/model` | Recorded as an override, which breaks the session pin | Stays selected and is sent as it is. The router routes only while the selection is one of its own two models |
+| A model picked with `/model` | Recorded as an override, which breaks the session pin | Stays selected and is sent as it is. The router routes only while the selection is one of its own models |
 | Configuration | Environment variables and configuration files | The roster and the prompt files it names, and one environment variable, `PI_SMART_ROUTER_SCOPE` |
 | State and files | A SQLite database of telemetry, prices and session data, and `.pi-smart-router/` under the working directory | No file of its own. Its records are session entries that Pi writes, and they hold no prompt text |
 | Network | Downloads its embedding model and fetches prices | No connection of its own. The one request off the machine is Jev's, which Pi makes |
-| Commands | `status`, `history`, `stats`, `mode`, `pricing`, `export`, `feedback`, `unpin`, `plan`, `doctor` | `status`, `history`, `scope`, `was`, `check`, `reload` |
+| Commands | `status`, `history`, `stats`, `mode`, `pricing`, `export`, `feedback`, `unpin`, `plan`, `doctor` | `status`, `history`, `scope`, `prefer`, `tiers`, `was`, `check`, `reload` |
 | The package | On npm, with a build, native dependencies and a library API | Not on npm. TypeScript source that Pi loads by path, with no runtime dependency, no native code, no build and no library API |
 
 Removed with these: the HyDRA embedding matcher and its ONNX models, the price broker and virtual
@@ -63,7 +68,7 @@ and agent tooling. Upstream's sections on them, which is most of its README, do 
 ### Installing the fork
 
 It needs jwiegley/pi 1.5.0 or later, whose bounded session reads let it look at a session without
-loading its whole history. Upstream Pi 1.5.0 lacks them, so there both of its models refuse every
+loading its whole history. Upstream Pi 1.5.0 lacks them, so there every one of its models refuses every
 request. There is nothing to install: point Pi at a checkout,
 
 ```sh
@@ -161,14 +166,14 @@ request → hardware probe → loop escalation → turn envelope → typed judgm
 
 The pipeline runs **12 stages sequentially with early exit** — the moment any stage reaches a routing decision, subsequent stages are skipped. Every decision includes the stage name, reason code, candidates considered, estimated cost, and routing latency for full observability.
 
-\* `typed_judgment` is an additional **opt-in, non-deciding** stage (default off) that runs between turn envelope and the context-fit gate when enabled — it records judge answers for later consumers and never decides. See [Typed judgment (opt-in)](#typed-judgment-opt-in-183).
+\* `typed_judgment` is an additional **opt-in, non-deciding** stage (default off) that runs between turn envelope and the context-fit gate when enabled — it records judge answers and never selects a model itself. Its [#188](https://github.com/beettlle/pi-smart-router/issues/188) consumers can use those answers for planning classification, tier hints, and local safety gates. See [Typed judgment (opt-in)](#typed-judgment-opt-in-183).
 
 | Stage | Budget | What it does |
 |-------|--------|--------------|
 | Hardware Probe | — | Checks platform/RAM/battery to gate local inference |
 | Loop Escalation | — | Detects repeated identical tool failures; escalates session to frontier |
 | Turn Envelope | <2ms | Classifies turn type: tool_result, planning, subagent, main_loop |
-| Typed Judgment (opt-in) | ~385–990ms per judged user turn when enabled; 0 otherwise | **Non-deciding** (default off): asks a Jev-compatible judge six questions about the turn and records the answers — never decides |
+| Typed Judgment (opt-in) | ~385–990ms per judged user turn when enabled; 0 otherwise | **Non-deciding** (default off): asks a Jev-compatible judge six questions and records the answers; downstream #188 consumers may use them for planning, tier hints, and local gates |
 | Context-Fit Gate | — | Filters fleet to models whose context window fits estimated input tokens |
 | Low-Intensity Gate | — | Structural tier hint, cluster match, and P(success) expected-cost scoring |
 | Session Pin | <1ms | Returns pinned model if session has one; breaks pin on compaction or overflow |
@@ -706,18 +711,30 @@ Floor/ceiling bind only what the policy itself derives. An explicit operator `/t
 
 ### Typed judgment (opt-in) (#183)
 
-Typed judgment is an **opt-in, non-deciding** pipeline stage (`typed_judgment`, directly after `turn_envelope` and before `context_fit`) that asks a Jev-compatible “systemone” semantic judge six structured questions about each user-prompt turn and records the normalized answers on the routing context. **In v1.3.0 the answers are recorded only — they do not change routing decisions.** Downstream consumers (tier hints, capability gating, adaptive reasoning) land in later trains ([#188](https://github.com/beettlle/pi-smart-router/issues/188)–[#190](https://github.com/beettlle/pi-smart-router/issues/190)); do not expect any routing behavior change from enabling the stage today.
+Typed judgment is an **opt-in, non-deciding** pipeline stage (`typed_judgment`, directly after `turn_envelope` and before `context_fit`) that asks a Jev-compatible “systemone” semantic judge six structured questions about each user-prompt turn and records the normalized answers on the routing context. The stage itself never selects a model. With [#188](https://github.com/beettlle/pi-smart-router/issues/188) landed, enabling the stage allows downstream `turn_envelope`, `low_intensity`, and `local_zero` consumers to use those answers as described below. The default remains **off**, and a missing judgment preserves the deterministic / regex fallback behavior.
 
-The six questions (stable ids):
+The six questions (stable ids), their normalized forms, and their consumers:
 
-| Question id | Kind | What it asks |
-|-------------|------|--------------|
-| `task_kind` | choice (10 anchored options) | The single kind of work the user message asks for: `plan`, `implement`, `debug`, `refactor`, `review`, `research`, `explain`, `operate`, `write`, `chat` |
-| `capability_deserved` | score 0–3 | Setting price aside, how much model capability the request deserves |
-| `needs_deep_reasoning` | noul (yes/no) | Whether the turn needs extended multi-step reasoning rather than recall, lookup, or a short direct edit |
-| `code_gen` | score 0–3 | How much code or configuration must be written or modified |
-| `tool_use` | score 0–3 | How much tool execution (shell, file, search, agentic calls) the turn requires |
-| `destructive` | noul (yes/no) | Whether satisfying the request could destroy, overwrite, or irreversibly modify data, state, or history |
+| Question id | Kind | What it asks | Normalized signal and consumer |
+|-------------|------|--------------|--------------------------------|
+| `task_kind` | choice (10 anchored options) | The single kind of work the user message asks for: `plan`, `implement`, `debug`, `refactor`, `review`, `research`, `explain`, `operate`, `write`, `chat` | `task_kind` plus `task_kind_confidence`; consumed by `turn_envelope` for planning classification (#188) |
+| `capability_deserved` | score 0–3 | Setting price aside, how much model capability the request deserves | `0`, `1/3`, `2/3`, or `1`; consumed by `low_intensity` for tier hints and capability filtering (#188) |
+| `needs_deep_reasoning` | noul (yes/no) | Whether the turn needs extended multi-step reasoning rather than recall, lookup, or a short direct edit | `deep_reasoning_p` (0–1); recorded only — the adaptive-reasoning consumer remains [#190](https://github.com/beettlle/pi-smart-router/issues/190) |
+| `code_gen` | score 0–3 | How much code or configuration must be written or modified | `0`, `1/3`, `2/3`, or `1`; recorded only — the HyDRA requirement-source consumer remains [#189](https://github.com/beettlle/pi-smart-router/issues/189) |
+| `tool_use` | score 0–3 | How much tool execution (shell, file, search, agentic calls) the turn requires | `0`, `1/3`, `2/3`, or `1`; consumed by the `local_zero` capability gate (#188) |
+| `destructive` | noul (yes/no) | Whether satisfying the request could destroy, overwrite, or irreversibly modify data, state, or history | `destructive_p` (0–1); consumed by the `local_zero` safety gate (#188) |
+
+**Landed #188 consumer behavior:**
+
+| Consumer | Judgment field | Behavior and attribution |
+|----------|----------------|--------------------------|
+| `turn_envelope` | `task_kind` | At confidence ≥ `typed_judgment.min_confidence`, `plan`, `debug`, or `review` selects planning classification. A confident non-planning answer can replace only regex-derived planning when the host did not explicitly set `turn_type`. A positive judgment-driven planning override uses reason code `typed_judgment_planning`. |
+| `low_intensity` | `capability_deserved` | Level 0 hints `zero-tier`, level 1 (`1/3`) hints `economical-cloud`, and levels 2–3 (`≥2/3`) hint `frontier-cloud`. Any non-zero level removes zero-tier and flash-class candidates when another healthy candidate remains. At confidence ≥ `min_confidence` the judgment may replace the prior hint in either direction; below the threshold it may only raise a tier. Session-depth and loop-escalation frontier floors still win, and context-fit constraints remain authoritative. Explain attribution uses `typed_judgment_tier_zero-tier`, `typed_judgment_tier_economical-cloud`, or `typed_judgment_tier_frontier-cloud`. |
+| `local_zero` | `destructive`, `tool_use` | `destructive_p ≥ 0.7` or judged `tool_use` above the effective local ceiling skips local dispatch with `typed_judgment_destructive` or `typed_judgment_tool_use_shortfall`. The ceiling is `min(local model tool_use capability, local_zero.max_tool_use_requirement)`. These safety gates may skip local dispatch even below `min_confidence`; a missing `tool_use` answer retains the legacy cue-count gate, and a null judgment retains prior behavior. |
+
+**Remaining Sprint 2 work:** [#189](https://github.com/beettlle/pi-smart-router/issues/189) (typed judgment as a HyDRA requirement source), [#190](https://github.com/beettlle/pi-smart-router/issues/190) (adaptive reasoning from `needs_deep_reasoning`), and [#191](https://github.com/beettlle/pi-smart-router/issues/191) (eval comparison and latency benchmark). Epic [#183](https://github.com/beettlle/pi-smart-router/issues/183) therefore remains open; enabling #188 does **not** change those consumers or flip any encoder, requirement-source, frugality, or reasoning default.
+
+**Observability:** explain and `LOG_ROUTING` expose the normalized signal in `features.typed_judgment` (including confidences, `skip_reason`, and `latency_ms`), tier attribution in `features.tier_hint_reason_code`, and local gate outcomes in `features.tier_selection.local_zero_skip_reasons`.
 
 **Default off.** `typed_judgment.enabled` defaults to `false` — existing installs make no judge call and pay zero added latency. When enabled, the stage runs only on user-prompt turns: `tool_result` turns, acknowledgement-only turns, and explicit `force_model_id` turns skip it, and any timeout or judge error **fails open** — routing proceeds exactly as if the stage were unwired. Skip/failure reason codes recorded on the routing context: `typed_judgment_disabled`, `typed_judgment_tool_result`, `typed_judgment_acknowledgement`, `typed_judgment_force_model`, `typed_judgment_timeout`, `typed_judgment_error` (plus `typed_judgment_remote_key_missing` when a remote endpoint has no API key available — see privacy note below).
 
@@ -739,7 +756,7 @@ The six questions (stable ids):
 | `samples` | `SMART_ROUTER_TYPED_JUDGMENT_SAMPLES` | `1` | Judge samples per question (OpenJev self-consistency extension; omitted for hosted Jev) |
 | `api_key_env` | `SMART_ROUTER_TYPED_JUDGMENT_API_KEY_ENV` | `TYPESAFE_API_KEY` | **Name** of the env var holding the API key — never the key itself |
 | `allow_remote` | `SMART_ROUTER_TYPED_JUDGMENT_ALLOW_REMOTE` | `false` | Permit non-loopback (hosted) endpoints; default false = fail closed to local judge only |
-| `min_confidence` | `SMART_ROUTER_TYPED_JUDGMENT_MIN_CONFIDENCE` | `0.6` | Minimum answer confidence for a judgment to influence routing (consumed by later trains; defined now to stabilize the config shape) |
+| `min_confidence` | `SMART_ROUTER_TYPED_JUDGMENT_MIN_CONFIDENCE` | `0.6` | Confidence threshold for `task_kind` planning overrides and `capability_deserved` tier replacement; below it, capability judgments may raise but never lower a tier. The `local_zero` safety gates still apply |
 
 Invalid env overrides (e.g. a remote endpoint without `allow_remote`) fail closed: the base config stays intact and disabled, and no judge call is made.
 

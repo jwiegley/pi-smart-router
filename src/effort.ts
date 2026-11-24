@@ -1,7 +1,7 @@
 // Thinking effort by turn type: upstream's "adaptive reasoning", as John ruled on 2026-11-18,
 // "Exactly as upstream: effort follows each request's turn type."
 //
-// The policy is upstream's src/domain/delegation/adaptive-reasoning.ts at v1.4.0 (54bee53d), and
+// The policy is upstream's src/domain/delegation/adaptive-reasoning.ts at v1.4.0 (54bee53d), unchanged at v1.5.0 (f22cbe9e), and
 // the turn type is its .pi/extensions/smart-router/routing-context.ts deriveTurnType, both ported
 // rule for rule. What upstream reads from its pipeline's decision is given here as two facts the
 // route knows: whether the request goes to the strongest level (upstream's frontier tier) and

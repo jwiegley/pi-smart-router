@@ -8,15 +8,14 @@ This is the manual of the fork. The repository's [README](../README.md) is upstr
 section on how the fork differs.
 
 This is John Wiegley's fork of [beettlle/pi-smart-router](https://github.com/beettlle/pi-smart-router),
-rewritten for the virtual models of Pi 1.5. Of upstream's code it keeps the deterministic prompt
-classifier and, since 1.4.0-jw.5, the low-intensity scoring that weighs a prompt's heuristics, and
-nothing else; [CHANGELOG.md](../CHANGELOG.md) lists what was removed and why. The port started from
-upstream v1.3.0 (`f31b2304`). Since version `1.4.0-jw.4` it has upstream v1.4.0 (`54bee53d`) in its
-history through a merge that keeps the port's tree, as an earlier one recorded upstream main at
-`58e87b59`: everything upstream changed between v1.3.0 and v1.4.0 is in files the port had removed
-or replaced, so the merge brought none of it into this code. Version `1.4.0-jw.5` takes one of
-those files as it is at v1.4.0, the low-intensity scoring ([License](#license)). It is not
-published to npm.
+rewritten for the virtual models of Pi 1.5. It retains upstream's deterministic prompt classifier,
+low-intensity scoring and adaptive-reasoning policy, and carries what upstream v1.5.0 added, each
+part fitted to the four levels: [docs/upstream-1.5.0.md](upstream-1.5.0.md) says how.
+[CHANGELOG.md](../CHANGELOG.md) lists what was removed and why. The port started from upstream
+v1.3.0 (`f31b2304`). Version `1.5.0-jw.1` has upstream v1.5.0 (`f22cbe9e`) in its history through
+a merge that keeps the port's tree, as earlier ones recorded v1.4.0 (`54bee53d`): the files the
+port vendors or ports rule for rule did not change between the two releases, so the merge brought
+nothing into this code, and what v1.5.0 added is written here anew. It is not published to npm.
 
 ## What it does
 
@@ -92,7 +91,7 @@ disabled, passed over. It has no runtime dependency and no native code; Pi suppl
 
 It needs jwiegley/pi 1.5.0 or later, whose bounded session reads let it look at a session without
 loading its whole history. Upstream Pi 1.5.0 lacks those reads, so there the router fails closed:
-both of its models refuse every request for as long as it is loaded. Do not load it on upstream Pi.
+every one of its models refuses every request for as long as it is loaded. Do not load it on upstream Pi.
 
 ## Installing
 
@@ -131,7 +130,7 @@ The roster is one JSON file per host, at `<agentDir>/smart-router.json`, which i
   A symlink is followed to its target, which must pass the same checks.
 - **Validation is strict.** Unknown keys are rejected at every level, and errors name their place,
   as in `roles[3].models[0]: "openai-codex-3/gpt-6.1-sol" is excluded by openai-codex-3/*`.
-- **Failure is closed.** A missing, invalid or unsafe roster makes both models refuse until it is
+- **Failure is closed.** A missing, invalid or unsafe roster makes every model refuse until it is
   fixed, with one notice per session start. There is no last-known-good copy, so a typo cannot keep
   routing to a model you just removed. Only the scope keeps something of the last valid roster: its
   work directories, so that a broken edit cannot move a work session to personal scope.
@@ -538,7 +537,7 @@ Three things to know:
 | `roles[].disabled` | no | Set to `true` with an empty `models` array to leave a role explicitly disabled, for example while no work account is verified. An empty role without this flag remains invalid. |
 | `scopes.work.directories` | no | Absolute paths whose sessions are in work scope ([Scope](#scope-personal-or-work)), written plainly: no trailing `/`, no empty, `.` or `..` segment, and not `/` itself. |
 | `accounts.<provider>.scope` | no | `"personal"`, the default, or `"work"`. |
-| `classifier` | no | Jev's settings; without them, Jev is never asked. `model`, an exact ref, default `openrouter/typesafe/jev-1.14`; `timeoutMs`, 100 to 1000, default 1000; and `context`: `messages`, 0 to 20, default 6; `messageChars`, 200 to 8000, default 1500; `totalChars`, 1000 to 32000, default 12000. `closeCall`, which earlier versions used, is still accepted from 0 to 0.5 and ignored, and the checker says so: `demand.closeCall` decides a close call. The model names a Jev version, so that tuned demand settings keep their meaning; moving to a newer Jev is a roster edit. `instructions`, the question Jev is asked, as a text of at most 4000 characters, or `instructionsFile`, the name of a prompt file that holds it; not both, and with neither the built-in question is asked ([Jev's prompts](#jevs-prompts)). |
+| `classifier` | no | Jev's settings; without them, Jev is never asked. `model`, an exact ref, default `openrouter/typesafe/jev-1.14`; `timeoutMs`, 100 to 1000, default 1000; and `context`: `messages`, 0 to 20, default 6; `messageChars`, 200 to 8000, default 1500; `totalChars`, 1000 to 32000, default 12000. `closeCall`, which earlier versions used, is still accepted from 0 to 0.5 and ignored, and the checker says so: `demand.closeCall` decides a close call. The model names a Jev version, so that tuned demand settings keep their meaning; moving to a newer Jev is a roster edit. `instructions`, the question Jev is asked, as a text of at most 4000 characters, or `instructionsFile`, the name of a prompt file that holds it; not both, and with neither the built-in question is asked ([Jev's prompts](#jevs-prompts)). `typedJudgment`, `true` or `false`, default `false`: also ask upstream's six typed questions ([The level a prompt needs](#the-level-a-prompt-needs)). |
 | `demand` | no | How a prompt's demand is weighed ([The level a prompt needs](#the-level-a-prompt-needs)). `jevWeight` and `heuristicsWeight`, each 0 to 100, defaults 4 and 1, not both 0; `minConfidence`, 0 to 1, default 0.6; `closeCall`, 0 to 0.5, default 0.1; `cuts`, three numbers that ascend, each above 0 and below 3, default `[0.75, 1.5, 2.25]`; `deepSessionFloor`, `low`, `medium`, `high` or `super`, default `medium`; and `weights`, any of the twelve heuristic signals, each 0 to 100 and not all 0, by default upstream's weights with `requirement_low` and `cluster_signal` at 0. Every field is optional, and a field left out keeps its default. |
 | `adaptiveReasoning` | no | The thinking effort each request is sent ([Thinking effort](#thinking-effort)), upstream's `adaptive_reasoning`: `enabled`, `true` or `false`, default `true`; `minLevel`, the floor, and `maxLevel`, the ceiling, each one of `minimal`, `low`, `medium`, `high`, `xhigh` and `max`, with no default, the floor never above the ceiling. A floor above the selected `/thinking` level raises it; a ceiling never lowers it. A version 1 roster has none, and the defaults. |
 | `switching` | no | When a session moves to another model ([Choosing the model](#choosing-the-model)). `margin`, 0 to 0.9, default 0.15; `horizonCap`, a whole number of runs from 1 to 20, default 5; and `cacheSurvival`, 1 to 32 pairs of `[seconds, chance]`, the seconds rising and the chances from 1 to 0 never rising, by default the table in [Choosing the model](#choosing-the-model). Every field is optional. |
@@ -711,7 +710,7 @@ the first error with its place, such as
 - **It reads the roster, not the host.** Whether Pi's catalog on a host lists a model, and whether
   it has credentials, is for `/smart-router status` there: a model Pi does not list is passed over
   at run time as `not-in-catalog`.
-- **An invalid roster still makes both models refuse everything.** That is deliberate: a last
+- **An invalid roster still makes every model refuse everything.** That is deliberate: a last
   valid copy kept in use would keep sending to a model or an account the edit had just removed.
   The check is the remedy: run it before relying on an edit.
 
@@ -821,7 +820,7 @@ These are version 1's rules. Version 2 keeps them, comparing levels rather than 
     (`connect ETIMEDOUT`, `UND_ERR_CONNECT_TIMEOUT`, "connect timeout"); the SDK's "connection
     error", "network error" or "fetch failed", "socket hang up", "other side closed", a closed
     socket; a TLS handshake or certificate verification that failed (unable to verify, self-signed,
-    expired, name mismatch); or 502, "bad gateway".
+    expired, name mismatch); or 502 at the start of the error, or "bad gateway".
   - *Not unreachable,* because the server may be there and slow, loading or busy: a request or a
     read that timed out (a bare `ETIMEDOUT`, "timed out", 504, "gateway time-out"), 503 and
     "service unavailable", 500, a stream cut off, a rate limit, "overloaded", and a text that
@@ -841,6 +840,29 @@ These are version 1's rules. Version 2 keeps them, comparing levels rather than 
 - **Cooldowns and holds are per session.** Each router instance keeps its own, in memory: another
   session finds an exhausted account or a dead server out for itself, with one failed request,
   and a restarted session starts with none.
+- **Repetitive output.** Upstream v1.5.0's detector treats a length stop with no tool call as
+  degenerate when at least 24 five-grams in its last 8,192 characters are at least 65% repeated,
+  after normalizing numbers. The router excludes such a response from its last-answer and cost
+  records, including on resume, and warns when it was the routed run's own response. Pi keeps and
+  shows the response.
+- **Failover within a run.** On a Pi with the `recover` boundary (jwiegley/pi; npm's Pi 1.5.2 has
+  none, and there this does nothing), a request that failed can go on with another model in the
+  same run: after a repetitive length stop, after an error with an explicit 4xx or 5xx status that
+  is the model's own, and after a usage limit or a refused credential, whose model or account is
+  cooled first. The alternate is the role's next model, then the scope's chain, and a run that
+  moves onto the chain says so. A content-filter refusal never moves, nor does an error about the
+  conversation's size, and `smart-router/local` stays local. Pi allows three alternates in a run,
+  one after a repetitive stop, and stops when two models give the same 4xx: that is the request's
+  fault, and the router cools neither for it. Both responses stay in the session and on screen;
+  only the next request's context leaves the failed one out.
+- **A model whose requests keep failing** with errors of its own (an explicit 4xx or 5xx, not a
+  limit, not 429) is passed over for 30 seconds after the third in a row, upstream's numbers. Like
+  the hold for an unreachable server it is a preference: with nothing else to take a request the
+  model is tried anyway, an answer from it starts the count again, and `/smart-router status` lists
+  it as `Failing`.
+- **After a move to another provider** on a retry or a failover, the first tool result's request
+  chooses the run's model again, once, as a prompt for the run's level would. While the cause of
+  the move holds, that is the model the run is on.
 - **Retries.** When Pi retries a failed request, a limit-kind failure moves to the role's next model
   and then its fallback, skipping every model that failed with a limit earlier in the same run, so
   a run tries each candidate once; a local server that could not be reached gives way as above; any
@@ -855,7 +877,7 @@ These are version 1's rules. Version 2 keeps them, comparing levels rather than 
   type gives ([Thinking effort](#thinking-effort)), and Pi clamps that to what the routed model
   supports.
 - **Declared limits.** Pi and other extensions read a virtual model's context window and output
-  budget before the first response. At every session start the router registers both models again:
+  budget before the first response. At every session start the router registers its models again:
   auto with the smallest window and output budget among the first available model of each role it
   can reach (under version 2, every level's role and every fallback chain's role in both scopes,
   each resolved in its own scope),
@@ -940,6 +962,14 @@ is not asked at all and its outcome is the failure `error`.
   (0.1) under a cut takes the level above it, so 0.66 is MEDIUM. (The old `classifier.closeCall`,
   which compared Jev's two likeliest levels, is accepted and ignored: the expected value already
   carries that.)
+- **Typed judgment, when asked for.** With `classifier.typedJudgment: true`, the same request also
+  asks upstream v1.5.0's six typed questions. `capability_deserved`, whose scores 0 to 3 are LOW to
+  SUPER, replaces the level, up or down, at `demand.minConfidence` or above, and can only raise it
+  under that. `destructive` at 0.7 or above takes the risky floor below. `task_kind` at
+  `demand.minConfidence` or above makes a `plan`, `debug` or `review` prompt a planning one for
+  its demand; it never makes a planning prompt not one, and the thinking effort does not read it.
+  The other three are recorded only. A missing or
+  malformed answer changes nothing.
 - **Risky operations get at least HIGH**, whatever Jev says: force push, `git reset --hard`,
   `rm -rf`, `git rm`, unstage, "clean up the repo" or "repo cleanup", and "accidentally added",
   "mistakenly added" or "accidental add", with file names and paths blanked out first.
@@ -953,6 +983,9 @@ is not asked at all and its outcome is the failure `error`.
   tag says so. That section says when the size is not known. Before a session has planned a run, a
   run without a prompt stays on the model the session used last.
   `"deepSessionFloor": "low"` turns the floor off.
+  In such a session each request is checked too: a main-loop request that would go to a model of
+  the LOW level goes to MEDIUM's choice instead, when a model that is not a LOW one can take it.
+  Planning and tool-result turns, a retry, and a run whose level a tag set are left as they are.
 
 The record of a run says what decided its level: `tag`, `jev` (the blend with Jev's answer),
 `heuristics` (the heuristics alone) or `floor` (a risky operation or a deep session raised it).
@@ -1658,7 +1691,7 @@ A version 1 roster serves no work scope: `smart-router/auto` refuses a work sess
 on every pick refuses it again. A latched process whose roster has no work scope refuses every request
 on `smart-router/auto`, and `/smart-router status` says why. Normally `smart-router/local` serves both
 scopes and an unreadable scope, using only local roles. A personal-only restriction refuses work or
-unreadable scope on both models. In either scope a model picked by hand
+unreadable scope on every model. In either scope a model picked by hand
 is sent as it is, a work-account model in a personal session included
 ([A model picked by hand](#a-model-picked-by-hand)).
 
@@ -1847,8 +1880,8 @@ The entry's fields:
 - `demand`, for an untagged run: its `value` before the floors; `tier`, the level after every guard,
   floors included; Jev's term (`value` and `confidence`) when Jev answered, the heuristics' term
   (`value`, upstream's `score`, and the three signals that raise it most, each with its share), and
-  the `guards` that applied, in the order applied (`low-confidence`, `close-call`, `risky`,
-  `deep-session`);
+  the `guards` that applied, in the order applied (`low-confidence`, `close-call`, `typed-judgment`,
+  `risky` or `destructive`, `deep-session`);
 - `keyword`, the keyword classifier's signal and reason; its planning signal gives the heuristics
   their turn type;
 - `jev`: Jev's model, choice, probabilities, confidence and latency (`ms`), or its failure
@@ -1856,8 +1889,8 @@ The entry's fields:
   run whose answer had not come when it settled records `{ "late": true }`. The field can be absent,
   as it is without a classifier, and an extension's resend can repeat the answer its message got
   before;
-- `ref`, the model of the run's last assistant message that ended without an error, absent when no
-  model answered;
+- `ref`, the model of the run's last assistant message that ended without an error or degenerate
+  output, absent when no model answered;
 - `cost`, when the cost rule was asked: its `outcome`, `unknown` with the reason `why`, or
   `stayed`, `moved` or `only` (no current model among the candidates); the model `chosen` and the
   `current` one; the run's expected `requests`, the `horizon` and the chance `again` that the
@@ -2014,4 +2047,7 @@ John Wiegley for the port. The triage engine, the entropy check and the low-inte
 (`tier-features.ts`) in `src/triage/` are upstream's, taken at commit
 `54bee53d908a81260a34b94cbe124bfd61f57df7` (v1.4.0) and changed only in their import specifiers
 (`tier-features.ts` also carries a header and reads its types from `types.ts`).
-`scripts/vendor-drift.mjs` compares them with an upstream clone.
+`scripts/vendor-drift.mjs` compares them with an upstream clone; upstream v1.5.0 (`f22cbe9e`) left
+all three as they were. The repetitive-output test in `src/output-quality.ts` and the typed
+questions in `src/jev.ts` follow upstream's `src/domain/delegation/degenerate-output.ts` and
+`src/domain/judgment/questions.ts` at `f22cbe9e`.

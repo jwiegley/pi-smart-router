@@ -1,7 +1,7 @@
 // A stuck run: its last three tool calls in a row failed, whatever the tool and whatever the text.
 // Pure: it reads a request's messages and nothing else, and keeps nothing of them.
 //
-// This is upstream's test below its top tier (`src/domain/pinning/loop-escalation.ts`, v1.4.0),
+// This is upstream's test below its top tier (`src/domain/pinning/loop-escalation.ts`, v1.4.0, unchanged at v1.5.0),
 // where consecutive tool failures of any signature count toward its threshold (John, 2026-11-18).
 // Upstream's test of identical failure text applies only on its top tier, where it moves to another
 // top-tier model; here a run on SUPER has no level above and never moves, so that test has no

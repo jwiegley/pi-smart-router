@@ -1,6 +1,6 @@
 // Thinking effort by turn type (src/effort.ts): upstream's adaptive reasoning, as John ruled on
 // 2026-11-18, "Exactly as upstream: effort follows each request's turn type". Each expectation
-// names the line of upstream's v1.4.0 source it comes from: AR is
+// names the line of upstream's v1.4.0 source, unchanged at v1.5.0, it comes from: AR is
 // src/domain/delegation/adaptive-reasoning.ts, RC is .pi/extensions/smart-router/routing-context.ts.
 import assert from "node:assert/strict";
 import test, { describe } from "node:test";

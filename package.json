@@ -1,6 +1,6 @@
 {
   "name": "pi-smart-router",
-  "version": "1.4.0-jw.6",
+  "version": "1.5.0-jw.1",
   "description": "Pi virtual models for automatic, local, personal, and work routing from a per-host roster",
   "private": true,
   "license": "MIT",

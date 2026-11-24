@@ -36,7 +36,7 @@ const reviewedInstallScripts = new Set(["node_modules/@google/genai@2.21.0", "no
 
 test("package.json satisfies mkSourcePiExtension's assertions", () => {
   assert.equal(manifest.name, "pi-smart-router");
-  assert.equal(manifest.version, "1.4.0-jw.6");
+  assert.equal(manifest.version, "1.5.0-jw.1");
   assert.equal(manifest.type, "module");
   assert.equal(manifest.license, "MIT");
   assert.deepEqual(manifest.pi, { extensions: ["./index.ts"] });

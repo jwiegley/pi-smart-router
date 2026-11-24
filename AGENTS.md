@@ -44,6 +44,17 @@ beettlle/pi-smart-router to the virtual models of Pi 1.5. `CLAUDE.md` is a link 
 - A prompt file is guidance for Jev and nothing else reads it. The request's shape, the four level
   names, what counts as an answer and the scope are fixed in code: no roster text or
   prompt file may reach them (`test/prompts.test.ts`, "a hostile prompt").
+- The typed questions are upstream's, at the release the fork has merged, and are fixed in code
+  too: `src/jev.ts` holds them and `test/jev.test.ts` holds their text to
+  `test/fixtures/upstream-typed-questions.json`. They are asked only when the roster's
+  `classifier.typedJudgment` is `true`, in the one request to Jev, never in a second. Change their
+  text only to follow upstream. A missing or malformed typed answer changes nothing.
+- Pi owns recovery. The models' `recover` callback only offers a physical alternate
+  (`src/recovery.ts`): Pi decides whether to use it, omits the failed attempt from the next
+  request's context and bounds the attempts. The router never rewrites a response to make Pi
+  retry it, never moves content a model refused, and checks scope, accounts and the local policy
+  on every offer as on every pick. Pi asks twice, to offer and to confirm, so an offer changes no
+  state that a second, identical call would not leave the same.
 - `src/check-cli.ts` is the standalone roster checker, not runtime code: `index.ts` never imports
   it. It may take a path relative to the working directory and write to standard output. It and
   everything it imports stay free of Pi's packages (`test/check.test.ts` walks its imports), so
@@ -54,13 +65,15 @@ beettlle/pi-smart-router to the virtual models of Pi 1.5. `CLAUDE.md` is a link 
   John's sessions, which are under Pi's agent directory, needs his word.
 - The thinking effort of every routed request is upstream's adaptive reasoning, as John ruled on
   2026-11-18 ("Exactly as upstream: effort follows each request's turn type"): `src/effort.ts`
-  ports upstream v1.4.0's table and merge rule by rule, and `test/effort.test.ts` cites the upstream
-  line each expectation comes from. Change it only to follow upstream, never to invent a rule of
+  ports upstream's table and merge rule by rule (`adaptive-reasoning.ts`, the same at v1.4.0 and
+  v1.5.0), and `test/effort.test.ts` cites the upstream line each expectation comes from. A typed
+  judgment never changes it: upstream's effort reads its host's turn type. Change it only to follow upstream, never to invent a rule of
   the fork's own. The route and the cost choice both take the effort from `effortFor`
   (`src/decide.ts`), so the effort a request is sent at is the one its price assumed; a change of
   effort costs that model's whole prompt cache. A role's fixed `thinking` is never changed, and the
   roster's `adaptiveReasoning` section holds upstream's off switch, floor and ceiling.
-- `README.md` is upstream's README at the upstream release the fork has merged, byte for byte, plus
+- `README.md` is upstream's README at the upstream release the fork has merged (v1.5.0,
+  `f22cbe9e`, since `1.5.0-jw.1`), byte for byte, plus
   one section, "This fork", that says how the fork differs and ends at the heading "Upstream's
   README", as John asked on 2026-11-19. Keep that section short, and write nothing else into the
   README. The fork's documentation is `docs/manual.md`, whose rosters and redaction tables the

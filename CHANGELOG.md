@@ -7,6 +7,42 @@ fork's releases on that base. Releases are signed tags; nothing is published to 
 
 ## [Unreleased]
 
+## [1.5.0-jw.1] - 2026-11-23
+
+The fork's base is now upstream v1.5.0 (`f22cbe9e`), merged into its history with the port's tree
+kept. What v1.5.0 added is fitted to the four levels; [docs/upstream-1.5.0.md](docs/upstream-1.5.0.md)
+says how, and which differences remain. The README's upstream part is upstream's at v1.5.0.
+
+### Added
+
+- **Failover within a run**, on a Pi with the virtual-model `recover` boundary (jwiegley/pi; npm's
+  Pi 1.5.2 has none, and there nothing changes). A request that ended in a repetitive length stop,
+  in an error with an explicit 4xx or 5xx status that is the model's own, or in a usage limit or a
+  refused credential goes on with the role's next model, then the scope's fallback chain. A
+  content-filter refusal never moves, `smart-router/local` stays local, and a work session never
+  reaches the personal chain. A usage limit that Pi does not retry used to end the run with a
+  notice to send it again; it now does so only when no alternate answers.
+- **Repetitive output** is detected by upstream's test and is not counted as an answer or in the
+  cost ledger, on resume either.
+- **A model whose requests keep failing** with errors of its own is passed over for 30 seconds
+  after the third in a row. It is a preference like the hold for an unreachable server, never a
+  refusal, and `/smart-router status` lists it as `Failing`.
+- **The deep-session floor on each request.** In a session over 100,000 tokens or 1,000 entries, a
+  main-loop request that would go to a model of the LOW level goes to MEDIUM's choice, when a model
+  that is not a LOW one can take it. A tagged run is left alone.
+- **A re-check after a move to another provider.** The first tool result's request after a retry
+  or a failover changed provider chooses the run's model again, once.
+- **`classifier.typedJudgment`**, off by default. When `true`, the one request to Jev also asks
+  upstream's six typed questions. `capability_deserved` (0 to 3, LOW to SUPER) can replace the
+  level, `destructive` at 0.7 or above takes the risky floor, and a `task_kind` of plan, debug or
+  review makes a prompt a planning one for its demand; the other three are recorded. The run's
+  record keeps the answers and the guards `typed-judgment` and `destructive`.
+
+### Changed
+
+- The local-unreachable rule reads a 502 only where an error text begins, so a 502 quoted inside an
+  error body holds no server.
+
 ## [1.4.0-jw.6] - 2026-11-23
 
 Session-level provider ordering, scoped models, and tiered local routing. No roster migration is
@@ -890,6 +926,7 @@ directories, its ONNX models and its SQLite database are not read, and can be de
 - Tests run offline in an isolated root with a network and process tripwire, and the behaviour
   suite runs only in a sandbox.
 
+[1.5.0-jw.1]: https://github.com/jwiegley/pi-smart-router/compare/v1.4.0-jw.6...v1.5.0-jw.1
 [1.4.0-jw.6]: https://github.com/jwiegley/pi-smart-router/compare/v1.4.0-jw.5...v1.4.0-jw.6
 [1.4.0-jw.3]: https://github.com/jwiegley/pi-smart-router/compare/v1.4.0-jw.2...v1.4.0-jw.3
 [1.4.0-jw.2]: https://github.com/jwiegley/pi-smart-router/compare/v1.4.0-jw.1...v1.4.0-jw.2
