@@ -345,3 +345,76 @@ describe("on a Pi with the recovery boundary, a usage limit moves the run on ins
     assert.match(loaded.session.notices.slice(before).map((notice) => notice.message).join("\n"), /could not take this run/);
   });
 });
+
+describe("the deep-session floor on each request: the LOW level's models are the small ones", () => {
+  const DEEP = usage(150_000);
+  const user = (text: string) => ({ role: "user" as const, content: text, timestamp: NOW });
+  const toolResult = { role: "toolResult" as const, toolCallId: "c", toolName: "bash", content: [{ type: "text" as const, text: "ok" }], isError: false, timestamp: NOW };
+
+  async function deepOnLuna(t: TestContext, tagged: boolean): Promise<Session> {
+    const state = await session(t);
+    const { loaded } = state;
+    await loaded.host.emit("message_end", { message: assistant(LUNA, { usage: DEEP }) });
+    await loaded.host.emit("agent_settled", { aborted: false });
+    return state;
+  }
+
+  test("a main-loop continuation that would stay on luna goes to MEDIUM's model; planning and tool-result turns stay", async (t) => {
+    const { loaded } = await deepOnLuna(t, false);
+    const { runtime } = loaded;
+    // An extension's run, which has no prompt and no tag, starts on the model that answered last.
+    const signal = loaded.session.startRun();
+    const base = { signal, previous: previous(runtime, LUNA) };
+    assert.equal(routed(runtime.route("auto", request("continuation", { ...base, messages: [toolResult] }))), LUNA, "a tool result's request stays");
+    assert.equal(routed(runtime.route("auto", request("continuation", { ...base, messages: [user("plan the next step")] }))), LUNA, "a planning turn stays");
+    assert.equal(routed(runtime.route("auto", request("continuation", { ...base, messages: [user("go on")] }))), TERRA, "a main-loop turn does not");
+    assert.equal(lastCode(loaded), "deep-session");
+  });
+
+  test("a session that is not deep stays, and so does one where nothing but small models can answer", async (t) => {
+    const shallow = await session(t);
+    await shallow.loaded.host.emit("message_end", { message: assistant(LUNA, { usage: usage(50_000) }) });
+    await shallow.loaded.host.emit("agent_settled", { aborted: false });
+    const go = (loaded: Loaded) => routed(loaded.runtime.route("auto", request("continuation", { signal: loaded.session.startRun(), previous: previous(loaded.runtime, LUNA), messages: [user("go on")] })));
+    assert.equal(go(shallow.loaded), LUNA);
+
+    const alone = await deepOnLuna(t, false);
+    for (const ref of [TERRA, SOL, ASTRA, OR_GLM, OR_QWEN, GLM, NYX_QWEN, HERA_QWEN]) alone.cat.unavailable.add(ref);
+    assert.equal(go(alone.loaded), LUNA, "with no other model the request keeps its pick");
+  });
+
+  test("a retry keeps its model, a floor of low turns the check off, and smart-router/local is never lifted", async (t) => {
+    const { loaded } = await deepOnLuna(t, false);
+    const { runtime } = loaded;
+    const signal = loaded.session.startRun();
+    const failed = { model: runtime.physical(LUNA), message: assistant(LUNA, { stopReason: "error", errorMessage: "overloaded_error", content: [], timestamp: NOW + ++stamps }) };
+    assert.equal(routed(runtime.route("auto", request("retry", { signal, failed, messages: [user("go on")] }))), LUNA);
+
+    const off = JSON.parse(TEXT) as Record<string, unknown>;
+    off.demand = { deepSessionFloor: "low" };
+    const cat = catalog();
+    const quiet = await start({ dir: agentDir(t, { roster: JSON.stringify(off) }), runtime: new FakeRuntime(cat), now: () => NOW });
+    await quiet.host.emit("message_end", { message: assistant(LUNA, { usage: DEEP }) });
+    await quiet.host.emit("agent_settled", { aborted: false });
+    assert.equal(routed(quiet.runtime.route("auto", request("continuation", { signal: quiet.session.startRun(), previous: previous(quiet.runtime, LUNA), messages: [user("go on")] }))), LUNA);
+
+    const local = await session(t, { select: "smart-router/local" });
+    await local.loaded.host.emit("message_end", { message: assistant(GLM, { usage: DEEP }) });
+    await local.loaded.host.emit("agent_settled", { aborted: false });
+    assert.equal(routed(local.loaded.runtime.route("local", request("continuation", { signal: local.loaded.session.startRun(), previous: previous(local.loaded.runtime, GLM), messages: [user("go on")] }))), GLM);
+  });
+
+  test("smart-router/work lifts to the work account's MEDIUM model, never to a personal one", async (t) => {
+    const { loaded } = await session(t, { select: "smart-router/work" });
+    await loaded.host.emit("message_end", { message: assistant(WORK_LUNA, { usage: DEEP }) });
+    await loaded.host.emit("agent_settled", { aborted: false });
+    assert.equal(routed(loaded.runtime.route("work", request("continuation", { signal: loaded.session.startRun(), previous: previous(loaded.runtime, WORK_LUNA), messages: [user("go on")] }))), WORK_TERRA);
+  });
+
+  test("a run tagged LOW is left on its model: the tag is the explicit choice", async (t) => {
+    const { loaded } = await deepOnLuna(t, true);
+    const signal = await prompt(loaded, "tidy the imports #low");
+    assert.equal(routed(loaded.runtime.route("auto", request("user", { signal, messages: [user("tidy the imports")] }))), LUNA);
+    assert.equal(routed(loaded.runtime.route("auto", request("continuation", { signal, previous: previous(loaded.runtime, LUNA), messages: [user("go on")] }))), LUNA);
+  });
+});

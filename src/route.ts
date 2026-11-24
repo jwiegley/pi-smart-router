@@ -49,6 +49,7 @@ import type { VirtualId } from "./constants.ts";
 import { chooseModel, effortFor, eligibleRole, escalationTarget, NO_LOCAL_SECTION, noScopeSection, pickInRole } from "./decide.ts";
 import type { Choice, Chosen, CompactionFigures, CostFigures, CostTerms, Decision, LastResponder, LevelInput, Plan, PlanLevel } from "./decide.ts";
 import { turnTypeOf } from "./effort.ts";
+import type { TurnType } from "./effort.ts";
 import type { SentEffort } from "./effort.ts";
 import { invariant, noBoundedHistory, unroutable } from "./errors.ts";
 import type { JevOutcome } from "./jev.ts";
@@ -505,6 +506,27 @@ function keepLevel(rc: ResolveContext, record: SessionRecord, section: ScopeSect
   return chooseModel({ rc, section, need: record.runTier, code: "run:level", last: record.last, promptTokens: 0, compaction, figures: undefined, priced: false });
 }
 
+/**
+ * Upstream v1.5.0's deep-session capability floor (SP-323, applyMainLoopCapabilityFloor in
+ * flash-class.ts), with the small models being those of the scope's LOW level (John, 2026-11-23):
+ * in a deep session, a main-loop request that would go to one of them goes to MEDIUM's choice
+ * instead, by the climb a tagged run makes, when that finds a model that is not one of them. With
+ * no such model the request keeps its pick, as upstream keeps its fleet. Planning and tool-result
+ * turns are left alone, as upstream leaves them, and so is a tagged run: its tag is the explicit
+ * choice upstream's forced model is. (Upstream's other use of the filter, for a typed capability
+ * above 0, needs nothing here: that capability already puts the run at MEDIUM or above.)
+ */
+function liftFromSmall(input: RouteInput, section: ScopeSection, decision: Decision, turn: TurnType, tagged: boolean): Chosen | undefined {
+  const { rc, record } = input;
+  const small = section.levels.low.role;
+  // A retry keeps the model it has, as it always did: Pi has backed off, and a move costs the cache.
+  // A roster whose deepSessionFloor is `low` has turned the floor off, here too.
+  if (tagged || input.request.reason === "retry" || rc.roster.version !== 2 || rc.roster.demand.deepSessionFloor === "low") return undefined;
+  if (turn !== "main_loop" || !decision.ok || decision.choice.role !== small || !isDeepSession(input.depth)) return undefined;
+  const chosen = chooseModel({ rc, section, need: "medium", code: "deep-session", last: record.last, promptTokens: 0, compaction: input.compaction, figures: undefined, priced: false });
+  return chosen.decision.ok && chosen.decision.choice.role !== small ? chosen : undefined;
+}
+
 /** Rewrite the run's pending level and terms for the scope the run is now in; nothing when they already name it. */
 function rescope(record: SessionRecord, scope: Scope, moved: Chosen | undefined): void {
   const relevel = (level: PlanLevel): PlanLevel => {
@@ -642,6 +664,11 @@ export function routeOwned(input: RouteInput): ModelRoute {
   else decision = stick(rc, previousRef(request), record);
   const moved = plan === undefined && unplanned === undefined && escalated === undefined && section !== undefined ? keepLevel(rc, record, section, request, decision, input.compaction) : undefined;
   if (moved !== undefined) decision = moved.decision;
+  // The request's turn type is its last message's, as upstream's host derives it. A typed task
+  // kind never changes it: upstream's adaptive reasoning reads the host's turn type too.
+  const turn = turnTypeOf(request.messages);
+  const lifted = section === undefined ? undefined : liftFromSmall(input, section, decision, turn, plan?.level?.source === "tag" || (plan === undefined && record.runTagged));
+  if (lifted !== undefined) decision = lifted.decision;
   const choice = settle(input, decision);
   // A planned run's prompt: its need and the level whose model took it go in the ledger, and the
   // need is the session's until the next planned run. A run without a prompt counts as a prompt
@@ -679,6 +706,7 @@ export function routeOwned(input: RouteInput): ModelRoute {
     record.escalated = true;
   }
   if (moved !== undefined) record.runTier = moved.tier;
+  if (lifted !== undefined) record.runTier = lifted.tier;
   // What is shown and recorded of a run names the scope it is in. A run that goes on in another
   // scope than the one that planned it (moved above, or moved up by escalation after the scope
   // changed) keeps its need and what decided it; the cost the other scope's models were compared
@@ -699,7 +727,7 @@ export function routeOwned(input: RouteInput): ModelRoute {
     ...(starts ? {} : { continuesRun: true as const }),
   });
   // A run that moved up for being stuck is upstream's loop escalation from that request on.
-  const effort = effortFor(rc, choice.role, choice.model, request.thinkingLevel, turnTypeOf(request.messages), record.escalated);
+  const effort = effortFor(rc, choice.role, choice.model, request.thinkingLevel, turn, record.escalated);
   record.effort = effort;
   return { model: choice.model, thinkingLevel: effort.level };
 }
