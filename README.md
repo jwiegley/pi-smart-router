@@ -113,10 +113,11 @@ A version 2 roster for one personal ChatGPT login, with a fallback chain and one
 ```
 
 Save it as `smart-router.json` in Pi's agent directory, owned by you, or by root as a file in the
-Nix store is, and not writable by group or others. `/smart-router check` in a session, or `node src/check-cli.ts <roster.json>` anywhere,
-reads a roster back in plain words, or gives the first error and its place. The manual has
-[the roster's fields](docs/manual.md#the-roster), [version 2](docs/manual.md#roster-version-2-levels-and-scopes),
-[the edits that change the routing](docs/manual.md#changing-the-routing) and John's own rosters.
+Nix store is, and not writable by group or others. `/smart-router check` in a session, or `node
+src/check-cli.ts <roster.json>` anywhere, reads a roster back in plain words, or gives the first
+error and its place. The manual has [the roster's fields](docs/manual.md#the-roster), [version
+2](docs/manual.md#roster-version-2-levels-and-scopes), [the edits that change the
+routing](docs/manual.md#changing-the-routing) and John's own rosters.
 
 ### The fork's commands
 
