@@ -11,7 +11,8 @@
 // when it names a risky operation, and a very deep session to the roster's floor; a tagged run is
 // raised by neither. The tier's role takes its first available candidate, not the latest
 // response's. A tier with no available candidate passes the run up to the next tier: a run is
-// refused only when neither its own tier nor any above it has an available one.
+// refused only when neither its own tier nor any above it has an available one. A tagged prompt
+// is the exception: its tag names the level, so it is refused when that level is unavailable.
 //
 // A conversation larger than a candidate's window neither removes the candidate nor holds the
 // session while Pi's compaction is enabled: the run goes to its tier, and Pi compacts before it
@@ -383,7 +384,8 @@ function lifetimeOf(model: Model<Api>): number | undefined {
 /**
  * The model a run takes, from the level it needs up. Without figures, for a run that is not priced
  * (a tagged one), or when the needed level's own models cannot take it, the climb as it always was
- * (its chain, then a step up). Otherwise each level's first available model of its own is a
+ * (its chain, then a step up). A pinned run, a tagged prompt's, is refused when its level and its
+ * chain are unavailable; it passes up only for size. Otherwise each level's first available model of its own is a
  * candidate, once (a model a lower level took is not a candidate again), and, with compaction
  * disabled, only when the conversation fits it. With no usage yet (no history measured, whatever
  * the prompt's size), a candidate without a price or one seen after now (checked in that order),
@@ -403,9 +405,19 @@ export function chooseModel(input: {
   readonly compaction: CompactionFigures;
   readonly figures: CostFigures | undefined;
   readonly priced: boolean;
+  /**
+   * A tagged prompt's level is John's choice, not a floor: when neither that level's own models
+   * nor the scope's chain can take the run, it is refused, never passed up. A conversation too
+   * large for the level's model, with compaction disabled, still passes up as any run's does.
+   */
+  readonly pinned?: boolean;
 }): Chosen {
   const { rc, section, need, code, last, compaction, figures } = input;
   const conversation = historyOf(last) + input.promptTokens;
+  if (input.pinned) {
+    const own = pickInRole(rc, section.levels[need].role, { fallback: true, code });
+    if (!own.ok) return { tier: need, decision: own, steppedUp: false };
+  }
   const climbed = (): Chosen => {
     const { tier, decision } = climb({ rc, conversation, reserve: compaction.reserve }, section, need, code, !compaction.enabled);
     return { tier, decision, steppedUp: tierRank(tier) > tierRank(need) };
@@ -539,6 +551,7 @@ function planLevel(p: PlanInput, roster: RosterV2, section: ScopeSection, signal
     compaction: p.compaction,
     figures: p.figures,
     priced: tag === undefined,
+    pinned: tag !== undefined,
   });
   const choice = decision.ok ? decision.choice : undefined;
   // The tier's own role, whichever role the pick is in: a chain model's role is not the run's.

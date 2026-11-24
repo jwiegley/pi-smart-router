@@ -1389,14 +1389,28 @@ describe("what the router keeps of a message's text", () => {
 });
 
 describe("the tier's model", () => {
-  test("a tier with no available model passes the run up, with a notice", async (t) => {
+  test("a tier with no available model passes an untagged run up, with a notice", async (t) => {
+    const runtime = heraRuntime();
+    for (const ref of [LUNA, NYX_QWEN, HERA_QWEN]) runtime.catalog.unavailable.add(ref);
+    const loaded = await hera(t, { runtime });
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    await say(loaded, "x");
+    assert.equal(firstRequest(loaded), TERRA);
+    assert.deepEqual(lastNotice(loaded), { type: "info", message: "pi-smart-router: no LOW model can take this run, so it goes to MEDIUM (gpt-6.1-terra)." });
+    const level = recordOf(loaded)?.history.at(-1)?.level;
+    assert.deepEqual([level?.need, level?.tier, level?.steppedUp], ["low", "medium", true]);
+  });
+
+  test("a tagged run whose tier has no available model is refused, though the tier above could take it", async (t) => {
     const runtime = heraRuntime();
     for (const ref of [LUNA, NYX_QWEN, HERA_QWEN]) runtime.catalog.unavailable.add(ref);
     const loaded = await hera(t, { runtime });
     assert.deepEqual(await say(loaded, "x #low"), [{ action: "transform", text: "x" }]);
-    assert.equal(firstRequest(loaded), TERRA);
-    assert.deepEqual(lastNotice(loaded), { type: "info", message: "pi-smart-router: no LOW model can take this run, so it goes to MEDIUM (gpt-6.1-terra)." });
-    assert.deepEqual(recordOf(loaded)?.history.at(-1)?.level, { scope: "personal", need: "low", tier: "medium", source: "tag", steppedUp: true, returnedToFirst: false });
+    const signal = loaded.session.startRun();
+    const none = "not among the available models";
+    assert.throws(() => loaded.runtime.route("auto", request("user", { signal })), {
+      message: `smart-router/auto: no model can take this request (low: ${LUNA}: ${none}; ${NYX_QWEN}: ${none}; ${HERA_QWEN}: ${none}). Nothing was sent. See /smart-router status, or choose a model with /model.`,
+    });
   });
 
   test("the step-up notice names the level the run needs, which the risky floor can raise above the demand's", async (t) => {
@@ -1419,7 +1433,8 @@ describe("the tier's model", () => {
     const runtime = heraRuntime();
     for (const ref of [TERRA, DEEPSEEK, SOL, GLM_CLOUD, ASTRA, KIMI]) runtime.catalog.unavailable.add(ref);
     const loaded = await hera(t, { runtime });
-    await say(loaded, "x #medium");
+    loaded.runtime.answer = async () => jevAnswer(MEDIUM);
+    await say(loaded, "x");
     const signal = loaded.session.startRun();
     const none = "not among the available models";
     assert.throws(() => loaded.runtime.route("auto", request("user", { signal })), {
@@ -1834,7 +1849,7 @@ describe("a run's record", () => {
     await say(loaded, "force push the branch");
     await finish(loaded, firstRequest(loaded));
     for (const ref of [LUNA, NYX_QWEN, HERA_QWEN]) runtime.catalog.unavailable.add(ref);
-    await say(loaded, "x #low");
+    await say(loaded, "x");
     await finish(loaded, firstRequest(loaded));
     runtime.catalog.unavailable.clear();
     await loaded.host.emit("message_end", { message: assistant(SOL, { stopReason: "error", errorMessage: "You've hit your usage limit." }) });
@@ -1848,7 +1863,7 @@ describe("a run's record", () => {
       levelEntries(loaded).map(pick),
       [
         ["floor", "high", "high", "destructive-git", undefined, undefined, SOL],
-        ["tag", "low", "medium", undefined, true, undefined, TERRA],
+        ["jev", "low", "medium", undefined, true, undefined, TERRA],
         ["tag", "high", "high", undefined, undefined, undefined, GLM_CLOUD],
         ["tag", "high", "high", undefined, undefined, true, SOL],
       ],

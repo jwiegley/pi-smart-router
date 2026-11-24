@@ -18,6 +18,9 @@ fork's releases on that base. Releases are signed tags; nothing is published to 
 
 - **A work level or chain takes models of any work-bound account**, not only Codex and Claude
   Code. An unbound provider is still refused there.
+- **A tagged prompt whose level is unavailable is refused**, where it used to be passed up to the
+  next level. Its tag names the level; its chain is still tried first, and it still passes up for
+  size with compaction disabled. An untagged run steps up as before.
 
 ## [1.5.0-jw.1] - 2026-11-23
 

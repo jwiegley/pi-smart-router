@@ -1120,7 +1120,11 @@ passes the run up to the next level, and a notice names the level the pick start
 model can take this run, so it goes to MEDIUM (gpt-6.1-terra)". With compaction disabled, when no
 level's first available model fits, the highest level with one takes the run: fit alone never
 refuses a run. A run is refused only when neither its level nor any above it has an available
-model. A stronger model chosen by cost is no step-up. When a run's pick is an earlier model of its
+model. **A tagged prompt is the exception:** its tag names the level, so when that level's own
+models and its chain are unavailable the run is refused there, and is not passed up: "rename foo to
+bar #low" with the LOW models cooling sends nothing, where the same prompt without its tag would
+go to MEDIUM. A tagged run still passes up for size, with compaction disabled. A stronger model
+chosen by cost is no step-up. When a run's pick is an earlier model of its
 role than the one that answered last, which costs a prompt-cache miss, its record notes
 `returnedToFirst`.
 

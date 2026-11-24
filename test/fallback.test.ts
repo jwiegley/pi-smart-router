@@ -311,12 +311,12 @@ describe("planning with a fallback chain", () => {
     models.remove(NYX_QWEN);
     assert.deepEqual(next(), ["local", HERA_QWEN, "fallback:medium→local"]);
     models.unauthenticated.add(HERA_QWEN);
-    // Nothing is left at any level, so the run is refused: each role is named once.
+    // Nothing is left at the tag's level or in the chain, so the tagged run is refused there: each role is named once.
     const refused = plan(context({ catalog: models, cooldowns }), { tag: "medium" });
     assert.equal(refused.decision.ok, false);
     assert.deepEqual(
       refused.decision.ok ? [] : refused.decision.attempts.map((attempt) => [attempt.role, attempt.fallback === true]),
-      [["medium", false], ["openrouter", true], ["local", true], ["high", false], ["super", false]],
+      [["medium", false], ["openrouter", true], ["local", true]],
     );
     assert.equal(refused.role, undefined);
   });
@@ -408,14 +408,18 @@ describe("planning with a fallback chain", () => {
 
 describe("the work scope declares no fallback, so it behaves as before", () => {
   test("a work level whose model is cooling steps up to the next work level, never to the personal chain", () => {
-    const planned = plan(context({ scope: "work", cooldowns: cooled(WORK_LUNA) }), { tag: "low" });
-    assert.deepEqual(picked(planned.decision), ["work-medium", WORK_TERRA, "step-up"]);
+    // Untagged, the heuristics alone rate this prompt MEDIUM.
+    const planned = plan(context({ scope: "work", cooldowns: cooled(WORK_TERRA) }), {});
+    assert.equal(planned.level?.need, "medium");
+    assert.deepEqual(picked(planned.decision), ["work-high", WORK_SOL, "step-up"]);
     assert.equal(planned.level?.fallback, undefined);
+    // Tagged, the same run keeps its level, and is refused there.
+    assert.equal(picked(plan(context({ scope: "work", cooldowns: cooled(WORK_LUNA) }), { tag: "low" }).decision), "refused: work-low");
   });
 
   test("with every work model cooling, the run is refused: no OpenRouter, local or personal-account model takes it", () => {
-    const planned = plan(context({ scope: "work", cooldowns: cooled(WORK_LUNA, WORK_TERRA, WORK_SOL, WORK_ASTRA) }), { tag: "low" });
-    assert.equal(picked(planned.decision), "refused: work-low, work-medium, work-high, work-super");
+    const planned = plan(context({ scope: "work", cooldowns: cooled(WORK_LUNA, WORK_TERRA, WORK_SOL, WORK_ASTRA) }), {});
+    assert.equal(picked(planned.decision), "refused: work-medium, work-high, work-super", "an untagged MEDIUM run tries its level and each above");
     const retry = pickInRole(context({ scope: "work", cooldowns: cooled(WORK_LUNA) }), "work-low", { skip: WORK_LUNA, fallback: true, code: "retry:next" });
     assert.equal(picked(retry), "refused: work-low");
   });
@@ -690,7 +694,7 @@ describe("a run through the router with a fallback chain", () => {
     assert.deepEqual([routed(runtime.route("auto", request("user", { signal }))), lastHistory(loaded)?.code], [OR_GLM, "fallback:low→openrouter"], "nothing holds a session by time");
   });
 
-  test("a refusal names the level's role, then the chain's roles as fallbacks, then the levels above as step-ups", async (t) => {
+  test("a tagged run's refusal names the level's role, then the chain's roles as fallbacks, and no level above", async (t) => {
     const { loaded, cat } = await session(t);
     for (const ref of [...TIERS.map((tier) => OWN[tier]), ...CHAIN]) cat.unavailable.add(ref);
     const signal = await prompt(loaded, "rename foo to bar #high");
@@ -699,8 +703,8 @@ describe("a run through the router with a fallback chain", () => {
       message,
       `smart-router/auto: no model can take this request (high: ${SOL}: not among the available models; ` +
         `fallback openrouter: ${OR_GLM}: not among the available models; ${OR_QWEN}: not among the available models; ` +
-        `fallback local: ${GLM}: not among the available models; ${NYX_QWEN}: not among the available models; ${HERA_QWEN}: not among the available models; ` +
-        `step-up super: ${ASTRA}: not among the available models). Nothing was sent. See /smart-router status, or choose a model with /model.`,
+        `fallback local: ${GLM}: not among the available models; ${NYX_QWEN}: not among the available models; ${HERA_QWEN}: not among the available models). ` +
+        "Nothing was sent. See /smart-router status, or choose a model with /model.",
     );
   });
 
@@ -717,7 +721,7 @@ describe("a run through the router with a fallback chain", () => {
     // refused too: the work scope has no chain, and no other account takes it.
     const next = await prompt(loaded, "rename bar to baz #low");
     const again = refusal(() => runtime.route("auto", request("user", { signal: next })));
-    assert.match(again, /^smart-router\/auto: no model can take this request \(work-low: .*step-up work-medium: .*step-up work-high: .*step-up work-super: /);
+    assert.match(again, /^smart-router\/auto: no model can take this request \(work-low: [^;]*\)\. Nothing was sent\./, "a tagged run is refused at its tag's level");
     assert.doesNotMatch(again, /openrouter|omlx-hera|nyx|openai-codex-2/);
   });
 

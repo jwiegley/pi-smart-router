@@ -832,12 +832,11 @@ describe("v2 levels", () => {
     assert.equal(top.level?.steppedUp, false);
   });
 
-  test("a run is refused only when no tier from its start has an available candidate, with every tier's reasons and no role", () => {
+  test("an untagged run is refused only when no tier from its start has an available candidate, with every tier's reasons and no role", () => {
     const catalog = v2Catalog();
     for (const ref of [LUNA, NYX_QWEN, HERA_QWEN, TERRA, DEEPSEEK, SOL, GLM_CLOUD, ASTRA, KIMI]) catalog.unavailable.add(ref);
-    const result = planV2(PLAIN, { rc: v2(catalog), level: { tag: "low" }, last: last(SOL, MINUTE, 100_000) });
-    assert.deepEqual([result.role, result.code], [undefined, "tag"]);
-    assert.deepEqual(levelOf(result), { scope: "personal", need: "low", tier: "low", source: "tag", steppedUp: false, returnedToFirst: false });
+    const result = planV2(PLAIN, { rc: v2(catalog), level: { jev: answer("low") }, last: last(SOL, MINUTE, 100_000) });
+    assert.deepEqual([result.role, result.level?.need, result.level?.tier, result.level?.steppedUp], [undefined, "low", "low", false]);
     assert.ok(!result.decision.ok, JSON.stringify(result.decision));
     assert.equal(result.decision.problem, undefined);
     assert.deepEqual(
@@ -849,12 +848,34 @@ describe("v2 levels", () => {
         ["super", true, [[ASTRA, "not-available"], [KIMI, "not-available"]]],
       ],
     );
-    // A run never goes down: low and medium are available, but a run tagged high cannot use them.
+    // A run never goes down: low and medium are available, but a run that needs high cannot use them.
     const lower = v2Catalog();
     for (const ref of [SOL, GLM_CLOUD, ASTRA, KIMI]) lower.unavailable.add(ref);
-    const high = planV2(PLAIN, { rc: v2(lower), level: { tag: "high" } });
+    const high = planV2(PLAIN, { rc: v2(lower), level: { jev: answer("high") } });
+    assert.equal(high.level?.need, "high");
     assert.ok(!high.decision.ok, JSON.stringify(high.decision));
     assert.deepEqual(high.decision.attempts.map((attempt) => attempt.role), ["high", "super"]);
+  });
+
+  test("a tagged run is refused when its tag's tier has no available candidate: it moves neither up nor down", () => {
+    const catalog = v2Catalog();
+    for (const ref of [LUNA, NYX_QWEN, HERA_QWEN]) catalog.unavailable.add(ref);
+    const result = planV2(PLAIN, { rc: v2(catalog), level: { tag: "low" }, last: last(SOL, MINUTE, 100_000) });
+    assert.deepEqual([result.role, result.code], [undefined, "tag"]);
+    assert.deepEqual(levelOf(result), { scope: "personal", need: "low", tier: "low", source: "tag", steppedUp: false, returnedToFirst: false });
+    assert.ok(!result.decision.ok, JSON.stringify(result.decision));
+    assert.deepEqual(
+      result.decision.attempts.map((attempt) => [attempt.role, attempt.candidates.map((candidate) => [candidate.ref, candidate.reason])]),
+      [["low", [[LUNA, "not-available"], [NYX_QWEN, "not-available"], [HERA_QWEN, "not-available"]]]],
+      "medium, high and super are all available, and none takes a run tagged low",
+    );
+    // The same prompt without its tag steps up, as before.
+    expectPlan(planV2(PLAIN, { rc: v2(catalog), level: { jev: answer("low") } }), TERRA, "step-up");
+    const top = v2Catalog();
+    for (const ref of [ASTRA, KIMI]) top.unavailable.add(ref);
+    const tagged = planV2(PLAIN, { rc: v2(top), level: { tag: "super" } });
+    assert.ok(!tagged.decision.ok, JSON.stringify(tagged.decision));
+    assert.deepEqual(tagged.decision.attempts.map((attempt) => attempt.role), ["super"], "nor does it go down");
   });
 
   test("a scope the roster does not serve is refused before any level", () => {
@@ -974,8 +995,10 @@ describe("v2 levels", () => {
           }
           count(`${scope} picked`);
         } else {
-          // Refused only when neither the run's own tier nor any tier above it has an available candidate.
-          assert.ok(from(own).every((tier) => !available(tier)), `${where}: refused, though ${own} or a tier above it has an available candidate`);
+          // A tagged run is refused when its tag's tier has no available candidate; any other only
+          // when neither its own tier nor any tier above it has one.
+          if (level.tag !== undefined) assert.ok(!available(own), `${where}: a tagged run was refused, though ${own} has an available candidate`);
+          else assert.ok(from(own).every((tier) => !available(tier)), `${where}: refused, though ${own} or a tier above it has an available candidate`);
           count(`${scope} refused`);
         }
         count(result.code);
