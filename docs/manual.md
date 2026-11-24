@@ -273,6 +273,13 @@ also need bindings; numbered Claude Code providers are not Multi-Pass aliases.
   appears, in the roster or in Multi-Pass's file, except on a version 2 work binding, which must
   carry one, and which only a work-scope session accepts.
 
+- **A named account** needs no label. Pi can give every account of a service a provider of its own
+  (`accountOf` in Pi's `models.json`): `openai-codex-j` and `openai-codex-p`, `openrouter-j` and
+  `openrouter-p`. Such an id names its account, so its binding is `{}` in version 1, or a `scope`
+  alone in version 2, and takes neither `native` nor `multiPassLabel`. In version 2 any provider can
+  be bound this way, a keyed one such as `openrouter-p` or `google-j` included, and that is what
+  admits it to a work level.
+
 `status` reports each binding, the label Multi-Pass stores and the auth source (configured, stored or
 environment), never a credential.
 
@@ -487,8 +494,8 @@ How the chain works:
   session behaves exactly as before: its levels' own work-account models, a step up, or a refusal.
 - **Validation keeps each scope's account rules.** No role of a chain is a level's role, in either
   scope, and no role is in two chains. A personal chain takes no model of a work-bound provider. A
-  work chain takes only work-bound Codex or Claude Code models, not OpenRouter, local or a personal
-  account. A model still sits in exactly one role, so a chain cannot repeat a level's model.
+  work chain takes only models of work-bound accounts, not an unbound provider's, a local one's or a
+  personal account's. A model still sits in exactly one role, so a chain cannot repeat a level's model.
 - **A level may also name one local fallback role.** Its models come after the level's own models
   and before the scope's chain. The same local role may serve levels of both scopes. Each model must pass
   the configured provider and LAN-host checks even when `smart-router/auto` reaches it.
@@ -505,7 +512,7 @@ How the chain works:
 > conversation so far, not only the new message, goes to that role's vendor: here to OpenRouter and
 > the provider behind the model, under their retention terms, and then to the LAN models on Hera
 > and Nyx. Delete the `fallback` line, or the roles you do not want, to be refused or stepped up
-> instead. A work scope's shared chain names only work-bound Codex or Claude Code, but an explicit
+> instead. A work scope's shared chain names only models of work-bound accounts, but an explicit
 > per-level local fallback can send the whole work conversation to that LAN endpoint.
 
 Three things to know:
@@ -531,12 +538,12 @@ Three things to know:
 | `$comment`, `exclude`, `roles`, `accounts`, `local`, `stickyIdleMinutes`, `cooldownMinutes`, `unreachableMinutes` | as in version 1 | As in [version 1](#fields), with the rules below. There is no `routing`: the levels replace it, and a scope's `fallback` replaces `routing.fallback`. |
 | `scopes` | yes | `personal`, `work` or both. `smart-router/auto` refuses a session in a scope the roster does not have. |
 | `scopes.<scope>.levels` | yes | `low`, `medium`, `high` and `super`, each with `role` and either `describe` or `describeFile`. No role serves two scope levels; the levels rank up the ladder. An optional `fallback` is a one-element array naming a local role, whose models follow the level's own and precede the scope-wide chain. The same local role may serve both scopes. |
-| `scopes.<scope>.fallback` | no | Role names to try after every level's own models and its local fallbacks. A scope-wide chain is nonempty, has no duplicate or level role and belongs to only one scope. Personal chains take no work-bound model; work chains take only work-bound Codex or Claude Code models. |
+| `scopes.<scope>.fallback` | no | Role names to try after every level's own models and its local fallbacks. A scope-wide chain is nonempty, has no duplicate or level role and belongs to only one scope. Personal chains take no work-bound model; work chains take only models of work-bound accounts. |
 | `local.levels` | no | All four tiers, each a local role name or `null` to refuse that tier. `local.role` must be one of the enabled tier roles and remains the default for operations that do not use a planned prompt. Local routing uses offline heuristics or a tag and never asks Jev. |
 | `providerOrder` | no | `personal`, `work` and `local`, each optional and each a nonempty list of provider ids without duplicates. In every role of that scope, the listed providers' models come first, in the listed order ([The provider order](#the-provider-order)). A list may name only providers of the models it governs. Without the field, every role is tried in the order its `models` are written. |
 | `roles[].disabled` | no | Set to `true` with an empty `models` array to leave a role explicitly disabled, for example while no work account is verified. An empty role without this flag remains invalid. |
 | `scopes.work.directories` | no | Absolute paths whose sessions are in work scope ([Scope](#scope-personal-or-work)), written plainly: no trailing `/`, no empty, `.` or `..` segment, and not `/` itself. |
-| `accounts.<provider>.scope` | no | `"personal"`, the default, or `"work"`. |
+| `accounts.<provider>.scope` | no | `"personal"`, the default, or `"work"`. A provider that is neither a native subscription login nor a Multi-Pass alias is bound by its id, with `scope` alone ([Account bindings](#account-bindings)). |
 | `classifier` | no | Jev's settings; without them, Jev is never asked. `model`, an exact ref, default `openrouter/typesafe/jev-1.14`; `timeoutMs`, 100 to 1000, default 1000; and `context`: `messages`, 0 to 20, default 6; `messageChars`, 200 to 8000, default 1500; `totalChars`, 1000 to 32000, default 12000. `closeCall`, which earlier versions used, is still accepted from 0 to 0.5 and ignored, and the checker says so: `demand.closeCall` decides a close call. The model names a Jev version, so that tuned demand settings keep their meaning; moving to a newer Jev is a roster edit. `instructions`, the question Jev is asked, as a text of at most 4000 characters, or `instructionsFile`, the name of a prompt file that holds it; not both, and with neither the built-in question is asked ([Jev's prompts](#jevs-prompts)). `typedJudgment`, `true` or `false`, default `false`: also ask upstream's six typed questions ([The level a prompt needs](#the-level-a-prompt-needs)). |
 | `demand` | no | How a prompt's demand is weighed ([The level a prompt needs](#the-level-a-prompt-needs)). `jevWeight` and `heuristicsWeight`, each 0 to 100, defaults 4 and 1, not both 0; `minConfidence`, 0 to 1, default 0.6; `closeCall`, 0 to 0.5, default 0.1; `cuts`, three numbers that ascend, each above 0 and below 3, default `[0.75, 1.5, 2.25]`; `deepSessionFloor`, `low`, `medium`, `high` or `super`, default `medium`; and `weights`, any of the twelve heuristic signals, each 0 to 100 and not all 0, by default upstream's weights with `requirement_low` and `cluster_signal` at 0. Every field is optional, and a field left out keeps its default. |
 | `adaptiveReasoning` | no | The thinking effort each request is sent ([Thinking effort](#thinking-effort)), upstream's `adaptive_reasoning`: `enabled`, `true` or `false`, default `true`; `minLevel`, the floor, and `maxLevel`, the ceiling, each one of `minimal`, `low`, `medium`, `high`, `xhigh` and `max`, with no default, the floor never above the ceiling. A floor above the selected `/thinking` level raises it; a ceiling never lowers it. A version 1 roster has none, and the defaults. |
@@ -551,14 +558,16 @@ Three things to know:
   own scope's sessions: a personal session refuses a work binding, and a work session refuses a
   personal one.
 - **Levels, chains and accounts.** Validation refuses a work-bound provider in a personal level or
-  chain. Work levels and scope-wide chains take only work-bound Codex or Claude Code. A level's
-  separate local fallback can serve either scope, but each candidate must pass the LAN policy.
+  chain. Work levels and scope-wide chains take only models of work-bound accounts, of any service:
+  an unbound provider, such as bare `openrouter`, is no one's account and is refused there. A
+  level's separate local fallback can serve either scope, but each candidate must pass the LAN
+  policy.
 - **The built-in `openai-codex-3/*` exclusion** holds in personal scope only. A work-scope session
   lifts it for a model of a work level or a work chain whose provider is bound as work. The roster's own exclusions
   are never lifted.
 - **The classifier's model** must match no exclusion, built-in or the roster's own, and none is
   lifted for it, because Jev reads text from both scopes. So a roster with a classifier must not
-  exclude `openrouter/*`. A work level itself takes only work-bound Codex or Claude Code, although
+  exclude `openrouter/*`. A work level itself takes only models of work-bound accounts, although
   a per-level local fallback may also be named. An exclusion binds the router's routes only: a model
   picked by hand is sent as it is.
 
@@ -573,7 +582,7 @@ the check, and the next prompt of every running session uses it: no restart, no 
 | Which provider every level tries first | `providerOrder.<scope>`, for every session; or `/smart-router prefer`, for the session you are in ([The provider order](#the-provider-order)). |
 | What takes over when a level's model cannot | A level's `fallback` for local roles, then `scopes.<scope>.fallback` for a scope-wide chain. Each role's own `models` order is the order inside it. |
 | The local set, for `smart-router/local` | The local role's `models`, or the roles named by `local.levels`. A new server also needs its provider in `local.providers` and host in `local.hosts`. |
-| A work session's models | The `work-*` roles, which take work-bound Codex or Claude Code; a level may also name a local fallback. |
+| A work session's models | The `work-*` roles, which take models of work-bound accounts; a level may also name a local fallback. |
 | What a level means to Jev | That level's `describe`, or the file its `describeFile` names. |
 | How Jev judges a message | `classifier.instructions`, or the file `classifier.instructionsFile` names. |
 | How much Jev counts against the heuristics | `demand.jevWeight` (4) and `demand.heuristicsWeight` (1). |
@@ -1605,7 +1614,7 @@ allow is refused by the model that was asked, and the selection stays where it w
 
 | Selection | Session | Its requests |
 |---|---|---|
-| `smart-router/auto` | work scope | Use a work-bound Codex or Claude Code model, or an explicitly configured per-level local fallback. Refuse when the roster serves no work scope, or the scope cannot be read. |
+| `smart-router/auto` | work scope | Use a model of a work-bound account, or an explicitly configured per-level local fallback. Refuse when the roster serves no work scope, or the scope cannot be read. |
 | `smart-router/local` | either scope, or a scope that cannot be read | Use only local roles, never a cloud model. With local tiers, a disabled or unplanned tier refuses. A personal-only restriction refuses work and unreadable scope. |
 
 John's decision of 2026-11-16, "Let smart-router/local route in work scope": selecting

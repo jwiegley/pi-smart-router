@@ -467,13 +467,13 @@ describe("accounts", () => {
       }),
       "accounts.openai-codex-2.multiPassLabel: must be a non-empty string",
     );
-    assert.equal(
+    assert.deepEqual(
       valid(
         edited((r) => {
           r.accounts["openai-codex-2"].multiPassLabel = "  Personal ";
         }),
-      ).accounts.get("openai-codex-2")?.label,
-      "Personal",
+      ).accounts.get("openai-codex-2"),
+      { kind: "multi-pass", label: "Personal" },
     );
   });
 

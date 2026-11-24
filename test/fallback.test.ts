@@ -186,21 +186,21 @@ describe("the roster's fallback chain: parsing and validation", () => {
         delete r.scopes.personal.fallback;
         r.scopes.work.fallback = ["openrouter"];
       }),
-      `roles[1].models[0]: "${OR_GLM}" is in the work scope's fallback, which takes only work-bound Codex or Claude Code models`,
+      `roles[1].models[0]: "${OR_GLM}" is in the work scope's fallback, which takes only models of work-bound accounts`,
     );
     invalid(
       edited((r) => {
         delete r.scopes.personal.fallback;
         r.scopes.work.fallback = ["local"];
       }),
-      `roles[0].models[0]: "${GLM}" is in the work scope's fallback, which takes only work-bound Codex or Claude Code models`,
+      `roles[0].models[0]: "${GLM}" is in the work scope's fallback, which takes only models of work-bound accounts`,
     );
     invalid(
       edited((r) => {
         r.roles.push({ name: "spare", models: ["openai-codex-2/gpt-6-nova"] });
         r.scopes.work.fallback = ["spare"];
       }),
-      'roles[10].models[0]: "openai-codex-2/gpt-6-nova" is in the work scope\'s fallback, which takes only work-bound Codex or Claude Code models',
+      'roles[10].models[0]: "openai-codex-2/gpt-6-nova" is in the work scope\'s fallback, which takes only models of work-bound accounts',
     );
   });
 

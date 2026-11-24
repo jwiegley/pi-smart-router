@@ -153,11 +153,11 @@ describe("reading a roster's scopes and bindings", () => {
     assert.equal(isWorkBound(rosterFixtureV2("roster-work.json"), "openai-codex"), true);
   });
 
-  test("isCodexProvider is the native openai-codex login or a Multi-Pass alias of it", () => {
-    for (const provider of ["openai-codex", "openai-codex-2", "openai-codex-3", "openai-codex-10"]) {
+  test("isCodexProvider is the native openai-codex login, a Multi-Pass alias of it or a named account of it", () => {
+    for (const provider of ["openai-codex", "openai-codex-2", "openai-codex-3", "openai-codex-10", "openai-codex-j", "openai-codex-p", "openai-codex-x"]) {
       assert.equal(isCodexProvider(provider), true, provider);
     }
-    const others = ["openai-codex-", "openai-codex-x", "openai-codexx", "openai-codex-2x", "openai-codex-2-3", "xopenai-codex-2", "OpenAI-Codex", "openai", "openrouter", "anthropic", "anthropic-2", "github-copilot-2", ""];
+    const others = ["openai-codex-", "openai-codexx", "openai-codex-P", "xopenai-codex-2", "OpenAI-Codex", "openai", "openrouter", "anthropic", "anthropic-2", "github-copilot-2", ""];
     for (const provider of others) assert.equal(isCodexProvider(provider), false, provider);
   });
 
@@ -277,7 +277,8 @@ describe("version 2 account bindings", () => {
           r.accounts["openai-codex-3"].multiPassLabel = `  ${label} `;
         }),
       );
-      assert.equal(roster.accounts.get("openai-codex-3")?.label, label);
+      const bound = roster.accounts.get("openai-codex-3");
+      assert.equal(bound?.kind === "multi-pass" ? bound.label : undefined, label);
     }
   });
 
@@ -286,7 +287,7 @@ describe("version 2 account bindings", () => {
       edited((r) => {
         r.accounts.openrouter = { native: "personal" };
       }),
-      /^accounts\.openrouter: openrouter is not a subscription provider/,
+      'accounts.openrouter: openrouter is bound by its id, with "scope" alone: "native" and "multiPassLabel" are for a native subscription login and a Multi-Pass alias',
     );
     invalid(
       edited((r) => {
@@ -552,19 +553,58 @@ describe("each level's accounts", () => {
     );
   });
 
-  test("a work level holds only work-bound Codex or Claude Code models, not arbitrary cloud or personal accounts", () => {
+  test("a work level holds only models of work-bound accounts, not unbound cloud, local or personal-account models", () => {
     for (const ref of ["openrouter/qwen/qwen-9-max", "nyx/qwen-local", "omlx-hera/GLM-9", "openai-codex-2/gpt-6-nova"]) {
       invalid(
         edited((r) => r.roles[5].models.push(ref)),
-        `roles[5].models[1]: "${ref}" is in the work scope's low level, which takes only work-bound Codex or Claude Code models`,
+        `roles[5].models[1]: "${ref}" is in the work scope's low level, which takes only models of work-bound accounts`,
       );
     }
-    invalid(
+    // Any service's work-bound account serves a work level: a subscription login, and a keyed
+    // provider bound by its id.
+    const bound = valid(
       edited((r) => {
         r.accounts.anthropic = { native: "Positron work", scope: "work" };
-        r.roles[8].models.push("anthropic/claude-x");
+        r.accounts["openrouter-p"] = { scope: "work" };
+        r.roles[8].models.push("anthropic/claude-x", "openrouter-p/moonshotai/kimi-k3.1-pro");
       }),
-      "roles[8].models[1]: \"anthropic/claude-x\" is in the work scope's super level, which takes only work-bound Codex or Claude Code models",
+    );
+    assert.deepEqual(bound.accounts.get("openrouter-p"), { kind: "account", scope: "work" });
+    // The same keyed provider bound to the personal scope, or under its bare id, is refused.
+    invalid(
+      edited((r) => {
+        r.accounts["openrouter-j"] = { scope: "personal" };
+        r.roles[8].models.push("openrouter-j/moonshotai/kimi-k3.1-pro");
+      }),
+      "roles[8].models[1]: \"openrouter-j/moonshotai/kimi-k3.1-pro\" is in the work scope's super level, which takes only models of work-bound accounts",
+    );
+  });
+
+  test("an account binding takes a scope and no label", () => {
+    for (const field of ["native", "multiPassLabel"]) {
+      invalid(
+        edited((r) => {
+          r.accounts["openrouter-p"] = { scope: "work", [field]: "Positron work" };
+        }),
+        'accounts.openrouter-p: openrouter-p is bound by its id, with "scope" alone: "native" and "multiPassLabel" are for a native subscription login and a Multi-Pass alias',
+      );
+      invalid(
+        edited((r) => {
+          r.accounts["openai-codex-p"] = { scope: "work", [field]: "Positron work" };
+        }),
+        'accounts.openai-codex-p: openai-codex-p is bound by its id, with "scope" alone: "native" and "multiPassLabel" are for a native subscription login and a Multi-Pass alias',
+      );
+    }
+    assert.deepEqual(valid(edited((r) => void (r.accounts["google-j"] = {}))).accounts.get("google-j"), { kind: "account", scope: "personal" });
+  });
+
+  test("a personal level holds no model of a work-bound keyed account", () => {
+    invalid(
+      edited((r) => {
+        r.accounts["openrouter-p"] = { scope: "work" };
+        r.roles[1].models.push("openrouter-p/z-ai/glm-5.3-flash");
+      }),
+      /^roles\[1\]\.models\[\d\]: "openrouter-p\/z-ai\/glm-5\.3-flash" is in the personal scope's .*, but openrouter-p is work-bound$/,
     );
   });
 });
@@ -606,7 +646,7 @@ describe("exclusions in version 2", () => {
       ['accounts.openai-codex-3.scope: must be "personal" or "work"', (r) => (r.accounts["openai-codex-3"].scope = "team")],
       ['roles[5].models[0]: "openai-codex-3/gpt-6-luna" uses the subscription provider openai-codex-3, which needs a binding in accounts', (r) => delete r.accounts["openai-codex-3"]],
       ['scopes.personal.levels.low.role: "nobody" is not a role', (r) => (r.scopes.personal.levels.low.role = "nobody")],
-      ["roles[5].models[1]: \"openrouter/qwen/qwen-9-max\" is in the work scope's low level, which takes only work-bound Codex or Claude Code models", (r) => r.roles[5].models.push("openrouter/qwen/qwen-9-max")],
+      ["roles[5].models[1]: \"openrouter/qwen/qwen-9-max\" is in the work scope's low level, which takes only models of work-bound accounts", (r) => r.roles[5].models.push("openrouter/qwen/qwen-9-max")],
     ];
     for (const [defect, edit] of later) {
       invalid(edited(edit), defect);
@@ -889,7 +929,7 @@ test("version 2 reports its first defect in order: keys, exclude, roles, account
     ['roles[1].models[0]: "hermes/x" is excluded by hermes/*', (r) => (r.roles[1].models[0] = "hermes/x")],
     ['accounts.openai-codex-3.scope: must be "personal" or "work"', (r) => (r.accounts["openai-codex-3"].scope = "team")],
     ['scopes.personal.levels.low.role: "nobody" is not a role', (r) => (r.scopes.personal.levels.low.role = "nobody")],
-    ["roles[5].models[1]: \"openrouter/qwen/qwen-9-max\" is in the work scope's low level, which takes only work-bound Codex or Claude Code models", (r) => r.roles[5].models.push("openrouter/qwen/qwen-9-max")],
+    ["roles[5].models[1]: \"openrouter/qwen/qwen-9-max\" is in the work scope's low level, which takes only models of work-bound accounts", (r) => r.roles[5].models.push("openrouter/qwen/qwen-9-max")],
     ['roles[9].models[0]: "openai-codex-3/gpt-6-nova" is excluded by openai-codex-3/*', (r) => r.roles.push({ name: "spare", models: ["openai-codex-3/gpt-6-nova"] })],
     ['local.role: "nobody" is not a role', (r) => (r.local.role = "nobody")],
     ["classifier.timeoutMs: must be a whole number of milliseconds from 100 to 1000", (r) => (r.classifier.timeoutMs = 1001)],

@@ -66,7 +66,8 @@ function accountLines(roster: Roster): string[] {
     "Accounts:",
     ...[...roster.accounts].map(([provider, binding]) => {
       const scope = "scope" in binding ? `, ${binding.scope} scope` : "";
-      return `  ${provider}: ${binding.kind === "multi-pass" ? `the Multi-Pass label "${binding.label}"` : `a native login acknowledged as "${binding.label}"`}${scope}`;
+      const how = binding.kind === "account" ? "an account, bound by its id" : binding.kind === "multi-pass" ? `the Multi-Pass label "${binding.label}"` : `a native login acknowledged as "${binding.label}"`;
+      return `  ${provider}: ${how}${scope}`;
     }),
   ];
 }

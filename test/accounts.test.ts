@@ -39,10 +39,11 @@ function refused(check: AccountCheck, reason: RegExp): void {
   if (!check.ok) assert.match(check.reason, reason);
 }
 
-test("subscription providers include Claude Code and Multi-Pass aliases", () => {
+test("subscription providers include Claude Code, Multi-Pass aliases and named accounts", () => {
   for (const provider of ["openai-codex", "anthropic", "github-copilot", "claude-code", "claude-code-2", "claude-code-12"]) assert.equal(subscriptionKind(provider), "native");
   for (const provider of ["openai-codex-2", "anthropic-3", "github-copilot-12"]) assert.equal(subscriptionKind(provider), "alias");
-  for (const provider of ["openai", "openrouter", "omlx-hera", "openai-codex-x", "codex-2", "anthropic-", "xanthropic-2"]) {
+  for (const provider of ["openai-codex-j", "openai-codex-p", "claude-code-j", "claude-code-p", "anthropic-work", "github-copilot-x2"]) assert.equal(subscriptionKind(provider), "account");
+  for (const provider of ["openai", "openrouter", "openrouter-p", "google-j", "omlx-hera", "codex-2", "anthropic-", "xanthropic-2", "openai-codex-", "openai-codex-J"]) {
     assert.equal(subscriptionKind(provider), undefined, provider);
   }
 });

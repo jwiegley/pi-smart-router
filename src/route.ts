@@ -40,7 +40,7 @@
 // effort the cost choice priced (effortFor).
 import type { ModelRoute, ModelRouteReason, ModelRouteRequest } from "@earendil-works/pi-coding-agent";
 
-import { isClaudeCodeProvider, isWorkCodex, subscriptionKind } from "./accounts.ts";
+import { isWorkAccount } from "./accounts.ts";
 import type { Classification } from "./classify.ts";
 import { isDeepSession } from "./demand.ts";
 import type { SessionDepth } from "./demand.ts";
@@ -591,20 +591,21 @@ function fromPlan(rc: ResolveContext, plan: Plan): Decision {
 }
 
 /**
- * A personal pick never uses a work-bound account. A work pick uses a work-bound Codex or Claude
- * Code account, or a model in a local role that passes the local policy. Version 1 serves no work
+ * A personal pick never uses a work-bound account. A work pick uses a work-bound account, or a
+ * model in a local role that passes the local policy. Version 1 serves no work
  * scope. Local-only picks also pass the local policy in assertSafe; prepare refuses auto for an
  * unserved scope before this independent check.
  */
 function outsideScope(rc: ResolveContext, choice: Choice): string | undefined {
   const { roster } = rc;
   const provider = choice.model.provider;
-  const local = subscriptionKind(provider) === undefined &&
+  // A bound provider is an account, and an account is never a local endpoint.
+  const local = !roster.accounts.has(provider) &&
     (rc.localOnly || (inLocalRole(roster, choice.ref) && checkLocal(choice.model, rc.policy, true).ok));
   if (roster.version === 1) return rc.scope === "work" && !local ? "is outside this session's work scope, which a version 1 roster does not serve" : undefined;
   if (rc.scope === "personal") return isWorkBound(roster, provider) ? "is on a work-bound account, and this session is in personal scope" : undefined;
-  if (isWorkCodex(roster.accounts, provider) || (isClaudeCodeProvider(provider) && isWorkBound(roster, provider)) || local) return undefined;
-  return "is not on a work-bound Codex or Claude Code account or an allowed local endpoint, and this session is in work scope";
+  if (isWorkAccount(roster.accounts, provider) || local) return undefined;
+  return "is not on a work-bound account or an allowed local endpoint, and this session is in work scope";
 }
 
 /**

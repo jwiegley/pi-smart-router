@@ -572,22 +572,24 @@ describe("a version 2 session's scope in the final assertions", () => {
   const HERA_V2 = rosterFixtureV2("roster-hera-v2.json");
   const pick = (role: string, ref: string): Choice => ({ role, ref, model: model(ref), code: "t" });
 
-  test("a work-scope cloud pick must be on a work-bound supported account", () => {
+  test("a work-scope cloud pick must be on a work-bound account", () => {
     const work = heraContext({ roster: HERA_V2, scope: "work" });
     assertSafe("auto", work, pick("work-high", WORK_SOL));
     refuses(
       () => assertSafe("auto", work, pick("high", GLM_CLOUD)),
-      /^smart-router\/auto: the router picked openrouter\/z-ai\/glm-5\.3, which is not on a work-bound Codex or Claude Code account or an allowed local endpoint, and this session is in work scope; this is a bug in pi-smart-router\./,
+      /^smart-router\/auto: the router picked openrouter\/z-ai\/glm-5\.3, which is not on a work-bound account or an allowed local endpoint, and this session is in work scope; this is a bug in pi-smart-router\./,
     );
-    refuses(() => assertSafe("auto", work, pick("high", SOL)), /openai-codex-2\/gpt-6\.1-sol, which is not on a work-bound Codex or Claude Code account or an allowed local endpoint, and this session is in work scope;/);
-    // A work-bound account that is not Codex, in a work level, as if validation had been bypassed.
+    refuses(() => assertSafe("auto", work, pick("high", SOL)), /openai-codex-2\/gpt-6\.1-sol, which is not on a work-bound account or an allowed local endpoint, and this session is in work scope;/);
+    // A work-bound account of any service serves a work-scope pick.
     const claude = "anthropic-2/claude-opus";
     const anthropic = {
       ...HERA_V2,
       roles: HERA_V2.roles.map((role) => (role.name === "work-high" ? { ...role, models: [...role.models, claude] } : role)),
       accounts: new Map([...HERA_V2.accounts, ["anthropic-2", { kind: "multi-pass", label: "work", scope: "work" } as const]]),
     };
-    refuses(() => assertSafe("auto", heraContext({ roster: anthropic, scope: "work" }), pick("work-high", claude)), /anthropic-2\/claude-opus, which is not on a work-bound Codex or Claude Code account/);
+    assertSafe("auto", heraContext({ roster: anthropic, scope: "work" }), pick("work-high", claude));
+    // The same account in a personal session is refused.
+    refuses(() => assertSafe("auto", heraContext({ roster: anthropic }), pick("work-high", claude)), /anthropic-2\/claude-opus, which is on a work-bound account, and this session is in personal scope/);
   });
 
   test("a personal-scope pick is never on a work-bound account", () => {
@@ -602,7 +604,7 @@ describe("a version 2 session's scope in the final assertions", () => {
   test("a local-only request in work scope keeps smart-router/local's rules: the local role, and never an account", () => {
     const local = heraContext({ roster: HERA_V2, scope: "work", virtualId: "local" });
     assertSafe("local", local, { role: "local", ref: GLM, model: model(GLM, { baseUrl: HERA_LAN }), code: "t" });
-    refuses(() => assertSafe("local", local, pick("high", SOL)), /openai-codex-2\/gpt-6\.1-sol, which is not on a work-bound Codex or Claude Code account or an allowed local endpoint, and this session is in work scope;/);
+    refuses(() => assertSafe("local", local, pick("high", SOL)), /openai-codex-2\/gpt-6\.1-sol, which is not on a work-bound account or an allowed local endpoint, and this session is in work scope;/);
     refuses(() => assertSafe("local", local, pick("high", GLM_CLOUD)), /openrouter\/z-ai\/glm-5\.3, which is not in a local role;/);
   });
 });

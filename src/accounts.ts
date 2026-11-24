@@ -14,7 +14,14 @@ import { agentFile, isRecord, message, own } from "./files.ts";
 import type { AgentFile, FileSystem, Loaded, Parsed } from "./files.ts";
 import type { Roster, RosterV1, RosterV2, Scope } from "./roster.ts";
 
-export type SubscriptionKind = "native" | "alias";
+export type SubscriptionKind = "native" | "alias" | "account";
+
+/**
+ * A subscription provider under a symbolic account suffix, as Pi's `accountOf` names an account of
+ * a provider: `openai-codex-p`, `claude-code-j`. A numbered suffix is a Multi-Pass alias or a
+ * numbered Claude Code instance instead.
+ */
+const SUBSCRIPTION_ACCOUNT = /^(?:openai-codex|anthropic|github-copilot|claude-code)-[a-z][a-z0-9-]*$/;
 
 const CLAUDE_CODE_PROVIDER = /^claude-code(?:-[1-9][0-9]*)?$/;
 
@@ -23,16 +30,17 @@ export function isClaudeCodeProvider(provider: string): boolean {
   return CLAUDE_CODE_PROVIDER.test(provider);
 }
 
-/** Whether a provider is a subscription login (native) or a Multi-Pass alias of one. */
+/** Whether a provider is a subscription login (native), a Multi-Pass alias of one, or a named account of one. */
 export function subscriptionKind(provider: string): SubscriptionKind | undefined {
   if (SUBSCRIPTION_PROVIDERS.includes(provider) || isClaudeCodeProvider(provider)) return "native";
   if (SUBSCRIPTION_ALIAS.test(provider)) return "alias";
+  if (SUBSCRIPTION_ACCOUNT.test(provider)) return "account";
   return undefined;
 }
 
-const CODEX_PROVIDER = /^openai-codex(?:-[0-9]+)?$/;
+const CODEX_PROVIDER = /^openai-codex(?:-[a-z0-9][a-z0-9-]*)?$/;
 
-/** Whether a provider is Codex: the native openai-codex login or a Multi-Pass alias of it. */
+/** Whether a provider is Codex: the native openai-codex login, a Multi-Pass alias of it, or a named account of it. */
 export function isCodexProvider(provider: string): boolean {
   return CODEX_PROVIDER.test(provider);
 }
@@ -47,6 +55,11 @@ export type ScopedAccounts = ReadonlyMap<string, { readonly scope: Scope }>;
  */
 export function isWorkCodex(accounts: ScopedAccounts, provider: string): boolean {
   return isCodexProvider(provider) && accounts.get(provider)?.scope === "work";
+}
+
+/** Whether the roster binds a provider to the work scope: the accounts a work level holds and a work-scope pick goes to. */
+export function isWorkAccount(accounts: ScopedAccounts, provider: string): boolean {
+  return accounts.get(provider)?.scope === "work";
 }
 
 /** Multi-Pass's labels, keyed by the provider each subscription registers (`openai-codex-2`). */
@@ -103,15 +116,19 @@ export function needsLabels(roster: Pick<Roster, "accounts">): boolean {
 export type AccountCheck =
   | { readonly ok: true; readonly kind: "none" }
   | { readonly ok: true; readonly kind: "native" | "multi-pass"; readonly label: string; readonly verified: boolean }
+  /** A provider the roster binds to a scope by its id alone: the id names the account. */
+  | { readonly ok: true; readonly kind: "account" }
   | { readonly ok: false; readonly reason: string };
 
 /** What checkAccount reads of a roster: its version and its account bindings. */
 export type RosterBindings = Pick<RosterV1, "version" | "accounts"> | Pick<RosterV2, "version" | "accounts">;
 
 /**
- * Whether the roster's binding lets the router use a provider. Not a subscription provider:
- * nothing to check. A native login: John's acknowledgement, reported as unverified. A Multi-Pass
- * alias: the label Multi-Pass stores must match the roster's, trimmed and case-insensitive.
+ * Whether the roster's binding lets the router use a provider. Not a subscription provider and
+ * not bound: nothing to check. A provider bound by its id (an account binding): its scope, and
+ * nothing else, since the id names the account. A native login: John's acknowledgement, reported
+ * as unverified. A Multi-Pass alias: the label Multi-Pass stores must match the roster's, trimmed
+ * and case-insensitive.
  *
  * Checked in a session's scope, a version 2 binding serves only that scope's sessions: a personal
  * session refuses a work binding, and a work session takes only a work binding, whose label must
@@ -119,13 +136,13 @@ export type RosterBindings = Pick<RosterV1, "version" | "accounts"> | Pick<Roste
  */
 export function checkAccount(provider: string, roster: RosterBindings, labels: Loaded<Labels> | undefined, scope?: Scope): AccountCheck {
   const kind = subscriptionKind(provider);
-  if (kind === undefined) return { ok: true, kind: "none" };
   const binding = roster.accounts.get(provider);
-  if (binding === undefined) return { ok: false, reason: `${provider} has no account binding in the roster` };
-  const wanted = binding.label.trim();
+  if (binding === undefined) return kind === undefined ? { ok: true, kind: "none" } : { ok: false, reason: `${provider} has no account binding in the roster` };
   // The scope a version 2 binding names, when the check is made in a session's scope.
   const bound = roster.version === 2 && scope !== undefined ? roster.accounts.get(provider)?.scope : undefined;
   if (bound !== undefined && bound !== scope) return { ok: false, reason: `the roster binds ${provider} to the ${bound} scope, but this session is in the ${scope} scope` };
+  if (binding.kind === "account") return { ok: true, kind: "account" };
+  const wanted = binding.label.trim();
   const work = bound === "work";
   if (work && !REFUSED_LABEL.test(wanted)) return { ok: false, reason: `the roster binds ${provider} to "${wanted}", which names neither work nor Positron` };
   if (!work && REFUSED_LABEL.test(wanted)) return { ok: false, reason: `the roster binds ${provider} to "${wanted}", a refused label` };

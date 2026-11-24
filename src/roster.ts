@@ -9,7 +9,7 @@
 // file has nowhere to hold a key, token, header, base URL or environment.
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 
-import { isClaudeCodeProvider, isWorkCodex, subscriptionKind } from "./accounts.ts";
+import { isWorkAccount, subscriptionKind } from "./accounts.ts";
 import {
   ALL_LEVELS,
   BUILTIN_EXCLUDES,
@@ -61,7 +61,9 @@ export interface Routing {
 
 export type AccountBinding =
   | { readonly kind: "multi-pass"; readonly label: string }
-  | { readonly kind: "native"; readonly label: string };
+  | { readonly kind: "native"; readonly label: string }
+  /** A provider bound by its id, which names the account (`openrouter-p`): it carries no label to check. */
+  | { readonly kind: "account" };
 
 /** A version 2 session's scope. */
 export type Scope = "personal" | "work";
@@ -494,16 +496,28 @@ function parseRoles(root: Record<string, unknown>, patterns: readonly string[], 
   return { roles, names, refs, roleName };
 }
 
-/** A binding of a subscription provider, which may hold only `keys`: its kind, the field holding its label, and that label, trimmed. */
-function bindingLabel(
-  provider: string,
-  item: unknown,
-  keys: readonly string[],
-): { readonly binding: Record<string, unknown>; readonly kind: AccountBinding["kind"]; readonly field: string; readonly label: string } {
+type LabelledBinding = { readonly binding: Record<string, unknown>; readonly kind: "native" | "multi-pass"; readonly field: string; readonly label: string };
+type ParsedBinding = LabelledBinding | { readonly binding: Record<string, unknown>; readonly kind: "account" };
+
+/**
+ * A binding, which may hold only `keys`. A native login or a Multi-Pass alias: its kind, the field
+ * holding its label, and that label, trimmed. Any other provider is bound by its id, which names
+ * the account, and takes neither label field; `scoped` says whether the roster's version has
+ * scopes, without which only a named subscription account has anything to bind.
+ */
+function bindingLabel(provider: string, item: unknown, keys: readonly string[], scoped: boolean): ParsedBinding {
   const path = `accounts.${provider}`;
   const kind = subscriptionKind(provider);
-  if (kind === undefined) {
-    fail(path, `${provider} is not a subscription provider: openai-codex, anthropic, github-copilot, claude-code, a numbered Claude Code instance, or a Multi-Pass alias`);
+  // Before the keys are read, so that the provider is named, not a key it has no use for.
+  if (kind === undefined && !scoped) {
+    fail(path, `${provider} is not a subscription provider: openai-codex, anthropic, github-copilot, claude-code, a numbered Claude Code instance, a Multi-Pass alias, or a named account of one`);
+  }
+  if (kind === undefined || kind === "account") {
+    // Its id names the account, so there is no label to acknowledge or to compare.
+    if (isRecord(item) && (own(item, "native") !== undefined || own(item, "multiPassLabel") !== undefined)) {
+      fail(path, `${provider} is bound by its id, with "scope" alone: "native" and "multiPassLabel" are for a native subscription login and a Multi-Pass alias`);
+    }
+    return { binding: object(item, path, keys.filter((key) => key !== "native" && key !== "multiPassLabel")), kind: "account" };
   }
   const binding = object(item, path, keys);
   if (kind === "alias" && own(binding, "native") !== undefined) fail(path, 'a Multi-Pass alias is bound with "multiPassLabel", not "native"');
@@ -597,9 +611,13 @@ function validate(value: unknown): Roster {
   const accounts = new Map<string, AccountBinding>();
   if (own(root, "accounts") !== undefined) {
     for (const [provider, item] of entries(object(own(root, "accounts"), "accounts", "map"))) {
-      const { kind, field, label } = bindingLabel(provider, item, BINDING_KEYS);
-      if (REFUSED_LABEL.test(label)) fail(`accounts.${provider}.${field}`, `the label "${label}" is refused`);
-      accounts.set(provider, { kind, label });
+      const parsed = bindingLabel(provider, item, BINDING_KEYS, false);
+      if (parsed.kind === "account") {
+        accounts.set(provider, { kind: "account" });
+        continue;
+      }
+      if (REFUSED_LABEL.test(parsed.label)) fail(`accounts.${provider}.${parsed.field}`, `the label "${parsed.label}" is refused`);
+      accounts.set(provider, { kind: parsed.kind, label: parsed.label });
     }
   }
   requireBindings(parsed.refs, accounts);
@@ -832,11 +850,17 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
   const accounts = new Map<string, ScopedBinding>();
   if (own(root, "accounts") !== undefined) {
     for (const [provider, item] of entries(object(own(root, "accounts"), "accounts", "map"))) {
-      const { binding, kind, field, label } = bindingLabel(provider, item, SCOPED_BINDING_KEYS);
+      const parsed = bindingLabel(provider, item, SCOPED_BINDING_KEYS, true);
+      const { binding } = parsed;
       const path = `accounts.${provider}`;
       const given = own(binding, "scope");
       const scope = given === undefined ? "personal" : given;
       if (!isScope(scope)) fail(`${path}.scope`, 'must be "personal" or "work"');
+      if (parsed.kind === "account") {
+        accounts.set(provider, { kind: "account", scope });
+        continue;
+      }
+      const { kind, field, label } = parsed;
       if (scope === "personal" && REFUSED_LABEL.test(label)) fail(`${path}.${field}`, `the label "${label}" is refused for a personal binding`);
       if (scope === "work" && !REFUSED_LABEL.test(label)) {
         fail(`${path}.${field}`, `the label "${label}" is refused for a work binding, whose label must contain work or Positron`);
@@ -903,7 +927,7 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
   }
 
   // Personal level and chain roles never reach work bindings. Work level and chain roles take only
-  // work-bound Codex or Claude Code; local tier fallbacks are checked against the LAN at runtime.
+  // work-bound accounts; local tier fallbacks are checked against the LAN at runtime.
   for (const { where, ref, provider, role } of refs) {
     const level = levelOf.get(role);
     const chain = chainOf.get(role);
@@ -911,8 +935,8 @@ function validateV2(value: Record<string, unknown>): RosterV2 {
     if (scope === undefined) continue;
     const place = level !== undefined ? levelName(level) : `the ${scope} scope's fallback`;
     if (scope === "personal" && boundToWork(accounts, provider)) fail(where, `"${ref}" is in ${place}, but ${provider} is work-bound`);
-    if (scope === "work" && !isWorkCodex(accounts, provider) && !(isClaudeCodeProvider(provider) && boundToWork(accounts, provider))) {
-      fail(where, `"${ref}" is in ${place}, which takes only work-bound Codex or Claude Code models`);
+    if (scope === "work" && !isWorkAccount(accounts, provider)) {
+      fail(where, `"${ref}" is in ${place}, which takes only models of work-bound accounts`);
     }
   }
 

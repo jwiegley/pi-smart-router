@@ -7,6 +7,18 @@ fork's releases on that base. Releases are signed tags; nothing is published to 
 
 ## [Unreleased]
 
+### Added
+
+- **Named accounts.** Pi can give every account of a service a provider of its own (`accountOf` in
+  its `models.json`: `openai-codex-j`, `openrouter-p`). A version 2 roster binds any such provider
+  by its id, with `scope` alone and no label, and a keyed provider can be bound too. The scope
+  rules read the binding, never the provider's name.
+
+### Changed
+
+- **A work level or chain takes models of any work-bound account**, not only Codex and Claude
+  Code. An unbound provider is still refused there.
+
 ## [1.5.0-jw.1] - 2026-11-23
 
 The fork's base is now upstream v1.5.0 (`f22cbe9e`), merged into its history with the port's tree

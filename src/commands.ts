@@ -240,7 +240,13 @@ function accountLines(ctx: ExtensionContext, roster: Roster, labels: Loaded<Labe
     ...[...providers].sort().map((provider) => {
       const binding = roster.accounts.get(provider);
       const bound =
-        binding === undefined ? "no binding" : binding.kind === "multi-pass" ? `bound to the Multi-Pass label "${binding.label}"` : `a native login acknowledged as "${binding.label}"`;
+        binding === undefined
+          ? "no binding"
+          : binding.kind === "account"
+            ? `an account, bound by its id${"scope" in binding ? ` to the ${binding.scope} scope` : ""}`
+            : binding.kind === "multi-pass"
+              ? `bound to the Multi-Pass label "${binding.label}"`
+              : `a native login acknowledged as "${binding.label}"`;
       const check = checkAccount(provider, roster, labels, scope);
       const verdict = !check.ok
         ? `refused: ${check.reason}`
@@ -248,7 +254,9 @@ function accountLines(ctx: ExtensionContext, roster: Roster, labels: Loaded<Labe
           ? `Multi-Pass labels it "${check.label}"`
           : check.kind === "native"
             ? "the router cannot verify a native login; run /smart-router status after every /login, /logout or /subs change"
-            : "no binding needed";
+            : check.kind === "account"
+              ? "its id names the account"
+              : "no binding needed";
       return `  ${provider}: ${bound}; ${verdict}; auth ${authSource(ctx, provider)}`;
     }),
   ];
