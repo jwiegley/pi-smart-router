@@ -627,7 +627,7 @@ const ORDER_KEYS = ["personal", "work", "local"] as const;
 const SCOPE_KEYS: Readonly<Record<Scope, readonly string[]>> = { personal: ["levels", "fallback"], work: ["levels", "directories", "fallback"] };
 const LEVEL_KEYS = ["role", "describe", "describeFile", "fallback"];
 const SCOPED_BINDING_KEYS = ["multiPassLabel", "native", "scope"];
-const CLASSIFIER_KEYS = ["model", "timeoutMs", "closeCall", "context", "instructions", "instructionsFile"];
+const CLASSIFIER_KEYS = ["model", "timeoutMs", "closeCall", "context", "instructions", "instructionsFile", "typedJudgment"];
 const CONTEXT_KEYS = ["messages", "messageChars", "totalChars"];
 
 interface LevelName {
@@ -685,6 +685,8 @@ function classifierSettings(value: unknown, exclude: readonly string[]): JevSett
   if (instructions !== undefined && [...instructions].length > INSTRUCTIONS_MAX_CHARS) fail("classifier.instructions", `must be at most ${INSTRUCTIONS_MAX_CHARS} characters`);
   const instructionsFile = own(section, "instructionsFile") === undefined ? undefined : promptFile(own(section, "instructionsFile"), "classifier.instructionsFile");
   if (instructions !== undefined && instructionsFile !== undefined) fail("classifier", 'give "instructions" or "instructionsFile", not both');
+  const typedJudgment = own(section, "typedJudgment");
+  if (typedJudgment !== undefined && typeof typedJudgment !== "boolean") fail("classifier.typedJudgment", "must be true or false");
   return {
     model,
     timeoutMs,
@@ -695,6 +697,7 @@ function classifierSettings(value: unknown, exclude: readonly string[]): JevSett
     },
     ...(instructions === undefined ? {} : { instructions }),
     ...(instructionsFile === undefined ? {} : { instructionsFile }),
+    ...(typedJudgment === true ? { typedJudgment: true } : {}),
   };
 }
 

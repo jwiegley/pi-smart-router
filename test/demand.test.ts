@@ -221,6 +221,24 @@ describe("the guards", () => {
     assert.equal(edge.tier, "low", "exactly 100,000 tokens and 1,000 entries is not deep");
   });
 
+  test("a typed capability maps 0 to 3 onto LOW to SUPER: sure, it replaces the level either way; unsure, it only raises; the floors still win", () => {
+    const typed = (table: Table, score: 0 | 1 | 2 | 3, confidence: number): JevOutcome => ({ ...answer(table), typed: { capability: { score, confidence } } } as JevOutcome);
+    for (const [score, tier] of [[0, "low"], [1, "medium"], [2, "high"], [3, "super"]] as const) {
+      assert.equal(run("what is 2+2 ?", FRESH, { jev: typed(MEDIUM, score, 0.9) }).tier, tier, `score ${score}`);
+    }
+    const down = run(PLANNING, FRESH, { planning: true, jev: typed(SUPER, 0, 0.9) });
+    assert.deepEqual([down.tier, down.guards.at(-1)], ["low", "typed-judgment"], "a sure judgment lowers");
+    assert.equal(run(PLANNING, FRESH, { planning: true, jev: typed(SUPER, 0, 0.59) }).tier, "super", "an unsure judgment never lowers");
+    assert.equal(run("what is 2+2 ?", FRESH, { jev: typed(LOW, 3, 0.1) }).tier, "super", "an unsure judgment still raises");
+    assert.deepEqual(run("what is 2+2 ?", FRESH, { jev: typed(LOW, 0, 0.9) }).guards, [], "agreement is no guard");
+    const risky = run("what is 2+2 ?", FRESH, { risky: true, jev: typed(LOW, 0, 1) });
+    assert.deepEqual([risky.tier, risky.guards], ["high", ["risky"]], "the risky floor wins over a lowered level");
+    const destructive = (p: number): JevOutcome => ({ ...answer(LOW), typed: { destructive: p } } as JevOutcome);
+    assert.deepEqual([run("what is 2+2 ?", FRESH, { jev: destructive(0.7) }).tier, run("what is 2+2 ?", FRESH, { jev: destructive(0.7) }).guards], ["high", ["destructive"]], "a request judged destructive takes the risky floor");
+    assert.equal(run("what is 2+2 ?", FRESH, { jev: destructive(0.69) }).tier, "low", "under 0.7 it does not");
+    const deep = run("continue", DEEP, { jev: typed(HIGH, 0, 1) });
+    assert.deepEqual([deep.tier, deep.guards], ["medium", ["typed-judgment", "deep-session"]], "so does the deep-session floor");
+  });
   test("a Jev that failed, or weights that silence one side, leave the other to decide", () => {
     const failed: JevOutcome = { kind: "failure", model: "jev", failure: "timeout", ms: 1_000 };
     const without = run("what is 2+2 ?", FRESH);

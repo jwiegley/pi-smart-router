@@ -15,7 +15,7 @@ import type { Priced } from "./cost.ts";
 import type { CostTerms, LevelSource, PlanLevel } from "./decide.ts";
 import type { Demand } from "./demand.ts";
 import { isRecord, own } from "./files.ts";
-import type { JevFailure } from "./jev.ts";
+import type { JevFailure, TypedJudgment } from "./jev.ts";
 import type { PendingLevel } from "./route.ts";
 import { isScope, parseRef } from "./roster.ts";
 import type { Scope } from "./roster.ts";
@@ -31,6 +31,8 @@ export type JevRecord =
       readonly probabilities: Readonly<Record<Tier, number>>;
       readonly confidence: number;
       readonly ms: number;
+      /** The typed answers: names, scores and probabilities, never text. */
+      readonly typed?: TypedJudgment;
     }
   | { readonly model: string; readonly failure: JevFailure; readonly ms: number }
   | { readonly late: true };
@@ -123,7 +125,7 @@ function jevRecord(jev: PendingLevel["jev"]): JevRecord | undefined {
   if (jev === undefined) return undefined;
   if (jev === "pending") return { late: true };
   if (jev.kind === "failure") return { model: jev.model, failure: jev.failure, ms: jev.ms };
-  return { model: jev.model, choice: jev.choice, probabilities: { ...jev.probabilities }, confidence: jev.confidence, ms: jev.ms };
+  return { model: jev.model, choice: jev.choice, probabilities: { ...jev.probabilities }, confidence: jev.confidence, ms: jev.ms, ...(jev.typed === undefined ? {} : { typed: jev.typed }) };
 }
 
 /**

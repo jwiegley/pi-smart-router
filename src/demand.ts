@@ -3,6 +3,7 @@
 // the level the number names. It is pure: the caller reads the prompt, the session and Jev, and
 // passes what it found.
 import { capText } from "./classify.ts";
+import { judgedDestructive, typedJudgment } from "./jev.ts";
 import type { JevOutcome } from "./jev.ts";
 import { DEEP_SESSION_ENTRIES, DEEP_SESSION_TOKENS } from "./settings.ts";
 import type { DemandSettings } from "./settings.ts";
@@ -49,7 +50,7 @@ export function rolesOf(messages: readonly unknown[]): string[] {
   return roles.slice(-HEURISTIC_MESSAGES);
 }
 
-export type DemandGuard = "low-confidence" | "close-call" | "risky" | "deep-session";
+export type DemandGuard = "low-confidence" | "close-call" | "typed-judgment" | "risky" | "destructive" | "deep-session";
 
 /**
  * What says how deep a session is: the conversation's size and the active context's entry count,
@@ -155,9 +156,21 @@ export function demandOf(input: DemandInput, settings: DemandSettings): Demand {
   const named = tierOfDemand(value, settings);
   if (named.closeCall) guards.push("close-call");
   let tier = named.tier;
-  if (input.risky && higherTier(tier, "high") !== tier) {
+  // 5a. Upstream v1.5.0's typed capability (computeAdjustedHint in low-intensity-stage.ts): scores 0
+  // to 3 are LOW to SUPER. At minConfidence or above it replaces the level, up or down; under it, it
+  // can only raise. The floors below still win over a level it lowered.
+  const capability = typedJudgment(input.jev)?.capability;
+  const judged = capability === undefined ? undefined : TIERS[capability.score];
+  if (capability !== undefined && judged !== undefined && judged !== tier && (capability.confidence >= settings.minConfidence || higherTier(tier, judged) !== tier)) {
+    tier = judged;
+    guards.push("typed-judgment");
+  }
+  // A request the typed judgment calls destructive is risky too (upstream's local-zero gate keeps
+  // such a request off its smallest model; here it takes the risky floor).
+  const destructive = judgedDestructive(input.jev);
+  if ((input.risky || destructive) && higherTier(tier, "high") !== tier) {
     tier = "high";
-    guards.push("risky");
+    guards.push(input.risky ? "risky" : "destructive");
   }
   if (isDeepSession(facts) && higherTier(tier, settings.deepSessionFloor) !== tier) {
     tier = settings.deepSessionFloor;

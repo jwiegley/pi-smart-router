@@ -1,0 +1,117 @@
+{
+  "source": "beettlle/pi-smart-router f22cbe9e7ecc4df8aa129bc98c188768281c3660 src/domain/judgment/questions.ts",
+  "taskKinds": [
+    "plan",
+    "implement",
+    "debug",
+    "refactor",
+    "review",
+    "research",
+    "explain",
+    "operate",
+    "write",
+    "chat"
+  ],
+  "questions": [
+    {
+      "id": "task_kind",
+      "kind": "choice",
+      "prompt": "Which single kind of work does `latest_user_message` ask for? Judge the work the user wants done, not the topic they mention. Read `recent_activity` when the request is a short follow-up that only makes sense in context. Pick the closest kind even when the request is ambiguous.\n- plan: Deciding what to build, sequencing work, or designing an approach before editing\n- implement: Writing or changing code, scripts, or configuration to produce a concrete result\n- debug: Diagnosing a failure, error, or unexpected behavior and finding its root cause\n- refactor: Restructuring existing code without changing intended behavior\n- review: Auditing code, a diff, a document, or a plan for problems and risks\n- research: Searching, reading, and synthesizing external information or unfamiliar APIs\n- explain: Answering a question or explaining how something works\n- operate: Running commands, tooling, git, deploys, or environment setup\n- write: Producing prose, documentation, comments, or other non-code content from scratch\n- chat: Small talk, acknowledgements, or a request with no real work attached",
+      "options": [
+        "plan",
+        "implement",
+        "debug",
+        "refactor",
+        "review",
+        "research",
+        "explain",
+        "operate",
+        "write",
+        "chat"
+      ]
+    },
+    {
+      "id": "capability_deserved",
+      "kind": "score",
+      "prompt": "Setting price aside entirely, how much model capability does this request deserve to get a good outcome? Judge by stakes, difficulty, and how much a stronger model would measurably improve the result.",
+      "anchors": [
+        {
+          "score": 0,
+          "description": "Minimal: any fast small model answers this just as well"
+        },
+        {
+          "score": 1,
+          "description": "Standard: a competent mid-tier model is enough"
+        },
+        {
+          "score": 2,
+          "description": "High: a strong frontier model materially improves the outcome"
+        },
+        {
+          "score": 3,
+          "description": "Maximum: correctness matters more than cost; use the best available"
+        }
+      ]
+    },
+    {
+      "id": "needs_deep_reasoning",
+      "kind": "noul",
+      "prompt": "Does answering `latest_user_message` well require extended multi-step reasoning (algorithm design, subtle debugging, proof, careful long-horizon planning) rather than recall, lookup, or a short direct edit?",
+      "criteria_true": "The work hinges on reasoning through non-obvious steps or edge cases",
+      "criteria_false": "The work is recall, lookup, formatting, or a short direct change"
+    },
+    {
+      "id": "code_gen",
+      "kind": "score",
+      "prompt": "How much code or configuration must be written or modified to satisfy `latest_user_message` well?",
+      "anchors": [
+        {
+          "score": 0,
+          "description": "None: no code or configuration is written or modified"
+        },
+        {
+          "score": 1,
+          "description": "Small: a short snippet, single-line change, or simple config value"
+        },
+        {
+          "score": 2,
+          "description": "Moderate: a function, test, or file-scale change using familiar patterns"
+        },
+        {
+          "score": 3,
+          "description": "Substantial: multi-file or architecturally significant code generation"
+        }
+      ]
+    },
+    {
+      "id": "tool_use",
+      "kind": "score",
+      "prompt": "How much tool execution (shell, file, search, or agentic tool calls) does satisfying `latest_user_message` require? Use `session` and `recent_activity` to judge whether a tool loop is already underway.",
+      "anchors": [
+        {
+          "score": 0,
+          "description": "None: the answer needs no tool execution"
+        },
+        {
+          "score": 1,
+          "description": "Light: at most a couple of simple read-only tool calls"
+        },
+        {
+          "score": 2,
+          "description": "Moderate: several tool calls or state-changing commands in a known sequence"
+        },
+        {
+          "score": 3,
+          "description": "Heavy: long agentic tool loops, orchestration across many calls, or recovery from tool failures"
+        }
+      ]
+    },
+    {
+      "id": "destructive",
+      "kind": "noul",
+      "prompt": "Could satisfying `latest_user_message` destroy, overwrite, or irreversibly modify data, state, or history?",
+      "criteria_true": "The request could delete, overwrite, or irreversibly modify data, state, or history (e.g. recursive deletes, force pushes, dropped tables, branch resets, mass edits without a checkpoint)",
+      "criteria_false": "The request is read-only, additive, or easily reversible"
+    }
+  ]
+}

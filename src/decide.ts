@@ -46,6 +46,7 @@ import type { Demand, PromptFacts } from "./demand.ts";
 import { sentEffort } from "./effort.ts";
 import type { EffortSignal, SentEffort, TurnType } from "./effort.ts";
 import { isRecord, own } from "./files.ts";
+import { judgedPlanning } from "./jev.ts";
 import type { JevOutcome } from "./jev.ts";
 import { localRoles } from "./local.ts";
 import { againChance, effortOf, horizonFor, runShape, usable } from "./ledger.ts";
@@ -513,8 +514,10 @@ function needOf(p: PlanInput, roster: RosterV2, signal: Signal): Pick<PlanLevel,
   const tag = p.level?.tag;
   if (tag !== undefined) return { need: tag, source: "tag" };
   const risky = riskyTrigger(p.text);
-  const demand = demandOf({ text: p.text, planning: signal === "planning", risky: risky !== undefined, jev: p.level?.jev, facts: p.facts }, roster.demand);
-  const raised = demand.guards.includes("risky") || demand.guards.includes("deep-session");
+  // A confident typed task kind can make the prompt a planning one for its demand (judgedPlanning).
+  const planning = judgedPlanning(p.level?.jev, roster.demand.minConfidence, signal === "planning");
+  const demand = demandOf({ text: p.text, planning, risky: risky !== undefined, jev: p.level?.jev, facts: p.facts }, roster.demand);
+  const raised = demand.guards.includes("risky") || demand.guards.includes("destructive") || demand.guards.includes("deep-session");
   const source: LevelSource = raised ? "floor" : demand.jev !== undefined ? "jev" : "heuristics";
   return { need: demand.tier, source, ...(risky !== undefined && demand.guards.includes("risky") ? { trigger: risky } : {}), demand };
 }

@@ -784,7 +784,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       const { messages } = settings.context;
       const entries = messages === 0 ? [] : (window ?? history.getRecentActiveEntries({ type: "message", limit: messages * 4 }));
       const recent = recentMessages(entries, messages);
-      return askJev(ctx.modelRegistry, settings, buildContext(text, recent, descriptions, settings.context, given.instructions), now);
+      return askJev(ctx.modelRegistry, settings, buildContext(text, recent, descriptions, settings.context, given.instructions, settings.typedJudgment === true), now);
     } catch {
       return Promise.resolve<JevOutcome>({ kind: "failure", model: settings.model, failure: "error", ms: 0 });
     }

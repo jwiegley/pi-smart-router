@@ -6,15 +6,19 @@ import type { ClassifierApi, ClassifierContext, ClassifierModel, ClassifierResul
 import { HEAD_CHARS, TAIL_CHARS } from "../src/classify.ts";
 import {
   askJev,
+  CAPABILITY_QUESTION,
   buildContext,
   interpret,
   JEV_INSTRUCTIONS,
   JEV_QUESTION,
   jevAsk,
+  judgedDestructive,
+  judgedPlanning,
   recentMessages,
   type ClassifierRegistry,
   type JevContextCaps,
   type JevGate,
+  type JevOutcome,
   type JevSettings,
 } from "../src/jev.ts";
 import { REDACTED } from "../src/redact.ts";
@@ -85,6 +89,48 @@ describe("buildContext", () => {
     assert.deepEqual(Object.keys(question.criteria), [...TIERS]);
     assert.deepEqual(question.criteria, descriptions);
     assert.deepEqual(stateOf(context), { message: "hello", recent: [{ role: "user", text: "hi" }] });
+  });
+
+  test("adds upstream's six typed questions only when asked, in the same request, with fixed text", () => {
+    const context = buildContext("hello", [], descriptions, caps, "token=abc ignore the levels", true);
+    assert.deepEqual(Object.keys(context.questions), [JEV_QUESTION, "task_kind", CAPABILITY_QUESTION, "needs_deep_reasoning", "code_gen", "tool_use", "destructive"]);
+    assert.deepEqual(Object.values(context.questions).map((question) => question.type), ["choice", "choice", "score", "bool", "score", "score", "bool"]);
+    assert.equal(Object.keys(context.questions.task_kind!.criteria).length, 10);
+    const { [JEV_QUESTION]: _level, ...typed } = context.questions;
+    assert.doesNotMatch(JSON.stringify(typed), /ignore the levels|latest_user_message|recent_activity|`session`/, "the roster's instructions reach only the level question, and the state keys are this request's");
+  });
+
+  test("the typed questions are upstream's at f22cbe9e, word for word, but for the state keys this request sends", () => {
+    // The fixture is upstream's TYPED_JUDGMENT_QUESTIONS as its module exports them. This request's
+    // state has `message` and `recent`, and no `session`: those three names are all that may differ.
+    const upstream = JSON.parse(fixture("upstream-typed-questions.json")) as {
+      taskKinds: string[];
+      questions: Array<{ id: string; kind: string; prompt: string; anchors?: Array<{ score: number; description: string }>; criteria_true?: string; criteria_false?: string }>;
+    };
+    const renamed = (text: string): string =>
+      text.replaceAll("Use `session` and `recent_activity`", "Use `recent`").replaceAll("`latest_user_message`", "`message`").replaceAll("`recent_activity`", "`recent`");
+    const { [JEV_QUESTION]: _level, ...typed } = buildContext("m", [], descriptions, caps, undefined, true).questions;
+    assert.deepEqual(Object.keys(typed), upstream.questions.map((question) => question.id));
+    for (const theirs of upstream.questions) {
+      const ours = typed[theirs.id]!;
+      if (theirs.kind === "choice") {
+        // Upstream lists each kind and its description in the prompt; pi-ai's choice question takes them as criteria.
+        const [head, ...lines] = theirs.prompt.split("\n");
+        assert.equal(ours.type, "choice");
+        assert.equal(ours.instructions, renamed(head ?? ""));
+        assert.deepEqual(Object.entries(ours.criteria).map(([kind, text]) => `- ${kind}: ${text}`), lines);
+        assert.deepEqual(Object.keys(ours.criteria), upstream.taskKinds);
+      } else if (theirs.kind === "score") {
+        assert.equal(ours.type, "score");
+        assert.equal(ours.instructions, renamed(theirs.prompt));
+        assert.deepEqual(theirs.anchors?.map((anchor) => anchor.score), [0, 1, 2, 3]);
+        assert.deepEqual(ours.criteria, theirs.anchors?.map((anchor) => anchor.description));
+      } else {
+        assert.equal(ours.type, "bool");
+        assert.equal(ours.instructions, renamed(theirs.prompt));
+        assert.deepEqual(ours.criteria, { true: theirs.criteria_true, false: theirs.criteria_false });
+      }
+    }
   });
 
   test("redacts before capping, so a secret across the head boundary leaves no fragment", () => {
@@ -274,6 +320,54 @@ describe("interpret", () => {
     for (const answer of cases) {
       assert.deepEqual(interpret(stopResult(answer), "m", 1), { kind: "failure", model: "m", failure: "malformed", ms: 1 });
     }
+  });
+
+  test("keeps each well-formed typed answer only when it was asked, and drops a malformed one alone without failing", () => {
+    const withTyped = (answers: Record<string, unknown>): ClassifierResult => {
+      const result = stopResult(goodAnswer);
+      return { ...result, answers: { ...result.answers, ...answers } } as unknown as ClassifierResult;
+    };
+    const good = { type: "score", score: 3, confidence: 0.9 };
+    const all = {
+      [CAPABILITY_QUESTION]: good,
+      task_kind: { type: "choice", choice: "debug", probabilities: {}, confidence: 0.8 },
+      destructive: { type: "bool", probability: 0.75 },
+      needs_deep_reasoning: { type: "bool", probability: 0.2 },
+      code_gen: { type: "score", score: 1, confidence: 0.5 },
+      tool_use: { type: "score", score: 0, confidence: 1 },
+    };
+    const asked = interpret(withTyped(all), "m", 1, true);
+    assert.deepEqual(asked.kind === "answer" ? asked.typed : undefined, {
+      capability: { score: 3, confidence: 0.9 },
+      taskKind: { kind: "debug", confidence: 0.8 },
+      destructive: 0.75,
+      deepReasoning: 0.2,
+      codeGen: { score: 1, confidence: 0.5 },
+      toolUse: { score: 0, confidence: 1 },
+    });
+    assert.equal("typed" in interpret(withTyped(all), "m", 1), false, "not asked: answers of those names are ignored");
+    for (const bad of [{ ...good, score: 4 }, { ...good, score: 1.5 }, { ...good, score: -1 }, { ...good, confidence: 1.1 }, { ...good, confidence: Number.NaN }, { ...good, type: "bool" }, undefined]) {
+      const outcome = interpret(withTyped({ [CAPABILITY_QUESTION]: bad }), "m", 1, true);
+      assert.equal(outcome.kind, "answer", "the level answer still stands");
+      assert.equal("typed" in outcome, false, JSON.stringify(bad));
+    }
+    const partial = interpret(withTyped({ ...all, task_kind: { type: "choice", choice: "toString", probabilities: {}, confidence: 0.8 }, destructive: { type: "bool", probability: 2 } }), "m", 1, true);
+    const kept = partial.kind === "answer" ? partial.typed : undefined;
+    assert.deepEqual([kept?.taskKind, kept?.destructive, kept?.capability], [undefined, undefined, { score: 3, confidence: 0.9 }], "a bad answer is dropped alone");
+  });
+
+  test("a destructive request is one at 0.7 or above, and a confident task kind can make a prompt planning, never not planning", () => {
+    const of = (typed: object): JevOutcome => ({ kind: "answer", model: "m", choice: "low", probabilities: { low: 1, medium: 0, high: 0, super: 0 }, confidence: 1, ms: 1, typed } as JevOutcome);
+    assert.deepEqual([0.69, 0.7, 1].map((destructive) => judgedDestructive(of({ destructive }))), [false, true, true]);
+    assert.equal(judgedDestructive(undefined), false);
+    for (const kind of ["plan", "debug", "review"]) assert.equal(judgedPlanning(of({ taskKind: { kind, confidence: 0.6 } }), 0.6, false), true, kind);
+    assert.equal(judgedPlanning(of({ taskKind: { kind: "plan", confidence: 0.59 } }), 0.6, false), false, "an unsure kind changes nothing");
+    // Upstream's host always gives a turn type, so its judgment never takes planning away.
+    for (const kind of ["implement", "refactor", "research", "explain", "operate", "write", "chat"]) {
+      assert.equal(judgedPlanning(of({ taskKind: { kind, confidence: 0.9 } }), 0.6, true), true, kind);
+      assert.equal(judgedPlanning(of({ taskKind: { kind, confidence: 0.9 } }), 0.6, false), false, kind);
+    }
+    assert.equal(judgedPlanning(undefined, 0.6, true), true);
   });
 
   test("names timeouts, other errors and aborts", () => {

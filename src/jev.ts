@@ -31,6 +31,8 @@ export interface JevSettings {
   readonly instructions?: string;
   /** The name of the prompt file that holds the roster's own question. */
   readonly instructionsFile?: string;
+  /** Ask upstream v1.5.0's six fixed typed questions in the same request. Off unless the roster says `true`. */
+  readonly typedJudgment?: boolean;
 }
 export interface RecentMessage {
   readonly role: "user" | "assistant";
@@ -69,6 +71,165 @@ function capMessage(message: string, totalChars: number): string {
   return `${capped.slice(0, totalChars - Math.floor(totalChars / 5))}\n${capped.slice(capped.length - tail)}`;
 }
 
+export const CAPABILITY_QUESTION = "capability_deserved";
+export const TASK_KIND_QUESTION = "task_kind";
+export const DEEP_REASONING_QUESTION = "needs_deep_reasoning";
+export const CODE_GEN_QUESTION = "code_gen";
+export const TOOL_USE_QUESTION = "tool_use";
+export const DESTRUCTIVE_QUESTION = "destructive";
+
+/** Upstream's ten task kinds, in its order, each with its description. */
+const TASK_KINDS = {
+  plan: "Deciding what to build, sequencing work, or designing an approach before editing",
+  implement: "Writing or changing code, scripts, or configuration to produce a concrete result",
+  debug: "Diagnosing a failure, error, or unexpected behavior and finding its root cause",
+  refactor: "Restructuring existing code without changing intended behavior",
+  review: "Auditing code, a diff, a document, or a plan for problems and risks",
+  research: "Searching, reading, and synthesizing external information or unfamiliar APIs",
+  explain: "Answering a question or explaining how something works",
+  operate: "Running commands, tooling, git, deploys, or environment setup",
+  write: "Producing prose, documentation, comments, or other non-code content from scratch",
+  chat: "Small talk, acknowledgements, or a request with no real work attached",
+} as const;
+export type TaskKind = keyof typeof TASK_KINDS;
+const isTaskKind = (value: unknown): value is TaskKind => typeof value === "string" && Object.hasOwn(TASK_KINDS, value);
+
+/**
+ * Upstream v1.5.0's six typed questions (src/domain/judgment/questions.ts at f22cbe9e), asked in
+ * the same request as the level question when the roster says so. Their wording is upstream's,
+ * with its state keys `latest_user_message` and `recent_activity` renamed to this request's
+ * `message` and `recent`, and its `session` key, which this request does not send, left out.
+ * Fixed in code: no roster text or prompt file reaches them. The router acts on three,
+ * `capability_deserved`, `destructive` and `task_kind` (John, 2026-11-23); the other three are
+ * recorded and decide nothing, since Pi's catalog has none of the capability scores upstream
+ * compares them with.
+ */
+const TYPED_QUESTIONS: ClassifierContext["questions"] = {
+  [TASK_KIND_QUESTION]: {
+    type: "choice",
+    instructions:
+      "Which single kind of work does `message` ask for? Judge the work the user wants done, not the topic they mention. Read `recent` when the request is a short follow-up that only makes sense in context. Pick the closest kind even when the request is ambiguous.",
+    criteria: { ...TASK_KINDS },
+  },
+  [CAPABILITY_QUESTION]: {
+    type: "score",
+    instructions:
+      "Setting price aside entirely, how much model capability does this request deserve to get a good outcome? Judge by stakes, difficulty, and how much a stronger model would measurably improve the result.",
+    criteria: [
+      "Minimal: any fast small model answers this just as well",
+      "Standard: a competent mid-tier model is enough",
+      "High: a strong frontier model materially improves the outcome",
+      "Maximum: correctness matters more than cost; use the best available",
+    ],
+  },
+  [DEEP_REASONING_QUESTION]: {
+    type: "bool",
+    instructions:
+      "Does answering `message` well require extended multi-step reasoning (algorithm design, subtle debugging, proof, careful long-horizon planning) rather than recall, lookup, or a short direct edit?",
+    criteria: { true: "The work hinges on reasoning through non-obvious steps or edge cases", false: "The work is recall, lookup, formatting, or a short direct change" },
+  },
+  [CODE_GEN_QUESTION]: {
+    type: "score",
+    instructions: "How much code or configuration must be written or modified to satisfy `message` well?",
+    criteria: [
+      "None: no code or configuration is written or modified",
+      "Small: a short snippet, single-line change, or simple config value",
+      "Moderate: a function, test, or file-scale change using familiar patterns",
+      "Substantial: multi-file or architecturally significant code generation",
+    ],
+  },
+  [TOOL_USE_QUESTION]: {
+    type: "score",
+    instructions: "How much tool execution (shell, file, search, or agentic tool calls) does satisfying `message` require? Use `recent` to judge whether a tool loop is already underway.",
+    criteria: [
+      "None: the answer needs no tool execution",
+      "Light: at most a couple of simple read-only tool calls",
+      "Moderate: several tool calls or state-changing commands in a known sequence",
+      "Heavy: long agentic tool loops, orchestration across many calls, or recovery from tool failures",
+    ],
+  },
+  [DESTRUCTIVE_QUESTION]: {
+    type: "bool",
+    instructions: "Could satisfying `message` destroy, overwrite, or irreversibly modify data, state, or history?",
+    criteria: {
+      true: "The request could delete, overwrite, or irreversibly modify data, state, or history (e.g. recursive deletes, force pushes, dropped tables, branch resets, mass edits without a checkpoint)",
+      false: "The request is read-only, additive, or easily reversible",
+    },
+  },
+};
+
+export type TypedScore = 0 | 1 | 2 | 3;
+/** A scored answer: 0 to 3, and the judge's confidence in it. */
+export interface Scored {
+  readonly score: TypedScore;
+  readonly confidence: number;
+}
+
+/** The typed answers that were well formed, each on its own: a missing or malformed one is absent, and changes nothing. */
+export interface TypedJudgment {
+  /** `capability_deserved`: 0 to 3 are LOW to SUPER. */
+  readonly capability?: Scored;
+  readonly taskKind?: { readonly kind: TaskKind; readonly confidence: number };
+  /** The probability that the request is destructive. */
+  readonly destructive?: number;
+  /** Recorded only. */
+  readonly deepReasoning?: number;
+  readonly codeGen?: Scored;
+  readonly toolUse?: Scored;
+}
+
+/** Upstream's TYPED_JUDGMENT_DESTRUCTIVE_THRESHOLD: at or above it a request counts as destructive. */
+export const DESTRUCTIVE_THRESHOLD = 0.7;
+/** Upstream's PLANNING_TASK_KINDS: the kinds a confident judgment makes a planning turn of. */
+const PLANNING_KINDS: ReadonlySet<TaskKind> = new Set(["plan", "debug", "review"]);
+
+const unit = (value: unknown): value is number => typeof value === "number" && value >= 0 && value <= 1;
+
+function scored(answer: ClassifierResult["answers"][string] | undefined): Scored | undefined {
+  if (answer?.type !== "score") return undefined;
+  const { score, confidence } = answer;
+  return (score === 0 || score === 1 || score === 2 || score === 3) && unit(confidence) ? { score, confidence } : undefined;
+}
+
+function probability(answer: ClassifierResult["answers"][string] | undefined): number | undefined {
+  return answer?.type === "bool" && unit(answer.probability) ? answer.probability : undefined;
+}
+
+function typedOf(answers: ClassifierResult["answers"]): TypedJudgment | undefined {
+  const kind = answers[TASK_KIND_QUESTION];
+  const judged = {
+    capability: scored(answers[CAPABILITY_QUESTION]),
+    taskKind: kind?.type === "choice" && isTaskKind(kind.choice) && unit(kind.confidence) ? { kind: kind.choice, confidence: kind.confidence } : undefined,
+    destructive: probability(answers[DESTRUCTIVE_QUESTION]),
+    deepReasoning: probability(answers[DEEP_REASONING_QUESTION]),
+    codeGen: scored(answers[CODE_GEN_QUESTION]),
+    toolUse: scored(answers[TOOL_USE_QUESTION]),
+  };
+  const kept = Object.fromEntries(Object.entries(judged).filter(([, value]) => value !== undefined)) as TypedJudgment;
+  return Object.keys(kept).length === 0 ? undefined : kept;
+}
+
+/** The typed answers of an outcome, when it has any. */
+export const typedJudgment = (jev: JevOutcome | undefined): TypedJudgment | undefined => (jev?.kind === "answer" ? jev.typed : undefined);
+
+/** Whether the typed judgment calls the request destructive (upstream's local-zero gate; here it applies the risky floor). */
+export function judgedDestructive(jev: JevOutcome | undefined): boolean {
+  const p = typedJudgment(jev)?.destructive;
+  return p !== undefined && p >= DESTRUCTIVE_THRESHOLD;
+}
+
+/**
+ * Whether a prompt counts as planning for its demand, upstream's resolveTurnType
+ * (turn-envelope-stage.ts at f22cbe9e): a task kind of plan, debug or review at `minConfidence` or
+ * above makes it planning. The judgment never makes a planning prompt not one: upstream allows
+ * that only when its host gave no turn type, and its host always gives one. The thinking effort
+ * does not read this: upstream's adaptive reasoning takes the host's turn type, not the judged one.
+ */
+export function judgedPlanning(jev: JevOutcome | undefined, minConfidence: number, words: boolean): boolean {
+  const task = typedJudgment(jev)?.taskKind;
+  return words || (task !== undefined && task.confidence >= minConfidence && PLANNING_KINDS.has(task.kind));
+}
+
 /**
  * The classifier request: the redacted message and recent turns, and the one level question.
  * `instructions` and `descriptions` are the only parts John's prompts supply. The request's shape
@@ -81,6 +242,7 @@ export function buildContext(
   descriptions: Readonly<Record<Tier, string>>,
   caps: JevContextCaps,
   instructions: string = JEV_INSTRUCTIONS,
+  typed = false,
 ): ClassifierContext {
   const capped = capMessage(redact(message), caps.totalChars);
   const candidates = caps.messages > 0 ? recent.slice(-caps.messages) : [];
@@ -99,7 +261,7 @@ export function buildContext(
   for (const tier of TIERS) criteria[tier] = redact(descriptions[tier]);
   return {
     state: { message: capped, recent: kept.map(({ role, text }) => ({ role, text })) },
-    questions: { [JEV_QUESTION]: { type: "choice", instructions: redact(instructions), criteria } },
+    questions: { [JEV_QUESTION]: { type: "choice", instructions: redact(instructions), criteria }, ...(typed ? TYPED_QUESTIONS : {}) },
   };
 }
 
@@ -114,6 +276,8 @@ export type JevOutcome =
       readonly probabilities: Readonly<Record<Tier, number>>;
       readonly confidence: number;
       readonly ms: number;
+      /** The typed answers, when the roster asked for them and any was well formed. */
+      readonly typed?: TypedJudgment;
     }
   | { readonly kind: "failure"; readonly model: string; readonly failure: JevFailure; readonly ms: number };
 
@@ -122,7 +286,7 @@ function failure(model: string, kind: JevFailure, ms: number): JevOutcome {
 }
 
 /** pi-ai checks the answer's types only; the labels must be exactly the four tiers here. */
-export function interpret(result: ClassifierResult, model: string, ms: number): JevOutcome {
+export function interpret(result: ClassifierResult, model: string, ms: number, typed = false): JevOutcome {
   if (result.stopReason === "aborted") return failure(model, "aborted", ms);
   if (result.stopReason === "error") {
     return failure(model, /^Request timed out after \d+ms$/.test(result.errorMessage ?? "") ? "timeout" : "error", ms);
@@ -137,7 +301,8 @@ export function interpret(result: ClassifierResult, model: string, ms: number): 
     return failure(model, "malformed", ms);
   }
   const probabilities: Record<Tier, number> = { low: raw.low!, medium: raw.medium!, high: raw.high!, super: raw.super! };
-  return { kind: "answer", model, choice: answer.choice, probabilities, confidence: answer.confidence, ms };
+  const judged = typed ? typedOf(result.answers) : undefined;
+  return { kind: "answer", model, choice: answer.choice, probabilities, confidence: answer.confidence, ms, ...(judged === undefined ? {} : { typed: judged }) };
 }
 
 /** What the router reads at a message's input to decide whether Jev is asked about it. */
@@ -201,7 +366,7 @@ export async function askJev(
     const model = ref === undefined ? undefined : registry.findOfType("classifier", ref.provider, ref.id);
     if (model === undefined) return failure(settings.model, "unavailable", elapsed());
     const result = await registry.classify(model, context, { timeoutMs: settings.timeoutMs, maxRetries: 0 });
-    return interpret(result, settings.model, elapsed());
+    return interpret(result, settings.model, elapsed(), settings.typedJudgment === true);
   } catch {
     return failure(settings.model, "error", elapsed());
   }
