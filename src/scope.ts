@@ -18,7 +18,8 @@
 // The first time rule 3 decides a session's scope, at session start or at its next idle input, the
 // router records it as a work entry, so that rule 2 keeps it whatever the roster says later
 // (src/router.ts). Rule 4 records nothing, so a roster whose default changes moves every session
-// it decides at the next roster load.
+// it decides at the next roster load. Selecting smart-router/work records a work entry in a session
+// that rule 4 puts in work scope, as in a personal one, so that session then stays where it is.
 //
 // The read fails closed. A malformed entry, a custom_message of the type, or a session whose
 // entries cannot be read has an unreadable scope: routing resolves in work scope, the narrower one,

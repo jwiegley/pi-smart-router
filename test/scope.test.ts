@@ -7,7 +7,7 @@ import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import type { Api, Model } from "@earendil-works/pi-ai";
 
 import { ENV_SCOPE, LEVEL_ENTRY, LEVEL_KEY, SCOPE_ENTRY } from "../src/constants.ts";
-import { directoryFailedNotice, directoryNotice, scopeCarriedNotice, scopeCarryFailedNotice, scopeUnreadable, scopeUnserved } from "../src/errors.ts";
+import { directoryFailedNotice, directoryNotice, scopeCarriedNotice, scopeCarryFailedNotice, scopeSelectedNotice, scopeUnreadable, scopeUnserved } from "../src/errors.ts";
 import { processSlot, rememberedRoster, scopeLatched } from "../src/owners.ts";
 import { createRouter } from "../src/router.ts";
 import { BUILT_IN_DEFAULT, fromHostDefault, parseScopeEntry, readScope, scopeEntry, underDirectory, workDirectoryOf } from "../src/scope.ts";
@@ -1089,6 +1089,140 @@ describe("the host's default scope (rule 4)", () => {
       assert.deepEqual([scopeEntries(child), messages(child)], [[], []], reason);
       assert.equal(await scopeAnswer(child), SCOPE_WORK_DEFAULT, reason);
     }
+  });
+
+  describe("selecting smart-router/work records work scope where the default already gives it", () => {
+    const WORK_ENTRY = { v: 1, scope: "work", by: "command", at: NOW };
+    const SELECTED = { type: "info", message: scopeSelectedNotice() };
+    const selectedNotices = (loaded: Loaded): number => messages(loaded).filter((message) => message === scopeSelectedNotice()).length;
+
+    /** Load a session on `id` and start it for a reason, as Pi restores a selection with a session. */
+    async function beginOn(options: LoadOptions, id: string, reason = "startup"): Promise<Loaded> {
+      const loaded = load({ now: () => NOW, ...options });
+      loaded.session.select(id);
+      await loaded.host.emit("session_start", { reason });
+      return loaded;
+    }
+
+    test("selected by hand: one work entry with the notice; a second selection, an idle input and a run record nothing more", async (t) => {
+      const loaded = await begin({ dir: agentDir(t, { roster: withDefault("work") }), cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) });
+      assert.deepEqual(scopeEntries(loaded), []);
+      await loaded.host.choose("smart-router/work");
+      assert.deepEqual(scopeEntries(loaded), [WORK_ENTRY]);
+      assert.deepEqual(loaded.session.notices.at(-1), SELECTED);
+      assert.equal(await scopeAnswer(loaded), "pi-smart-router: scope work (entry).");
+      assert.equal(routed(loaded.runtime.route("work", request("direct"))), WORK_TERRA);
+      await loaded.host.choose("smart-router/auto");
+      await loaded.host.choose("smart-router/work");
+      await loaded.host.emit("input", { text: "fix the build", source: "interactive" });
+      await loaded.host.emit("before_agent_start", { prompt: "fix the build" });
+      assert.deepEqual(scopeEntries(loaded), [WORK_ENTRY], "recorded once");
+      assert.equal(selectedNotices(loaded), 1, "and said once");
+    });
+
+    test("smart-router/auto, selected by hand or at start, records nothing on the same host", async (t) => {
+      const loaded = await begin({ dir: agentDir(t, { roster: withDefault("work") }), cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) });
+      // Away by cycling, which asks nothing, and back by hand: a selection of smart-router/auto.
+      await loaded.host.choose("smart-router/personal", "cycle");
+      await loaded.host.choose("smart-router/auto");
+      await loaded.host.emit("input", { text: "fix the build", source: "interactive" });
+      assert.deepEqual([scopeEntries(loaded), selectedNotices(loaded)], [[], 0]);
+      assert.equal(await scopeAnswer(loaded), SCOPE_WORK_DEFAULT);
+    });
+
+    test("once recorded, a roster whose default turns personal leaves the session in work scope; one without an entry moves", async (t) => {
+      const dir = agentDir(t, { roster: withDefault("work") });
+      const selected = await begin({ dir, id: "selected", cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) });
+      const other = await begin({ dir, id: "other", cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) });
+      await selected.host.choose("smart-router/work");
+      await selected.host.choose("smart-router/auto");
+      rewrite(dir, withDefault("personal"));
+      // The next idle input of each session reads the edited roster.
+      await selected.host.emit("input", { text: "fix the build", source: "interactive" });
+      await other.host.emit("input", { text: "fix the build", source: "interactive" });
+      assert.equal(await scopeAnswer(selected), "pi-smart-router: scope work (entry).");
+      assert.equal(routed(selected.runtime.route("auto", request("direct"))), WORK_TERRA);
+      assert.equal(routed(other.runtime.route("auto", request("direct"))), DEEPSEEK, "the session that only the default made work moves");
+      assert.deepEqual([scopeEntries(selected), selected.session.dialogs], [[WORK_ENTRY], []]);
+    });
+
+    test("a fork or /new carries the recorded scope, and keeps it when the default turns personal", async (t) => {
+      const dir = agentDir(t, { roster: withDefault("work") });
+      const children: Loaded[] = [];
+      for (const reason of ["new", "fork"] as const) {
+        const parent = await begin({ dir, id: `p-${reason}`, file: `/sessions/p-${reason}.jsonl`, cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) });
+        await parent.host.choose("smart-router/work");
+        await parent.host.emit("session_shutdown", { reason, targetSessionFile: `/sessions/p-${reason}-child.jsonl` });
+        const child = await begin({ dir, id: `c-${reason}`, file: `/sessions/p-${reason}-child.jsonl`, cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) }, reason);
+        assert.deepEqual(scopeEntries(child), [{ v: 1, scope: "work", by: "carried", at: NOW }], reason);
+        assert.deepEqual(messages(child), [scopeCarriedNotice("work")], reason);
+        children.push(child);
+      }
+      rewrite(dir, withDefault("personal"));
+      for (const child of children) {
+        await child.host.emit("input", { text: "fix the build", source: "interactive" });
+        assert.equal(await scopeAnswer(child), "pi-smart-router: scope work (entry).", child.session.id);
+        assert.equal(routed(child.runtime.route("auto", request("direct"))), WORK_TERRA, child.session.id);
+      }
+    });
+
+    test("a session restored on smart-router/work records at session start, once, at any kind of start", async (t) => {
+      const dir = agentDir(t, { roster: withDefault("work") });
+      for (const reason of ["startup", "resume", "reload", "new", "fork"]) {
+        const loaded = await beginOn({ dir, id: reason, cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) }, "work", reason);
+        assert.deepEqual(scopeEntries(loaded), [WORK_ENTRY], reason);
+        assert.deepEqual(messages(loaded), [scopeSelectedNotice()], reason);
+        await loaded.host.emit("input", { text: "fix the build", source: "interactive" });
+        await loaded.host.emit("session_start", { reason: "reload" });
+        assert.deepEqual([scopeEntries(loaded).length, selectedNotices(loaded)], [1, 1], `${reason}: nothing more`);
+      }
+    });
+
+    test("under the latch, with a work entry or under a work directory, the selection records nothing more", async (t) => {
+      const dir = agentDir(t, { roster: withDefault("work") });
+      await withScope("work", async () => {
+        const latched = await beginOn({ dir, id: "latched", cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) }, "work");
+        await latched.host.choose("smart-router/auto");
+        await latched.host.choose("smart-router/work");
+        assert.deepEqual([scopeEntries(latched), selectedNotices(latched)], [[], 0], "the latch needs no entry");
+      });
+      resetSlot();
+      const entry = await beginOn({ dir, id: "entry", cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()), setup: recorded("work") }, "work");
+      await entry.host.choose("smart-router/auto");
+      await entry.host.choose("smart-router/work");
+      assert.deepEqual([scopeEntries(entry), selectedNotices(entry)], [[{ v: 1, scope: "work", by: "command", at: NOW - 60_000 }], 0], "an entry");
+      const directory = await begin({ dir, id: "directory", cwd: APP, runtime: new FakeRuntime(workCatalog()) });
+      await directory.host.choose("smart-router/work");
+      assert.deepEqual(scopeEntries(directory).map((data: any) => data.by), ["directory"], "a work directory records its own entry, and the selection nothing more");
+      // A work directory whose entry could not be written: the directory still gives work scope, so
+      // the selection records nothing either, though it could now.
+      const failing = load({ now: () => NOW, dir, id: "failing", cwd: APP, runtime: new FakeRuntime(workCatalog()) });
+      const host = failing.host.api as unknown as Record<string, unknown>;
+      const append = host.appendEntry;
+      host.appendEntry = () => {
+        throw new Error("the session is read-only");
+      };
+      failing.session.select("auto");
+      await failing.host.emit("session_start", { reason: "startup" });
+      host.appendEntry = append;
+      assert.deepEqual(scopeEntries(failing), []);
+      await failing.host.choose("smart-router/work");
+      assert.deepEqual([scopeEntries(failing), selectedNotices(failing)], [[], 0]);
+      assert.equal(await scopeAnswer(failing), "pi-smart-router: scope work (directory).");
+    });
+
+    test("a personal-only process is unchanged: the selection records nothing and the model refuses", async (t) => {
+      const dir = agentDir(t, { roster: withDefault("work") });
+      await withScope("personal-only", async () => {
+        const loaded = await begin({ dir, cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) });
+        await loaded.host.choose("smart-router/work");
+        await loaded.host.emit("input", { text: "fix the build", source: "interactive" });
+        assert.deepEqual([scopeEntries(loaded), selectedNotices(loaded)], [[], 0]);
+        assert.throws(() => loaded.runtime.route("work", request("direct")), /work scope is disabled for the router/);
+        const restored = await beginOn({ dir, id: "restored", cwd: ACME_APP, runtime: new FakeRuntime(workCatalog()) }, "work");
+        assert.deepEqual([scopeEntries(restored), selectedNotices(restored)], [[], 0]);
+      });
+    });
   });
 
   describe("leaving work scope the default gives asks, as from any work scope", () => {

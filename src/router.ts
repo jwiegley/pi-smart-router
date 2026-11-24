@@ -368,12 +368,12 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
   };
 
   /**
-   * The session's working directory and the work directories that rosterFacts gives; undefined
-   * without any. Never throws: a stale context has none.
+   * The session's working directory and the work directories of `facts`, which rosterFacts gave;
+   * undefined without any. Never throws: a stale context has none.
    */
-  const workOf = (ctx: ExtensionContext): WorkDirectories | undefined => {
+  const workIn = (ctx: ExtensionContext, facts: RememberedRoster | undefined): WorkDirectories | undefined => {
     try {
-      const directories = rosterFacts()?.directories ?? [];
+      const directories = facts?.directories ?? [];
       if (directories.length === 0) return undefined;
       const { cwd } = ctx;
       return typeof cwd === "string" ? { cwd, directories } : undefined;
@@ -382,24 +382,30 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     }
   };
 
+  /** The session's working directory and the work directories that rosterFacts gives now. */
+  const workOf = (ctx: ExtensionContext): WorkDirectories | undefined => workIn(ctx, rosterFacts());
+
   /**
-   * The host's default scope, rule 4 of src/scope.ts, as rosterFacts gives it. With no roster known
-   * to the process, or only a memory another version kept without a default, it is unknown, and a
-   * session it would decide has an unreadable scope: never personal by assumption.
+   * The host's default scope, rule 4 of src/scope.ts, as `facts`, which rosterFacts gave, says it.
+   * With no roster known to the process, or only a memory another version kept without a default,
+   * it is unknown, and a session it would decide has an unreadable scope: never personal by
+   * assumption.
    */
-  const hostDefault = (): HostDefault => {
-    const facts = rosterFacts();
+  const hostDefault = (facts: RememberedRoster | undefined): HostDefault => {
     if (facts === undefined) return { kind: "unknown", reason: NO_ROSTER_DEFAULT };
     if (facts.defaultScope === undefined) return { kind: "unknown", reason: OLD_MEMORY_DEFAULT };
     return facts.defaultScope === null ? BUILT_IN_DEFAULT : { kind: "roster", scope: facts.defaultScope };
   };
 
   /**
-   * A session's scope, read fail closed: the latch, the session's entry, then the work directories
-   * that rosterFacts gives, then the host's default. A context whose session cannot be read has an
-   * unreadable scope.
+   * A session's scope, read fail closed: the latch, the session's entry, then the work directories,
+   * then the host's default, both from one rosterFacts read. A context whose session cannot be read
+   * has an unreadable scope.
    */
-  const scopeOf = (ctx: ExtensionContext): ScopeState => readScope(managerOf(ctx), scopeLatched(slot), workOf(ctx), hostDefault());
+  const scopeOf = (ctx: ExtensionContext): ScopeState => {
+    const facts = rosterFacts();
+    return readScope(managerOf(ctx), scopeLatched(slot), workIn(ctx, facts), hostDefault(facts));
+  };
 
   /**
    * The scope a session resolves in. A scope that cannot be read resolves in work scope, the
@@ -724,13 +730,16 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
    * then on, as after /smart-router scope work, and the scope is recorded so that it holds whatever
    * is selected later. It is tried once for each selection, at the selection, at session start and
    * at the next idle input, and never on a personal-only host, where the model refuses instead.
+   * A session the latch, an entry or the work directories put in work scope needs no entry of its
+   * own; one the host's default puts there does, since a roster whose default turns personal would
+   * move it without asking.
    * The other direction is never taken here: smart-router/personal in a work session asks first
    * (selectPersonal), and refuses until the session is moved.
    */
   const alignWork = (ctx: ExtensionContext, id: VirtualId | undefined = virtualIdOf(ctx.model)): void => {
     if (id !== "work" || personalOnlyLatched(slot)) return;
     const scope = scopeOf(ctx);
-    if (scope.kind === "ok" && scope.scope === "work") return;
+    if (scope.kind === "ok" && scope.scope === "work" && !fromHostDefault(scope)) return;
     const record = recordOf(ctx.sessionManager.getSessionId());
     if (record.workTried) return;
     record.workTried = true;

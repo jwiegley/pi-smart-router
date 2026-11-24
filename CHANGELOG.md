@@ -21,10 +21,14 @@ fork's releases on that base. Releases are signed tags; nothing is published to 
   A session with no scope entry, under no work directory and outside the latch, is in that scope,
   which status and `/smart-router scope` name `roster-default`; without the key it is personal, as
   before. The default records nothing, so a roster that changes it moves such a session at the next
-  roster load; leaving work scope still asks first. A default the roster has no section for is an
-  error, and the checker reads the default back. While the roster fails to load, the last valid
-  roster's default holds; when no roster the process loaded says it, a session it would decide is
-  held in work scope as unreadable, never personal. A version 1 roster refuses the key.
+  roster load; leaving work scope still asks first. Selecting `smart-router/work` records work
+  scope, with its notice, in a session the default already puts in work scope too, at the
+  selection, at session start or at the next idle prompt, so that session stays a work session
+  whatever the default later says; `smart-router/auto` records nothing. A default the roster has
+  no section for is an error, and the checker reads the default back. While the roster fails to
+  load, the last valid roster's default holds; when no roster the process loaded says it, a session
+  it would decide is held in work scope as unreadable, never personal. A version 1 roster refuses
+  the key.
 
 ### Changed
 

@@ -548,7 +548,7 @@ Three things to know:
 | `providerOrder` | no | `personal`, `work` and `local`, each optional and each a nonempty list of provider ids without duplicates. In every role of that scope, the listed providers' models come first, in the listed order ([The provider order](#the-provider-order)). A list may name only providers of the models it governs. Without the field, every role is tried in the order its `models` are written. |
 | `roles[].disabled` | no | Set to `true` with an empty `models` array to leave a role explicitly disabled, for example while no work account is verified. An empty role without this flag remains invalid. |
 | `scopes.work.directories` | no | Absolute paths whose sessions are in work scope ([Scope](#scope-personal-or-work)), written plainly: no trailing `/`, no empty, `.` or `..` segment, and not `/` itself. |
-| `defaultScope` | no | `"personal"` or `"work"`: the scope of a session on this host that has no scope entry, is under no work directory and is outside the latch ([Scope](#scope-personal-or-work), rule 4). Without it, personal. It must name a scope the roster has a section for; a version 1 roster refuses the key. Each host's roster sets its own. |
+| `defaultScope` | no | `"personal"` or `"work"`: the scope of a session on this host that has no scope entry, is under no work directory and is outside the latch ([Scope](#scope-personal-or-work), rule 4). Without it, personal. The default records nothing in a session; selecting `smart-router/work` does ([The scope's own models](#the-scopes-own-models)). It must name a scope the roster has a section for; a version 1 roster refuses the key. Each host's roster sets its own. |
 | `accounts.<provider>.scope` | no | `"personal"`, the default, or `"work"`. A provider that is neither a native subscription login nor a Multi-Pass alias is bound by its id, with `scope` alone ([Account bindings](#account-bindings)). |
 | `classifier` | no | Jev's settings; without them, Jev is never asked. `model`, an exact ref, default `openrouter/typesafe/jev-1.14`; `timeoutMs`, 100 to 1000, default 1000; and `context`: `messages`, 0 to 20, default 6; `messageChars`, 200 to 8000, default 1500; `totalChars`, 1000 to 32000, default 12000. `closeCall`, which earlier versions used, is still accepted from 0 to 0.5 and ignored, and the checker says so: `demand.closeCall` decides a close call. The model names a Jev version, so that tuned demand settings keep their meaning; moving to a newer Jev is a roster edit. `instructions`, the question Jev is asked, as a text of at most 4000 characters, or `instructionsFile`, the name of a prompt file that holds it; not both, and with neither the built-in question is asked ([Jev's prompts](#jevs-prompts)). `typedJudgment`, `true` or `false`, default `false`: also ask upstream's six typed questions ([The level a prompt needs](#the-level-a-prompt-needs)). |
 | `demand` | no | How a prompt's demand is weighed ([The level a prompt needs](#the-level-a-prompt-needs)). `jevWeight` and `heuristicsWeight`, each 0 to 100, defaults 4 and 1, not both 0; `minConfidence`, 0 to 1, default 0.6; `closeCall`, 0 to 0.5, default 0.1; `cuts`, three numbers that ascend, each above 0 and below 3, default `[0.75, 1.5, 2.25]`; `deepSessionFloor`, `low`, `medium`, `high` or `super`, default `medium`; and `weights`, any of the twelve heuristic signals, each 0 to 100 and not all 0, by default upstream's weights with `requirement_low` and `cluster_signal` at 0. Every field is optional, and a field left out keeps its default. |
@@ -1699,7 +1699,8 @@ account bindings. The first rule that applies decides it:
    even if the variable is removed later. nix-config's shared-work profile is to set it.
 2. **The session's entry.** `/smart-router scope work` and `/smart-router scope personal` record a
    `smart-router.scope` entry in the session, and resume keeps it. Selecting `smart-router/work`
-   records the same work entry.
+   records the same work entry, in a session the host's default already puts in work scope too
+   ([The scope's own models](#the-scopes-own-models)).
    - Personal to work takes effect at once, for the routes of the router's own models. A model
      picked by hand stays selected and is sent as it is, and the answer says so. One of the
      router's own models gives way to `smart-router/work`.
@@ -1718,10 +1719,11 @@ account bindings. The first rule that applies decides it:
 4. Otherwise **the host's default**: the roster's `defaultScope`, which `/smart-router status`
    and `scope` name `roster-default`, or, for a roster without it, personal, named `default`.
    Each host has its own roster, so one host can default to work and the others to personal.
-   Unlike rule 3, this rule records nothing: no entry is written at a session's start, at its
+   Unlike rule 3, the default records nothing: no entry is written at a session's start, at its
    prompts or after its runs, so a roster edit that changes the default moves every session it
    decides at the next roster load, in either direction and without asking. A session that should
-   stay where it is needs an entry: `/smart-router scope work` or `personal`.
+   stay where it is needs an entry: `/smart-router scope work` or `personal`, or the selection of
+   `smart-router/work`, which records work scope even where the default already gives it.
 
 `PI_SMART_ROUTER_PERSONAL_ONLY=1` is a separate process-lifetime restriction; the alternative
 `PI_SMART_ROUTER_SCOPE=personal-only` has the same effect. It does not rewrite a session's scope:
@@ -1772,9 +1774,17 @@ decides which accounts its content may reach. The selection never does.
 |---|---|---|
 | `smart-router/auto` | Routes the personal levels. | Routes the work levels. |
 | `smart-router/personal` | Routes the personal levels. | Asks "Move this session to personal scope?", the question `/smart-router scope personal` asks. Declined, the session stays a work session and the model refuses every request with "Nothing was sent". |
-| `smart-router/work` | Records work scope, with a notice, and routes the work levels. The session stays a work session whatever you select later. | Routes the work levels. |
+| `smart-router/work` | Records work scope, with a notice, and routes the work levels. The session stays a work session whatever you select later. | Routes the work levels. A session that only the host's default puts in work scope has its work scope recorded too, with the same notice. |
 | `smart-router/local` | Routes the local roles. | Routes the local roles. |
 
+- **The default records nothing; the selection of `smart-router/work` records.** On a host whose
+  roster's `defaultScope` is `work`, a session with no entry is a work session only while the
+  roster says so. Selecting `smart-router/work` records work scope in it, so it stays a work
+  session if the default later turns personal, and a fork or `/new` carries that scope. The
+  selection is checked when you make it, at session start and at the next idle prompt, so a
+  session restored on `smart-router/work` records there too. It records once, and not at all in a
+  session the latch, an entry or a work directory already puts in work scope. `smart-router/auto`
+  records nothing on such a host.
 - **The question is asked only when you select the model by hand**, with `/model`. A selection Pi
   restores with a session, or reaches by cycling, asks nothing: `smart-router/personal` refuses the
   work session until you run `/smart-router scope personal` or select another model.
