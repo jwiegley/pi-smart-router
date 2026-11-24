@@ -164,7 +164,7 @@ export function correctionRecord(previous: LevelRecord, tier: Tier, at: number):
   return { v: 1, at, scope: previous.scope, source: "correction", tier, refers };
 }
 
-const SOURCES: ReadonlySet<string> = new Set<LevelRecord["source"]>(["tag", "jev", "heuristics", "floor", "keyword", "correction"]);
+const SOURCES: ReadonlySet<string> = new Set<LevelRecord["source"]>(["tag", "goal", "jev", "heuristics", "floor", "keyword", "correction"]);
 
 const isSource = (value: unknown): value is LevelRecord["source"] => typeof value === "string" && SOURCES.has(value);
 const isTime = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
@@ -241,6 +241,7 @@ export function levelNote(level: PlanLevel): string {
 /** What decided a run's level, without the cost: "tag", or the demand with its Jev and floor marks. */
 function decidedNote(level: PlanLevel): string {
   if (level.source === "tag") return "tag";
+  if (level.source === "goal") return "goal draft";
   const { jev, demand } = level;
   return [
     demand === undefined ? "demand unknown" : `demand ${demand.value.toFixed(1)}`,

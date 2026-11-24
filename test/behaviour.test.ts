@@ -2711,3 +2711,44 @@ test("smart-router/personal, smart-router/work and /smart-router scope: the mode
   assert.match(status, /^Scope: work \(entry\)$/m);
   assert.deepEqual(scopeEntries(pi), [["work", "command"], ["personal", "command"], ["work", "command"]]);
 });
+
+test("goal-x command protocol: guided drafts use SUPER, direct creation has no model call (simulated extension)", TIMEOUT, async (t) => {
+  const world = levelsWorld(t, { roster: rosterV2({ classifier: false }) });
+  const extension: InlineExtension = {
+    name: "goal-x-protocol",
+    factory: (api) => {
+      for (const mode of ["goal", "sisyphus"] as const) {
+        api.registerCommand(mode, {
+          handler: async (topic) => {
+            api.appendEntry("pi-goal-draft", { version: 1, mode, seed: topic, startedAt: mode, auditorEnabled: true });
+            api.sendUserMessage(`[GOAL CONFIRMATION focus=${mode}]\n${topic}`);
+          },
+        });
+        api.registerCommand(`${mode}-direct`, { handler: async () => { api.appendEntry("goal-direct-test", { mode }); } });
+      }
+      api.registerCommand("goal-cancel", { handler: async () => { api.appendEntry("pi-goal-draft", { version: 1, mode: "goal", startedAt: "goal", clearedAt: "now" }); } });
+    },
+  };
+  const pi = await world.start({ extensions: [extension] });
+  for (const mode of ["goal", "sisyphus"] as const) {
+    const prior = pi.assistants().length;
+    await pi.prompt(`/${mode} make a plan`);
+    await until(() => pi.assistants().length > prior, 5_000, "draft response");
+    await pi.session.waitForIdle();
+    assert.equal(answered(pi), PERSONAL.super);
+    await pi.prompt("yes #low");
+    assert.equal(answered(pi), PERSONAL.super);
+    await pi.prompt("/goal-cancel");
+    await pi.prompt("ordinary #low");
+    assert.equal(answered(pi), PERSONAL.low);
+  }
+  await pi.prompt("ordinary again #low");
+  await pi.prompt("ordinary once more #low");
+  for (const mode of ["goal-direct", "sisyphus-direct"] as const) {
+    const prior = pi.assistants().length;
+    await pi.prompt(`/${mode} work`);
+    assert.equal(pi.assistants().length, prior);
+    await pi.custom();
+    assert.equal(answered(pi), PERSONAL.low);
+  }
+});

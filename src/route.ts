@@ -261,6 +261,8 @@ export interface RouteInput {
   readonly compaction: CompactionFigures;
   /** How deep the session is: a run without a prompt takes at least the deep-session floor in a deep one. */
   readonly depth: SessionDepth;
+  /** SUPER's eligible choice while this request belongs to a goal draft. */
+  readonly goal?: Decision;
 }
 
 const previousRef = (request: ModelRouteRequest): string | undefined =>
@@ -677,30 +679,31 @@ export function routeOwned(input: RouteInput): ModelRoute {
   let plan: Plan | undefined;
   if (request.reason === "user") plan = takePlan(record, id, rc);
   const section = levelSection(rc);
-  const unplanned = plan !== undefined || request.reason === "retry" || !starts
+  const unplanned = input.goal !== undefined || plan !== undefined || request.reason === "retry" || !starts
     ? undefined
     : section !== undefined
       ? chooseForNeed(rc, record, section, input.figures, input.compaction, input.depth)
       : rc.localOnly
         ? chooseLocalForNeed(rc, record)
         : undefined;
-  const escalated = section === undefined || plan !== undefined || unplanned !== undefined ? undefined : escalation(input, section);
-  if (plan !== undefined) decision = fromPlan(rc, plan);
-  else if (request.reason === "retry") decision = retry(rc, request, record);
+  const escalated = input.goal !== undefined || section === undefined || plan !== undefined || unplanned !== undefined ? undefined : escalation(input, section);
+  if (request.reason === "retry") decision = retry(rc, request, record);
+  else if (input.goal !== undefined) decision = input.goal;
+  else if (plan !== undefined) decision = fromPlan(rc, plan);
   else if (unplanned !== undefined) decision = unplanned.decision;
   else if (escalated !== undefined) decision = escalated.decision;
   else decision = stick(rc, previousRef(request), record);
   // The first tool result's request consumes the handoff whatever else decides that request, as
   // upstream's tracker does; its choice stands only where nothing else chose.
   const again = section === undefined ? undefined : recheck(input, section);
-  const rechecked = plan === undefined && unplanned === undefined && escalated === undefined ? again : undefined;
+  const rechecked = input.goal === undefined && plan === undefined && unplanned === undefined && escalated === undefined ? again : undefined;
   if (rechecked !== undefined) decision = rechecked.decision;
-  const moved = plan === undefined && unplanned === undefined && escalated === undefined && section !== undefined ? keepLevel(rc, record, section, request, decision, input.compaction) : undefined;
+  const moved = input.goal === undefined && plan === undefined && unplanned === undefined && escalated === undefined && section !== undefined ? keepLevel(rc, record, section, request, decision, input.compaction) : undefined;
   if (moved !== undefined) decision = moved.decision;
   // The request's turn type is its last message's, as upstream's host derives it. A typed task
   // kind never changes it: upstream's adaptive reasoning reads the host's turn type too.
   const turn = turnTypeOf(request.messages);
-  const lifted = section === undefined ? undefined : liftFromSmall(input, section, decision, turn, plan?.level?.source === "tag" || (plan === undefined && record.runTagged));
+  const lifted = section === undefined || input.goal !== undefined ? undefined : liftFromSmall(input, section, decision, turn, plan?.level?.source === "tag" || plan?.level?.source === "goal" || (plan === undefined && record.runTagged));
   if (lifted !== undefined) decision = lifted.decision;
   const choice = settle(input, decision);
   // A planned run's prompt: its need and the level whose model took it go in the ledger, and the
@@ -714,7 +717,7 @@ export function routeOwned(input: RouteInput): ModelRoute {
     notePlanned(record.ledger, need);
     record.need = need;
     record.runTier = tier;
-    record.runTagged = source === "tag";
+    record.runTagged = source === "tag" || source === "goal";
     record.needRun = undefined;
     record.runTerms = { kind: "plan", level: plan.level };
   } else if (unplanned !== undefined) {
@@ -730,6 +733,11 @@ export function routeOwned(input: RouteInput): ModelRoute {
       ...(unplanned.cost === undefined ? {} : { cost: unplanned.cost }),
     };
     record.runTerms = { kind: "need", run: record.needRun, tier: unplanned.tier };
+  } else if (input.goal !== undefined) {
+    record.runTier = "super";
+    record.runTagged = true;
+    record.needRun = undefined;
+    record.runTerms = undefined;
   } else if (starts) {
     // A run whose first request made no choice of level shows no older run's terms.
     record.runTerms = undefined;

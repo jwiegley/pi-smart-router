@@ -185,11 +185,12 @@ function pickWithHolds(rc: ResolveContext, roleName: string, options: PickOption
 /** What a version 2 run's input says about its tier: a trailing tag's, and Jev's outcome. */
 export interface LevelInput {
   readonly tag?: Tier;
+  readonly goal?: true;
   readonly jev?: JevOutcome;
 }
 
-/** What decided a version 2 run's level: a tag, the blend with Jev's answer, the heuristics alone, or a floor that raised it. */
-export type LevelSource = "tag" | "jev" | "heuristics" | "floor";
+/** What decided a version 2 run's level: a tag, a goal draft, the blend with Jev's answer, the heuristics alone, or a floor that raised it. */
+export type LevelSource = "tag" | "goal" | "jev" | "heuristics" | "floor";
 
 /** Why a version 2 run on auto went to its tier. Never prompt text. */
 export interface PlanLevel {
@@ -523,6 +524,7 @@ export function escalationTarget(input: {
  * alone are `heuristics`.
  */
 function needOf(p: PlanInput, roster: RosterV2, signal: Signal): Pick<PlanLevel, "need" | "source" | "trigger" | "demand"> {
+  if (p.level?.goal) return { need: "super", source: "goal" };
   const tag = p.level?.tag;
   if (tag !== undefined) return { need: tag, source: "tag" };
   const risky = riskyTrigger(p.text);
@@ -540,7 +542,7 @@ function planLevel(p: PlanInput, roster: RosterV2, section: ScopeSection, signal
   const tag = p.level?.tag;
   const jev = p.level?.jev;
   const { need, source, trigger, demand } = needOf(p, roster, signal);
-  // Whichever tier answered last, the pick starts at the level the prompt needs. A tagged run is never priced.
+  // Whichever tier answered last, the pick starts at the level the prompt needs. A tagged or goal-draft run is never priced.
   const { tier, decision, steppedUp, cost } = chooseModel({
     rc,
     section,
@@ -550,8 +552,8 @@ function planLevel(p: PlanInput, roster: RosterV2, section: ScopeSection, signal
     promptTokens: promptTokensOf(p.text, p.now),
     compaction: p.compaction,
     figures: p.figures,
-    priced: tag === undefined,
-    pinned: tag !== undefined,
+    priced: tag === undefined && p.level?.goal !== true,
+    pinned: tag !== undefined || p.level?.goal === true,
   });
   const choice = decision.ok ? decision.choice : undefined;
   // The tier's own role, whichever role the pick is in: a chain model's role is not the run's.
@@ -592,7 +594,7 @@ export function planUserTurn(p: PlanInput): Plan {
       const { signal, reason } = classify(p.text);
       // A local request uses an external classifier only where the roster says so, and otherwise
       // none, a prior resend's opinion included.
-      const input = rc.roster.classifier?.local === true ? p : { ...p, level: p.level?.tag === undefined ? {} : { tag: p.level.tag } };
+      const input: PlanInput = rc.roster.classifier?.local === true ? p : { ...p, level: p.level?.goal ? { goal: true } : p.level?.tag === undefined ? {} : { tag: p.level.tag } };
       const needed = needOf(input, rc.roster, signal);
       const role = local.levels[needed.need] ?? undefined;
       const level: PlanLevel = { ...needed, scope: rc.scope, tier: needed.need, steppedUp: false, returnedToFirst: false };

@@ -2165,3 +2165,150 @@ describe("/smart-router scope work", () => {
     assert.deepEqual([selection(stuck), attempts, lastNotice(stuck)?.type], [KIMI, 0, "info"], "the command tries no switch");
   });
 });
+
+describe("goal-x guided drafts (simulated lifecycle entries)", () => {
+  const draft = (loaded: Loaded, mode: "goal" | "sisyphus", cleared = false) => {
+    loaded.session.appendCustom("pi-goal-draft", { version: 1, mode, seed: "private goal", startedAt: "2026-01-01", auditorEnabled: true, ...(cleared ? { clearedAt: "2026-01-02" } : {}) });
+  };
+
+  for (const mode of ["goal", "sisyphus"] as const) {
+    test(`${mode}: initial draft and replies use SUPER until the draft is cleared`, async (t) => {
+      const loaded = await hera(t);
+      loaded.runtime.answer = async () => jevAnswer(LOW);
+      draft(loaded, mode);
+      const prompt = `[GOAL CONFIRMATION focus=${mode}]\nDraft this goal`;
+      await say(loaded, prompt, { source: "extension" });
+      assert.equal(await runPrompt(loaded, prompt), ASTRA);
+      assert.equal(recordOf(loaded)?.pendingLevel?.level.source, "goal");
+      await finish(loaded, ASTRA);
+      await say(loaded, "yes #low");
+      assert.equal(await runPrompt(loaded, "yes"), ASTRA);
+      await finish(loaded, ASTRA);
+      draft(loaded, mode, true);
+      await say(loaded, "ordinary work #low");
+      assert.equal(await runPrompt(loaded, "ordinary work"), LUNA);
+      await finish(loaded, LUNA);
+    });
+  }
+
+  test("a missing SUPER uses normal routing and reports it", async (t) => {
+    const loaded = await hera(t);
+    loaded.runtime.catalog.unavailable.add(ASTRA);
+    loaded.runtime.catalog.unavailable.add(KIMI);
+    loaded.runtime.answer = async () => jevAnswer(LOW);
+    draft(loaded, "goal");
+    await say(loaded, "yes");
+    assert.equal(await runPrompt(loaded, "yes"), LUNA);
+    assert.ok(loaded.session.notices.some(({ message }) => message.includes("goal draft SUPER is unavailable; using normal safe routing")));
+    await finish(loaded, LUNA);
+  });
+
+  test("a custom-message run does not inherit an active draft", async (t) => {
+    const loaded = await hera(t);
+    draft(loaded, "goal");
+    const signal = loaded.session.startRun();
+    await loaded.host.emit("before_agent_start", { messageType: "custom", message: GOAL_X });
+    assert.equal(routed(loaded.runtime.route("auto", request("continuation", { signal }))), TERRA);
+    await finish(loaded, TERRA);
+  });
+
+  test("a draft started while busy takes effect when its rewritten user message is delivered", async (t) => {
+    const loaded = await hera(t);
+    await say(loaded, "ordinary #low");
+    const signal = loaded.session.startRun();
+    await loaded.host.emit("before_agent_start", { messageType: "user", prompt: "ordinary" });
+    assert.equal(routed(loaded.runtime.route("auto", request("user", { signal }))), LUNA);
+    draft(loaded, "goal");
+    await say(loaded, "[GOAL CONFIRMATION focus=goal]", { source: "extension" });
+    await loaded.host.emit("message_end", { message: { role: "user", content: [{ type: "text", text: "rewritten draft message" }], timestamp: NOW } });
+    assert.equal(routed(loaded.runtime.route("auto", request("continuation", { signal }))), ASTRA);
+    draft(loaded, "goal", true);
+    await finish(loaded, ASTRA);
+  });
+  test("drafts are isolated from other sessions and from goal tweaks", async (t) => {
+    const one = await hera(t, { id: "draft-one" });
+    const two = await hera(t, { id: "draft-two" });
+    one.runtime.answer = async () => jevAnswer(LOW);
+    two.runtime.answer = async () => jevAnswer(LOW);
+    draft(one, "goal");
+    await say(two, "ordinary #low");
+    assert.equal(await runPrompt(two, "ordinary"), LUNA);
+    await finish(two, LUNA);
+    one.session.appendCustom("pi-goal-draft", { version: 1, mode: "tweak", startedAt: "2026-01-03" });
+    await say(one, "tweak #low");
+    assert.equal(await runPrompt(one, "tweak"), LUNA);
+    await finish(one, LUNA);
+  });
+
+  test("work scope uses only work SUPER; an un-tiered local selection reports normal routing", async (t) => {
+    const work = await hera(t, { id: "work-draft", select: "work" });
+    draft(work, "goal");
+    await say(work, "yes #low");
+    const workSignal = work.session.startRun();
+    await work.host.emit("before_agent_start", { messageType: "user", prompt: "yes" });
+    assert.equal(routed(work.runtime.route("work", request("user", { signal: workSignal }))), WORK_ASTRA);
+    await finish(work, WORK_ASTRA);
+
+    const local = await hera(t, { id: "local-draft", select: "local" });
+    draft(local, "goal");
+    await say(local, "hello");
+    const localSignal = local.session.startRun();
+    await local.host.emit("before_agent_start", { messageType: "user", prompt: "hello" });
+    assert.equal(routed(local.runtime.route("local", request("user", { signal: localSignal }))), GLM);
+    assert.ok(local.session.notices.some(({ message }) => message.includes("goal draft SUPER is unavailable")));
+    await finish(local, GLM);
+  });
+  test("tiered local SUPER is used when configured", async (t) => {
+    const value = JSON.parse(HERA_V2);
+    const localSuper = "omlx-hera/goal-super";
+    value.roles.push({ name: "local-super", models: [localSuper] });
+    value.local.levels = { low: "local", medium: null, high: null, super: "local-super" };
+    const runtime = heraRuntime();
+    runtime.catalog.add(model(localSuper, { baseUrl: HERA_LAN }));
+    const loaded = await hera(t, { runtime, roster: JSON.stringify(value), select: "local" });
+    draft(loaded, "goal");
+    await say(loaded, "hello");
+    const signal = loaded.session.startRun();
+    await loaded.host.emit("before_agent_start", { messageType: "user", prompt: "hello" });
+    assert.equal(routed(runtime.route("local", request("user", { signal }))), localSuper);
+    await finish(loaded, localSuper);
+  });
+
+  test("SUPER's declared fallback is named when its own models are unavailable", async (t) => {
+    const value = JSON.parse(HERA_V2);
+    const spare = "openrouter/vendor/spare";
+    value.roles.push({ name: "spare", models: [spare] });
+    value.scopes.personal.fallback = ["spare"];
+    const runtime = heraRuntime();
+    runtime.catalog.add(model(spare));
+    runtime.catalog.unavailable.add(ASTRA);
+    runtime.catalog.unavailable.add(KIMI);
+    const loaded = await hera(t, { runtime, roster: JSON.stringify(value) });
+    draft(loaded, "goal");
+    await say(loaded, "hello");
+    assert.equal(await runPrompt(loaded, "hello"), spare);
+    assert.ok(loaded.session.notices.some(({ message }) => message.includes("goal draft SUPER is unavailable; using fallback spare")));
+    await finish(loaded, spare);
+  });
+  test("a prompt queued before a draft and delivered during it uses SUPER", async (t) => {
+    const loaded = await hera(t);
+    await say(loaded, "ordinary #low");
+    draft(loaded, "goal");
+    assert.equal(await runPrompt(loaded, "ordinary"), ASTRA);
+    await finish(loaded, ASTRA);
+  });
+
+  test("canceling a queued draft before delivery prevents the override", async (t) => {
+    const loaded = await hera(t);
+    await say(loaded, "ordinary #low");
+    const signal = loaded.session.startRun();
+    await loaded.host.emit("before_agent_start", { messageType: "user", prompt: "ordinary" });
+    assert.equal(routed(loaded.runtime.route("auto", request("user", { signal }))), LUNA);
+    draft(loaded, "goal");
+    await say(loaded, "draft message", { source: "extension" });
+    draft(loaded, "goal", true);
+    await loaded.host.emit("message_end", { message: { role: "user", content: [{ type: "text", text: "draft message" }], timestamp: NOW } });
+    assert.equal(routed(loaded.runtime.route("auto", request("continuation", { signal }))), LUNA);
+    await finish(loaded, LUNA);
+  });
+});

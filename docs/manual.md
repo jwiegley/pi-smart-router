@@ -33,9 +33,10 @@ answered, and Pi's footer shows it.
   the role's declared fallback, one hop and no further. Without a declared fallback the request is
   refused.
 - **Levels and scopes.** With a version 2 roster, `smart-router/auto` sends each run to one of four
-  levels, LOW, MEDIUM, HIGH or SUPER, in the session's scope, personal or work. A trailing tag such
-  as `#high` sets the level; otherwise the prompt's demand does: the judgment of Jev, TypeSafe AI's
-  decision model, which the router asks through Pi, weighed together with upstream's heuristics.
+  levels, LOW, MEDIUM, HIGH or SUPER, in the session's scope, personal or work. A goal draft takes
+  SUPER; otherwise a trailing tag such as `#high` sets the level, or the prompt's demand does: the
+  judgment of Jev, TypeSafe AI's decision model, which the router asks through Pi, weighed together
+  with upstream's heuristics.
   Among the models good enough for that level, the run goes to the one the coming work costs least
   on, counting what each has in its prompt cache, and a session leaves its model only when that
   saves more than a margin. In a work session `smart-router/auto` may use work-bound Codex or
@@ -936,12 +937,22 @@ floor and cost picks above it: cost never takes a run below the level it needs.
 
 The first rule that applies decides it:
 
-1. **A tag:** the message's last whitespace-separated word, in any case, when it is `#super`,
+1. **A goal draft:** while pi-goal-x is drafting a new `/goal` or `/sisyphus`, its initial message
+   and user messages delivered during it use SUPER, even if queued earlier or rewritten, ahead of
+   tags, demand and cost. The router reads the draft's
+   branch-local lifecycle entry, not its topic. Confirmation or `/goal-cancel` ends the override;
+   a custom-message run and another session do not inherit it. A goal tweak is not a new draft.
+   `/goal-direct` and `/sisyphus-direct` create their goals without a model request; their subsequent
+   continuations use normal routing. This applies only when a smart-router virtual model is selected.
+   If SUPER is unavailable, the router uses the existing eligible fallback or normal routing and
+   warns; a local selection stays local. A version 1 roster or an un-tiered local selection has no
+   SUPER tier to select and uses normal routing with a warning. Normal safety refusals still apply.
+2. **A tag:** the message's last whitespace-separated word, in any case, when it is `#super`,
    `#high`, `#medium` or `#low`, or `#s`, `#h`, `#m` or `#l`. The router removes it before any
-   model sees the text. A tag always wins, at once, up or down: no guard raises it, and the cost
-   rule does not price it, so the run takes the tagged level's first available model. `#high.`,
-   `#hashtag` and `fix issue #12` are not tags.
-2. **The demand**, a number from 0 (LOW) to 3 (SUPER) that weighs Jev's judgment together with
+   model sees the text. Outside a goal draft a tag wins, at once, up or down: no guard raises it,
+   and the cost rule does not price it, so the run takes the tagged level's first available model.
+   `#high.`, `#hashtag` and `fix issue #12` are not tags.
+3. **The demand**, a number from 0 (LOW) to 3 (SUPER) that weighs Jev's judgment together with
    upstream's heuristics, after the guards below.
 
 **Jev's term.** When the roster has a classifier and Jev answers, its four probabilities give an
