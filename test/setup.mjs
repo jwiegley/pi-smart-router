@@ -147,19 +147,21 @@ Object.defineProperty(globalThis, "WebSocket", {
   },
 });
 
-// Coarse file times. The router notices a changed file by its device, inode, size and
-// modification time. Linux kernels before 6.13 stamp files from a clock that ticks every 1 to
+// Coarse file times. The router notices a changed file by its device, inode, size, modification
+// time and change time. Linux kernels before 6.13 stamp files from a clock that ticks every 1 to
 // 4 ms, and older filesystems keep whole seconds, so two writes made in one tick carry the same
 // time, and a test that rewrote a file in place with content of the same size passed or failed
 // by the clock (it failed in the Nix build on a 6.8 kernel). Every test process therefore sees
-// modification times in whole seconds, the coarsest a filesystem in use keeps: a test whose
-// rewrite must be noticed has to change the file's size or set a later time itself.
+// modification and change times in whole seconds, the coarsest a filesystem in use keeps: a test
+// whose rewrite must be noticed has to change the file's size or set a later time itself.
 import fs from "node:fs";
 for (const name of ["fstatSync", "statSync", "lstatSync"]) {
   const original = fs[name];
   fs[name] = function coarseTimes(...args) {
     const stats = original.apply(this, args);
-    if (stats !== undefined && typeof stats.mtimeMs === "number") stats.mtimeMs = Math.floor(stats.mtimeMs / 1000) * 1000;
+    for (const field of ["mtimeMs", "ctimeMs"]) {
+      if (stats !== undefined && typeof stats[field] === "number") stats[field] = Math.floor(stats[field] / 1000) * 1000;
+    }
     return stats;
   };
 }

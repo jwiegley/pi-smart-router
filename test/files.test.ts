@@ -3,9 +3,14 @@ import { appendFileSync, chmodSync, closeSync, constants, fstatSync, mkdirSync, 
 import { join } from "node:path";
 import test from "node:test";
 
+import { labelsFile } from "../src/accounts.ts";
+import { MULTI_PASS_FILE, PROMPT_DIR, ROSTER_FILE } from "../src/constants.ts";
 import { agentFile, OPEN_FLAGS, readUserFile } from "../src/files.ts";
 import type { FileSystem, Parsed } from "../src/files.ts";
-import { expectKind, scratch, write } from "./support/fixtures.ts";
+import { promptStore } from "../src/prompts.ts";
+import { rosterFile } from "../src/roster.ts";
+import { expectKind, fakeFileSystem, fixture, scratch, write } from "./support/fixtures.ts";
+import type { FakeFile } from "./support/fixtures.ts";
 
 const UID = process.getuid?.() ?? -1;
 const CAP = 1024;
@@ -229,4 +234,118 @@ test("an agent file follows a change of agent directory", (t) => {
   dir = second;
   const after = expectKind(file.refresh(), "ok");
   assert.deepEqual([after.path, after.value], [join(second, "smart-router.json"), "second"]);
+});
+
+// ─── A roster root owns ───────────────────────────────────────────────────────
+// Home Manager installs the roster as a link to a file in the Nix store, which is root's and mode
+// 0444. These files are fakes (fakeFileSystem): no test makes a file root owns.
+
+const ME = 1000;
+const STORE = "/nix/store/00000000000000000000000000000000-smart-router.json";
+
+/** A file system holding STORE alone, with this owner and mode. */
+const holding = (uid: number, mode: number, text = '{"version": 1}'): FileSystem => fakeFileSystem(new Map([[STORE, { text, uid, mode }]]));
+
+test("with rootOwner, a file root owns, read-only as in the Nix store, is read; so is one only root may write, and one of this user's", () => {
+  for (const mode of [0o444, 0o400, 0o644]) {
+    const read = expectKind(readUserFile(STORE, { maxBytes: CAP, uid: ME, rootOwner: true, fs: holding(0, mode) }), "read");
+    assert.equal(read.text, '{"version": 1}', mode.toString(8));
+  }
+  expectKind(readUserFile(STORE, { maxBytes: CAP, uid: ME, rootOwner: true, fs: holding(ME, 0o644) }), "read");
+});
+
+test("with rootOwner, a file root owns that its group or others may write is refused", () => {
+  for (const mode of [0o664, 0o646, 0o666, 0o464, 0o446, 0o474]) {
+    const result = expectKind(readUserFile(STORE, { maxBytes: CAP, uid: ME, rootOwner: true, fs: holding(0, mode) }), "unsafe");
+    assert.equal(result.error, `${STORE} is writable by its group or by others (mode ${mode.toString(8)})`);
+  }
+});
+
+test("with rootOwner, a file of any third owner is still refused", () => {
+  for (const owner of [ME + 1, 1, 65534]) {
+    const result = expectKind(readUserFile(STORE, { maxBytes: CAP, uid: ME, rootOwner: true, fs: holding(owner, 0o444) }), "unsafe");
+    assert.equal(result.error, `${STORE} is owned by uid ${owner}, not ${ME} or root`);
+  }
+});
+
+test("without rootOwner, a file root owns is refused", () => {
+  for (const rootOwner of [undefined, false]) {
+    const result = expectKind(readUserFile(STORE, { maxBytes: CAP, uid: ME, rootOwner, fs: holding(0, 0o444) }), "unsafe");
+    assert.equal(result.error, `${STORE} is owned by uid 0, not ${ME}`);
+  }
+});
+
+test("where the platform gives no uid, every file is refused, rootOwner or not", () => {
+  const own = Object.getOwnPropertyDescriptor(process, "getuid");
+  Object.defineProperty(process, "getuid", { value: undefined, configurable: true, writable: true });
+  try {
+    assert.equal(process.getuid, undefined);
+    for (const rootOwner of [undefined, true]) {
+      for (const owner of [0, ME]) {
+        const result = expectKind(readUserFile(STORE, { maxBytes: CAP, rootOwner, fs: holding(owner, 0o444) }), "unsafe");
+        assert.equal(result.error, `${STORE}: its owner cannot be checked on this platform`);
+      }
+    }
+  } finally {
+    if (own === undefined) Reflect.deleteProperty(process, "getuid");
+    else Object.defineProperty(process, "getuid", own);
+  }
+  assert.equal(typeof process.getuid, "function");
+});
+
+test("the router's roster may be root's; its prompt files and Multi-Pass's labels may not", () => {
+  const dir = "/home/john/.config/pi/agent";
+  const roster = join(dir, ROSTER_FILE);
+  const prompt = join(dir, PROMPT_DIR, "classifier.md");
+  const labels = join(dir, MULTI_PASS_FILE);
+  const files = new Map<string, FakeFile>([
+    [roster, { text: fixture("roster-hera-v2.json"), uid: 0, mode: 0o444 }],
+    [prompt, { text: "Judge it.", uid: 0, mode: 0o444 }],
+    [labels, { text: "{}", uid: 0, mode: 0o444 }],
+  ]);
+  const options = { agentDir: () => dir, uid: ME, fs: fakeFileSystem(files) };
+  expectKind(rosterFile(options).current(), "ok");
+  assert.deepEqual(promptStore(options).read("classifier.md", 4000), { ok: false, path: prompt, error: `${prompt} is owned by uid 0, not ${ME}` });
+  assert.equal(expectKind(labelsFile(options).current(), "unsafe").error, `${labels} is owned by uid 0, not ${ME}`);
+  // The same files, this user's: the prompt is read, and the labels pass the owner check.
+  for (const file of files.values()) file.uid = ME;
+  expectKind(rosterFile(options).current(), "ok");
+  assert.deepEqual(promptStore(options).read("classifier.md", 4000), { ok: true, path: prompt, value: "Judge it." });
+  assert.notEqual(labelsFile(options).current().kind, "unsafe");
+  // A roster of a third owner, or one root owns that others may write, is refused.
+  const third = files.get(roster);
+  assert.ok(third !== undefined);
+  third.uid = ME + 1;
+  assert.equal(expectKind(rosterFile(options).current(), "unsafe").error, `${roster} is owned by uid ${ME + 1}, not ${ME} or root`);
+  third.uid = 0;
+  third.mode = 0o666;
+  expectKind(rosterFile(options).current(), "unsafe");
+});
+
+test("a change of ctime alone makes a file's identity differ", () => {
+  // A store path keeps its mtime, so a collected path whose inode number a new roster of the same
+  // size takes differs from it only in ctime.
+  const file: FakeFile = { text: "one!", uid: 0, mode: 0o444, ino: 7, mtimeMs: 1_000, ctimeMs: 5_000 };
+  const fs = fakeFileSystem(new Map([[STORE, file]]));
+  const options = { maxBytes: CAP, uid: ME, rootOwner: true, fs };
+  const first = expectKind(readUserFile(STORE, options), "read");
+  expectKind(readUserFile(STORE, { ...options, previous: first.identity }), "unchanged");
+  file.text = "two!";
+  file.ctimeMs = 6_000;
+  const second = expectKind(readUserFile(STORE, { ...options, previous: first.identity }), "read");
+  assert.equal(second.text, "two!");
+  assert.deepEqual({ ...second.identity, ctimeMs: first.identity.ctimeMs }, first.identity, "only the ctime differs");
+  assert.notEqual(second.identity.ctimeMs, first.identity.ctimeMs);
+});
+
+test("an agent file is loaded again when only its ctime changed", () => {
+  const file: FakeFile = { text: "one!", uid: ME, mode: 0o444, ino: 7, mtimeMs: 1_000, ctimeMs: 5_000 };
+  const { parse, count } = counting();
+  const agent = agentFile({ agentDir: () => "/nix/store", name: STORE.slice("/nix/store/".length), maxBytes: CAP, parse, uid: ME, fs: fakeFileSystem(new Map([[STORE, file]])) });
+  assert.equal(expectKind(agent.current(), "ok").value, "one!");
+  file.text = "two!";
+  assert.equal(expectKind(agent.refresh(), "ok").value, "one!", "an unchanged identity keeps the parsed state");
+  file.ctimeMs = 6_000;
+  assert.equal(expectKind(agent.refresh(), "ok").value, "two!");
+  assert.equal(count(), 2);
 });

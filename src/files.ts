@@ -6,7 +6,8 @@
 // A read opens the path once, read-only and non-blocking (a symlink resolves to its target; a
 // FIFO cannot stall Pi), checks the open descriptor with fstat, and then reads at most the cap
 // plus one byte from that same descriptor, so nothing can change between the check and the read.
-// The file must be a regular file owned by this user and writable by no one else.
+// The file must be a regular file owned by this user and writable by no one else. The roster alone
+// may also be root's, as a file in the Nix store is: Home Manager installs it as a link to one.
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
@@ -15,8 +16,16 @@ export interface Identity {
   readonly dev: number;
   readonly ino: number;
   readonly mtimeMs: number;
+  /**
+   * A file in the Nix store keeps the same mtime whatever it holds, so a store path collected and
+   * its inode number given to a new roster of the same size would look unchanged without it.
+   */
+  readonly ctimeMs: number;
   readonly size: number;
 }
+
+/** Root's uid, the one owner other than this user that a roster may have (ReadOptions.rootOwner). */
+const ROOT_UID = 0;
 
 export type Failure = "missing" | "unsafe" | "invalid";
 
@@ -36,6 +45,7 @@ export interface FileSystem {
     readonly uid: number;
     readonly size: number;
     readonly mtimeMs: number;
+    readonly ctimeMs: number;
   };
   readSync(fd: number, buffer: Uint8Array, offset: number, length: number, position: null): number;
   closeSync(fd: number): void;
@@ -53,8 +63,16 @@ export interface ReadOptions {
   /** The required owner; `process.getuid()` by default. */
   readonly uid?: number | undefined;
   /**
+   * Accept a file root owns as well as one this user owns: for the roster alone, which Home Manager
+   * installs as a link to a file in the Nix store, root's and read-only. Root can write any file of
+   * the user's anyway, so this trusts no one new; no other owner is accepted, a platform without
+   * uids is still refused, and the file must still be writable by its owner only. The router's
+   * roster and the checker's set it (ROSTER_READ in src/roster.ts); no other file does.
+   */
+  readonly rootOwner?: boolean | undefined;
+  /**
    * Accept a file of any owner. For the standalone checker alone (--no-owner-check), which a build
-   * runs on a roster in the Nix store, where every file is root's. The router never sets it: no
+   * runs in a sandbox, where the Nix store's files can show any owner. The router never sets it: no
    * AgentFile takes it. The file must still be writable by its owner only.
    */
   readonly anyOwner?: boolean | undefined;
@@ -70,7 +88,7 @@ function errorCode(error: unknown): string {
 }
 
 function sameIdentity(a: Identity, b: Identity): boolean {
-  return a.dev === b.dev && a.ino === b.ino && a.mtimeMs === b.mtimeMs && a.size === b.size;
+  return a.dev === b.dev && a.ino === b.ino && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs && a.size === b.size;
 }
 
 /** Read one of the router's files safely. Never throws. */
@@ -92,7 +110,10 @@ export function readUserFile(path: string, options: ReadOptions): FileRead {
     if (!stat.isFile()) return { kind: "unsafe", error: `${path} is not a regular file` };
     if (options.anyOwner !== true) {
       if (uid === undefined) return { kind: "unsafe", error: `${path}: its owner cannot be checked on this platform` };
-      if (stat.uid !== uid) return { kind: "unsafe", error: `${path} is owned by uid ${stat.uid}, not ${uid}` };
+      const rootOwned = options.rootOwner === true && stat.uid === ROOT_UID;
+      if (stat.uid !== uid && !rootOwned) {
+        return { kind: "unsafe", error: `${path} is owned by uid ${stat.uid}, not ${uid}${options.rootOwner === true ? " or root" : ""}` };
+      }
     }
     if ((stat.mode & 0o022) !== 0) {
       const mode = (stat.mode & 0o777).toString(8).padStart(3, "0");
@@ -100,7 +121,7 @@ export function readUserFile(path: string, options: ReadOptions): FileRead {
     }
     const tooLarge = { kind: "invalid", error: `${path} is larger than ${options.maxBytes} bytes` } as const;
     if (stat.size > options.maxBytes) return tooLarge;
-    const identity: Identity = { dev: stat.dev, ino: stat.ino, mtimeMs: stat.mtimeMs, size: stat.size };
+    const identity: Identity = { dev: stat.dev, ino: stat.ino, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, size: stat.size };
     if (options.previous !== undefined && sameIdentity(options.previous, identity)) return { kind: "unchanged", identity };
     const buffer = new Uint8Array(options.maxBytes + 1);
     let length = 0;
@@ -150,7 +171,7 @@ export type Loaded<T> =
 export interface AgentFile<T> {
   /** The last state; loads on first use. */
   current(): Loaded<T>;
-  /** Loads again when the path or the file's (dev, ino, mtimeMs, size) changed. */
+  /** Loads again when the path or the file's (dev, ino, mtimeMs, ctimeMs, size) changed. */
   refresh(): Loaded<T>;
   /** Reads and parses again, whatever the identity. */
   reload(): Loaded<T>;
@@ -163,6 +184,8 @@ export interface AgentFileOptions<T> {
   readonly maxBytes: number;
   readonly parse: (text: string) => Parsed<T>;
   readonly uid?: number | undefined;
+  /** ReadOptions.rootOwner: the roster's alone. */
+  readonly rootOwner?: boolean | undefined;
   readonly fs?: FileSystem | undefined;
   readonly now?: (() => number) | undefined;
 }
@@ -188,7 +211,7 @@ export function agentFile<T>(options: AgentFileOptions<T>): AgentFile<T> {
     // A previous identity is offered only with a state for the same path, so "unchanged" always
     // has a state to keep.
     const previous = !force && state !== undefined && state.path === path ? identity : undefined;
-    const read = readUserFile(path, { maxBytes: options.maxBytes, uid: options.uid, previous, fs: options.fs });
+    const read = readUserFile(path, { maxBytes: options.maxBytes, uid: options.uid, rootOwner: options.rootOwner, previous, fs: options.fs });
     if (read.kind === "unchanged") return state ?? load(true);
     if (read.kind === "read") {
       identity = read.identity;

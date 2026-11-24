@@ -20,6 +20,11 @@ fork's releases on that base. Releases are signed tags; nothing is published to 
 
 ### Changed
 
+- **The roster may be root's.** Home Manager can install it as a link to a file in the Nix store,
+  which root owns with mode 0444; the router refused that as unsafe. A roster owned by you or by
+  root is now read, by the router and by the standalone checker alike, and is still refused when
+  another user owns it, when its group or others may write it, or on a platform without uids. Its
+  prompt files and Multi-Pass's labels must still be yours. `--no-owner-check` is unchanged.
 - **A work level or chain takes models of any work-bound account**, not only Codex and Claude
   Code. An unbound provider is still refused there.
 - **A tagged prompt whose level is unavailable is refused**, where it used to be passed up to the
@@ -28,6 +33,9 @@ fork's releases on that base. Releases are signed tags; nothing is published to 
 
 ### Fixed
 
+- A file's change time is now part of what tells the router it changed. A path in the Nix store
+  keeps one modification time, so a roster written where a collected store path's inode number was
+  reused, with the same size, read as unchanged in a running Pi.
 - A new `/goal` or `/sisyphus` draft now uses SUPER for its initial prompt and user messages
   delivered while drafting, including steers, across the router's virtual models. The goal-x tag
   previously covered only the first idle prompt on `smart-router/auto`; later replies were classified

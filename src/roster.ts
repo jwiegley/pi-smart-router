@@ -1,4 +1,4 @@
-// The roster: one user-owned JSON file per host, <agentDir>/smart-router.json, holding ordered
+// The roster: one JSON file per host, <agentDir>/smart-router.json, holding ordered
 // roles of exact provider/id refs, the account bindings and the local section. Schema version 1
 // routes by its routing table. Version 2 replaces the table with the four levels of each scope it
 // serves, personal, work or both, binds every account to a scope, and may configure the
@@ -33,7 +33,7 @@ import {
 } from "./constants.ts";
 import type { Level } from "./constants.ts";
 import { agentFile, isRecord, message, own } from "./files.ts";
-import type { AgentFile, FileSystem, Parsed } from "./files.ts";
+import type { AgentFile, FileSystem, Parsed, ReadOptions } from "./files.ts";
 import type { JevSettings } from "./jev.ts";
 import { canonicalHost, isLocalHost, localRoles } from "./local.ts";
 import { DEFAULT_DEMAND, DEFAULT_EFFORT, DEFAULT_SWITCHING, isReasoningLevel, REASONING_LEVELS, SIGNALS } from "./settings.ts";
@@ -1066,7 +1066,15 @@ export interface RosterFileOptions {
   readonly now?: (() => number) | undefined;
 }
 
-/** The roster under Pi's agent directory, capped at 64 KiB and cached by file identity. */
+/**
+ * How a roster is read, by the router (rosterFile) and by the checker (checkFile in src/check.ts)
+ * alike, so that neither accepts a file the other refuses: at most 64 KiB, and owned by this user
+ * or by root, since Home Manager installs it as a link to a file in the Nix store. Its prompt files
+ * and Multi-Pass's labels are not read so: they must be this user's.
+ */
+export const ROSTER_READ = { maxBytes: ROSTER_MAX_BYTES, rootOwner: true } as const satisfies Pick<ReadOptions, "maxBytes" | "rootOwner">;
+
+/** The roster under Pi's agent directory, read as ROSTER_READ says and cached by file identity. */
 export function rosterFile(options: RosterFileOptions): AgentFile<Roster> {
-  return agentFile({ ...options, name: ROSTER_FILE, maxBytes: ROSTER_MAX_BYTES, parse: parseRoster });
+  return agentFile({ ...options, ...ROSTER_READ, name: ROSTER_FILE, parse: parseRoster });
 }

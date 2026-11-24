@@ -125,10 +125,13 @@ The roster is one JSON file per host, at `<agentDir>/smart-router.json`, which i
 `~/.config/pi/agent/smart-router.json` on John's hosts. `<agentDir>` is Pi's agent directory
 (`PI_CODING_AGENT_DIR`); a relative one is refused.
 
-- **You own it.** Nix never writes it, and it holds no secrets: the schema has no field for keys,
-  tokens, headers, base URLs or environment.
-- **It must be safe:** a regular file owned by you, not writable by group or others, at most 64 KiB.
-  A symlink is followed to its target, which must pass the same checks.
+- **It is yours to write,** by hand or through Home Manager, and it holds no secrets: the schema has
+  no field for keys, tokens, headers, base URLs or environment.
+- **It must be safe:** a regular file owned by you or by root, not writable by group or others, at
+  most 64 KiB. A symlink is followed to its target, which must pass the same checks, so the roster
+  may be the link Home Manager makes to a file in the Nix store, which is root's and read-only.
+  Root is the one other owner accepted, since it can write your files anyway; the roster is the one
+  file accepted so: its prompt files and Multi-Pass's labels must be yours.
 - **Validation is strict.** Unknown keys are rejected at every level, and errors name their place,
   as in `roles[3].models[0]: "openai-codex-3/gpt-6.1-sol" is excluded by openai-codex-3/*`.
 - **Failure is closed.** A missing, invalid or unsafe roster makes every model refuse until it is
@@ -719,10 +722,13 @@ the first error with its place, such as
   nix-config installs the package under `share/pi-packages/pi-smart-router/`, which is not, so
   `node <that>/src/check-cli.ts` checks with the installed version's own parser. No built
   JavaScript copy is shipped: it would be a second parser to keep equal to the first.
-- **A roster in the Nix store** is root's, and the checker reports it as the router would:
-  `UNSAFE: … is owned by uid 0`. For a build-time check, pass `--no-owner-check` before the path.
-  The flag is the checker's alone, the report says the owner was not checked, and a file others
-  can write is still unsafe. The router itself always requires a file you own.
+- **A roster in the Nix store** is root's, and the checker accepts it, as the router does. Its
+  prompt files must still be yours, so one in the store is reported as the router finds it:
+  `PROMPT NOT USABLE: … is owned by uid 0`. A build sandbox can show the store's files under
+  another owner (Linux's shows root's as `nobody`), so for a build-time check, pass
+  `--no-owner-check` before the path. The flag is the checker's alone, the report says the owner
+  was not checked, and a file others can write is still unsafe. The router itself always requires a
+  roster you or root own, and prompt files you own.
 - **It reads the roster, not the host.** Whether Pi's catalog on a host lists a model, and whether
   it has credentials, is for `/smart-router status` there: a model Pi does not list is passed over
   at run time as `not-in-catalog`.
@@ -1449,9 +1455,10 @@ name ending in `.md` or `.txt`, with no directory part:
 - **Limits:** the instructions at most 4000 characters, a level description at most 2000, a file
   at most 16 KiB of plain UTF-8 text, with no control characters.
 - **A prompt file must be yours:** a regular file you own, writable by no one else, in
-  `<agentDir>/smart-router/`, by the roster's own rules. A link is followed to its target, which
-  must pass the same checks, so a link into `/nix/store`, whose files are root's, is refused as
-  unsafe: keep prompt files as real files you edit.
+  `<agentDir>/smart-router/`, by the roster's own rules but for one: the roster may be root's, and a
+  prompt file may not. A link is followed to its target, which must pass the same checks, so a link
+  into `/nix/store`, whose files are root's, is refused as unsafe: keep prompt files as real files
+  you edit.
 - **Prompts are redacted like messages.** The instructions and the descriptions go through the
   same redaction as the message before Jev reads them
   ([What redaction hides](#what-redaction-hides)), so a prompt file that is, or links to, something

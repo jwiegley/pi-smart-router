@@ -11,13 +11,12 @@
 // Nothing here sends anything, and nothing here imports Pi.
 import { dirname } from "node:path";
 
-import { ROSTER_MAX_BYTES } from "./constants.ts";
 import { readUserFile } from "./files.ts";
 import type { ReadOptions } from "./files.ts";
 import { ORDER_SCOPES, orderedRoster } from "./order.ts";
 import { promptLines, promptProblem, promptReader, promptUses } from "./prompts.ts";
 import type { PromptReader, PromptUse } from "./prompts.ts";
-import { parseRoster, SCOPES, unreachableMinutesOf } from "./roster.ts";
+import { parseRoster, ROSTER_READ, SCOPES, unreachableMinutesOf } from "./roster.ts";
 import type { Roster, RosterV1, RosterV2 } from "./roster.ts";
 import { DEEP_SESSION_ENTRIES, DEEP_SESSION_TOKENS, DEFAULT_EFFORT, SIGNALS } from "./settings.ts";
 import { tierLabel, TIERS } from "./tiers.ts";
@@ -255,13 +254,14 @@ export function checkRoster(text: string, read?: PromptReader): CheckReport {
 }
 
 /**
- * Check a roster file at an absolute path, read as the router reads its own: a regular file owned
- * by this user, writable by no one else, at most 64 KiB of UTF-8. A file the router would refuse
- * as missing or unsafe is reported so. The prompt files it names are looked for where the router
- * would find them were this the roster in use: in the directory smart-router/ beside it.
+ * Check a roster file at an absolute path, read as the router reads its own (ROSTER_READ): a
+ * regular file owned by this user or by root, writable by no one else, at most 64 KiB of UTF-8. A
+ * file the router would refuse as missing or unsafe is reported so. The prompt files it names are
+ * looked for where the router would find them were this the roster in use: in the directory
+ * smart-router/ beside it, and, as the router reads them, they must be this user's.
  */
 export function checkFile(path: string, options: Pick<ReadOptions, "uid" | "fs" | "anyOwner"> = {}): CheckReport {
-  const read = readUserFile(path, { maxBytes: ROSTER_MAX_BYTES, ...options });
+  const read = readUserFile(path, { ...options, ...ROSTER_READ });
   if (read.kind === "read") return checkRoster(read.text, promptReader(dirname(path), options));
   // No previous identity is offered, so the file is never reported unchanged.
   const error = read.kind === "unchanged" ? `${path} was not read` : read.error;
@@ -271,7 +271,7 @@ export function checkFile(path: string, options: Pick<ReadOptions, "uid" | "fs" 
 export const CHECK_USAGE =
   "Usage: node src/check-cli.ts [--no-owner-check] <roster.json>\n" +
   "Checks a pi-smart-router roster without Pi, a session or credentials, and prints what it routes to.\n" +
-  "--no-owner-check accepts a roster and prompt files that another user owns, as in the Nix store; the router itself never does.";
+  "--no-owner-check accepts a roster and prompt files of any owner, as a build sandbox shows the Nix store; the router itself never does.";
 const NO_OWNER_CHECK = "--no-owner-check";
 
 /**
@@ -288,7 +288,7 @@ export function runCheck(args: readonly string[], print: (line: string) => void,
   }
   const report = checkFile(path, { ...options, anyOwner });
   print(`${path}`);
-  if (anyOwner) print("Checked without the owner check: the router itself reads only files you own.");
+  if (anyOwner) print("Checked without the owner check: the router itself reads only a roster you or root own, and prompt files you own.");
   for (const line of report.lines) print(line);
   return report.ok ? 0 : 1;
 }

@@ -3,17 +3,20 @@
 // check. The standalone entry point itself is not started here, because the tripwire refuses child
 // processes: its whole run is runCheck, which these tests call.
 import assert from "node:assert/strict";
-import { readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import test, { afterEach, beforeEach, describe } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { CHECK_USAGE, checkFile, checkRoster, runCheck } from "../src/check.ts";
 import { FakeCatalog, model, NOW } from "./support/catalog.ts";
-import { fixture, scratch, write } from "./support/fixtures.ts";
+import { fakeFileSystem, fixture, scratch, write } from "./support/fixtures.ts";
+import type { FakeFile } from "./support/fixtures.ts";
 import { agentDir, FakeRuntime, resetSlot, start } from "./support/pi.ts";
 
 const JOHN = fixture("roster-hera-v2-fallback.json");
+/** What the standalone run says when it was asked not to check the owner. */
+const NO_OWNER_CHECKED = "Checked without the owner check: the router itself reads only a roster you or root own, and prompt files you own.";
 const NYX_QWEN = "nyx/g3mjym7raqj6147biq46zxym32gyda9g-Qwen3.8-27B-exl3-6fe61ad";
 
 const TAIL = [
@@ -247,17 +250,17 @@ describe("checking a roster file", () => {
       1,
       [bad, 'INVALID: scopes.personal.fallback[1]: "cloud" is not a role', "Every smart-router model refuses every request while the roster is invalid."],
     ]);
-    // A roster another user owns, as in the Nix store: unsafe as the router reads it, and checked
-    // only when the caller says so, which the report then states.
+    // A roster a third user owns: unsafe as the router reads it, and checked only when the caller
+    // says so, which the report then states.
     const other = (process.getuid?.() ?? 0) + 1;
     const as = (...args: string[]): readonly [number, string[]] => {
       const out: string[] = [];
       return [runCheck(args, (line) => out.push(line), { uid: other }), out];
     };
-    assert.deepEqual(as(good), [1, [good, `UNSAFE: ${good} is owned by uid ${other - 1}, not ${other}`]]);
+    assert.deepEqual(as(good), [1, [good, `UNSAFE: ${good} is owned by uid ${other - 1}, not ${other} or root`]]);
     assert.deepEqual(as("--no-owner-check", good), [
       0,
-      [good, "Checked without the owner check: the router itself reads only files you own.", "OK: a valid version 2 roster.", "", ...JOHN_ROUTING],
+      [good, NO_OWNER_CHECKED, "OK: a valid version 2 roster.", "", ...JOHN_ROUTING],
     ]);
     // The mode check stays: a file others can write is unsafe whoever owns it.
     const loose = write(dir, "loose.json", JOHN, 0o666);
@@ -266,6 +269,45 @@ describe("checking a roster file", () => {
     assert.deepEqual(run(), [2, [CHECK_USAGE]]);
     assert.deepEqual(run(good, bad), [2, [CHECK_USAGE]]);
     assert.deepEqual(run("--help"), [2, [CHECK_USAGE]]);
+  });
+
+  test("a roster root owns, as Home Manager links one from the Nix store, is accepted as the router accepts it; its prompt files must still be yours", () => {
+    const me = 1000;
+    const dir = "/home/john/.config/pi/agent";
+    const path = join(dir, "smart-router.json");
+    const prompt = join(dir, "smart-router", "classifier.md");
+    const withFile = JSON.parse(JOHN) as { classifier: Record<string, unknown> };
+    withFile.classifier.instructionsFile = "classifier.md";
+    const roster: FakeFile = { text: JOHN, uid: 0, mode: 0o444 };
+    const files = new Map<string, FakeFile>([[path, roster]]);
+    const fs = fakeFileSystem(files);
+    const as = (...args: string[]): readonly [number, string[]] => {
+      const out: string[] = [];
+      return [runCheck(args, (line) => out.push(line), { uid: me, fs }), out];
+    };
+    assert.deepEqual(checkFile(path, { uid: me, fs }), checkRoster(JOHN));
+    assert.deepEqual(as(path), [0, [path, "OK: a valid version 2 roster.", "", ...JOHN_ROUTING]]);
+    // One root owns that others may write, and one of a third owner, are unsafe, as the router finds them.
+    roster.mode = 0o664;
+    assert.deepEqual(as(path), [1, [path, `UNSAFE: ${path} is writable by its group or by others (mode 664)`]]);
+    assert.deepEqual(as("--no-owner-check", path)[1][2], `UNSAFE: ${path} is writable by its group or by others (mode 664)`);
+    roster.mode = 0o444;
+    roster.uid = me + 1;
+    assert.deepEqual(as(path), [1, [path, `UNSAFE: ${path} is owned by uid ${me + 1}, not ${me} or root`]]);
+    // --no-owner-check still takes any owner, and says so.
+    assert.deepEqual(as("--no-owner-check", path), [0, [path, NO_OWNER_CHECKED, "OK: a valid version 2 roster.", "", ...JOHN_ROUTING]]);
+    // A prompt file root owns is refused, as the router refuses it, unless the owner is not checked.
+    roster.uid = 0;
+    roster.text = JSON.stringify(withFile);
+    files.set(prompt, { text: "Judge it.", uid: 0, mode: 0o444 });
+    const refused = checkFile(path, { uid: me, fs });
+    assert.equal(refused.ok, false);
+    assert.ok(refused.lines[0]?.startsWith(`PROMPT NOT USABLE: ${prompt} is owned by uid 0, not ${me}. `), refused.lines[0]);
+    assert.equal(checkFile(path, { uid: me, fs, anyOwner: true }).ok, true);
+    const own = files.get(prompt);
+    assert.ok(own !== undefined);
+    own.uid = me;
+    assert.equal(checkFile(path, { uid: me, fs }).ok, true);
   });
 
   test("the standalone checker imports nothing of Pi's, so it runs without Pi and without credentials", () => {
@@ -290,6 +332,12 @@ describe("checking a roster file", () => {
     // The entry point's whole body is that run: nothing else to test in a child process.
     const cli = readFileSync(join(src, "check-cli.ts"), "utf8");
     assert.match(cli, /process\.exitCode = runCheck\(/);
+    // Only the roster may be root's: ROSTER_READ in roster.ts, which the router and the checker
+    // both read it with, is the one place outside files.ts that names rootOwner.
+    const named = readdirSync(src, { recursive: true, encoding: "utf8" }).filter((name) => name.endsWith(".ts") && /\brootOwner\b/.test(readFileSync(join(src, name), "utf8")));
+    assert.deepEqual(named.sort(), ["files.ts", "roster.ts"]);
+    const lines = readFileSync(join(src, "roster.ts"), "utf8").split("\n").filter((line) => /\brootOwner\b/.test(line));
+    assert.deepEqual(lines.map((line) => line.startsWith("export const ROSTER_READ = ")), [true], "roster.ts names it in ROSTER_READ alone");
     // The router's own readers never take the option that the checker's flag sets.
     for (const name of ["router.ts", "roster.ts", "accounts.ts"]) assert.doesNotMatch(readFileSync(join(src, name), "utf8"), /anyOwner/, name);
     assert.doesNotMatch(readFileSync(join(src, "prompts.ts"), "utf8").slice(readFileSync(join(src, "prompts.ts"), "utf8").indexOf("export function promptStore")), /anyOwner/);
