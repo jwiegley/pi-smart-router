@@ -57,7 +57,7 @@ import type { Resolution, ResolveContext } from "./resolve.ts";
 import { autoRoles, candidatesOf, effortSettingsOf, fallbackAfter, fixedLevel, roleLevel, roleOf, scopeSection } from "./roster.ts";
 import type { RosterV2, Scope, ScopeSection } from "./roster.ts";
 import { AGAIN_DEFAULT, DEFAULT_SWITCHING, SUMMARY_TOKENS } from "./settings.ts";
-import { tierAbove, tierRank } from "./tiers.ts";
+import { tierAbove, tierRank, TIERS } from "./tiers.ts";
 import type { Tier } from "./tiers.ts";
 
 /** The latest successful physical response of a session. */
@@ -111,7 +111,9 @@ export interface PickOptions {
    * backoff.
    */
   readonly strictHolds?: boolean | undefined;
-  /** Whether the role's declared fallback may take over: version 1's one hop, or a version 2 scope's chain on smart-router/auto. Never while local-only. */
+  /** A draft with compaction disabled must fit before this candidate can take it. */
+  readonly window?: { readonly conversation: number; readonly reserve: number };
+  /** Whether the role's declared fallback may take over: version 1's one hop, or a version 2 scope's chain. Never while local-only. */
   readonly fallback: boolean;
   readonly code: string;
 }
@@ -165,8 +167,10 @@ function pickWithHolds(rc: ResolveContext, roleName: string, options: PickOption
           : options.skipped?.has(ref) === true
             ? { ok: false, ref, reason: "failed", detail: "its request failed earlier in this run" }
             : resolveCandidate(ref, rc);
-      if (resolution.ok) return resolution;
-      refused.push(resolution);
+      if (resolution.ok) {
+        if (options.window === undefined || fitsSize(options.window.conversation, options.window.reserve, resolution.model)) return resolution;
+        refused.push({ ok: false, ref, reason: "context-window", detail: "the conversation does not fit its context window with compaction disabled" });
+      } else refused.push(resolution);
     }
     attempts.push({ role: name, exists: true, candidates: refused, ...(fallback ? { fallback: true as const } : {}) });
     return undefined;
@@ -197,7 +201,7 @@ export interface PlanLevel {
   readonly scope: Scope;
   /** The level the prompt needs: its tag's, else its demand's after the guards. */
   readonly need: Tier;
-  /** The level whose model takes the run: `need`, or a higher one. When the plan picked none, `need`. */
+  /** The level whose model takes the run. A draft's effective need is the highest usable tier. */
   readonly tier: Tier;
   readonly source: LevelSource;
   /** The risky operation that raised the run to HIGH. */
@@ -239,7 +243,9 @@ export interface Plan {
   readonly code: string;
   /** The model the decision picked when it was made, or why there was none. */
   readonly decision: Decision;
-  /** A version 2 run's level on auto, in a scope the roster serves. */
+  /** A tiered draft, including one that found only an unranked spare. Keep its prompt size, never its text. */
+  readonly draft?: { readonly scope: Scope; readonly promptTokens: number };
+  /** A ranked run's level. An unranked spare has none. */
   readonly level?: PlanLevel;
 }
 
@@ -312,6 +318,55 @@ function climb(p: Sizing, section: ScopeSection, start: Tier, code: string, chec
   // tier shares, moving up gains nothing: the run keeps the tier it started at.
   if (first !== undefined && highest !== undefined && first.decision.choice.ref === highest.decision.choice.ref) return first;
   return highest ?? { tier: start, decision: { ok: false, attempts } };
+}
+
+export interface GoalChoice {
+  readonly decision: Decision;
+  /** An unranked spare is a route, not a tier. */
+  readonly level?: PlanLevel;
+  /** Why configured SUPER candidates failed. Absent for a disabled or unmapped tier. */
+  readonly superReason?: string;
+}
+
+/** A draft prefers the highest usable tier in this selection. A scope-wide spare ranks below all four. */
+export function goalDraftChoice(rc: ResolveContext, last: LastResponder | undefined, compaction: CompactionFigures, promptTokens: number): GoalChoice | undefined {
+  if (rc.roster.version !== 2) return undefined;
+  const section = rc.localOnly ? undefined : scopeSection(rc.roster, rc.scope);
+  const local = rc.localOnly ? rc.roster.local?.levels : undefined;
+  if (section === undefined && local === undefined) return undefined;
+  const options: PickOptions = { code: "goal", fallback: false, ...(compaction.enabled ? {} : { window: { conversation: historyOf(last) + promptTokens, reserve: compaction.reserve } }) };
+  const attempts: Attempt[] = [];
+  const reasons = new Set<string>();
+  const tryRole = (role: string, tier?: Tier): GoalChoice | undefined => {
+    const decision = pickInRole(rc, role, options);
+    if (!decision.ok) {
+      for (const attempt of decision.attempts) {
+        if (!attempts.some((previous) => previous.role === attempt.role)) attempts.push(attempt);
+        if (tier === "super") for (const candidate of attempt.candidates) reasons.add(candidate.detail);
+      }
+      return undefined;
+    }
+    return {
+      decision,
+      // A draft prefers SUPER; it does not require a later execution turn to use a tier that failed.
+      ...(tier === undefined ? {} : { level: { scope: rc.scope, need: tier, tier, source: "goal", steppedUp: false, returnedToFirst: false } as const }),
+      ...(tier !== "super" && reasons.size > 0 ? { superReason: [...reasons].join("; ") } : {}),
+    };
+  };
+  for (const tier of [...TIERS].reverse()) {
+    const entry = section?.levels[tier];
+    const role = entry?.role ?? local?.[tier];
+    if (role == null) continue;
+    for (const name of [role, ...(entry?.fallback ?? [])]) {
+      const pick = tryRole(name, tier);
+      if (pick !== undefined) return pick;
+    }
+  }
+  for (const role of section?.fallback ?? []) {
+    const pick = tryRole(role);
+    if (pick !== undefined) return pick;
+  }
+  return { decision: { ok: false, attempts } };
 }
 
 /** What a climb measures a candidate against: the conversation with the new prompt, and Pi's compaction reserve. */
@@ -524,7 +579,6 @@ export function escalationTarget(input: {
  * alone are `heuristics`.
  */
 function needOf(p: PlanInput, roster: RosterV2, signal: Signal): Pick<PlanLevel, "need" | "source" | "trigger" | "demand"> {
-  if (p.level?.goal) return { need: "super", source: "goal" };
   const tag = p.level?.tag;
   if (tag !== undefined) return { need: tag, source: "tag" };
   const risky = riskyTrigger(p.text);
@@ -542,7 +596,7 @@ function planLevel(p: PlanInput, roster: RosterV2, section: ScopeSection, signal
   const tag = p.level?.tag;
   const jev = p.level?.jev;
   const { need, source, trigger, demand } = needOf(p, roster, signal);
-  // Whichever tier answered last, the pick starts at the level the prompt needs. A tagged or goal-draft run is never priced.
+  // Whichever tier answered last, the pick starts at the level the prompt needs. A tagged run is never priced.
   const { tier, decision, steppedUp, cost } = chooseModel({
     rc,
     section,
@@ -552,8 +606,8 @@ function planLevel(p: PlanInput, roster: RosterV2, section: ScopeSection, signal
     promptTokens: promptTokensOf(p.text, p.now),
     compaction: p.compaction,
     figures: p.figures,
-    priced: tag === undefined && p.level?.goal !== true,
-    pinned: tag !== undefined || p.level?.goal === true,
+    priced: tag === undefined,
+    pinned: tag !== undefined,
   });
   const choice = decision.ok ? decision.choice : undefined;
   // The tier's own role, whichever role the pick is in: a chain model's role is not the run's.
@@ -588,13 +642,21 @@ export function planUserTurn(p: PlanInput): Plan {
     decision,
     ...(level === undefined ? {} : { level }),
   });
+  if (p.level?.goal) {
+    const promptTokens = promptTokensOf(p.text, p.now);
+    const pick = goalDraftChoice(rc, p.last, p.compaction, promptTokens);
+    if (pick !== undefined) {
+      const { signal, reason } = classify(p.text);
+      return { ...plan(signal, reason, pick.decision.ok ? pick.decision.choice.role : undefined, "goal", pick.decision, pick.level), draft: { scope: rc.scope, promptTokens } };
+    }
+  }
   if (rc.localOnly) {
     const local = rc.roster.local;
     if (rc.roster.version === 2 && local?.levels !== undefined) {
       const { signal, reason } = classify(p.text);
       // A local request uses an external classifier only where the roster says so, and otherwise
       // none, a prior resend's opinion included.
-      const input: PlanInput = rc.roster.classifier?.local === true ? p : { ...p, level: p.level?.goal ? { goal: true } : p.level?.tag === undefined ? {} : { tag: p.level.tag } };
+      const input: PlanInput = rc.roster.classifier?.local === true ? p : { ...p, level: p.level?.tag === undefined ? {} : { tag: p.level.tag } };
       const needed = needOf(input, rc.roster, signal);
       const role = local.levels[needed.need] ?? undefined;
       const level: PlanLevel = { ...needed, scope: rc.scope, tier: needed.need, steppedUp: false, returnedToFirst: false };

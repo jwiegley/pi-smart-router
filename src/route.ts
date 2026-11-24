@@ -47,7 +47,7 @@ import type { SessionDepth } from "./demand.ts";
 import { routesLevels, VIRTUAL_API } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
 import { chooseModel, effortFor, eligibleRole, escalationTarget, NO_LOCAL_SECTION, noScopeSection, pickInRole } from "./decide.ts";
-import type { Choice, Chosen, CompactionFigures, CostFigures, CostTerms, Decision, LastResponder, LevelInput, Plan, PlanLevel } from "./decide.ts";
+import type { Choice, Chosen, CompactionFigures, CostFigures, CostTerms, Decision, GoalChoice, LastResponder, LevelInput, Plan, PlanLevel } from "./decide.ts";
 import { turnTypeOf } from "./effort.ts";
 import type { TurnType } from "./effort.ts";
 import type { SentEffort } from "./effort.ts";
@@ -261,8 +261,8 @@ export interface RouteInput {
   readonly compaction: CompactionFigures;
   /** How deep the session is: a run without a prompt takes at least the deep-session floor in a deep one. */
   readonly depth: SessionDepth;
-  /** SUPER's eligible choice while this request belongs to a goal draft. */
-  readonly goal?: Decision;
+  /** The draft's revalidated decision, which can also refuse or take an unranked spare. */
+  readonly goal?: GoalChoice;
 }
 
 const previousRef = (request: ModelRouteRequest): string | undefined =>
@@ -390,6 +390,7 @@ export function afterFailure(rc: ResolveContext, failover: Failover, start: stri
  */
 export function planApplies(plan: Plan, id: VirtualId, rc: ResolveContext): boolean {
   if (plan.virtualId !== id || plan.localOnly !== rc.localOnly) return false;
+  if (plan.draft !== undefined) return rc.roster.version === 2 && plan.draft.scope === rc.scope;
   return rc.localOnly || (rc.roster.version === 1 ? plan.level === undefined : plan.level?.scope === rc.scope);
 }
 
@@ -688,7 +689,7 @@ export function routeOwned(input: RouteInput): ModelRoute {
         : undefined;
   const escalated = input.goal !== undefined || section === undefined || plan !== undefined || unplanned !== undefined ? undefined : escalation(input, section);
   if (request.reason === "retry") decision = retry(rc, request, record);
-  else if (input.goal !== undefined) decision = input.goal;
+  else if (input.goal !== undefined) decision = input.goal.decision;
   else if (plan !== undefined) decision = fromPlan(rc, plan);
   else if (unplanned !== undefined) decision = unplanned.decision;
   else if (escalated !== undefined) decision = escalated.decision;
@@ -711,15 +712,16 @@ export function routeOwned(input: RouteInput): ModelRoute {
   // that needed its run:need level (the highest of the last prompts, else the session's), raised
   // to the deep-session floor where it was, adds nothing to the last prompts, and leaves the
   // session's need as it was.
-  if (plan?.level !== undefined) {
-    const { need, tier, source } = plan.level;
+  const plannedLevel = plan === undefined ? undefined : input.goal !== undefined ? input.goal.level : plan.level;
+  if (plannedLevel !== undefined) {
+    const { need, tier, source } = plannedLevel;
     notePrompt(record.ledger, need, tier);
     notePlanned(record.ledger, need);
     record.need = need;
     record.runTier = tier;
     record.runTagged = source === "tag" || source === "goal";
     record.needRun = undefined;
-    record.runTerms = { kind: "plan", level: plan.level };
+    record.runTerms = { kind: "plan", level: plannedLevel };
   } else if (unplanned !== undefined) {
     notePrompt(record.ledger, unplanned.need, unplanned.tier);
     record.runTier = unplanned.tier;
@@ -734,7 +736,7 @@ export function routeOwned(input: RouteInput): ModelRoute {
     };
     record.runTerms = { kind: "need", run: record.needRun, tier: unplanned.tier };
   } else if (input.goal !== undefined) {
-    record.runTier = "super";
+    record.runTier = input.goal.level?.tier;
     record.runTagged = true;
     record.needRun = undefined;
     record.runTerms = undefined;
@@ -768,7 +770,7 @@ export function routeOwned(input: RouteInput): ModelRoute {
     ref: choice.ref,
     code: choice.code,
     foreign: false,
-    ...(plan?.level === undefined ? {} : { level: plan.level }),
+    ...(plannedLevel === undefined ? {} : { level: plannedLevel }),
     ...(starts ? {} : { continuesRun: true as const }),
   });
   // A run that moved up for being stuck is upstream's loop escalation from that request on.

@@ -956,9 +956,12 @@ The first rule that applies decides it:
    a custom-message run and another session do not inherit it. A goal tweak is not a new draft.
    `/goal-direct` and `/sisyphus-direct` create their goals without a model request; their subsequent
    continuations use normal routing. This applies only when a smart-router virtual model is selected.
-   If SUPER is unavailable, the router uses the existing eligible fallback or normal routing and
-   warns; a local selection stays local. A version 1 roster or an un-tiered local selection has no
-   SUPER tier to select and uses normal routing with a warning. Normal safety refusals still apply.
+   On a tiered roster, drafts try SUPER, HIGH, MEDIUM and LOW in order, within the selected scope.
+   Each level tries its own models and any explicitly assigned local fallback. The scope-wide chain
+   is unranked and tried only after all levels. If SUPER has no models configured, a lower choice is
+   silent. If configured SUPER models cannot serve the draft, one advisory gives the reason and
+   the selected tier, or the spare's role. Untiered local and version 1 selections keep their normal
+   route without a tier warning. Local stays local; when no allowed model can serve, the router refuses.
 2. **A tag:** the message's last whitespace-separated word, in any case, when it is `#super`,
    `#high`, `#medium` or `#low`, or `#s`, `#h`, `#m` or `#l`. The router removes it before any
    model sees the text. Outside a goal draft a tag wins, at once, up or down: no guard raises it,

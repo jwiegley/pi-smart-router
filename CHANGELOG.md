@@ -53,9 +53,10 @@ fork's releases on that base. Releases are signed tags; nothing is published to 
 - A new `/goal` or `/sisyphus` draft now uses SUPER for its initial prompt and user messages
   delivered while drafting, including steers, across the router's virtual models. The goal-x tag
   previously covered only the first idle prompt on `smart-router/auto`; later replies were classified
-  normally. Scope and local eligibility still apply, and an unavailable SUPER is reported before
-  normal safe fallback. Direct commands create goals without a model request; their continuations
-  route normally.
+  normally. A draft now tries tiers from highest to lowest before the scope-wide spare. An absent
+  SUPER is silent; a configured but unusable SUPER gives one advisory with the reason and actual
+  fallback. Scope and local restrictions still apply. Direct commands create goals without a model
+  request; their continuations route normally.
 
 - A Claude subscription whose allocation for one model is spent answers 429 with "would exceed
   your account's rate limit". The router read that as a throttle, so each of Pi's retries went back

@@ -17,7 +17,7 @@
 import { createHmac, randomBytes } from "node:crypto";
 
 import type { Api, Model, ModelThinkingLevel, Usage } from "@earendil-works/pi-ai";
-import { calculateContextTokens } from "@earendil-works/pi-coding-agent";
+import { calculateContextTokens, estimateTokens } from "@earendil-works/pi-coding-agent";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -36,7 +36,7 @@ import { selectPersonal, smartRouterCommand } from "./commands.ts";
 import type { CommandHost, Files } from "./commands.ts";
 import { ALL_LEVELS, COMMAND, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, isVirtualId, LEVEL_ENTRY, LEVEL_KEY, PROVIDER, routesLevels, SCOPE_ENTRY, VIRTUAL_API, VIRTUAL_IDS } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
-import { compactionFor, effortFor, eligibleRole, pickInRole, planUserTurn } from "./decide.ts";
+import { compactionFor, effortFor, eligibleRole, goalDraftChoice, pickInRole, planUserTurn } from "./decide.ts";
 import type { CostFigures, Decision, LastResponder, LevelInput, Plan } from "./decide.ts";
 import { HEURISTIC_MESSAGES, rolesOf } from "./demand.ts";
 import type { PromptFacts, SessionDepth } from "./demand.ts";
@@ -70,7 +70,7 @@ import {
 } from "./errors.ts";
 import type { RouterError, TagIgnored } from "./errors.ts";
 import { isRecord, own } from "./files.ts";
-import { activeGoalDraft, goalSuper } from "./goal-draft.ts";
+import { activeGoalDraft } from "./goal-draft.ts";
 import type { FileSystem, Loaded } from "./files.ts";
 import { askJev, buildContext, jevAsk, recentMessages } from "./jev.ts";
 import type { JevAsk, JevOutcome } from "./jev.ts";
@@ -168,7 +168,8 @@ export interface Session extends SessionRecord {
   inputsSinceRun: number;
   /** A user message in this run belongs to an active goal draft. */
   goalRun: string | undefined;
-  goalWarning: boolean;
+  /** Draft identity already advised of a downgrade. Many requests may belong to one draft. */
+  warnedDraft: string | undefined;
   /**
    * The digests of the texts, without tags, of the messages the router passed, busy or idle, whose
    * own runs have not started, each with how many such messages carry that text: the REMEMBERED most
@@ -334,7 +335,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         planDigest: undefined,
         inputsSinceRun: 0,
         goalRun: undefined,
-        goalWarning: false,
+        warnedDraft: undefined,
         remembered: new Map(),
       };
       records.set(sessionId, record);
@@ -964,7 +965,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     guarded("input", ctx, () => alignWork(ctx));
     const id = virtualIdOf(ctx.model);
     const value = state.kind === "ok" ? state.value : undefined;
-    if (tier !== undefined) {
+    if (tier !== undefined && !(draft !== undefined && id !== undefined && tier === "super")) {
       const why: TagIgnored | undefined =
         (id === undefined || !routesLevels(id)) && !(id === "local" && value?.version === 2 && value.local?.levels !== undefined)
           ? { selection: describeModel(ctx.model) }
@@ -979,9 +980,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     const reused = tagged === undefined && event.source === "extension" && previous?.digest === digest && (previous.level.goal !== true || draft !== undefined) ? previous.level : undefined;
     const scope = scopeOf(ctx);
     const blocked = value !== undefined && id !== undefined && refusalFor(id, value, ctx) !== undefined;
-    const goalPick = !blocked && id !== undefined && value !== undefined && draft !== undefined
-      ? goalSuper(contextFor(ctx, value, id), record.last, compactionFor(pi.getSettings(), id)) : undefined;
-    const goal = goalPick?.decision.ok === true;
+    const goal = !blocked && id !== undefined && value !== undefined && draft !== undefined;
     const ask = blocked ? undefined : jevAsk({
       idle: ctx.isIdle(),
       selection: id,
@@ -1076,7 +1075,6 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       if (draft !== undefined) {
         const record = recordOf(ctx.sessionManager.getSessionId());
         record.goalRun = draft;
-        record.goalWarning = false;
       }
       return;
     }
@@ -1286,30 +1284,31 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       // A request that is routed is no recovery: an offer Pi did not use is dropped.
       record.recoveryPick = undefined;
       const drafting = record.goalRun !== undefined && record.goalRun === activeGoalDraft(ctx.sessionManager);
-      const goalPick = drafting && request.reason !== "retry" ? goalSuper(input.rc, record.last, input.compaction) : undefined;
-      const goal = goalPick?.decision.ok === true ? goalPick.decision : undefined;
-      if (drafting && request.reason !== "retry" && !record.goalWarning && (goal === undefined || goal.choice.role !== goalPick?.role)) {
-        notify(ctx, goal === undefined
-          ? "pi-smart-router: goal draft SUPER is unavailable; using normal safe routing."
-          : `pi-smart-router: goal draft SUPER is unavailable; using fallback ${goal.choice.role} → ${goal.choice.model.id}.`, "warning");
-        record.goalWarning = true;
-      }
-      if (((!drafting || (request.reason !== "retry" && goal === undefined)) && record.plan?.level?.source === "goal") ||
-          (goal !== undefined && record.plan !== undefined && record.plan.level?.source !== "goal")) {
+      const plan = record.plan;
+      const latest = drafting ? request.messages.at(-1) : undefined;
+      const goal = drafting && request.reason !== "retry" ? goalDraftChoice(input.rc, record.last, input.compaction,
+        latest?.role === "user" ? estimateTokens(latest) : request.reason === "user" ? plan?.draft?.promptTokens ?? 0 : 0) : undefined;
+      // Delivery may start or cancel a draft after its input planned. Never consume the other kind of plan.
+      if (plan !== undefined && request.reason !== "retry" && (plan.draft !== undefined) !== (goal !== undefined)) {
         record.plan = undefined;
         record.planDigest = undefined;
         record.pendingLevel = undefined;
       }
-      // A prompt's plan already accounts for its size; do not replace that decision with a
-      // continuation's zero-prompt-size pick.
-      const plannedGoal = request.reason === "user" && record.plan?.level?.source === "goal" && planApplies(record.plan, id, input.rc);
-      const route = routeOwned(goal === undefined || plannedGoal ? input : { ...input, goal });
+      const route = routeOwned(goal === undefined ? input : { ...input, goal });
+      if (goal !== undefined && record.pendingLevel !== undefined) {
+        record.pendingLevel = goal.level === undefined ? undefined : { ...record.pendingLevel, level: goal.level };
+      }
+      if (goal?.decision.ok && goal.superReason !== undefined && record.warnedDraft !== record.goalRun) {
+        const target = goal.level?.tier.toUpperCase() ?? `unranked spare ${goal.decision.choice.role}`;
+        notify(ctx, `pi-smart-router: goal draft SUPER is unavailable (${goal.superReason}); using ${target} → ${route.model.id}.`, "warning");
+        record.warnedDraft = record.goalRun;
+      }
       record.recoveryScope = input.rc.scope;
       const after = record.runPick;
       // Each request of the owner's loop shows the level its run needs, a planned run's or a
       // run:need choice's, when it has one; the effort the request carries; and the model it goes to.
       // So the footer follows a run that moves: up for being stuck, or onto another model on a retry.
-      const need = goal !== undefined ? "super" : routesLevels(id) ? (record.pendingLevel?.level.need ?? record.needRun?.need) : undefined;
+      const need = goal !== undefined ? goal.level?.tier : routesLevels(id) ? (record.pendingLevel?.level.need ?? record.needRun?.need) : undefined;
       showFooter(ctx, record, record.effort === undefined ? undefined : footerText({ tier: need, effort: record.effort.level, model: route.model.id }));
       const movedUp = !escalated && record.escalated;
       // A stuck run that moves up says so, where it happens, once: the level and the model it reached,
@@ -1318,7 +1317,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       const to = record.runTier;
       if (movedUp && from !== undefined && to !== undefined) notify(ctx, escalationNotice(from, to, route.model.id), "info");
       // A run under way that moves from its model onto the scope's chain says so, where it happens.
-      if (!movedUp && routesLevels(id) && !input.rc.localOnly && before !== undefined && after !== undefined && before.ref !== after.ref) {
+      if (goal === undefined && !movedUp && routesLevels(id) && !input.rc.localOnly && before !== undefined && after !== undefined && before.ref !== after.ref) {
         const { scope } = input.rc;
         if (!inChain(scope, before.ref) && inChain(scope, after.ref)) {
           notify(ctx, fallbackMoveNotice(parseRef(before.ref)?.id ?? before.ref, after.role, route.model.id), "info");
@@ -1394,7 +1393,6 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         guarded("before_agent_start", ctx, () => {
           const record = recordOf(ctx.sessionManager.getSessionId());
           record.goalRun = event.messageType !== "custom" && typeof event.prompt === "string" ? activeGoalDraft(ctx.sessionManager) : undefined;
-          record.goalWarning = false;
           // A run starts with no answer of its own.
           record.answered = undefined;
           if (event.messageType === "custom" || typeof event.prompt !== "string") {

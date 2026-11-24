@@ -22,7 +22,7 @@ import { createRouter } from "../src/router.ts";
 import { scopeEntry } from "../src/scope.ts";
 import { TIERS } from "../src/tiers.ts";
 import type { Tier } from "../src/tiers.ts";
-import { ASTRA, CHATGPT, DEEPSEEK, FakeCatalog, GLM, GLM_CLOUD, HERA_LAN, heraModels, KIMI, model, NOW, SOL } from "./support/catalog.ts";
+import { ASTRA, CHATGPT, DEEPSEEK, FakeCatalog, GLM, GLM_CLOUD, HERA_LAN, heraModels, KIMI, model, NOW, SOL, WORK_SOL } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
 import { agentDir, assistant, failure as failedRequest, FakeRuntime, footerOf, load, plannedWords, request, resetSlot, routed, start } from "./support/pi.ts";
 import type { Loaded, LoadOptions } from "./support/pi.ts";
@@ -2191,17 +2191,48 @@ describe("goal-x guided drafts (simulated lifecycle entries)", () => {
     });
   }
 
-  test("a missing SUPER uses normal routing and reports it", async (t) => {
-    const loaded = await hera(t);
-    loaded.runtime.catalog.unavailable.add(ASTRA);
-    loaded.runtime.catalog.unavailable.add(KIMI);
-    loaded.runtime.answer = async () => jevAnswer(LOW);
-    draft(loaded, "goal");
-    await say(loaded, "yes");
-    assert.equal(await runPrompt(loaded, "yes"), LUNA);
-    assert.ok(loaded.session.notices.some(({ message }) => message.includes("goal draft SUPER is unavailable; using normal safe routing")));
-    await finish(loaded, LUNA);
-  });
+  for (const mode of ["goal", "sisyphus"] as const) {
+    for (const selection of ["auto", "work", "personal", "local"] as const) {
+      for (const state of ["usable", "absent", "unusable"] as const) {
+        test(`${mode} on ${selection}, SUPER ${state}: physical route, tier and notice`, async (t) => {
+          const value = JSON.parse(HERA_V2);
+          const runtime = heraRuntime();
+          const local = selection === "local";
+          const work = selection === "work";
+          const top = local ? "omlx-hera/test-super" : work ? WORK_ASTRA : ASTRA;
+          const lower = local ? GLM : work ? WORK_SOL : SOL;
+          const topRole = local ? "local-super" : work ? "work-super" : "super";
+          if (local) {
+            value.roles.push({ name: topRole, models: [top] });
+            value.local.levels = { low: null, medium: null, high: "local", super: state === "absent" ? null : topRole };
+            runtime.catalog.add(model(top, { baseUrl: HERA_LAN }));
+          }
+          const role = value.roles.find((entry: { name: string }) => entry.name === topRole);
+          if (state === "absent" && !local) Object.assign(role, { disabled: true, models: [] });
+          if (state === "unusable") for (const ref of role.models) runtime.catalog.unavailable.add(ref);
+          const loaded = await hera(t, { runtime, roster: JSON.stringify(value), select: selection });
+          draft(loaded, mode);
+          const prompt = `[GOAL CONFIRMATION focus=${mode}]\n<goal_topic>Ship it</goal_topic>\nDraft instructions`;
+          const notices = loaded.session.notices.length;
+          const transformed = await say(loaded, `${prompt}\n#super`, { source: "extension" });
+          assert.deepEqual(transformed[0], { action: "transform", text: prompt });
+          const signal = loaded.session.startRun();
+          await loaded.host.emit("before_agent_start", { messageType: "user", prompt });
+          const ref = state === "usable" ? top : lower;
+          const tier = state === "usable" ? "super" : "high";
+          for (const reason of ["user", "continuation"] as const) {
+            assert.equal(routed(runtime.route(selection, request(reason, { signal }))), ref);
+            assert.equal(recordOf(loaded)?.runTier, tier);
+            assert.equal(recordOf(loaded)?.pendingLevel?.level.tier, tier);
+          }
+          const shown = loaded.session.notices.slice(notices);
+          assert.equal(shown.length, state === "unusable" ? 1 : 0, JSON.stringify(shown));
+          if (state === "unusable") assert.match(shown[0]!.message, /SUPER is unavailable \(not among the available models\); using HIGH/);
+          await finish(loaded, ref);
+        });
+      }
+    }
+  }
 
   test("a custom-message run does not inherit an active draft", async (t) => {
     const loaded = await hera(t);
@@ -2240,7 +2271,7 @@ describe("goal-x guided drafts (simulated lifecycle entries)", () => {
     await finish(one, LUNA);
   });
 
-  test("work scope uses only work SUPER; an un-tiered local selection reports normal routing", async (t) => {
+  test("work scope uses only work SUPER; an un-tiered local selection routes silently", async (t) => {
     const work = await hera(t, { id: "work-draft", select: "work" });
     draft(work, "goal");
     await say(work, "yes #low");
@@ -2251,11 +2282,12 @@ describe("goal-x guided drafts (simulated lifecycle entries)", () => {
 
     const local = await hera(t, { id: "local-draft", select: "local" });
     draft(local, "goal");
-    await say(local, "hello");
+    const notices = local.session.notices.length;
+    await say(local, "hello #super", { source: "extension" });
     const localSignal = local.session.startRun();
     await local.host.emit("before_agent_start", { messageType: "user", prompt: "hello" });
     assert.equal(routed(local.runtime.route("local", request("user", { signal: localSignal }))), GLM);
-    assert.ok(local.session.notices.some(({ message }) => message.includes("goal draft SUPER is unavailable")));
+    assert.deepEqual(local.session.notices.slice(notices), []);
     await finish(local, GLM);
   });
   test("tiered local SUPER is used when configured", async (t) => {
@@ -2274,22 +2306,75 @@ describe("goal-x guided drafts (simulated lifecycle entries)", () => {
     await finish(loaded, localSuper);
   });
 
-  test("SUPER's declared fallback is named when its own models are unavailable", async (t) => {
+  test("the scope-wide spare comes after every ranked tier and is never recorded as a tier", async (t) => {
     const value = JSON.parse(HERA_V2);
     const spare = "openrouter/vendor/spare";
     value.roles.push({ name: "spare", models: [spare] });
     value.scopes.personal.fallback = ["spare"];
     const runtime = heraRuntime();
     runtime.catalog.add(model(spare));
-    runtime.catalog.unavailable.add(ASTRA);
-    runtime.catalog.unavailable.add(KIMI);
     const loaded = await hera(t, { runtime, roster: JSON.stringify(value) });
     draft(loaded, "goal");
-    await say(loaded, "hello");
-    assert.equal(await runPrompt(loaded, "hello"), spare);
-    assert.ok(loaded.session.notices.some(({ message }) => message.includes("goal draft SUPER is unavailable; using fallback spare")));
+    for (const [tier, expected] of [["super", SOL], ["high", TERRA], ["medium", LUNA], ["low", spare]] as const) {
+      for (const ref of value.roles.find((entry: { name: string }) => entry.name === tier).models) runtime.catalog.unavailable.add(ref);
+      await say(loaded, "hello #super");
+      assert.equal(await runPrompt(loaded, "hello"), expected);
+      if (expected === spare) {
+        assert.equal(recordOf(loaded)?.runTier, undefined);
+        assert.equal(recordOf(loaded)?.history.at(-1)?.level, undefined);
+      }
+      await finish(loaded, expected);
+    }
+    assert.equal(loaded.session.notices.filter(({ message }) => message.includes("goal draft SUPER")).length, 1, "one advisory for this draft");
+    draft(loaded, "sisyphus");
+    await say(loaded, "new draft #super");
+    assert.equal(await runPrompt(loaded, "new draft"), spare);
+    assert.match(lastNotice(loaded)!.message, /not among the available models.*using unranked spare spare/);
     await finish(loaded, spare);
   });
+  test("a work draft cannot borrow personal SUPER; a local draft cannot borrow a cloud model", async (t) => {
+    for (const selection of ["work", "local"] as const) {
+      const value = JSON.parse(HERA_V2);
+      const runtime = heraRuntime();
+      if (selection === "local") {
+        value.local.levels = { low: null, medium: null, high: null, super: "local" };
+        runtime.catalog.add(model(GLM, { baseUrl: "https://not-local.example/v1" }));
+      } else {
+        for (const name of Object.values(value.scopes.work.levels) as { role: string }[]) {
+          for (const ref of value.roles.find((r: { name: string }) => r.name === name.role).models) runtime.catalog.unavailable.add(ref);
+        }
+      }
+      const loaded = await hera(t, { runtime, roster: JSON.stringify(value), select: selection });
+      draft(loaded, "sisyphus");
+      await say(loaded, "start #super");
+      const signal = loaded.session.startRun();
+      await loaded.host.emit("before_agent_start", { messageType: "user", prompt: "start" });
+      assert.throws(() => runtime.route(selection, request("user", { signal })), /no (local )?model can take this request/);
+      assert.equal(recordOf(loaded)?.runPick, undefined);
+      assert.ok(!loaded.session.notices.some(({ message }) => message.includes("goal draft SUPER")));
+    }
+  });
+
+  test("a draft checks eligibility again at delivery; ordinary #super does not downgrade", async (t) => {
+    const loaded = await hera(t);
+    draft(loaded, "goal");
+    await say(loaded, "ship #super");
+    assert.equal(recordOf(loaded)?.plan?.level?.tier, "super");
+    for (const ref of [ASTRA, KIMI]) loaded.runtime.catalog.unauthenticated.add(ref);
+    assert.equal(await runPrompt(loaded, "ship"), SOL);
+    assert.equal(recordOf(loaded)?.pendingLevel?.level.tier, "high");
+    assert.match(lastNotice(loaded)!.message, /no credentials.*using HIGH/);
+    await finish(loaded, SOL);
+    draft(loaded, "goal", true);
+    const signal = loaded.session.startRun();
+    await loaded.host.emit("before_agent_start", { messageType: "custom", message: GOAL_X });
+    assert.equal(routed(loaded.runtime.route("auto", request("continuation", { signal }))), SOL, "execution uses run:need, not a failed SUPER");
+    assert.equal(recordOf(loaded)?.needRun?.need, "high");
+    await finish(loaded, SOL);
+    await say(loaded, "ordinary #super");
+    await assert.rejects(runPrompt(loaded, "ordinary"), /no model can take this request/);
+  });
+
   test("a prompt queued before a draft and delivered during it uses SUPER", async (t) => {
     const loaded = await hera(t);
     await say(loaded, "ordinary #low");
