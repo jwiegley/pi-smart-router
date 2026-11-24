@@ -17,7 +17,7 @@ import { TIERS } from "../src/tiers.ts";
 import type { Tier } from "../src/tiers.ts";
 import { ASTRA, CHATGPT, FakeCatalog, GLM, HERA_LAN, KIMI, model, NOW, SOL, WORK_SOL } from "./support/catalog.ts";
 import { fixture } from "./support/fixtures.ts";
-import { agentDir, assistant, FakeRuntime, footerOf, plannedWords, request, resetSlot, routed, start } from "./support/pi.ts";
+import { agentDir, assistant, FakeRuntime, footerOf, plannedWords, previous, request, resetSlot, routed, start, usage } from "./support/pi.ts";
 import type { FakeSession, Loaded } from "./support/pi.ts";
 
 const TEXT = fixture("roster-hera-v2-fallback.json");
@@ -280,5 +280,68 @@ describe("a real usage limit: the run ends, the notice says what to do, and the 
     assert.deepEqual(await fails(loaded, GLM, "read ECONNRESET"), [
       "warning: pi-smart-router: GLM-5.3-Flash-oQ4e-mtp could not take this run (its server could not be reached), and nothing was answered. No other model can take it now: send the request again, and it is tried again, or choose a model with /model.",
     ]);
+  });
+});
+
+describe("on a Pi with the recovery boundary, a usage limit moves the run on instead of ending it", () => {
+  test("luna hits the limit: the run goes on with the chain, says so once, and asks for no resend", async (t) => {
+    const { loaded } = await session(t);
+    const { runtime } = loaded;
+    const signal = await prompt(loaded, "rename foo to bar #low");
+    assert.equal(routed(runtime.route("auto", request("user", { signal }))), LUNA);
+    const message = assistant(LUNA, { stopReason: "error", errorMessage: CODEX_LIMIT, content: [], timestamp: NOW + ++stamps });
+    const before = loaded.session.notices.length;
+    await loaded.host.emit("message_end", { message });
+    const offer = loaded.router!.dispatchRecovery("auto", { model: runtime.registry.find("smart-router", "auto")!, physical: runtime.physical(LUNA), reason: "user", thinkingLevel: "high", message, attempts: [], signal });
+    assert.equal(offer === undefined ? undefined : routed(offer.route), OR_GLM, "every Codex level shares the account, so the chain takes it");
+    await answers(loaded, OR_GLM);
+    const said = loaded.session.notices.slice(before).map((notice) => notice.message);
+    assert.equal(said.length, 1);
+    assert.match(said[0] ?? "", /openrouter/);
+    assert.doesNotMatch(said.join("\n"), /Send the request again|could not take this run/);
+    assert.equal(records(loaded).at(-1)?.ref, OR_GLM);
+  });
+
+  test("an alternate that fails too leaves the notice to be said, and asking twice changes nothing", async (t) => {
+    const { loaded } = await session(t);
+    const { runtime } = loaded;
+    const signal = await prompt(loaded, "rename foo to bar #low");
+    runtime.route("auto", request("user", { signal }));
+    const message = assistant(LUNA, { stopReason: "error", errorMessage: CODEX_LIMIT, content: [], timestamp: NOW + ++stamps });
+    await loaded.host.emit("message_end", { message });
+    const ask = () => loaded.router!.dispatchRecovery("auto", { model: runtime.registry.find("smart-router", "auto")!, physical: runtime.physical(LUNA), reason: "user", thinkingLevel: "high", message, attempts: [], signal });
+    const [offer, confirmation] = [ask(), ask()];
+    assert.deepEqual([offer && routed(offer.route), confirmation && routed(confirmation.route)], [OR_GLM, OR_GLM], "Pi asks to offer and to confirm: the same answer");
+    assert.equal(loaded.router?.record(SID)?.runPick?.ref, LUNA, "an offer is no pick");
+    const before = loaded.session.notices.length;
+    await loaded.host.emit("message_end", { message: assistant(OR_GLM, { stopReason: "error", errorMessage: "500 upstream error", content: [], timestamp: NOW + ++stamps }) });
+    await loaded.host.emit("agent_settled", { aborted: false });
+    assert.match(loaded.session.notices.slice(before).map((notice) => notice.message).join("\n"), /gpt-6-luna could not take this run/);
+  });
+
+  test("an offer Pi does not use is dropped at the next routed request", async (t) => {
+    const { loaded } = await session(t);
+    const { runtime } = loaded;
+    const signal = await prompt(loaded, "rename foo to bar #low");
+    runtime.route("auto", request("user", { signal }));
+    const message = assistant(LUNA, { stopReason: "error", errorMessage: "500 broken", content: [], timestamp: NOW + ++stamps });
+    await loaded.host.emit("message_end", { message });
+    assert.notEqual(loaded.router!.dispatchRecovery("auto", { model: runtime.registry.find("smart-router", "auto")!, physical: runtime.physical(LUNA), reason: "user", thinkingLevel: "high", message, attempts: [], signal }), undefined);
+    runtime.route("auto", request("continuation", { signal, previous: previous(runtime, LUNA) }));
+    await loaded.host.emit("message_end", { message: assistant(OR_GLM) });
+    assert.notEqual(loaded.router?.record(SID)?.history.at(-1)?.code, "recovery", "a later answer from that model is no recovery");
+  });
+
+  test("when no alternate answers, the run still ends with what to do", async (t) => {
+    const { loaded } = await session(t, { setup: (s) => s.appendCustom(SCOPE_ENTRY, scopeEntry("work", "command", NOW - MINUTE)) });
+    const { runtime } = loaded;
+    const signal = await prompt(loaded, "rename foo to bar #low");
+    assert.equal(routed(runtime.route("auto", request("user", { signal }))), WORK_LUNA);
+    const message = assistant(WORK_LUNA, { stopReason: "error", errorMessage: CODEX_LIMIT, content: [], timestamp: NOW + ++stamps });
+    await loaded.host.emit("message_end", { message });
+    assert.equal(loaded.router!.dispatchRecovery("auto", { model: runtime.registry.find("smart-router", "auto")!, physical: runtime.physical(WORK_LUNA), reason: "user", thinkingLevel: "high", message, attempts: [], signal }), undefined);
+    const before = loaded.session.notices.length;
+    await loaded.host.emit("agent_settled", { aborted: false });
+    assert.match(loaded.session.notices.slice(before).map((notice) => notice.message).join("\n"), /could not take this run/);
   });
 });

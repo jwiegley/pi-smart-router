@@ -18,6 +18,7 @@ import { firstLine, loadFailed, loadFailedNotice } from "./src/errors.ts";
 import { latchEnvScope, processSlot } from "./src/owners.ts";
 import { createRouter, DEFAULT_LIMITS } from "./src/router.ts";
 import type { Limits, Router, RouterOptions } from "./src/router.ts";
+import type { Recovery, RecoveryRequest } from "./src/recovery.ts";
 
 export type BuildRouter = (pi: ExtensionAPI, options: RouterOptions) => Router;
 
@@ -25,7 +26,7 @@ export type BuildRouter = (pi: ExtensionAPI, options: RouterOptions) => Router;
 export function install(pi: ExtensionAPI, build: BuildRouter = createRouter): void {
   let router: Router | undefined;
   let failure = "it did not finish loading";
-  const define = (id: VirtualId, limits: Limits): ExtensionVirtualModel => ({
+  const define = (id: VirtualId, limits: Limits): ExtensionVirtualModel & { recover(request: RecoveryRequest): Recovery | undefined } => ({
     provider: PROVIDER,
     id,
     name: NAMES[id],
@@ -36,6 +37,7 @@ export function install(pi: ExtensionAPI, build: BuildRouter = createRouter): vo
       if (router === undefined) throw loadFailed(id, failure);
       return router.dispatch(id, request, ctx);
     },
+    recover: (request) => router?.dispatchRecovery(id, request),
   });
   const register = (id: VirtualId, limits: Limits): void => {
     pi.registerVirtualModel(define(id, limits));

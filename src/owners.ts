@@ -32,6 +32,7 @@ import type { VirtualId } from "./constants.ts";
 import { isRecord } from "./files.ts";
 import type { LocalPolicy } from "./local.ts";
 import type { Scope } from "./roster.ts";
+import type { Recovery, RecoveryRequest } from "./recovery.ts";
 
 /** What the slot asks of a router instance. Instances of every load of this module answer it. */
 export interface OwnerRouter {
@@ -43,6 +44,8 @@ export interface OwnerRouter {
   heal(ctx: ExtensionContext): boolean;
   /** What route() will pick next for this owner's session, for pi-cache-optimizer; never throws. */
   activeRoute(id: VirtualId): ActiveRoute | undefined;
+  /** Optional recovery boundary, absent on older loaded copies of the router. */
+  recoverOwned?(id: VirtualId, request: RecoveryRequest, ctx: ExtensionContext): Recovery | undefined;
 }
 
 export interface Owner {
@@ -73,6 +76,8 @@ export interface Slot {
   readonly owners: Set<Owner>;
   /** Each catalog object an owner's registration produced, mapped to that owner. */
   readonly registered: WeakMap<object, Owner>;
+  /** Owner of an original routed run signal, used after the low-level run ends. */
+  recoveryOwners?: WeakMap<AbortSignal, Owner>;
   readonly env: EnvLatch;
   /** Was the removed pin's handoffs to the session a fork or /new creates. Kept for the slot's shape (isSlot); no longer written or read. */
   readonly handoffs: Map<string, unknown>;
@@ -93,6 +98,7 @@ function isSlot(value: unknown): value is Slot {
     value.version === 1 &&
     value.owners instanceof Set &&
     value.registered instanceof WeakMap &&
+    (value.recoveryOwners === undefined || value.recoveryOwners instanceof WeakMap) &&
     value.handoffs instanceof Map &&
     (value.scopeHandoffs === undefined || value.scopeHandoffs instanceof Map) &&
     isRecord(env) &&

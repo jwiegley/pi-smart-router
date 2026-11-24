@@ -36,7 +36,7 @@ import { selectPersonal, smartRouterCommand } from "./commands.ts";
 import type { CommandHost, Files } from "./commands.ts";
 import { ALL_LEVELS, COMMAND, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, isVirtualId, LEVEL_ENTRY, LEVEL_KEY, PROVIDER, routesLevels, SCOPE_ENTRY, VIRTUAL_API, VIRTUAL_IDS } from "./constants.ts";
 import type { VirtualId } from "./constants.ts";
-import { compactionFor, eligibleRole, pickInRole, planUserTurn } from "./decide.ts";
+import { compactionFor, effortFor, eligibleRole, pickInRole, planUserTurn } from "./decide.ts";
 import type { CostFigures, Decision, LastResponder, LevelInput, Plan } from "./decide.ts";
 import { HEURISTIC_MESSAGES, rolesOf } from "./demand.ts";
 import type { PromptFacts, SessionDepth } from "./demand.ts";
@@ -75,6 +75,8 @@ import { askJev, buildContext, jevAsk, recentMessages } from "./jev.ts";
 import type { JevAsk, JevOutcome } from "./jev.ts";
 import { answerOf, forgetBranch, forgetCaches, noteAnswer, noteRunEnd, seedAnswer, usable } from "./ledger.ts";
 import type { Ledger } from "./ledger.ts";
+import { recoveryChoice, recoveryStatus } from "./recovery.ts";
+import type { Recovery, RecoveryRequest } from "./recovery.ts";
 import { localRoles, policyFromRoster } from "./local.ts";
 import { isDegenerateOutput } from "./output-quality.ts";
 import { orderedRoster } from "./order.ts";
@@ -83,9 +85,9 @@ import { healDisplaced, isLive, isLiveOwner, join, leave, leaveScopeHandoff, own
 import type { Owner, OwnerRouter, RosterMemory, Slot } from "./owners.ts";
 import { promptProblem, promptStore, promptUses, scopePrompts } from "./prompts.ts";
 import { footerText, levelRecord, readLevelRecord } from "./records.ts";
-import { clock, coolFrom, Cooldowns, coolsAccount, hasOutput, holdFrom, Holds, resolveContext } from "./resolve.ts";
+import { clock, coolFrom, Cooldowns, coolsAccount, failureKind, hasOutput, holdFrom, Holds, resolveContext } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
-import { activeEntries, afterFailure, boundedHistory, newRecord, planApplies, predict, requireBoundedHistory, routeOther, routeOwned } from "./route.ts";
+import { activeEntries, afterFailure, boundedHistory, HISTORY_LIMIT, newRecord, planApplies, predict, requireBoundedHistory, routeOther, routeOwned } from "./route.ts";
 import type { BoundedHistory, Failover, LastInput, RouteInput, SessionRecord } from "./route.ts";
 import { autoRoles, parseRef, roleOf, rosterFile, SCOPES, scopeSection, servesScope } from "./roster.ts";
 import type { Roster, RosterV2, Scope } from "./roster.ts";
@@ -149,6 +151,16 @@ export interface Session extends SessionRecord {
   footerShown: boolean;
   /** The model of the current run's last assistant message that ended without an error: the one its record names. */
   answered: string | undefined;
+  /** Scope under which the current owner-loop request was routed. */
+  recoveryScope: Scope | undefined;
+  /** A failure that ends the run unless Pi recovers it: said at agent_settled when no alternate answered. */
+  resend: Failover | undefined;
+  /**
+   * The alternate last offered to Pi, which becomes the run's pick only when that model responds.
+   * Pi asks twice, to offer and to confirm, and may use neither answer; the next route call, the
+   * alternate's response or the run's end drops it.
+   */
+  recoveryPick: { id: VirtualId; ref: string; role: string; effort: NonNullable<SessionRecord["effort"]>; previous: ReadonlyArray<{ readonly ref: string; readonly status: number }> } | undefined;
   /** The digest of the text, without its tag, of the message whose plan `plan` holds; meaningful only while `plan` is set. */
   planDigest: string | undefined;
   /** How many idle messages the router passed since the latest prompt's run started. */
@@ -165,6 +177,7 @@ export interface Session extends SessionRecord {
 export interface Router extends OwnerRouter {
   /** Every route call of the router's models lands here, whichever instance registered the route. */
   dispatch(id: VirtualId, request: ModelRouteRequest, ctx: ExtensionContext): ModelRoute;
+  dispatchRecovery(id: VirtualId, request: RecoveryRequest): Recovery | undefined;
   /** Register every handler and the command, once. */
   wire(pi: ExtensionAPI): void;
   /** A session's records, for status and history. */
@@ -304,6 +317,9 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         plannedToken: 0,
         footerShown: false,
         answered: undefined,
+        recoveryScope: undefined,
+        recoveryPick: undefined,
+        resend: undefined,
         planDigest: undefined,
         inputsSinceRun: 0,
         remembered: new Map(),
@@ -1018,7 +1034,32 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     if (message.role !== "assistant" || message.provider === PROVIDER || message.api === VIRTUAL_API) return;
     const sessionId = ctx.sessionManager.getSessionId();
     const ref = `${message.provider}/${message.model}`;
+    const pending = records.get(sessionId);
+    const recovered = pending?.recoveryPick;
+    if (pending !== undefined && recovered !== undefined && recovered.ref === ref && virtualIdOf(ctx.model) === recovered.id) {
+      pending.recoveryPick = undefined;
+      // Only an alternate that answered settles the failure: one that failed too leaves what to do to be said.
+      if (message.stopReason !== "error") pending.resend = undefined;
+      const left = pending.runPick?.ref;
+      const scope = pending.recoveryScope;
+      // A run that recovery moves from its level's model onto the scope's chain says so, as a retry's move does.
+      if (routesLevels(recovered.id) && scope !== undefined && left !== undefined && !inChain(scope, left) && inChain(scope, ref)) {
+        notify(ctx, fallbackMoveNotice(parseRef(left)?.id ?? left, recovered.role, message.model), "info");
+      }
+      pending.runPick = { id: recovered.id, ref, role: recovered.role };
+      pending.effort = recovered.effort;
+      pending.history.push({ at: now(), virtual: recovered.id, reason: "retry", signal: undefined, trigger: undefined, role: recovered.role, ref, code: "recovery", foreign: false, continuesRun: true });
+      if (pending.history.length > HISTORY_LIMIT) pending.history.splice(0, pending.history.length - HISTORY_LIMIT);
+      const need = routesLevels(recovered.id) ? (pending.pendingLevel?.level.need ?? pending.needRun?.need) : undefined;
+      showFooter(ctx, pending, footerText({ tier: need, effort: recovered.effort.level, model: message.model }));
+    }
     if (message.stopReason === "error") {
+      const status = recoveryStatus(message.errorMessage);
+      const requestCaused = status !== undefined && status >= 400 && status < 500 && status !== 429;
+      // The same 4xx from a distinct alternate points to the request, not to either model (upstream
+      // SP-322): the alternate is not cooled for it.
+      const same = recovered?.ref === ref && virtualIdOf(ctx.model) === recovered.id && requestCaused ? recovered.previous.filter((attempt) => attempt.status === status) : [];
+      if (same.length > 0) return;
       const state = roster.current();
       if (state.kind === "ok") {
         const cooled = coolFrom(message, state.value, cooldowns, now());
@@ -1026,9 +1067,11 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         const held = holdFrom(message, ctx.modelRegistry.find(message.provider, message.model), state.value, holds, now());
         const session = records.get(sessionId);
         const kind = held !== undefined ? "unreachable" : cooled !== undefined && coolsAccount(message.provider, message.errorMessage) ? "limit" : undefined;
-        // Pi retries some of these errors, and its retry is routed to the next candidate; the rest end the run.
+        // Pi retries some of these errors, and its retry is routed to the next candidate. The rest
+        // end the run unless Pi's recovery boundary moves it to another model, so what to do is
+        // said when the run settles (settle), and only if no alternate answered.
         if (session !== undefined && kind !== undefined && session.runPick?.ref === ref && !hasOutput(message.content) && !looksRetryable(message.errorMessage ?? "")) {
-          sayResend(ctx, session, state.value, { ref, kind });
+          session.resend = { ref, kind };
         }
       }
       return;
@@ -1063,14 +1106,19 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
    * tag and escalation are dropped, whether or not the record could be appended. A run without a
    * level of its own records nothing.
    */
-  const settle = (record: Session, aborted: boolean): void => {
-    const { pendingLevel: pending, answered, escalated } = record;
+  const settle = (record: Session, aborted: boolean, ctx?: ExtensionContext): void => {
+    const { pendingLevel: pending, answered, escalated, resend } = record;
+    record.resend = undefined;
+    const state = roster.current();
+    if (resend !== undefined && ctx !== undefined && state.kind === "ok") guarded("agent_settled", ctx, () => sayResend(ctx, record, state.value, resend));
     record.plan = undefined;
     record.planDigest = undefined;
     record.runPick = undefined;
     record.limited.clear();
     record.pendingLevel = undefined;
     record.answered = undefined;
+    record.recoveryScope = undefined;
+    record.recoveryPick = undefined;
     record.runTier = undefined;
     record.runTagged = false;
     record.escalated = false;
@@ -1171,7 +1219,10 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       const record = recordOf(ctx.sessionManager.getSessionId());
       const before = record.runPick;
       const { runTier: from, escalated } = record;
+      // A request that is routed is no recovery: an offer Pi did not use is dropped.
+      record.recoveryPick = undefined;
       const route = routeOwned(input);
+      record.recoveryScope = input.rc.scope;
       const after = record.runPick;
       // Each request of the owner's loop shows the level its run needs, a planned run's or a
       // run:need choice's, when it has one; the effort the request carries; and the model it goes to.
@@ -1194,11 +1245,42 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       return route;
     },
     routeOther: (id, request, ctx) => routeOther(prepare(id, request, ctx)),
+    recoverOwned: (id, request, ctx) => {
+      try {
+        requireBoundedHistory(id, ctx.sessionManager);
+        const state = loaded(roster.current());
+        if (state.kind !== "ok" || refusalFor(id, state.value, ctx) !== undefined) return undefined;
+        const record = records.get(ctx.sessionManager.getSessionId());
+        const rc = contextFor(ctx, state.value, id);
+        if (record?.runPick?.id !== id || record.recoveryScope !== rc.scope) return undefined;
+        const turn = record.effort?.signal.turnType ?? "unknown";
+        if (request.message.stopReason === "error" && failureKind(request.message.errorMessage) === "limit") record.limited.add(`${request.physical.provider}/${request.physical.id}`);
+        const offered = recoveryChoice({ id, rc, request, skipped: record.limited, turn, escalated: record.escalated });
+        const role = offered === undefined ? undefined : eligibleRole(rc, `${offered.route.model.provider}/${offered.route.model.id}`);
+        record.recoveryPick = offered === undefined || role === undefined ? undefined : {
+          id, ref: `${offered.route.model.provider}/${offered.route.model.id}`, role,
+          effort: effortFor(rc, role, offered.route.model, request.thinkingLevel, turn, record.escalated), previous: [...request.attempts.map((attempt) => ({ ref: `${attempt.model.provider}/${attempt.model.id}`, status: attempt.status })), { ref: `${request.physical.provider}/${request.physical.id}`, status: offered.status }]
+            .filter((attempt): attempt is { ref: string; status: number } => attempt.status !== undefined),
+        };
+        return offered;
+      } catch {
+        return undefined;
+      }
+    },
+    dispatchRecovery: (id, request) => {
+      const owner = request.signal === undefined ? undefined : slot.recoveryOwners?.get(request.signal);
+      if (owner === undefined || !isLiveOwner(slot, owner)) return undefined;
+      return owner.router.recoverOwned?.(id, request, owner.ctx);
+    },
     heal,
     activeRoute,
 
     dispatch(id, request, passed) {
       const owner = request.reason !== "direct" && request.signal !== undefined ? ownerBySignal(slot, request.signal) : undefined;
+      if (owner !== undefined && request.signal !== undefined) {
+        slot.recoveryOwners ??= new WeakMap();
+        slot.recoveryOwners.set(request.signal, owner);
+      }
       if (owner !== undefined) return owner.router.routeOwned(id, request, owner.ctx);
       if (isLive(passed)) return api.routeOther(id, request, passed);
       const healed = healDisplaced(slot);
@@ -1287,7 +1369,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       // Whatever is selected, a run's turn starts as it is: the router only heals its registration.
       target.on("turn_start", (_event, ctx) => guarded("turn_start", ctx, () => void heal(ctx)));
       target.on("message_end", (event, ctx) => guarded("message_end", ctx, () => messageEnd(event, ctx)));
-      target.on("agent_settled", (event, ctx) => guarded("agent_settled", ctx, () => settle(recordOf(ctx.sessionManager.getSessionId()), event.aborted === true)));
+      target.on("agent_settled", (event, ctx) => guarded("agent_settled", ctx, () => settle(recordOf(ctx.sessionManager.getSessionId()), event.aborted === true, ctx)));
       // Compaction and tree navigation go on under any selection: these only heal the registration
       // their summary may route through, and return nothing.
       target.on("session_before_compact", (_event, ctx) => guarded("session_before_compact", ctx, () => void heal(ctx)));
