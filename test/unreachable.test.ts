@@ -149,6 +149,8 @@ describe("what counts as unreachable", () => {
       "TLS handshake failed",
       "SSL handshake error",
       "502 Bad Gateway",
+      "HTTP 502",
+      "502: {\"error\":{\"message\":\"upstream unavailable\"}}",
       "Bad Gateway",
     ]) {
       assert.equal(isUnreachable(text), true, text);
@@ -180,6 +182,8 @@ describe("what counts as unreachable", () => {
       "401 Unauthorized",
       "content_filter: 502",
       "request id 15021 failed",
+      "request had 502 tokens",
+      "invalid request: {\"code\":502}",
       "",
       undefined,
     ]) {
@@ -307,6 +311,15 @@ describe("smart-router/local when a server cannot be reached", () => {
     signal = await prompt(loaded, "rename bar to baz");
     assert.equal(routed(runtime.route("local", request("user", { signal }))), GLM);
     assert.equal((await status(loaded)).filter((line) => line.startsWith("Unreachable:")).length, 1);
+  });
+
+  test("a repetitive response still proves an unreachable server is reachable again", async (t) => {
+    const { loaded } = await session(t, { select: "local" });
+    await loaded.host.emit("message_end", { message: assistant(GLM, { stopReason: "error", errorMessage: "Connection error.", content: [], timestamp: NOW }) });
+    assert.equal((await status(loaded)).some((line) => line.startsWith("Unreachable:")), true);
+    await loaded.host.emit("message_end", { message: assistant(GLM, { stopReason: "length", content: [{ type: "text", text: "repeated output ".repeat(100) }] }) });
+    assert.equal((await status(loaded)).some((line) => line.startsWith("Unreachable:")), false);
+    assert.equal(loaded.router?.record(SID)?.last, undefined, "the unusable output is not recorded as an answer");
   });
 
   test("the next model is the one written after the failed one, not the role's first", async (t) => {

@@ -357,7 +357,7 @@ export function describeHold(hold: Hold): { readonly reason: string; readonly de
  * session to another host and back.
  */
 const UNREACHABLE =
-  /ECONNREFUSED|connection[ _-]?refused|ECONNRESET|connection[ _-]?reset|reset before headers|ENOTFOUND|EAI_AGAIN|getaddrinfo|EHOSTUNREACH|ENETUNREACH|EHOSTDOWN|connect ETIMEDOUT|UND_ERR_CONNECT_TIMEOUT|connect[ _-]?timeout|connection[ _-]?error|network[ _-]?error|fetch failed|socket hang up|other side closed|socket connection was closed|unable to verify the first certificate|UNABLE_TO_VERIFY_LEAF_SIGNATURE|self[- ]signed certificate|SELF_SIGNED_CERT|certificate has expired|CERT_HAS_EXPIRED|ERR_TLS_CERT_ALTNAME_INVALID|does not match certificate|\b(?:TLS|SSL) handshake\b|(?<![a-z0-9])502(?![a-z0-9])|bad gateway/i;
+  /ECONNREFUSED|connection[ _-]?refused|ECONNRESET|connection[ _-]?reset|reset before headers|ENOTFOUND|EAI_AGAIN|getaddrinfo|EHOSTUNREACH|ENETUNREACH|EHOSTDOWN|connect ETIMEDOUT|UND_ERR_CONNECT_TIMEOUT|connect[ _-]?timeout|connection[ _-]?error|network[ _-]?error|fetch failed|socket hang up|other side closed|socket connection was closed|unable to verify the first certificate|UNABLE_TO_VERIFY_LEAF_SIGNATURE|self[- ]signed certificate|SELF_SIGNED_CERT|certificate has expired|CERT_HAS_EXPIRED|ERR_TLS_CERT_ALTNAME_INVALID|does not match certificate|\b(?:TLS|SSL) handshake\b|^\s*(?:(?:HTTP|error:?|status(?: code)?:?)\s*)?502\b|bad gateway/i;
 
 /** Whether an error text says that a connection to the model's server could not be made. A content-filter refusal or a limit never does. */
 export function isUnreachable(text: string | undefined): boolean {

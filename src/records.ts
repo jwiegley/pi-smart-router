@@ -88,8 +88,8 @@ export interface LevelRecord {
   /** What the cost rule decided; absent for a run it did not price (a tagged one, or one on the scope's chain or stepped up). */
   readonly cost?: CostRecord;
   /**
-   * The model of the run's last assistant message that ended without an error, whichever route or
-   * selection sent it; absent when no model answered, as for a run refused or ended on an error.
+   * The model of the run's last assistant message that ended without an error or degenerate output,
+   * whichever route or selection sent it; absent when no model answered.
    */
   readonly ref?: string;
   /** The run went to a higher tier than the one its pick started at. */

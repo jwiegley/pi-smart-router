@@ -1000,6 +1000,19 @@ async function reached(slow: { readonly started: Promise<void> }, run: Promise<u
   assert.equal(await Promise.race([slow.started.then(() => "started"), ended]), "started", "the run ended before its request reached the model");
 }
 
+test("a repetitive length stop is warned and not recorded as an answer; Pi does not retry it", TIMEOUT, async (t) => {
+  const world = levelsWorld(t, { roster: rosterV2({ classifier: false }), compaction: { enabled: false, reserveTokens: 1_000, keepRecentTokens: 1 } });
+  const codex = world.faux("openai-codex-2");
+  const text = Array.from({ length: 160 }, (_, index) => `sleep ${300 + index}; echo ${index};`).join("\n");
+  codex.respond(response(codex, { id: "gpt-6-luna", stopReason: "length", text, usage: { input: 100, output: 500 } }));
+  const pi = await world.start({ select: "smart-router/auto" });
+  await pi.prompt("do the work #low");
+  assert.equal(pi.lastAssistant()?.stopReason, "length");
+  assert.equal(codex.calls.length, 1);
+  assert.match(notice(pi, /truncated repetitive output/), /truncated repetitive output detected/);
+  assert.equal(runRecords(pi).at(-1)?.ref, undefined);
+});
+
 test("L1 an untagged run rated lower moves down at once; a tag routes at once, never reaches the payload, and survives a resend", TIMEOUT, async (t) => {
   const world = levelsWorld(t);
   const pi = await world.start({ select: "smart-router/auto" });

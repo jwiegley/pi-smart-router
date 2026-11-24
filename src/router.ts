@@ -76,6 +76,7 @@ import type { JevAsk, JevOutcome } from "./jev.ts";
 import { answerOf, forgetBranch, forgetCaches, noteAnswer, noteRunEnd, seedAnswer, usable } from "./ledger.ts";
 import type { Ledger } from "./ledger.ts";
 import { localRoles, policyFromRoster } from "./local.ts";
+import { isDegenerateOutput } from "./output-quality.ts";
 import { orderedRoster } from "./order.ts";
 import type { SessionOrder } from "./order.ts";
 import { healDisplaced, isLive, isLiveOwner, join, leave, leaveScopeHandoff, ownerBySignal, personalOnlyLatched, rememberedRoster, rememberRoster, scopeLatched, sessionHash, takeScopeHandoff } from "./owners.ts";
@@ -533,7 +534,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
     if (!isRecord(entry) || !isRecord(message) || message.role !== "assistant") return undefined;
     const { provider, model, stopReason } = message;
     if (typeof provider !== "string" || typeof model !== "string" || provider === PROVIDER || message.api === VIRTUAL_API) return undefined;
-    if (stopReason === "error" || stopReason === "aborted") return undefined;
+    if (stopReason === "error" || stopReason === "aborted" || isDegenerateOutput(message)) return undefined;
     const stamp = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
     const at = Number.isFinite(stamp) ? stamp : typeof message.timestamp === "number" ? message.timestamp : now();
     return { ref: `${provider}/${model}`, at, usage: usable(message.usage) ? message.usage : undefined };
@@ -1032,8 +1033,17 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       }
       return;
     }
-    // A held model that answers is no longer held: its server is back.
+    // Even an unusable answer proves that a held server can be reached again.
     holds.release(ref);
+    // Pi owns the response and decides whether to retry it. A repetitive length stop is not an
+    // answer for the run or its cost ledger, even on a Pi that cannot yet fail it over.
+    if (isDegenerateOutput(message)) {
+      const record = records.get(sessionId);
+      if (virtualIdOf(ctx.model) === record?.runPick?.id && record?.runPick?.ref === ref) {
+        notify(ctx, "smart-router: truncated repetitive output detected.", "warning");
+      }
+      return;
+    }
     const record = records.get(sessionId);
     if (record !== undefined) record.answered = ref;
     if (message.stopReason === "aborted") return;
@@ -1048,10 +1058,10 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
 
   /**
    * At agent_settled, the run is over: its level, if it had one, is recorded with the model of its
-   * last assistant message that ended without an error, whichever route or selection sent it, and
-   * with none when no model answered. The run's plan, pick, level, answer, tag and escalation are
-   * dropped, whether or not the record could be appended. A run without a level of its own records
-   * nothing.
+   * last assistant message that ended without an error or degenerate output, whichever route or
+   * selection sent it, and with none when no model answered. The run's plan, pick, level, answer,
+   * tag and escalation are dropped, whether or not the record could be appended. A run without a
+   * level of its own records nothing.
    */
   const settle = (record: Session, aborted: boolean): void => {
     const { pendingLevel: pending, answered, escalated } = record;
