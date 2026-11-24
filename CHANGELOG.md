@@ -26,6 +26,15 @@ fork's releases on that base. Releases are signed tags; nothing is published to 
   next level. Its tag names the level; its chain is still tried first, and it still passes up for
   size with compaction disabled. An untagged run steps up as before.
 
+### Fixed
+
+- A Claude subscription whose allocation for one model is spent answers 429 with "would exceed
+  your account's rate limit". The router read that as a throttle, so each of Pi's retries went back
+  to the same model until they ran out, and the run ended without trying the tier's next model.
+  That text is now the failed model's limit: the model alone is cooled, the retry moves to the
+  next model of the tier and then the fallback chain, and the account's other models stay in use.
+  Any other rate limit is still a throttle and moves nothing.
+
 ## [1.5.0-jw.1] - 2026-11-23
 
 The fork's base is now upstream v1.5.0 (`f22cbe9e`), merged into its history with the port's tree

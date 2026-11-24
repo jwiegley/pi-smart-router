@@ -190,8 +190,14 @@ const ACCOUNT_LIMIT =
   /usage[ _-]?limit|\bquota\b|insufficient_quota|\bbilling\b|subscription_sharing|resource[ _]?exhausted|(?<![a-z0-9])401(?![a-z0-9])|unauthori[sz]ed|authentication[ _]error|invalid[ _]api[ _]key|incorrect api key/i;
 /** About the account's money: prepaid credit that has run out, as OpenRouter reports it (402). */
 const CREDIT_LIMIT = /(?<![a-z0-9])402(?![a-z0-9])|payment[ _-]?required|insufficient[ _-]?credits?|out of credits?|requires? more credits|credit balance/i;
-/** About the one model: it is not there, or this account may not use it (403). */
-const MODEL_LIMIT = /(?<![a-z0-9])403(?![a-z0-9])|\bforbidden\b|model_not_found|\bmodel\b[^\n]{0,200}?\bnot[ _-]?found\b/i;
+/**
+ * About the one model: it is not there, or this account may not use it (403). Also a rate limit the
+ * text says is the account's ("would exceed your account's rate limit"), which is how a Claude
+ * subscription says one model's allocation is spent while its other models still answer (John,
+ * 2026-11-24): no backoff clears it, so it is no throttle, and it is that model's alone, so the
+ * account is not cooled. Any other rate limit stays a throttle.
+ */
+const MODEL_LIMIT = /account(?:['’]s)? rate[ _-]?limit|(?<![a-z0-9])403(?![a-z0-9])|\bforbidden\b|model_not_found|\bmodel\b[^\n]{0,200}?\bnot[ _-]?found\b/i;
 // Whether the account is cooled is decided by narrower forms of the first two: an account error's
 // own words, or its status where an error text begins, so that a number or a word inside an
 // unrelated error body (a tool result quoted back, a token count) cools no account.

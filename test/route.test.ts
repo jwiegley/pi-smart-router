@@ -157,6 +157,22 @@ describe("owner-loop requests", () => {
     assert.equal(lastHistory(loaded)?.code, "fallback:architect→thinker");
   });
 
+  test("a Claude subscription out of one model's allocation says so as a 429 on the account's rate limit: the retry moves on, the run stays off that model, and the account's other models stay in use", async (t) => {
+    // What pi-claude-code reported to John on 2026-11-24. Pi retries a 429, and every retry went
+    // back to the same model until the retries ran out.
+    const spent = "Incomplete Claude Code upstream response (status 429, capture incomplete, upstream said: This request would exceed your account's rate limit. Please try again later.)";
+    const loaded = await start({ dir: agentDir(t) });
+    const signal = loaded.session.startRun();
+    const moved = loaded.runtime.route("auto", request("retry", { signal, failed: failure(loaded.runtime, SOL, spent) }));
+    assert.deepEqual([routed(moved), lastHistory(loaded)?.code], [GLM_CLOUD, "fallback:engineer→coder"]);
+    assert.equal(routed(loaded.runtime.route("auto", request("continuation", { signal, previous: previous(loaded.runtime, SOL) }))), GLM_CLOUD);
+    // The limit is that model's alone: astra, on the same account, still takes a run.
+    await loaded.host.emit("agent_settled", { aborted: false });
+    loaded.session.endRun();
+    await loaded.host.emit("input", { text: PLANNING, source: "interactive" });
+    assert.equal(routed(loaded.runtime.route("auto", request("user", { signal: loaded.session.startRun() }))), ASTRA);
+  });
+
   test("a retry keeps the model on transient errors, 429 and overflow, and moves on limit errors", async (t) => {
     const loaded = await start({ dir: agentDir(t) });
     const signal = loaded.session.startRun();

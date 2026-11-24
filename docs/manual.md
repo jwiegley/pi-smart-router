@@ -816,6 +816,11 @@ These are version 1's rules. Version 2 keeps them, comparing levels rather than 
   an account out of tokens: Pi backs off and retries the same model, and the router lets it. It
   cools nothing, holds nothing and triggers no fallback, so a run that ends on one leaves the next
   run on the same model. (A 429 whose text is a usage limit or a quota is the account's, above.)
+- **"Would exceed your account's rate limit" is the one model's.** A Claude subscription says that,
+  with a 429, when one model's allocation is spent, and no backoff clears it. The router cools that
+  model alone, as it does for a model that is not found, and the retry moves to the tier's next
+  model. The account's other models stay in use: they are metered apart, and they are tried as
+  written. If the whole account is spent, each of them fails once in turn.
 - **A local server that cannot be reached is passed over.** When a request to a local model (one
   of `local.providers` on one of `local.hosts`) fails before any output because a connection to
   its server could not be made, the model is held for `unreachableMinutes`, and the retry goes to

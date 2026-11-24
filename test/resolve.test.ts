@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test, { describe } from "node:test";
 
+import { isRetryableAssistantError } from "@earendil-works/pi-ai";
+
 import type { VirtualId } from "../src/constants.ts";
 import { EMPTY_POLICY, policyFromRoster } from "../src/local.ts";
-import { clock, coolFrom, Cooldowns, failureKind, resolveCandidate, resolveContext } from "../src/resolve.ts";
+import { accountScoped, clock, coolFrom, Cooldowns, coolsAccount, failureKind, resolveCandidate, resolveContext } from "../src/resolve.ts";
 import type { FailedResponse, Resolution, ResolveContext } from "../src/resolve.ts";
 import { SCOPES } from "../src/roster.ts";
 import type { Roster, Scope } from "../src/roster.ts";
@@ -272,6 +274,25 @@ describe("cooldown rules", () => {
       assert.equal(coolFrom(failure(SOL, text), HERA, cooldowns, NOW), undefined, text);
       assert.equal(cooldowns.until(SOL, NOW), undefined, text);
     }
+  });
+
+  test("a rate limit the text calls the account's is the failed model's limit, as a Claude subscription out of one model's allocation reports it; any other is a throttle", () => {
+    const spent = "Incomplete Claude Code upstream response (status 429, capture incomplete, upstream said: This request would exceed your account's rate limit. Please try again later.)";
+    for (const text of [spent, "This request would exceed your account's rate limit.", "exceeds the account rate limit", "account\u2019s rate-limit reached"]) {
+      assert.equal(failureKind(text), "limit", text);
+      // The model's own: John's other Claude models still answered when one was spent.
+      assert.equal(accountScoped(text), false, text);
+      assert.equal(coolsAccount("openai-codex-2", text), false, text);
+      const cooldowns = new Cooldowns();
+      assert.equal(coolFrom(failure(SOL, text), HERA, cooldowns, NOW), SOL, text);
+      assert.notEqual(cooldowns.until(SOL, NOW), undefined, `${text}: the failed model cools`);
+      assert.equal(cooldowns.until(ASTRA, NOW), undefined, `${text}: another model of the same account does not`);
+    }
+    for (const text of ["429 Too Many Requests", "rate limit exceeded", "429 Rate limit exceeded", "rate_limit_exceeded", "Rate limit reached for requests per minute"]) {
+      assert.equal(failureKind(text), "other", text);
+    }
+    // Pi retries the wrapped 429 itself, so it is the retry that must move.
+    assert.equal(isRetryableAssistantError(failure(SOL, spent) as never), true);
   });
 
   test("transient errors never cool", () => {
