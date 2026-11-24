@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
 
 import { SCOPE_ENTRY } from "../src/constants.ts";
-import { recoveryChoice, recoveryStatus } from "../src/recovery.ts";
+import { isThrottle, recoveryChoice, recoveryStatus } from "../src/recovery.ts";
 import type { RecoveryRequest } from "../src/recovery.ts";
 import { scopeEntry } from "../src/scope.ts";
 import { ASTRA, GLM, heraContext, KIMI, NOW, rosterFixtureV2, WORK_SOL } from "./support/catalog.ts";
@@ -45,6 +45,27 @@ test("content filters, context overflow, signature errors and errors without a s
   for (const error of ["400 content filter", "usage limit reached: flagged by moderation", "400 maximum context length", "400 thought_signature", "invalid 500 tokens"]) {
     assert.equal(choose(outcome(ASTRA, error)), undefined, error);
   }
+});
+
+test("a throttle that outlasted Pi's retries fails over with nothing cooled, with or without a status in its text", () => {
+  const wrapped = "Incomplete Claude Code upstream response (status 429, capture incomplete, upstream said: Too many requests. Please try again later.)";
+  for (const error of ["429 Too Many Requests", "rate limit exceeded", "rate_limit_exceeded", "overloaded_error", wrapped]) {
+    const rc = heraContext();
+    const request = outcome(ASTRA, error);
+    assert.equal(isThrottle(request.message), true, error);
+    assert.equal(routed(choose(request, rc)!.route), KIMI, error);
+    assert.equal(rc.cooldowns.until(ASTRA, NOW), undefined, `${error}: the throttled model is not cooled`);
+  }
+  // Not throttles, and no status to go by: Pi's retries are all they get.
+  for (const error of ["terminated", "Request timed out", "fetch failed"]) {
+    assert.equal(isThrottle(outcome(ASTRA, error).message), false, error);
+    assert.equal(choose(outcome(ASTRA, error)), undefined, error);
+  }
+  // A refusal of the content and an account's own limit are never throttles.
+  for (const error of ["429 rate limit: flagged by moderation", "This request would exceed your account's rate limit."]) {
+    assert.equal(isThrottle(outcome(ASTRA, error).message), false, error);
+  }
+  assert.equal(choose(outcome(ASTRA, "429 rate limit: flagged by moderation")), undefined);
 });
 
 test("a usage limit or a refused credential cools its model and fails over, as Pi's own retry of one does", () => {
@@ -95,4 +116,26 @@ test("matching request-caused 4xx does not cool the alternate", async (t) => {
   assert.equal(routed(loaded.router!.dispatchRecovery("auto", value)!.route), KIMI);
   await loaded.host.emit("message_end", { message: assistant(KIMI, { stopReason: "error", errorMessage: "400 forbidden" }) });
   assert.equal(routed(loaded.runtime.route("auto", request("direct", { previous: previous(loaded.runtime, KIMI) }))), KIMI);
+});
+
+test("a run that left a throttled model asks for no re-check, and the next run starts on its own model again", async (t) => {
+  const loaded = await start({ dir: agentDir(t), now: () => NOW });
+  await loaded.host.emit("input", { text: "plan the migration", source: "interactive" });
+  const signal = loaded.session.startRun();
+  assert.equal(routed(loaded.runtime.route("auto", request("user", { signal }))), ASTRA);
+  // Pi retried the throttle on the same model, as the router lets it, until its retries ran out.
+  const message = assistant(ASTRA, { stopReason: "error", errorMessage: "429 Too Many Requests", content: [] });
+  assert.equal(routed(loaded.runtime.route("auto", request("retry", { signal, failed: { model: loaded.runtime.physical(ASTRA), message } }))), ASTRA);
+  await loaded.host.emit("message_end", { message });
+  const value: RecoveryRequest = { ...outcome(ASTRA, "429 Too Many Requests"), message, signal };
+  assert.equal(routed(loaded.router!.dispatchRecovery("auto", value)!.route), KIMI);
+  await loaded.host.emit("message_end", { message: assistant(KIMI, { stopReason: "toolUse" }) });
+  const record = loaded.router!.record("session-1");
+  assert.deepEqual([record?.runPick?.ref, record?.handoff], [KIMI, false]);
+  const toolResult = { role: "toolResult" as const, toolCallId: "c", toolName: "bash", content: [{ type: "text" as const, text: "ok" }], isError: false, timestamp: NOW };
+  assert.equal(routed(loaded.runtime.route("auto", request("continuation", { signal, previous: previous(loaded.runtime, KIMI), messages: [toolResult] }))), KIMI, "the run stays where it went");
+  await loaded.host.emit("agent_settled", { aborted: false });
+  loaded.session.endRun();
+  await loaded.host.emit("input", { text: "plan the next migration", source: "interactive" });
+  assert.equal(routed(loaded.runtime.route("auto", request("user", { signal: loaded.session.startRun() }))), ASTRA, "nothing was cooled or held");
 });

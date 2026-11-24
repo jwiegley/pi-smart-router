@@ -34,6 +34,20 @@ export interface Recovery {
 /** Errors about the conversation itself, which another model would get too: its size, or a thinking signature it carries. */
 export const REQUEST_SIZED = /thought[_ -]?signature|context[ _-]?(?:window|length|overflow)|maximum context|prompt (?:is )?too long|too many (?:input )?tokens/i;
 
+/** What a throttle says: a rate limit that is not an account's, too many requests, a 429, an overloaded service. */
+const THROTTLE = /rate[ _-]?limit|too many requests|(?<![a-z0-9])429(?![a-z0-9])|overloaded/i;
+
+/**
+ * Whether a failed response is a throttle: Pi backs off and retries one on the same model, and the
+ * router lets it (retry in src/route.ts). Pi asks for a recovery only once those retries are spent,
+ * and then the run goes on with another model, with nothing cooled (John, 2026-11-24). A rate limit
+ * the text calls the account's is a limit, not a throttle (failureKind).
+ */
+export function isThrottle(message: { readonly stopReason?: unknown; readonly errorMessage?: string | undefined }): boolean {
+  const text = message.errorMessage;
+  return message.stopReason === "error" && failureKind(text) === "other" && THROTTLE.test((text ?? "").slice(0, 8192));
+}
+
 /** Read an HTTP status only from a status prefix or a structured provider error. */
 export function recoveryStatus(text: string | undefined): number | undefined {
   const head = (text ?? "").slice(0, 8192).trim();
@@ -74,7 +88,8 @@ export function recoveryChoice(input: {
     // (John, 2026-11-23): the model or its account is cooled first, so the pick passes it over.
     if (kind === "limit") coolFrom(message, rc.roster, rc.cooldowns, rc.now);
     else if (REQUEST_SIZED.test(message.errorMessage ?? "")) return undefined;
-    else if (status === undefined || !(status >= 400 && status <= 599)) return undefined;
+    // A throttle that outlasted Pi's retries moves on whether or not its text carries a status.
+    else if (!isThrottle(message) && (status === undefined || !(status >= 400 && status <= 599))) return undefined;
   }
   const ref = refOf(request.physical);
   const role = eligibleRole(rc, ref);

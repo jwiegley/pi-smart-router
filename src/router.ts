@@ -75,7 +75,7 @@ import { askJev, buildContext, jevAsk, recentMessages } from "./jev.ts";
 import type { JevAsk, JevOutcome } from "./jev.ts";
 import { answerOf, forgetBranch, forgetCaches, noteAnswer, noteRunEnd, seedAnswer, usable } from "./ledger.ts";
 import type { Ledger } from "./ledger.ts";
-import { recoveryChoice, recoveryStatus, REQUEST_SIZED } from "./recovery.ts";
+import { isThrottle, recoveryChoice, recoveryStatus, REQUEST_SIZED } from "./recovery.ts";
 import type { Recovery, RecoveryRequest } from "./recovery.ts";
 import { localRoles, policyFromRoster } from "./local.ts";
 import { isDegenerateOutput } from "./output-quality.ts";
@@ -160,7 +160,7 @@ export interface Session extends SessionRecord {
    * Pi asks twice, to offer and to confirm, and may use neither answer; the next route call, the
    * alternate's response or the run's end drops it.
    */
-  recoveryPick: { id: VirtualId; ref: string; role: string; effort: NonNullable<SessionRecord["effort"]>; previous: ReadonlyArray<{ readonly ref: string; readonly status: number }> } | undefined;
+  recoveryPick: { id: VirtualId; ref: string; role: string; effort: NonNullable<SessionRecord["effort"]>; previous: ReadonlyArray<{ readonly ref: string; readonly status: number }>; throttled: boolean } | undefined;
   /** The digest of the text, without its tag, of the message whose plan `plan` holds; meaningful only while `plan` is set. */
   planDigest: string | undefined;
   /** How many idle messages the router passed since the latest prompt's run started. */
@@ -1046,7 +1046,9 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       if (routesLevels(recovered.id) && scope !== undefined && left !== undefined && !inChain(scope, left) && inChain(scope, ref)) {
         notify(ctx, fallbackMoveNotice(parseRef(left)?.id ?? left, recovered.role, message.model), "info");
       }
-      if (left !== undefined && parseRef(left)?.provider !== message.provider) pending.handoff = true;
+      // A run that left a throttled model asks for no re-check: nothing cooled that model, so the
+      // re-check would send the run straight back to it.
+      if (left !== undefined && parseRef(left)?.provider !== message.provider && !recovered.throttled) pending.handoff = true;
       pending.runPick = { id: recovered.id, ref, role: recovered.role };
       pending.effort = recovered.effort;
       pending.history.push({ at: now(), virtual: recovered.id, reason: "retry", signal: undefined, trigger: undefined, role: recovered.role, ref, code: "recovery", foreign: false, continuesRun: true });
@@ -1272,6 +1274,7 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
           id, ref: `${offered.route.model.provider}/${offered.route.model.id}`, role,
           effort: effortFor(rc, role, offered.route.model, request.thinkingLevel, turn, record.escalated), previous: [...request.attempts.map((attempt) => ({ ref: `${attempt.model.provider}/${attempt.model.id}`, status: attempt.status })), { ref: `${request.physical.provider}/${request.physical.id}`, status: offered.status }]
             .filter((attempt): attempt is { ref: string; status: number } => attempt.status !== undefined),
+          throttled: isThrottle(request.message),
         };
         return offered;
       } catch {

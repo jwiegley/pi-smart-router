@@ -34,6 +34,11 @@ fork's releases on that base. Releases are signed tags; nothing is published to 
   That text is now the failed model's limit: the model alone is cooled, the retry moves to the
   next model of the tier and then the fallback chain, and the account's other models stay in use.
   Any other rate limit is still a throttle and moves nothing.
+- A run that ended on a throttle (a 429, a rate limit, an overloaded service) after Pi's retries
+  were spent stopped there, showing only the provider's error. On a Pi with the `recover` boundary
+  it now goes on with the tier's next model, then the fallback chain. Nothing is cooled, so the
+  next run starts on its own model again. While Pi still has retries, a throttle stays on its
+  model, as before.
 
 ## [1.5.0-jw.1] - 2026-11-23
 

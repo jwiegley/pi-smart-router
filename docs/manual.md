@@ -816,6 +816,11 @@ These are version 1's rules. Version 2 keeps them, comparing levels rather than 
   an account out of tokens: Pi backs off and retries the same model, and the router lets it. It
   cools nothing, holds nothing and triggers no fallback, so a run that ends on one leaves the next
   run on the same model. (A 429 whose text is a usage limit or a quota is the account's, above.)
+- **A throttle that outlasts Pi's retries moves the run on.** On a Pi with the `recover` boundary,
+  once Pi has spent its retries on a throttled model the run goes on with the tier's next model,
+  then the fallback chain. Nothing is cooled or held, so the next run starts on its own model
+  again, and the run asks for no re-check after the move. On a Pi without the boundary the run
+  ends on the throttle, as before.
 - **"Would exceed your account's rate limit" is the one model's.** A Claude subscription says that,
   with a 429, when one model's allocation is spent, and no backoff clears it. The router cools that
   model alone, as it does for a model that is not found, and the retry moves to the tier's next

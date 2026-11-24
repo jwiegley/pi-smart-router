@@ -14,6 +14,7 @@ The router offers an alternate for:
 
 - a repetitive length stop, by upstream's test (`src/output-quality.ts`, from `degenerate-output.ts`);
 - an error with an explicit 4xx or 5xx status that is the model's own;
+- a throttle (a 429, a rate limit, an overloaded service) once Pi's own retries of it are spent, with nothing cooled;
 - a usage limit or a credential that was not accepted, whose model or account is cooled first.
 
 It never offers one for a content-filter refusal, for an error about the conversation's size or a thinking signature, or for an error with no status it can read. The alternate is the failed role's next model, then the scope's fallback chain, skipping every model that already failed in the run. Scope, account bindings, the local policy and credentials are checked on every pick, so `smart-router/local` never reaches a cloud model and a work session never reaches the personal chain. A run that moves onto the chain says so once. When no alternate answers, the run ends with the notice that says what to do, as before; the notice is now said when the run settles, since only then is it known that none did.
