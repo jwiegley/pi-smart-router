@@ -1,0 +1,51 @@
+{
+  "version": 2,
+  "$comment": "Accounts are named by suffix: -j John's own, -p Positron's. Each tier lists subscription accounts first, then pay-per-token ones. LOW and MEDIUM fall back to the LAN.",
+  "exclude": ["openrouter-j/openrouter/auto", "openrouter-p/openrouter/auto"],
+  "roles": [
+    {"name": "local-low", "$comment": "LOW local tier: Nyx first, then Clio.", "models": ["nyx/g3mjym7raqj6147biq46zxym32gyda9g-Qwen3.8-27B-exl3-6fe61ad", "omlx-clio/Qwen3.8-27B-oQ4e-fp16-mtp"], "thinking": "max"},
+    {"name": "local-medium", "$comment": "MEDIUM local tier: Hera DeepSeek.", "models": ["omlx-hera/DeepSeek-V4.1-Flash-1017-oQ4e-mtp"], "thinking": "max"},
+    {"name": "low", "models": ["openai-codex-j/gpt-6-luna", "claude-code-j/claude-haiku-5-5", "google-j/gemini-4-argon", "openrouter-j/nvidia/nemotron-3.5-lightning"]},
+    {"name": "medium", "models": ["openai-codex-j/gpt-6.1-terra", "claude-code-j/claude-sonnet-5-5", "google-j/gemini-4-hydrogen", "openrouter-j/deepseek/deepseek-v4.1-flash-1017"]},
+    {"name": "high", "models": ["openai-codex-j/gpt-6.2-sol", "claude-code-j/claude-opus-5-5", "google-j/gemini-4-neon", "openrouter-j/tencent/hy4"]},
+    {"name": "super", "models": ["openai-codex-j/gpt-6.2-astra", "claude-code-j/claude-fable-5-2", "google-j/gemini-4-carbon", "openrouter-j/moonshotai/kimi-k3.1-pro"]},
+    {"name": "work-low", "models": ["openai-codex-p/gpt-6-luna", "claude-code-p/claude-haiku-5-5", "google-p/gemini-4-argon", "openrouter-p/nvidia/nemotron-3.5-lightning", "factory-p/minimax-m3.1-flash"]},
+    {"name": "work-medium", "models": ["openai-codex-p/gpt-6.1-terra", "claude-code-p/claude-sonnet-5-5", "google-p/gemini-4-hydrogen", "xai-p/grok-4.7", "openrouter-p/deepseek/deepseek-v4.1-flash-1017", "factory-p/deepseek-v4.1-flash-1017"]},
+    {"name": "work-high", "models": ["openai-codex-p/gpt-6.2-sol", "claude-code-p/claude-opus-5-5", "google-p/gemini-4-neon", "openrouter-p/tencent/hy4", "factory-p/qwen3.8-max"]},
+    {"name": "work-super", "models": ["openai-codex-p/gpt-6.2-astra", "claude-code-p/claude-fable-5-2", "google-p/gemini-4-carbon", "openrouter-p/moonshotai/kimi-k3.1-pro", "factory-p/kimi-k3.1-pro"]}
+  ],
+  "scopes": {
+    "personal": {
+      "levels": {
+        "low": {"role": "low", "describe": "Mechanical or trivial work that follows a clear specification", "fallback": ["local-low"]},
+        "medium": {"role": "medium", "describe": "Engineering, implementation and validation", "fallback": ["local-medium"]},
+        "high": {"role": "high", "describe": "Deep thought, review, and the design of verification"},
+        "super": {"role": "super", "describe": "Deep thought, research, design and planning"}
+      }
+    },
+    "work": {
+      "levels": {
+        "low": {"role": "work-low", "describe": "Mechanical or trivial work that follows a clear specification", "fallback": ["local-low"]},
+        "medium": {"role": "work-medium", "describe": "Engineering, implementation and validation", "fallback": ["local-medium"]},
+        "high": {"role": "work-high", "describe": "Deep thought, review, and the design of verification"},
+        "super": {"role": "work-super", "describe": "Deep thought, research, design and planning"}
+      },
+      "directories": ["/Users/johnw/work/positron", "/Users/johnw/hera/ares"]
+    }
+  },
+  "accounts": {
+    "openai-codex-j": {"scope": "personal"},
+    "claude-code-j": {"scope": "personal"},
+    "google-j": {"scope": "personal"},
+    "openrouter-j": {"scope": "personal"},
+    "factory-j": {"scope": "personal"},
+    "openai-codex-p": {"scope": "work"},
+    "claude-code-p": {"scope": "work"},
+    "google-p": {"scope": "work"},
+    "xai-p": {"scope": "work"},
+    "openrouter-p": {"scope": "work"},
+    "factory-p": {"scope": "work"}
+  },
+  "classifier": {"models": {"personal": "openrouter-j/typesafe/jev-1.14", "work": "openrouter-p/typesafe/jev-1.14"}, "local": true, "timeoutMs": 1000, "context": {"messages": 6, "messageChars": 1500, "totalChars": 12000}},
+  "local": {"role": "local-low", "providers": ["nyx", "omlx-clio", "omlx-hera"], "hosts": ["nyx.lan", "clio.lan", "hera.lan"], "levels": {"low": "local-low", "medium": "local-medium", "high": null, "super": null}}
+}

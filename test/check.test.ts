@@ -252,6 +252,15 @@ describe("checking a roster's text", () => {
     assert.deepEqual((shown ?? "").split("\n"), JOHN_ROUTING.slice(0, 11));
   });
 
+  test("the manual's Hera example is Hera's roster of named accounts, and it is valid", () => {
+    const manual = readFileSync(new URL("../docs/manual.md", import.meta.url), "utf8");
+    const section = manual.slice(manual.indexOf("### Hera, version 2"), manual.indexOf("A work machine's roster"));
+    const [, example] = /```json\n([\s\S]*?)\n```/.exec(section) ?? [];
+    const hera = fixture("roster-hera-v2-accounts.json");
+    assert.equal(`${example}\n`, hera);
+    assert.equal(checkRoster(hera).ok, true);
+  });
+
   // The manual is the fork's own document. The README is upstream's, with one section on the fork
   // that shows one roster: the one a missing roster's refusal sends its reader to.
   for (const [name, path, least] of [

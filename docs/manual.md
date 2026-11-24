@@ -149,7 +149,12 @@ The roster is one JSON file per host, at `<agentDir>/smart-router.json`, which i
 - **Two schema versions.** Version 1, below, routes by a routing table. Version 2 routes by four
   levels in each scope; see [Roster version 2](#roster-version-2-levels-and-scopes).
 
-### Hera
+### A Multi-Pass host
+
+Before Pi had named accounts, Hera reached its two ChatGPT logins through Multi-Pass's numbered
+aliases, `openai-codex-2` (personal) and `openai-codex-3` (work), and its roster was this version 1
+file. A host that still uses Multi-Pass binds its aliases this way; Hera itself now uses
+[named accounts](#hera-version-2).
 
 ```json
 {
@@ -176,8 +181,8 @@ The roster is one JSON file per host, at `<agentDir>/smart-router.json`, which i
 }
 ```
 
-The `"exclude": ["openai-codex/*"]` line is required on Hera: plain `openai-codex` is the work
-account there, and with the line, a role that names it is a validation error.
+The `"exclude": ["openai-codex/*"]` line was required there: plain `openai-codex` was the work
+account, and with the line, a role that names it is a validation error.
 
 ### Clio, Vulcan, athena and pallas
 
@@ -300,60 +305,72 @@ classifier picks the role, with no demand and no cost rule.
 ```json
 {
   "version": 2,
-  "$comment": "Hera, version 2. Personal levels take Codex first, on openai-codex-2 (John's personal ChatGPT account, labelled 'personal' in Multi-Pass), then OpenRouter. Work levels take only openai-codex-3, the work account, which the router excludes everywhere else. Plain openai-codex is excluded here because Hera reserves it for the work account.",
-  "exclude": ["openai-codex/*"],
+  "$comment": "Accounts are named by suffix: -j John's own, -p Positron's. Each tier lists subscription accounts first, then pay-per-token ones. LOW and MEDIUM fall back to the LAN.",
+  "exclude": ["openrouter-j/openrouter/auto", "openrouter-p/openrouter/auto"],
   "roles": [
-    { "name": "local", "$comment": "private or extreme economy; free; only smart-router/local", "models": ["omlx-hera/GLM-5.3-Flash-oQ4e-mtp"], "thinking": "max" },
-    { "name": "low", "$comment": "Nyx's ref is a Nix-store basename that changes whenever its model is rebuilt", "models": ["openai-codex-2/gpt-6-luna", "nyx/g3mjym7raqj6147biq46zxym32gyda9g-Qwen3.8-27B-exl3-6fe61ad", "omlx-hera/Qwen3.8-27B-oQ4e-fp16-mtp"] },
-    { "name": "medium", "models": ["openai-codex-2/gpt-6.1-terra", "openrouter/deepseek/deepseek-v4.1-flash-1017"] },
-    { "name": "high", "models": ["openai-codex-2/gpt-6.1-sol", "openrouter/z-ai/glm-5.3"] },
-    { "name": "super", "models": ["openai-codex-2/gpt-6-astra", "openrouter/moonshotai/kimi-k3.1-pro"] },
-    { "name": "work-low", "models": ["openai-codex-3/gpt-6-luna"] },
-    { "name": "work-medium", "models": ["openai-codex-3/gpt-6.1-terra"] },
-    { "name": "work-high", "models": ["openai-codex-3/gpt-6.1-sol"] },
-    { "name": "work-super", "models": ["openai-codex-3/gpt-6-astra"] }
+    {"name": "local-low", "$comment": "LOW local tier: Nyx first, then Clio.", "models": ["nyx/g3mjym7raqj6147biq46zxym32gyda9g-Qwen3.8-27B-exl3-6fe61ad", "omlx-clio/Qwen3.8-27B-oQ4e-fp16-mtp"], "thinking": "max"},
+    {"name": "local-medium", "$comment": "MEDIUM local tier: Hera DeepSeek.", "models": ["omlx-hera/DeepSeek-V4.1-Flash-1017-oQ4e-mtp"], "thinking": "max"},
+    {"name": "low", "models": ["openai-codex-j/gpt-6-luna", "claude-code-j/claude-haiku-5-5", "google-j/gemini-4-argon", "openrouter-j/nvidia/nemotron-3.5-lightning"]},
+    {"name": "medium", "models": ["openai-codex-j/gpt-6.1-terra", "claude-code-j/claude-sonnet-5-5", "google-j/gemini-4-hydrogen", "openrouter-j/deepseek/deepseek-v4.1-flash-1017"]},
+    {"name": "high", "models": ["openai-codex-j/gpt-6.2-sol", "claude-code-j/claude-opus-5-5", "google-j/gemini-4-neon", "openrouter-j/tencent/hy4"]},
+    {"name": "super", "models": ["openai-codex-j/gpt-6.2-astra", "claude-code-j/claude-fable-5-2", "google-j/gemini-4-carbon", "openrouter-j/moonshotai/kimi-k3.1-pro"]},
+    {"name": "work-low", "models": ["openai-codex-p/gpt-6-luna", "claude-code-p/claude-haiku-5-5", "google-p/gemini-4-argon", "openrouter-p/nvidia/nemotron-3.5-lightning", "factory-p/minimax-m3.1-flash"]},
+    {"name": "work-medium", "models": ["openai-codex-p/gpt-6.1-terra", "claude-code-p/claude-sonnet-5-5", "google-p/gemini-4-hydrogen", "xai-p/grok-4.7", "openrouter-p/deepseek/deepseek-v4.1-flash-1017", "factory-p/deepseek-v4.1-flash-1017"]},
+    {"name": "work-high", "models": ["openai-codex-p/gpt-6.2-sol", "claude-code-p/claude-opus-5-5", "google-p/gemini-4-neon", "openrouter-p/tencent/hy4", "factory-p/qwen3.8-max"]},
+    {"name": "work-super", "models": ["openai-codex-p/gpt-6.2-astra", "claude-code-p/claude-fable-5-2", "google-p/gemini-4-carbon", "openrouter-p/moonshotai/kimi-k3.1-pro", "factory-p/kimi-k3.1-pro"]}
   ],
   "scopes": {
     "personal": {
       "levels": {
-        "low": { "role": "low", "describe": "Mechanical or trivial work that follows a clear specification" },
-        "medium": { "role": "medium", "describe": "Engineering, implementation and validation" },
-        "high": { "role": "high", "describe": "Deep thought, review, and the design of verification" },
-        "super": { "role": "super", "describe": "Deep thought, research, design and planning" }
+        "low": {"role": "low", "describe": "Mechanical or trivial work that follows a clear specification", "fallback": ["local-low"]},
+        "medium": {"role": "medium", "describe": "Engineering, implementation and validation", "fallback": ["local-medium"]},
+        "high": {"role": "high", "describe": "Deep thought, review, and the design of verification"},
+        "super": {"role": "super", "describe": "Deep thought, research, design and planning"}
       }
     },
     "work": {
-      "$comment": "The directory is an example: list the directories of Hera's work checkouts.",
       "levels": {
-        "low": { "role": "work-low", "describe": "Mechanical or trivial work that follows a clear specification" },
-        "medium": { "role": "work-medium", "describe": "Engineering, implementation and validation" },
-        "high": { "role": "work-high", "describe": "Deep thought, review, and the design of verification" },
-        "super": { "role": "work-super", "describe": "Deep thought, research, design and planning" }
+        "low": {"role": "work-low", "describe": "Mechanical or trivial work that follows a clear specification", "fallback": ["local-low"]},
+        "medium": {"role": "work-medium", "describe": "Engineering, implementation and validation", "fallback": ["local-medium"]},
+        "high": {"role": "work-high", "describe": "Deep thought, review, and the design of verification"},
+        "super": {"role": "work-super", "describe": "Deep thought, research, design and planning"}
       },
-      "directories": ["/Users/johnw/src/positron"]
+      "directories": ["/Users/johnw/work/positron", "/Users/johnw/hera/ares"]
     }
   },
   "accounts": {
-    "openai-codex-2": { "multiPassLabel": "personal" },
-    "openai-codex-3": { "multiPassLabel": "Positron work", "scope": "work", "$comment": "the label Multi-Pass stores for openai-codex-3, which must name work or Positron" }
+    "openai-codex-j": {"scope": "personal"},
+    "claude-code-j": {"scope": "personal"},
+    "google-j": {"scope": "personal"},
+    "openrouter-j": {"scope": "personal"},
+    "factory-j": {"scope": "personal"},
+    "openai-codex-p": {"scope": "work"},
+    "claude-code-p": {"scope": "work"},
+    "google-p": {"scope": "work"},
+    "xai-p": {"scope": "work"},
+    "openrouter-p": {"scope": "work"},
+    "factory-p": {"scope": "work"}
   },
-  "classifier": { "model": "openrouter/typesafe/jev-1.14", "timeoutMs": 1000, "context": { "messages": 6, "messageChars": 1500, "totalChars": 12000 } },
-  "local": { "role": "local", "providers": ["omlx-hera", "nyx"], "hosts": ["hera.lan", "nyx.lan"] }
+  "classifier": {"models": {"personal": "openrouter-j/typesafe/jev-1.14", "work": "openrouter-p/typesafe/jev-1.14"}, "local": true, "timeoutMs": 1000, "context": {"messages": 6, "messageChars": 1500, "totalChars": 12000}},
+  "local": {"role": "local-low", "providers": ["nyx", "omlx-clio", "omlx-hera"], "hosts": ["nyx.lan", "clio.lan", "hera.lan"], "levels": {"low": "local-low", "medium": "local-medium", "high": null, "super": null}}
 }
 ```
 
-- **The personal ladder** takes Codex first at every level, then OpenRouter; LOW takes luna, then
-  Nyx's Qwen, then Hera's. A level is represented by the first available candidate of its role, so
-  a level returns to Codex as soon as Codex is available again.
-- **The work ladder** holds only `openai-codex-3`, Hera's work account, bound as work. The built-in
-  exclusion of `openai-codex-3/*` still holds in personal scope, so no personal level can name it.
+- **One provider per account.** Pi declares each account in its `models.json` (`accountOf`):
+  `openai-codex-j` is John's ChatGPT login, `openai-codex-p` Positron's, and so on for Claude
+  Code, Google, OpenRouter, Factory and xAI. Each id names its account, so its binding is a
+  `scope` alone; Multi-Pass labels and `native` acknowledgements are not needed. A work-bound
+  account may appear only in work levels, a personal one only in personal levels.
+- **Each level** takes the subscription accounts first (Codex, Claude Code, Google), then the
+  pay-per-token ones (xAI, OpenRouter, Factory). A level is represented by the first available
+  candidate of its role, so it returns to a subscription as soon as one is available again.
+  `factory-j` is bound but in no role: it is picked by hand only.
+- **LOW and MEDIUM fall back to the LAN** (`local-low`, `local-medium`) in both scopes; HIGH and
+  SUPER have no local model, so `smart-router/local` refuses them.
+- **Jev** is asked through the scope's own OpenRouter account, `classifier.models`, and on
+  `smart-router/local` too (`classifier.local`), which sends the redacted context off the machine.
 - **Nyx's ref** is a Nix-store basename that changes whenever its model is rebuilt, so the roster
-  needs an edit after each rebuild until nix-config gives it a stable id. Pi offers it only once
-  `NYX_API_KEY` reaches Pi's environment; until then, LOW falls through to Hera's Qwen whenever luna
-  is unavailable.
-- **The local section** keeps Nyx, so Nyx's Qwen counts as local although `smart-router/local`
-  routes only to GLM: when its server cannot be reached, LOW passes it over for a few minutes, as
-  it does any local model ([Routing in detail](#routing-in-detail)).
+  needs an edit after each rebuild until nix-config gives it a stable id.
 
 A work machine's roster has only the work roles, on its native `openai-codex` login bound as work:
 
@@ -387,11 +404,12 @@ one, Jev's request goes through whatever OpenRouter account Pi has on that machi
 ### A fallback chain
 
 A scope may say what takes a run when its level's own models cannot: `"fallback"`, a list of roles
-in the order to try them. This roster is John's routing of 2026-11-17 for Hera: on a personal
-session `smart-router/auto` uses astra, sol, terra or luna by difficulty; when the Codex account
-has no tokens left, OpenRouter's GLM-5.3-Flash and then its Qwen3.8; then GLM-5.3-Flash on Hera,
-Qwen3.8 on Nyx and Qwen3.8 on Hera. `smart-router/local` uses only those last three. A work
-session uses only the work account.
+in the order to try them. This roster is John's routing of 2026-11-17 for Hera, from before it
+had named accounts; it binds the Multi-Pass aliases of [A Multi-Pass host](#a-multi-pass-host).
+On a personal session `smart-router/auto` uses astra, sol, terra or luna by difficulty; when the
+Codex account has no tokens left, OpenRouter's GLM-5.3-Flash and then its Qwen3.8; then
+GLM-5.3-Flash on Hera, Qwen3.8 on Nyx and Qwen3.8 on Hera. `smart-router/local` uses only those
+last three. A work session uses only the work account.
 
 ```json
 {
@@ -742,11 +760,11 @@ would be refused`.
   valid copy kept in use would keep sending to a model or an account the edit had just removed.
   The check is the remedy: run it before relying on an edit.
 
-**One roster per host.** The hosts differ in more than names: on Hera, `openai-codex-2` is the
-personal account and plain `openai-codex` is the work one, while on the others plain `openai-codex`
-is the personal one, so one text for all would bind the wrong account somewhere; and the Nyx ref
-changes per rebuild. Keep the per-host files, and keep their `scopes`, `fallback` and prompt files
-alike.
+**One roster per host.** The hosts differ in more than names: Hera names its accounts
+(`openai-codex-j`, `openai-codex-p`), while a host without named accounts has plain `openai-codex`
+as whichever login it holds, so one text for all would bind the wrong account somewhere; and the
+Nyx ref changes per rebuild. Keep the per-host files, and keep their `scopes`, `fallback` and
+prompt files alike.
 
 ## Routing in detail
 
@@ -2051,7 +2069,9 @@ next answer. A replay can therefore raise the deep-session floor where the route
   *selected* model does not apply to them: its request options, its Codex tool surface and its remote
   compaction. On a branch with a native Codex compaction checkpoint it switches the selection back
   to Codex, and the router leaves it there: the session is then on Codex. Start local work outside
-  such a branch. Hera's `openai-codex-2` never uses codex-compat.
+  such a branch. Its checks compare a model's provider with `openai-codex` exactly
+  (`CODEX_PROVIDER` in its `codex-identifiers.ts`, version 0.0.26), so it does not treat Hera's
+  named accounts `openai-codex-j` and `openai-codex-p` as Codex.
 - **goal-x**: continuations route like any
   [run that starts without a prompt](#runs-without-a-prompt), and they get cooldowns and fallbacks.
   The default auditor routes through the session, on the selection it inherits; a configured auditor

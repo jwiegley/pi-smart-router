@@ -44,6 +44,10 @@ fork's releases on that base. Releases are signed tags; nothing is published to 
   size with compaction disabled. An untagged run steps up as before.
 - **Leaving work scope asks of "any earlier turns"**, where it said "its earlier turns": a session
   the host's default puts in work scope may have none yet.
+- **The manual's Hera example is Hera's named-account roster** (`openai-codex-j/-p`,
+  `claude-code-j/-p`, `google-j/-p`, `xai-p`, `openrouter-j/-p`, `factory-j/-p`), held to the
+  fixture `test/fixtures/roster-hera-v2-accounts.json`. The Multi-Pass examples stay, labelled as
+  the binding for hosts without named accounts.
 
 ### Fixed
 
