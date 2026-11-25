@@ -3,14 +3,17 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { clampThinkingLevel } from "@earendil-works/pi-ai";
+import type { Model } from "@earendil-works/pi-ai";
 import test, { afterEach, beforeEach, describe } from "node:test";
 import type { TestContext } from "node:test";
 
 import { checkRoster } from "../src/check.ts";
-import { ENV_SCOPE, SCOPE_ENTRY } from "../src/constants.ts";
+import { ALL_LEVELS, ENV_SCOPE, SCOPE_ENTRY } from "../src/constants.ts";
 import { hasOrderScope, orderedRoster, orderFor, providersOf, reorder, roleOwners, withScopeOrder } from "../src/order.ts";
 import { parseRoster } from "../src/roster.ts";
 import type { RosterV2 } from "../src/roster.ts";
+import type { RecoveryRequest } from "../src/recovery.ts";
 import { scopeEntry } from "../src/scope.ts";
 import { TIERS } from "../src/tiers.ts";
 import type { Tier } from "../src/tiers.ts";
@@ -320,6 +323,87 @@ describe("/smart-router prefer", () => {
       assert.equal(await run(other, "auto", tier), `${CODEX}/${tier}`);
     });
   }
+
+  test("prefer google preserves every configured tier and Pi thinking level", async (t) => {
+    const ids: Record<Tier, string> = {
+      low: "gemini-4-argon", medium: "gemini-4-hydrogen", high: "gemini-4-neon", super: "gemini-4-carbon",
+    };
+    const roster = config((value) => {
+      value.accounts.google = { scope: "personal" };
+      for (const tier of TIERS) value.roles.find((role: Json) => role.name === tier).models.push(`google/${ids[tier]}`);
+    });
+    const fleet = catalog();
+    for (const tier of TIERS) {
+      const xhigh = tier === "medium" || tier === "high" ? "xhigh" : null;
+      fleet.add(model(`google/${ids[tier]}`, {
+        api: "google-generative-ai",
+        thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh, max: null },
+      }));
+    }
+    const loaded = await open(t, { roster, runtime: new FakeRuntime(fleet) });
+    await say(loaded, "prefer google");
+    for (const tier of TIERS) {
+      for (const level of ALL_LEVELS) {
+        await loaded.host.emit("input", { text: `do the thing #${tier}`, source: "interactive" });
+        const picked = loaded.runtime.route("auto", request("user", { signal: loaded.session.startRun(), thinkingLevel: level }));
+        assert.equal(routed(picked), `google/${ids[tier]}`, `${tier}/${level}`);
+        const physical = picked.model as Model<"google-generative-ai">;
+        const actual = clampThinkingLevel(physical, picked.thinkingLevel);
+        assert.notEqual(physical.thinkingLevelMap?.[actual], null, `${tier}/${level}`);
+        if (level === "xhigh" || level === "max") {
+          assert.equal(actual, tier === "medium" || tier === "high" ? "xhigh" : "high", `${tier}/${level}`);
+        }
+        await settle(loaded);
+      }
+    }
+  });
+
+  test("a Google preflight error offers the next provider and does not return to Google mid-run", async (t) => {
+    const ref = "google/gemini-4-hydrogen";
+    const roster = config((value) => {
+      value.accounts.google = { scope: "personal" };
+      value.roles.find((role: Json) => role.name === "super").models.push(ref);
+    });
+    const fleet = catalog().add(model(ref, { api: "google-generative-ai", thinkingLevelMap: { xhigh: "invalid" } }));
+    const loaded = await open(t, { roster, runtime: new FakeRuntime(fleet) });
+    await say(loaded, "prefer google");
+    await loaded.host.emit("input", { text: "do the thing #super", source: "interactive" });
+    const signal = loaded.session.startRun();
+    assert.equal(routed(loaded.runtime.route("auto", request("user", { signal, thinkingLevel: "xhigh" }))), ref);
+    const message = assistant(ref, { api: "google-generative-ai", stopReason: "error", content: [], errorMessage: `Unsupported Google thinking level mapping for ${ref}: xhigh -> invalid` });
+    const recovery: RecoveryRequest = { model: loaded.session.model!, physical: loaded.runtime.physical(ref), reason: "user", thinkingLevel: "xhigh", message, attempts: [], signal };
+    const offer = loaded.router!.dispatchRecovery("auto", recovery);
+    assert.equal(routed(offer!.route), `${CODEX}/super`);
+    assert.equal(routed(loaded.router!.dispatchRecovery("auto", recovery)!.route), `${CODEX}/super`, "confirmation is idempotent");
+    assert.equal(loaded.router!.record(loaded.session.id)?.runPick?.ref, ref, "an offer alone changes no pick");
+    await loaded.host.emit("message_end", { message: assistant(`${CODEX}/super`, { stopReason: "toolUse" }) });
+    const record = loaded.router!.record(loaded.session.id);
+    assert.equal(record?.runPick?.ref, `${CODEX}/super`);
+    assert.equal(record?.handoff, false);
+    const toolResult = { role: "toolResult" as const, toolCallId: "c", toolName: "bash", content: [{ type: "text" as const, text: "ok" }], isError: false, timestamp: NOW };
+    assert.equal(routed(loaded.runtime.route("auto", request("continuation", { signal, previous: previous(loaded.runtime, `${CODEX}/super`), messages: [toolResult] }))), `${CODEX}/super`);
+  });
+
+
+  test("a Pi retry of a Google mapping failure moves once to the next provider", async (t) => {
+    const ref = "google/gemini-4-hydrogen";
+    const roster = config((value) => {
+      value.accounts.google = { scope: "personal" };
+      value.roles.find((role: Json) => role.name === "super").models.push(ref);
+    });
+    const fleet = catalog().add(model(ref, { api: "google-generative-ai", thinkingLevelMap: { xhigh: "invalid" } }));
+    const loaded = await open(t, { roster, runtime: new FakeRuntime(fleet) });
+    await say(loaded, "prefer google");
+    await loaded.host.emit("input", { text: "do the thing #super", source: "interactive" });
+    const signal = loaded.session.startRun();
+    assert.equal(routed(loaded.runtime.route("auto", request("user", { signal, thinkingLevel: "xhigh" }))), ref);
+    const message = assistant(ref, { stopReason: "error", content: [], errorMessage: `Unsupported Google thinking level mapping for ${ref}: xhigh -> invalid` });
+    const failed = { model: loaded.runtime.physical(ref), message };
+    const next = loaded.runtime.route("auto", request("retry", { signal, failed, thinkingLevel: "xhigh" }));
+    assert.equal(routed(next), `${CODEX}/super`);
+    assert.equal(loaded.router!.record(loaded.session.id)?.handoff, false);
+    assert.ok(loaded.router!.record(loaded.session.id)?.limited.has(ref));
+  });
 
   test("a whole order is taken as given, and a part of a provider's id names it", async (t) => {
     const loaded = await open(t);

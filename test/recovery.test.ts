@@ -47,6 +47,27 @@ test("content filters, context overflow, signature errors and errors without a s
   }
 });
 
+test("only a Google adapter's own preflight mapping error can fail over without a status", () => {
+  const first = outcome();
+  const physical = { ...first.physical, api: "google-generative-ai" as const };
+  const errorMessage = `Unsupported Google thinking level mapping for ${ASTRA}: xhigh -> invalid`;
+  const message = { ...first.message, api: physical.api, content: [], errorMessage };
+  const rc = heraContext();
+  const request = { ...first, physical, message };
+  assert.equal(routed(choose(request, rc)!.route), KIMI);
+  assert.equal(rc.cooldowns.until(ASTRA, NOW), undefined);
+  assert.equal(routed(choose(request, rc)!.route), KIMI, "Pi's second identical offer agrees");
+  assert.equal(choose({ ...request, attempts: [{ model: { provider: "openrouter", id: "moonshotai/kimi-k3.1-pro" }, kind: "error" }] }, rc), undefined, "an exhausted fallback is not tried again");
+  assert.equal(choose({ ...request, physical: first.physical }, rc), undefined, "not a Google adapter");
+  assert.equal(choose({ ...request, message: { ...message, errorMessage: errorMessage.replace(ASTRA, KIMI) } }, rc), undefined, "not this physical model");
+  assert.equal(choose({ ...request, message: { ...message, content: [{ type: "text", text: "partial" }] } }, rc), undefined, "output already began");
+  assert.equal(choose({ ...request, message: { ...message, errorMessage: `${errorMessage}; content filter` } }, rc), undefined, "refused content stays put");
+  assert.equal(choose({ ...request, message: { ...message, errorMessage: `${errorMessage}; maximum context length` } }, rc), undefined, "conversation-size errors stay put");
+  const work = heraContext({ roster: rosterFixtureV2("roster-hera-v2-fallback.json"), scope: "work" });
+  const failedWork = outcome(WORK_SOL);
+  assert.equal(choose({ ...failedWork, physical: { ...failedWork.physical, api: "google-vertex" }, message: { ...failedWork.message, content: [], errorMessage: `Unsupported Google thinking level mapping for ${WORK_SOL}: max -> invalid` } }, work), undefined, "work cannot use a personal alternate");
+});
+
 test("a throttle that outlasted Pi's retries fails over with nothing cooled, with or without a status in its text", () => {
   const wrapped = "Incomplete Claude Code upstream response (status 429, capture incomplete, upstream said: Too many requests. Please try again later.)";
   for (const error of ["429 Too Many Requests", "rate limit exceeded", "rate_limit_exceeded", "overloaded_error", wrapped]) {

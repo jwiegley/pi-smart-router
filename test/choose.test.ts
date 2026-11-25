@@ -298,6 +298,18 @@ describe("a change of effort zeroes the cached size", () => {
     assert.equal(chosen.cost?.outcome, "stayed", "a warm astra keeps a short MEDIUM run");
   });
 
+  test("a native Google xhigh request is priced at xhigh, with or without a turn", () => {
+    const googleApi = codex(ASTRA, { api: "google-generative-ai", thinkingLevelMap: { high: "high", xhigh: "xhigh", max: null } });
+    const rc = context({ catalog: catalog(googleApi) });
+    for (const turn of [undefined, "main_loop", "planning"] as const) {
+      const figures = { thinking: "xhigh" as const, ...(turn === undefined ? {} : { turn }) };
+      const same = choose({ rc, figures: { ...figures, ledger: ledgerOf({ effort: "xhigh" }) } });
+      assert.equal(entryOf(same, ASTRA).cached, 149_000, `native xhigh keeps its cache for ${turn}`);
+      const changed = choose({ rc, figures: { ...figures, ledger: ledgerOf({ effort: "high" }) } });
+      assert.equal(entryOf(changed, ASTRA).cached, 0, `high and native xhigh are distinct efforts for ${turn}`);
+    }
+  });
+
   test("an answer whose effort is not known counts as the same effort", () => {
     const chosen = choose({ thinking: "low", ledger: ledgerOf({ effort: undefined }) });
     assert.equal(entryOf(chosen, ASTRA).cached, 149_000, "an unknown effort is not a known change");

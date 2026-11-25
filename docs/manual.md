@@ -904,13 +904,17 @@ These are version 1's rules. Version 2 keeps them, comparing levels rather than 
 - **Failover within a run.** On a Pi with the `recover` boundary (jwiegley/pi; npm's Pi 1.5.2 has
   none, and there this does nothing), a request that failed can go on with another model in the
   same run: after a repetitive length stop, after an error with an explicit 4xx or 5xx status that
-  is the model's own, and after a usage limit or a refused credential, whose model or account is
+  is the model's own, after a Google adapter's unsupported thinking mapping before output, and after a
+  usage limit or a refused credential, whose model or account is
   cooled first. The alternate is the role's next model, then the scope's chain, and a run that
   moves onto the chain says so. A content-filter refusal never moves, nor does an error about the
   conversation's size, and `smart-router/local` stays local. Pi allows three alternates in a run,
   one after a repetitive stop, and stops when two models give the same 4xx: that is the request's
   fault, and the router cools neither for it. Both responses stay in the session and on screen;
   only the next request's context leaves the failed one out.
+  A mapping failure cools nothing; the run stays on the alternate rather than re-checking the same
+  broken mapping after a tool result. Without the boundary, it moves only if Pi retries the error;
+  otherwise the run ends.
 - **A model whose requests keep failing** with errors of its own (an explicit 4xx or 5xx, not a
   limit, not 429) is passed over for 30 seconds after the third in a row, upstream's numbers. Like
   the hold for an unreachable server it is a preference: with nothing else to take a request the
@@ -1275,7 +1279,8 @@ in any case and inside a longer word, is a *planning* turn; anything else is an 
 
 - **Any other `/thinking` level** is your own choice and is never lowered: at `high`, `xhigh` and
   `max` nothing changes. At `minimal` or `low` a turn that asks for more is raised to it, as
-  upstream raises it: at `low`, a planning turn goes out at `medium`.
+  upstream raises it: at `low`, a planning turn goes out at `medium`. Pi still clamps that level to
+  the physical model.
 - **A role with a fixed `thinking`** keeps it, whatever the turn: the local role's `max` stays.
 - **The roster's `adaptiveReasoning`** section turns the rule off (`"enabled": false`: every request
   is sent the selected level, as before), or sets a floor (`minLevel`) and a ceiling (`maxLevel`)

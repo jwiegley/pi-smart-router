@@ -6,7 +6,8 @@ import type { VirtualId } from "./constants.ts";
 import { effortFor, eligibleRole, pickInRole } from "./decide.ts";
 import type { TurnType } from "./effort.ts";
 import { isDegenerateOutput } from "./output-quality.ts";
-import { coolFrom, failureKind, refOf } from "./resolve.ts";
+import { providerThinkingFailure } from "./provider-thinking.ts";
+import { coolFrom, failureKind, hasOutput, refOf } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
 import { assertSafe } from "./route.ts";
 
@@ -80,6 +81,7 @@ export function recoveryChoice(input: {
   const { message } = request;
   const degenerate = isDegenerateOutput(message);
   const status = recoveryStatus(message.errorMessage);
+  const mappingFailure = providerThinkingFailure(request.physical, message) && !hasOutput(message.content);
   if (!degenerate) {
     const kind = message.stopReason === "error" ? failureKind(message.errorMessage) : "content-filter";
     // Content a model refused is never sent to another model.
@@ -88,8 +90,8 @@ export function recoveryChoice(input: {
     // (John, 2026-11-23): the model or its account is cooled first, so the pick passes it over.
     if (kind === "limit") coolFrom(message, rc.roster, rc.cooldowns, rc.now);
     else if (REQUEST_SIZED.test(message.errorMessage ?? "")) return undefined;
-    // A throttle that outlasted Pi's retries moves on whether or not its text carries a status.
-    else if (!isThrottle(message) && (status === undefined || !(status >= 400 && status <= 599))) return undefined;
+    // A spent throttle or a Google adapter's preflight failure may move on without a status.
+    else if (!isThrottle(message) && !mappingFailure && (status === undefined || !(status >= 400 && status <= 599))) return undefined;
   }
   const ref = refOf(request.physical);
   const role = eligibleRole(rc, ref);

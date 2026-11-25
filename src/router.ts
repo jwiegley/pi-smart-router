@@ -85,6 +85,7 @@ import type { SessionOrder } from "./order.ts";
 import { healDisplaced, isLive, isLiveOwner, join, leave, leaveScopeHandoff, ownerBySignal, personalOnlyLatched, rememberedRoster, rememberRoster, scopeLatched, sessionHash, takeScopeHandoff } from "./owners.ts";
 import type { Owner, OwnerRouter, RememberedRoster, RosterMemory, Slot } from "./owners.ts";
 import { promptProblem, promptStore, promptUses, scopePrompts } from "./prompts.ts";
+import { providerThinkingFailure } from "./provider-thinking.ts";
 import { footerText, levelRecord, readLevelRecord } from "./records.ts";
 import { clock, coolFrom, Cooldowns, coolsAccount, failureKind, hasOutput, holdFrom, Holds, resolveContext } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
@@ -161,7 +162,7 @@ export interface Session extends SessionRecord {
    * Pi asks twice, to offer and to confirm, and may use neither answer; the next route call, the
    * alternate's response or the run's end drops it.
    */
-  recoveryPick: { id: VirtualId; ref: string; role: string; effort: NonNullable<SessionRecord["effort"]>; previous: ReadonlyArray<{ readonly ref: string; readonly status: number }>; throttled: boolean } | undefined;
+  recoveryPick: { id: VirtualId; ref: string; role: string; effort: NonNullable<SessionRecord["effort"]>; previous: ReadonlyArray<{ readonly ref: string; readonly status: number }>; noRecheck: boolean } | undefined;
   /** The digest of the text, without its tag, of the message whose plan `plan` holds; meaningful only while `plan` is set. */
   planDigest: string | undefined;
   /** How many idle messages the router passed since the latest prompt's run started. */
@@ -1093,9 +1094,9 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
       if (routesLevels(recovered.id) && scope !== undefined && left !== undefined && !inChain(scope, left) && inChain(scope, ref)) {
         notify(ctx, fallbackMoveNotice(parseRef(left)?.id ?? left, recovered.role, message.model), "info");
       }
-      // A run that left a throttled model asks for no re-check: nothing cooled that model, so the
-      // re-check would send the run straight back to it.
-      if (left !== undefined && parseRef(left)?.provider !== message.provider && !recovered.throttled) pending.handoff = true;
+      // Nothing cooled a throttled model or an adapter's bad mapping: a re-check would send the
+      // run straight back to it.
+      if (left !== undefined && parseRef(left)?.provider !== message.provider && !recovered.noRecheck) pending.handoff = true;
       pending.runPick = { id: recovered.id, ref, role: recovered.role };
       pending.effort = recovered.effort;
       pending.history.push({ at: now(), virtual: recovered.id, reason: "retry", signal: undefined, trigger: undefined, role: recovered.role, ref, code: "recovery", foreign: false, continuesRun: true });
@@ -1335,14 +1336,16 @@ export function createRouter(pi: ExtensionAPI, options: RouterOptions): Router {
         const rc = contextFor(ctx, state.value, id);
         if (record?.runPick?.id !== id || record.recoveryScope !== rc.scope) return undefined;
         const turn = record.effort?.signal.turnType ?? "unknown";
-        if (request.message.stopReason === "error" && failureKind(request.message.errorMessage) === "limit") record.limited.add(`${request.physical.provider}/${request.physical.id}`);
+        const kind = request.message.stopReason === "error" ? failureKind(request.message.errorMessage) : "other";
+        const mappingFailure = kind === "other" && providerThinkingFailure(request.physical, request.message) && !hasOutput(request.message.content) && !REQUEST_SIZED.test(request.message.errorMessage ?? "");
+        if (kind === "limit" || mappingFailure) record.limited.add(`${request.physical.provider}/${request.physical.id}`);
         const offered = recoveryChoice({ id, rc, request, skipped: record.limited, turn, escalated: record.escalated });
         const role = offered === undefined ? undefined : eligibleRole(rc, `${offered.route.model.provider}/${offered.route.model.id}`);
         record.recoveryPick = offered === undefined || role === undefined ? undefined : {
           id, ref: `${offered.route.model.provider}/${offered.route.model.id}`, role,
           effort: effortFor(rc, role, offered.route.model, request.thinkingLevel, turn, record.escalated), previous: [...request.attempts.map((attempt) => ({ ref: `${attempt.model.provider}/${attempt.model.id}`, status: attempt.status })), { ref: `${request.physical.provider}/${request.physical.id}`, status: offered.status }]
             .filter((attempt): attempt is { ref: string; status: number } => attempt.status !== undefined),
-          throttled: isThrottle(request.message),
+          noRecheck: isThrottle(request.message) || mappingFailure,
         };
         return offered;
       } catch {

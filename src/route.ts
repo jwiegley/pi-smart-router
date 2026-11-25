@@ -57,7 +57,8 @@ import { newLedger, notePlanned, notePrompt, recentNeed } from "./ledger.ts";
 import type { Ledger } from "./ledger.ts";
 import { checkLocal, localRoles } from "./local.ts";
 import type { NeedRun } from "./records.ts";
-import { clock, coolFrom, failureKind, holdFrom, inLocalRole, refOf, resolveCandidate } from "./resolve.ts";
+import { providerThinkingFailure } from "./provider-thinking.ts";
+import { clock, coolFrom, failureKind, hasOutput, holdFrom, inLocalRole, refOf, resolveCandidate } from "./resolve.ts";
 import type { ResolveContext } from "./resolve.ts";
 import { autoRoles, excludedBy, excludesFor, isWorkBound, roleOf, scopeSection } from "./roster.ts";
 import type { Scope, ScopeSection } from "./roster.ts";
@@ -143,9 +144,8 @@ export interface SessionRecord {
   plan: Plan | undefined;
   runPick: RunPick | undefined;
   /**
-   * The models whose requests failed with a limit-kind error in the current run. A retry skips
-   * them all, so a run tries each candidate once: local-role models are never cooled, and without
-   * this a retry went back and forth between two of them.
+   * The models whose requests failed with a limit or an adapter mapping error in the current run.
+   * A retry skips them all, so a run does not go back and forth between failed candidates.
    */
   readonly limited: Set<string>;
   /** What the session has measured: each model's cache, its runs' shape and its prompts' levels (src/ledger.ts). */
@@ -335,7 +335,8 @@ function retry(rc: ResolveContext, request: ModelRouteRequest, record: SessionRe
   const ref = refOf(failed.model);
   const role = eligibleRole(rc, ref);
   const kind = failureKind(failed.message.errorMessage);
-  if (kind === "limit" && role !== undefined) {
+  const mappingFailure = providerThinkingFailure(failed.model, failed.message) && !hasOutput(failed.message.content);
+  if (role !== undefined && (kind === "limit" || (kind === "other" && mappingFailure))) {
     record.limited.add(ref);
     return pickInRole(rc, role, { skip: ref, skipped: record.limited, fallback: !rc.localOnly, code: "retry:next" });
   }
@@ -751,9 +752,9 @@ export function routeOwned(input: RouteInput): ModelRoute {
   if (moved !== undefined) record.runTier = moved.tier;
   if (lifted !== undefined) record.runTier = lifted.tier;
   if (rechecked !== undefined) record.runTier = rechecked.tier;
-  // A retry that leaves its provider is a handoff: the model it reaches has none of the
-  // conversation cached, so the first tool result's request chooses again (recheck).
-  if (request.reason === "retry" && record.runPick !== undefined && providerOf(record.runPick.ref) !== choice.model.provider) record.handoff = true;
+  // A retry that leaves its provider is a handoff, unless nothing cooled a model with a bad mapping.
+  const failedMapping = request.failed !== undefined && providerThinkingFailure(request.failed.model, request.failed.message) && !hasOutput(request.failed.message.content);
+  if (request.reason === "retry" && record.runPick !== undefined && providerOf(record.runPick.ref) !== choice.model.provider && !failedMapping) record.handoff = true;
   // What is shown and recorded of a run names the scope it is in. A run that goes on in another
   // scope than the one that planned it (moved above, or moved up by escalation after the scope
   // changed) keeps its need and what decided it; the cost the other scope's models were compared
